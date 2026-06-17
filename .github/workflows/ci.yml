@@ -31,8 +31,8 @@ jobs:
   lint:
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with: { go-version: '${{ env.GO_VERSION }}', cache: false}
       - name: gofmt
         run: |
@@ -57,8 +57,8 @@ jobs:
   fuzz:
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with: { go-version: '${{ env.GO_VERSION }}', cache: false}
       - name: Fuzz smoke (importer + exporter targets)
         run: |
@@ -72,7 +72,7 @@ jobs:
   scripts:
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: shellcheck packaging scripts
         continue-on-error: true
         run: |
@@ -94,8 +94,8 @@ jobs:
         # removed the wireguard outbound. Bump deliberately when WakeRoute moves.
         singbox: ['1.12.17', '1.13.13']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with: { go-version: '${{ env.GO_VERSION }}', cache: false}
       - name: Fetch sing-box ${{ matrix.singbox }}
         run: |
@@ -114,7 +114,7 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: [self-hosted, Linux, X64]
     steps:
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with: { go-version: '1.26' }   # olcRTC go.mod requires go 1.26.3; amneziawg-go builds on it too
       - name: amneziawg-go binary cross-builds (arm64)
         run: |

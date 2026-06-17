@@ -39,6 +39,15 @@ func TestRenderNft_NftCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out, err := exec.Command(nftBin, "-c", "-f", f).CombinedOutput(); err != nil {
+		// `nft -c` still initializes a netlink cache against the kernel even in
+		// check-only mode; an unprivileged CI container (no CAP_NET_ADMIN / restricted
+		// netns) can't do that and fails BEFORE parsing the ruleset. That's an
+		// environment limitation, not a ruleset bug — skip rather than fail. A genuine
+		// invalid ruleset produces a "syntax error"/parse message instead.
+		if s := string(out); strings.Contains(s, "Operation not permitted") ||
+			strings.Contains(s, "cache initialization failed") {
+			t.Skipf("nft -c can't initialize in this environment (unprivileged?) — skipping syntax check: %s", strings.TrimSpace(s))
+		}
 		t.Fatalf("nft -c rejected the rendered ruleset: %v\n%s\n--- ruleset ---\n%s", err, out, plan.RenderNft())
 	}
 }
