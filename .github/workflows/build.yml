@@ -1,7 +1,9 @@
 name: build
 
-# CI on every push/PR (test + cross-compile all router arches, artifacts downloadable),
-# and on a v* tag it additionally publishes a GitHub Release with the per-SoC tarballs.
+# CI on every push/PR (test + cross-compile all router arches), and on a v* tag it
+# uploads the per-SoC tarballs and publishes a GitHub Release. Artifacts are only
+# uploaded on tags — a push build is throwaway, and uploading it every time burns
+# the account's Actions artifact-storage quota for nothing.
 on:
   push:
     branches: [main]
@@ -90,14 +92,20 @@ jobs:
           tar -C "$owstage" -czf "wakeroute-${VERSION}-${{ matrix.name }}-openwrt.tar.gz" .
           sha256sum "wakeroute-${VERSION}-${{ matrix.name }}-openwrt.tar.gz"
 
+      # Only on release tags: these per-arch artifacts exist solely to feed the
+      # `release` job below (which itself runs only on v* tags). A normal push still
+      # cross-compiles every arch above — that build succeeding is the CI signal —
+      # so there is nothing to gain from uploading + storing throwaway tarballs.
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v7
         with:
           name: wakeroute-${{ matrix.name }}
           path: |
             wakeroute-*-${{ matrix.name }}.tar.gz
             wakeroute-*-${{ matrix.name }}-openwrt.tar.gz
           if-no-files-found: error
+          retention-days: 5
 
   release:
     needs: build
@@ -106,7 +114,7 @@ jobs:
     permissions:
       contents: write   # create the release + upload assets
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
