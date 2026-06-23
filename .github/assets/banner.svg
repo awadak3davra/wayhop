@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="190" viewBox="0 0 760 190" font-family="'Segoe UI', system-ui, -apple-system, Helvetica, Arial, sans-serif">
+  <defs>
+    <linearGradient id="logo" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#36abef"/>
+      <stop offset="1" stop-color="#006fae"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="760" height="190" rx="18" fill="#141b27"/>
+  <rect x="0.75" y="0.75" width="758.5" height="188.5" rx="17.5" fill="none" stroke="#284763" stroke-opacity="0.55"/>
+
+  <!-- logo mark -->
+  <rect x="58" y="59" width="72" height="72" rx="16" fill="url(#logo)"/>
+  <text x="94" y="107" font-size="33" font-weight="700" fill="#ffffff" text-anchor="middle">wr</text>
+
+  <!-- wordmark + subtitle -->
+  <text x="152" y="92" font-size="50" font-weight="800" letter-spacing="-0.5" fill="#eef4fb">WakeRoute</text>
+  <text x="154" y="123" font-size="17" letter-spacing="0.3" fill="#8197b0">proxy control for your router</text>
+
+  <!-- routing / failover motif: one active path (bright) to a green exit, alternates dimmed -->
+  <g>
+    <line x1="604" y1="95" x2="656" y2="54"  stroke="#2f9be0" stroke-width="2" stroke-opacity="0.3"/>
+    <line x1="604" y1="95" x2="656" y2="95"  stroke="#2f9be0" stroke-width="2.5" stroke-opacity="0.95"/>
+    <line x1="604" y1="95" x2="656" y2="136" stroke="#2f9be0" stroke-width="2" stroke-opacity="0.3"/>
+    <line x1="664" y1="95" x2="700" y2="95"  stroke="#43c97a" stroke-width="2.5" stroke-opacity="0.95"/>
+    <circle cx="604" cy="95"  r="9" fill="#2f9be0"/>
+    <circle cx="658" cy="54"  r="6" fill="#36506b"/>
+    <circle cx="658" cy="95"  r="6.5" fill="#2f9be0"/>
+    <circle cx="658" cy="136" r="6" fill="#36506b"/>
+    <circle cx="704" cy="95"  r="7" fill="#43c97a"/>
+  </g>
+</svg>

@@ -1,121 +1,235 @@
-# WakeRoute (`wakeroute`)
+<div align="center">
 
-A self-hosted web panel that lets you configure **any** VPN/proxy protocol on your Entware
-or OpenWrt router, with one-click **failover**, automatic **health checks**, and live **traffic
-graphs**. It runs as a service on its **own port** (`:8088`) and never touches the router's
-native VPN config.
+<img src=".github/assets/banner.png" alt="WakeRoute" width="760">
 
-Think: a polished router web UI, but on top of a universal proxy core (sing-box), so you
-can run VLESS-Reality, Hysteria2, TUIC, AmneziaWG, WireGuard, Shadowsocks, Trojan, and more from one
-clean interface, with real failsafe instead of hand-written scripts.
+**Run any modern VPN/proxy protocol on your router — from one clean web panel, with automatic failover.**
 
-## Why
+[![License: MIT](https://img.shields.io/badge/license-MIT-22a06b?style=flat-square)](LICENSE)
+[![Release](https://img.shields.io/badge/release-v0.3.0-0097dc?style=flat-square)](../../releases/latest)
+[![Go](https://img.shields.io/badge/go-1.22+-00ADD8?style=flat-square&logo=go&logoColor=white)](go.mod)
+[![Platforms](https://img.shields.io/badge/router-OpenWrt%20%C2%B7%20Keenetic%20%C2%B7%20Entware-151c28?style=flat-square)](#install)
+[![Arches](https://img.shields.io/badge/arch-mipsle%20%C2%B7%20mips%20%C2%B7%20arm%20%C2%B7%20arm64%20%C2%B7%20amd64-555?style=flat-square)](#install)
 
-Stock router firmware gives you WireGuard/IPsec/OpenVPN, but not the modern censorship-resistant stack
-(VLESS/Reality, Hysteria2, TUIC, AmneziaWG) and not an easy way to chain them with automatic failover.
-Today that means hand-edited sing-box/xray JSON, policy-routing scripts and SSH. `wakeroute` turns all of
-that into a UI that looks like it belongs on the router.
+</div>
 
-## Features
+<div align="center">
 
-- **Connections** — paste-link / subscription / `.conf` import for any protocol, including
-  **AmneziaWG** and **olcRTC**.
-- **Failover groups** — first-class objects built on sing-box `urltest` plus a daemon watchdog that
-  autostarts sing-box and crash-restarts it with backoff.
-- **Dashboard** — live traffic graph and per-tunnel health.
-- **Selective routing** — list-based, per-destination routing through any tunnel; coexists with an
-  existing policy-routing setup via a dedicated fwmark + routing table.
-- **Init Server** — SSH-provision a VPS into a VPN endpoint.
-- **Diagnostics, Updater, Settings** — per-tunnel speedtests, per-Apply fail-safe rollback, and a
-  researched error knowledgebase.
-- Light/dark theme. Single static Go binary with the UI embedded — no runtime deps beyond the proxy cores.
+<img src=".github/assets/wakeroute-demo.gif" alt="WakeRoute web UI walkthrough" width="820">
 
-## Install (short version)
+</div>
 
-**Easiest — grab a prebuilt tarball** from the [Releases](../../releases) page (built in CI for every
-router SoC). Each arch ships in **two flavours**: `wakeroute-<ver>-<arch>.tar.gz` for **Entware**
-(busybox sysvinit under `/opt`) and `wakeroute-<ver>-<arch>-openwrt.tar.gz` for **OpenWrt** (native
-`procd` service, `/usr/sbin` + `/etc/wakeroute`). Match the arch to your router's `uname -m`:
-`mips` → `mipsle` (little-endian, most MT7621) or `mips` (big-endian), `armv7l` → `arm`,
-`aarch64` → `arm64`, `x86_64` → `amd64`.
+WakeRoute is a **single static Go binary** (the web UI is embedded) that turns [sing-box](https://github.com/SagerNet/sing-box) into a router admin panel. Stock firmware gives you WireGuard and OpenVPN — WakeRoute adds the modern censorship-resistant stack (**VLESS-Reality, Hysteria2, TUIC, AmneziaWG**), one-click **failover groups**, list-based **selective routing**, live **traffic graphs**, and a one-click **diagnostics battery** — all on its own port, without touching your router's native VPN config.
+
+> **No more hand-edited sing-box JSON, policy-routing scripts, and SSH.** Paste a share link, pick a failover order, hit Apply — and if anything breaks connectivity, it rolls back on its own.
+
+---
+
+## ✨ Highlights
+
+| | |
+|---|---|
+| 🔌 **Any protocol, one panel** | Import VLESS-Reality, Hysteria2, TUIC, Trojan, VMess, Shadowsocks, WireGuard, AmneziaWG, and olcRTC from a share link, a `.conf` file, or a subscription URL. |
+| 🔁 **Smart failover & health** | Auto-select the fastest working endpoint (`urltest`), manual selector, or strict ordered fallback — with live latency, success-rate, uptime, and **probable failure cause** read from the engine logs. |
+| 🧭 **Selective routing, 20+ presets** | Route per destination by domain / IP / geo / port. One-click curated rule-sets (unblock RU sites, route Discord/Telegram/YouTube, block ads), or your own lists — with **auto-refreshing IP carve-outs** from CIDR/ASN feeds. |
+| ⚡ **Native-first kernel routing** | Let the kernel route WireGuard/AmneziaWG and IP carve-outs at full speed; sing-box handles only the obfuscation protocols. *(new in 0.3.0: a kernel-PBR backend for **Keenetic**, which ships no nftables.)* |
+| 🛟 **Fail-safe Apply** | Changes go live **until reboot** unless you Save. Lose connectivity and WakeRoute auto-reverts the previous config; optional guarded auto-reboot as a last resort. |
+| 🩺 **One-click diagnostics** | Ping, traceroute, DNS-leak, IPv6-leak, DoH reachability, clock-skew, config validation, and live engine-log tailing — with fixes suggested from a built-in knowledgebase. |
+| 📈 **Live dashboard** | Real-time traffic graph, per-tunnel latency sparklines, top-talkers, grouped connections by destination IP, RAM/CPU/uptime, and your public exit IP. |
+| 🔒 **Hardened by default** | SSRF-guarded subscription fetches, same-origin (CSRF) guard, CSP `script-src 'self'`, clickjacking/`nosniff`/referrer headers, a 16 MiB body cap, and an optional Host allow-list. |
+
+<div align="center">
+<img src=".github/assets/dashboard.png" alt="WakeRoute dashboard" width="820">
+</div>
+
+<details align="center">
+<summary><b>📸 More screenshots</b></summary>
+
+| Connections | Failover |
+|:---:|:---:|
+| <img src=".github/assets/connections.png" width="400"> | <img src=".github/assets/failover.png" width="400"> |
+| **Routing** | **Diagnostics** |
+| <img src=".github/assets/routing.png" width="400"> | <img src=".github/assets/diagnostics.png" width="400"> |
+
+</details>
+
+---
+
+## 📡 Protocol support
+
+| Protocol | Transport / mode | Import from | Engine |
+|---|---|---|---|
+| **VLESS** (+ Reality) | TCP · WebSocket · gRPC · HTTP/2, Reality or TLS, uTLS | link · subscription · form | sing-box |
+| **VMess** | WebSocket · gRPC · mKCP · h2 | link · subscription · form | sing-box |
+| **Trojan** | TLS (+ WebSocket / gRPC) | link · subscription · form | sing-box |
+| **Shadowsocks** | AEAD ciphers · SS-2022 | link · subscription · form | sing-box |
+| **Hysteria2** | QUIC, Salamander obfs, port-hopping | link · subscription · form | sing-box |
+| **TUIC v5** | QUIC, BBR/cubic, UDP relay | link · subscription · form | sing-box |
+| **WireGuard** | UDP (kernel-native routing) | `.conf` · link · form | sing-box / kernel |
+| **AmneziaWG** | WireGuard + junk-packet obfuscation | `.conf` · form | `amneziawg-go` plugin |
+| **olcRTC** | TCP-over-WebRTC (anti-whitelist) | YAML · form | olcRTC plugin |
+| **nfqws** | DPI-desync on the **direct** path (not a tunnel) | — | nfqws plugin |
+
+Subscriptions auto-detect base64 vs. plain text, import each link independently (one bad link doesn't sink the batch), and de-duplicate by name.
+
+---
+
+## 🚀 Install
+
+WakeRoute runs on **OpenWrt** (native `procd`) and on **Keenetic / generic Entware** (busybox `/opt`). Grab the prebuilt tarball for your router from the [**Releases**](../../releases/latest) page — each CPU arch ships in two flavours:
+
+| Your router's `uname -m` | Arch | Entware / Keenetic | OpenWrt |
+|---|---|---|---|
+| `mips` (little-endian, most MT7621) | `mipsle` | `wakeroute-<ver>-mipsle.tar.gz` | `…-mipsle-openwrt.tar.gz` |
+| `mips` (big-endian) | `mips` | `wakeroute-<ver>-mips.tar.gz` | `…-mips-openwrt.tar.gz` |
+| `armv7l` | `arm` | `wakeroute-<ver>-arm.tar.gz` | `…-arm-openwrt.tar.gz` |
+| `aarch64` | `arm64` | `wakeroute-<ver>-arm64.tar.gz` | `…-arm64-openwrt.tar.gz` |
+| `x86_64` | `amd64` | `wakeroute-<ver>-amd64.tar.gz` | `…-amd64-openwrt.tar.gz` |
+
+### Keenetic / Entware (`/opt`, SSH)
 
 ```sh
-# Entware — router has /opt + SSH:
-cd /tmp && curl -fsSLO <release-url>/wakeroute-<ver>-mipsle.tar.gz
-mkdir wakeroute && tar -xzf wakeroute-*.tar.gz -C wakeroute && cd wakeroute && sh ./install.sh
+cd /tmp
+curl -fsSLO <release-url>/wakeroute-<ver>-<arch>.tar.gz      # e.g. -arm64.tar.gz
+mkdir wr && tar -xzf wakeroute-*.tar.gz -C wr && cd wr
+sh ./install.sh
 ```
+
+The installer is **interactive and safe to run on a live router**. It detects your platform and arch, then pre-flights everything before touching anything:
+
+- ✅ **System & router status** — arch (incl. MIPS endianness), free flash space, RAM, uptime, internet reachability, and clock/NTP (Reality/TLS need an accurate clock).
+- ✅ **Dependencies** — `ip` / `ipset` / `iptables` / `opkg` / `sing-box`, with an offer to `opkg install` what's missing.
+- ✅ **Conflict detection + one-tap fixes** — it finds whatever already holds the UI port (**lighttpd** on stock Keenetic firmware is the usual culprit), **keen-pbr**, a stray sing-box, or a previous install, and **asks before disabling each one** (or just moves WakeRoute to a free port).
+- ✅ **Atomic install** — staged binary swap with a single rolling backup, then a health check on the UI.
+
+Useful flags: `--dry-run` (run every check, change nothing), `-y` (assume yes), `--port 8089` (use a different UI port), `--arch mipsle` (force arch), `--no-start`.
+
+### OpenWrt (`procd`)
+
+busybox has no `scp`, so stream the `-openwrt` tarball in over SSH:
 
 ```sh
-# OpenWrt (procd) — busybox has no scp, so stream the -openwrt tarball over ssh:
-ssh root@192.168.1.1 "cat > /tmp/wakeroute.tgz" < wakeroute-<ver>-arm64-openwrt.tar.gz
-ssh root@192.168.1.1 "mkdir -p /tmp/wr && tar -xzf /tmp/wakeroute.tgz -C /tmp/wr && cd /tmp/wr && sh ./install.sh"
+ssh root@192.168.1.1 "cat > /tmp/wr.tgz" < wakeroute-<ver>-<arch>-openwrt.tar.gz
+ssh root@192.168.1.1 "mkdir -p /tmp/wr && tar -xzf /tmp/wr.tgz -C /tmp/wr && cd /tmp/wr && sh ./install.sh"
 ```
 
-Then open `http://192.168.1.1:8088` (substitute your router's LAN address).
+Then open **`http://<router-ip>:8088`**. To remove it later: `sh ./uninstall.sh` (add `--purge` to delete the config too).
 
-**Or build it yourself:**
+<details>
+<summary><b>Build from source</b></summary>
+
+Requires Go 1.22+. The UI is embedded in the binary, so a UI change needs a rebuild.
 
 ```powershell
-./build.ps1                                    # cross-compile + package all arches (Windows)
+./build.ps1            # Windows: cross-compile + package every arch into dist\
 ```
 ```sh
-make package                                   # same, on a Unix build host
+make package           # the same, on a Unix build host
 ```
 
-## Security
+Single-arch, by hand:
 
-`wakeroute` is a **router admin panel**: it binds `:8088` on all interfaces (so it is
-reachable from your LAN) and is **unauthenticated by design**. The trust boundary is the
-**LAN** — anyone who can already reach the router's LAN is treated as an operator, the same
-assumption stock router admin UIs make.
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
+  -ldflags "-s -w -X wakeroute/internal/version.Version=0.3.0" \
+  -o wakeroute-arm64 ./cmd/wakeroute
+```
+
+Run the demo UI locally (synthetic data, no sing-box needed):
+
+```sh
+go run ./cmd/wakeroute --demo --listen 127.0.0.1:8088
+```
+</details>
+
+---
+
+## 🆕 What's new in 0.3.0
+
+- **Keenetic kernel-PBR backend** — native `iptables` + `ipset` policy routing for KeeneticOS (which ships no nftables): `hash:net` ipsets, fwmark marking, per-list routing tables, a load-independent failover cron, and a scripted cutover/rollback that leaves your default route untouched.
+- **Live connections grouped by destination IP**, with per-port byte counts.
+- **DPI-desync engine (nfqws)** supervised as a long-running plugin.
+- **Fixes** — iface-bound per-exit reachability testing (with an SSRF guard + IPv4 preference), monitor-mode core detection, and kernel-plane forwarding correctness (tunnel NAT, LAN-exclusion, and a symmetric IPv6 datapath). See the [changelog](CHANGELOG.md).
+
+---
+
+## 🧱 Architecture
+
+```
+                       ┌─────────────────────────────────────────────┐
+   browser ──:8088──▶  │  wakeroute daemon  (one Go binary, UI baked in) │
+                       │   • model → config   • health probes            │
+                       │   • fail-safe Apply   • REST + Clash API client │
+                       └───────┬───────────────────────┬─────────────────┘
+                               │ writes config          │ live traffic / latency
+                               ▼                         │ (Clash API :9090)
+                         ┌──────────────┐                │
+                         │   sing-box   │◀───────────────┘
+                         │  (universal  │   VLESS-Reality · Hy2 · TUIC · VMess · …
+                         │    core)     │
+                         └──────┬───────┘
+              kernel plane      │ engine plugins (gaps only)
+        ┌─────────────────┐     ├──▶ amneziawg-go   (AmneziaWG)
+   LAN ─┤ fwmark + ip rule│     └──▶ olcrtc         (WebRTC tunnel)
+        │  WG/AWG · WAN   │
+        │  IP carve-outs  │   One core handles ~90% of protocols; dedicated binaries
+        └─────────────────┘   fill the gaps. In hybrid mode the kernel routes
+                              WireGuard/AmneziaWG + IP carve-outs at native speed,
+                              and only obfuscation flows enter sing-box.
+```
+
+**Failover** is a first-class object built on sing-box `urltest`, watched by a daemon watchdog that autostarts the core and crash-restarts it with backoff. **Routing** coexists with an existing policy-routing setup via a dedicated fwmark + table — it only steers the traffic it marks.
+
+---
+
+## 🔒 Security model
+
+**WakeRoute is a router LAN admin panel.** It binds `:8088` without a login, treating any LAN-connected user as a trusted operator — the same assumption stock router UIs (LuCI, the Keenetic UI) make.
 
 > [!IMPORTANT]
-> **Do not expose `:8088` to the internet.** It has no login and returns secrets (keys,
-> credentials) to its own UI for editing. If you need remote access, reach the router over a
-> VPN, or front the panel with authentication + TLS (e.g. a reverse proxy) — the panel itself
-> assumes a trusted LAN.
+> **Do not expose `:8088` to the internet.** It has no auth and returns secrets (keys, credentials) to its own UI for editing. For remote access, reach the router over a VPN, or front the panel with TLS + authentication (e.g. a reverse proxy).
 
-Within that model the daemon still hardens against the realistic LAN-adjacent attacks (a
-malicious page open in a LAN browser, request forgery, resource exhaustion):
+Within that LAN-trust boundary the daemon still hardens against realistic LAN-adjacent attacks (a malicious page open in a LAN browser, request forgery, resource exhaustion):
 
-- **SSRF guard** on subscription fetches — a user-supplied URL can't be turned into a request
-  against the router's own control API, other LAN hosts, or cloud metadata.
-- **Same-origin (CSRF) guard** — state-changing requests with a cross-origin `Origin`/`Referer`
-  are rejected, so another site can't drive Apply / Rollback / Restart through your browser.
-- **Request-body cap** — bounds memory so one oversized request can't OOM a low-RAM router.
-- **Security headers + CSP** — `X-Frame-Options`/`frame-ancestors` (anti-clickjacking),
-  `nosniff`, `Referrer-Policy`, and `script-src 'self'` (anti-XSS).
-- **Optional Host allow-list** — set `allowed_hosts` in the config to pin which Host header
-  values are served (a DNS-rebinding defense); empty (the default) allows any.
+- **SSRF guard** — subscription URLs can't be turned into requests against the router's own API, other LAN hosts, or cloud metadata (`169.254.169.254`).
+- **Same-origin (CSRF) guard** — cross-origin `POST`/`PUT`/`DELETE` are rejected, so another tab can't drive Apply / Rollback / Restart through your browser.
+- **CSP + security headers** — `script-src 'self'` (anti-XSS), `X-Frame-Options: DENY` + `frame-ancestors 'none'` (anti-clickjacking), `nosniff`, `Referrer-Policy: no-referrer`.
+- **Request-body cap** — 16 MiB, so one oversized request can't OOM a low-RAM router.
+- **Optional Host allow-list** — pin `allowed_hosts` in `config.json` as a DNS-rebinding defense (empty by default = allow any).
 
-## CI / Releases
+The panel is unauthenticated and LAN-trust by design: treat anyone who can reach `:8088` as an operator.
 
-[`.github/workflows/build.yml`](.github/workflows/build.yml) runs on every push/PR: `go vet` + `go test -race`,
-then cross-compiles for all router SoCs (`mipsle`, `mips`, `arm` v7, `arm64`, `amd64`) as downloadable
-artifacts. Pushing a `v*` tag (`git tag v0.2.0 && git push --tags`) additionally publishes a GitHub Release
-with the per-arch tarballs — both the **Entware** (`…-<arch>.tar.gz`) and **OpenWrt**
-(`…-<arch>-openwrt.tar.gz`) flavours — plus `SHA256SUMS.txt`.
+---
 
-## Design in one breath
+## ❓ FAQ
 
-```
-Browser ──http:8088──▶ wakeroute-daemon (Go, single binary, UI embedded)
-                          ├─ writes config ─▶ sing-box (primary core: routing, DNS, urltest failover)
-                          ├─ Clash API :9090 ◀─ live traffic / latency for graphs
-                          └─ engine plugins ─▶ amneziawg-go (awg-quick), olcrtc (only for gaps)
-```
+<details>
+<summary><b>Which routers does it run on?</b></summary>
 
-One universal core does ~90% of protocols; dedicated binaries fill the gaps (AmneziaWG is the big one,
-olcRTC is the anti-whitelist WebRTC tunnel). Failover is a first-class object built on sing-box `urltest`
-+ a daemon watchdog that autostarts sing-box and crash-restarts it with backoff. Routing coexists with an
-existing policy-routing setup via a dedicated fwmark + table.
+Anything that runs **OpenWrt** (22.x–25.x, `procd`/`fw4`) or has **Entware** under `/opt` — that includes most **Keenetic** routers running stock firmware with the Entware/OPKG add-on. CPU: MIPS (little/big-endian), ARMv7, ARM64, or x86-64. The installer auto-detects yours.
+</details>
 
-## Non-goals (for now)
+<details>
+<summary><b>Will it break my stock VPN / firewall config?</b></summary>
 
-- Not a replacement for stock router firmware. It sits beside it.
-- Not a server/hosting panel in v1 — client-out first (router connects out through chosen protocols).
-- Not reimplementing protocols — it orchestrates proven cores.
+No. WakeRoute runs as its own service on `:8088` and routes only the traffic it explicitly marks (its own fwmark + routing table). It coexists with the stock firewall and with selective-routing systems like keen-pbr — the installer detects those and asks before changing anything.
+</details>
 
-## License
+<details>
+<summary><b>Do I need sing-box?</b></summary>
 
-[MIT](LICENSE). Built on MIT/Apache cores (sing-box, mihomo, xray, amneziawg).
+The UI runs without it, but you need `sing-box` present to **Apply** a proxy config. Install it via `opkg install sing-box` or drop the matching build from the [sing-box releases](https://github.com/SagerNet/sing-box/releases). WireGuard/AmneziaWG can route in the kernel without it.
+</details>
+
+<details>
+<summary><b>What if an Apply breaks my connection?</b></summary>
+
+Apply is **live-until-reboot** unless you explicitly Save. If connectivity drops, WakeRoute automatically rolls back to the previous config. As a last resort it can auto-reboot — but only if you opt in.
+</details>
+
+---
+
+## 🤝 Contributing & license
+
+Issues and PRs welcome. The codebase is protocol-agnostic at its core: adding a protocol touches `model` → `importer` → `generator` → `exporter`, and validation stays generic. CI runs `go vet` + `go test -race` and cross-builds every router arch on each push.
+
+Licensed under the [MIT License](LICENSE). Built on the work of the MIT/Apache-licensed cores it orchestrates — sing-box, mihomo, xray, and amneziawg.
