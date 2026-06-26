@@ -1,9 +1,11 @@
 name: build
 
-# CI on every push/PR (test + cross-compile all router arches), and on a v* tag it
-# uploads the per-SoC tarballs and publishes a GitHub Release. Artifacts are only
-# uploaded on tags — a push build is throwaway, and uploading it every time burns
-# the account's Actions artifact-storage quota for nothing.
+# CI on every push/PR cross-compiles all router arches (the build signal). On a v* tag a
+# single release job rebuilds every arch and attaches the per-SoC tarballs DIRECTLY to the
+# GitHub Release. It deliberately does NOT use actions/upload-artifact: Actions artifact
+# storage is a small, account-wide quota (shared across every repo) that fills up and then
+# fails releases, whereas Release assets are separate and don't draw on it. No artifacts are
+# uploaded anywhere, so a release can never be blocked by the artifact quota again.
 on:
   push:
     branches: [main]
@@ -32,8 +34,12 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...   # race detector (host build, CGO default on)
 
+  # Push/PR cross-compile signal: build + package every arch so a regression that breaks any
+  # SoC build (or the packaging) fails CI. Skipped on tags — the release job below rebuilds
+  # them there. Uploads nothing (no artifact-quota dependency).
   build:
     needs: test
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
     runs-on: [self-hosted, Linux, X64]
     strategy:
       fail-fast: false
@@ -51,16 +57,6 @@ jobs:
         with:
           go-version: '1.22'
           cache: false
-
-      - name: Resolve version
-        id: ver
-        run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=0.2.0-dev+$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Cross-compile + package ${{ matrix.name }}
         env:
           CGO_ENABLED: '0'
@@ -68,63 +64,77 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           GOMIPS: ${{ matrix.gomips }}
           GOARM: ${{ matrix.goarm }}
-          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
+          version="0.0.0-dev+$(git rev-parse --short HEAD)"
           stage="wakeroute-${{ matrix.name }}-pkg"
           mkdir -p "$stage"
           go build -trimpath \
-            -ldflags "-s -w -X wakeroute/internal/version.Version=${VERSION}" \
+            -ldflags "-s -w -X wakeroute/internal/version.Version=${version}" \
             -o "$stage/wakeroute-${{ matrix.name }}" ./cmd/wakeroute
-
-          # Entware /opt tarball: binary + install/uninstall + sysvinit S99 script
+          # Entware /opt tarball
           cp packaging/install.sh packaging/uninstall.sh packaging/S99wakeroute "$stage/"
           chmod +x "$stage"/*.sh "$stage"/S99wakeroute "$stage/wakeroute-${{ matrix.name }}"
-          tar -C "$stage" -czf "wakeroute-${VERSION}-${{ matrix.name }}.tar.gz" .
-          sha256sum "wakeroute-${VERSION}-${{ matrix.name }}.tar.gz"
-
-          # OpenWrt native tarball: same binary + procd install/uninstall + procd init
+          tar -C "$stage" -czf "wakeroute-${version}-${{ matrix.name }}.tar.gz" .
+          # OpenWrt native tarball
           owstage="wakeroute-${{ matrix.name }}-openwrt-pkg"
           mkdir -p "$owstage"
           cp "$stage/wakeroute-${{ matrix.name }}" "$owstage/wakeroute-${{ matrix.name }}"
           cp packaging/openwrt/install.sh packaging/openwrt/uninstall.sh packaging/openwrt/wakeroute.init "$owstage/"
           chmod +x "$owstage"/*.sh "$owstage"/wakeroute.init "$owstage/wakeroute-${{ matrix.name }}"
-          tar -C "$owstage" -czf "wakeroute-${VERSION}-${{ matrix.name }}-openwrt.tar.gz" .
-          sha256sum "wakeroute-${VERSION}-${{ matrix.name }}-openwrt.tar.gz"
+          tar -C "$owstage" -czf "wakeroute-${version}-${{ matrix.name }}-openwrt.tar.gz" .
 
-      # Only on release tags: these per-arch artifacts exist solely to feed the
-      # `release` job below (which itself runs only on v* tags). A normal push still
-      # cross-compiles every arch above — that build succeeding is the CI signal —
-      # so there is nothing to gain from uploading + storing throwaway tarballs.
-      - name: Upload artifact
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@v7
-        with:
-          name: wakeroute-${{ matrix.name }}
-          path: |
-            wakeroute-*-${{ matrix.name }}.tar.gz
-            wakeroute-*-${{ matrix.name }}-openwrt.tar.gz
-          if-no-files-found: error
-          retention-days: 5
-
+  # Tag-only: rebuild every arch in one job and create the GitHub Release with the tarballs
+  # attached as RELEASE ASSETS (not Actions artifacts). One job → deterministic SHA256SUMS and
+  # no matrix race to create the release.
   release:
-    needs: build
+    needs: test
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: [self-hosted, Linux, X64]
     permissions:
       contents: write   # create the release + upload assets
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
-          path: artifacts
-          merge-multiple: true
+          go-version: '1.22'
+          cache: false
+      - name: Build every arch + package
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          build_one() {  # name goarch [gomips] [goarm]
+            local name="$1" stage owstage
+            stage="wakeroute-${name}-pkg"; owstage="wakeroute-${name}-openwrt-pkg"
+            mkdir -p "$stage" "$owstage"
+            GOARCH="$2" GOMIPS="${3:-}" GOARM="${4:-}" go build -trimpath \
+              -ldflags "-s -w -X wakeroute/internal/version.Version=${version}" \
+              -o "$stage/wakeroute-${name}" ./cmd/wakeroute
+            cp packaging/install.sh packaging/uninstall.sh packaging/S99wakeroute "$stage/"
+            chmod +x "$stage"/*.sh "$stage"/S99wakeroute "$stage/wakeroute-${name}"
+            tar -C "$stage" -czf "dist/wakeroute-${version}-${name}.tar.gz" .
+            cp "$stage/wakeroute-${name}" "$owstage/wakeroute-${name}"
+            cp packaging/openwrt/install.sh packaging/openwrt/uninstall.sh packaging/openwrt/wakeroute.init "$owstage/"
+            chmod +x "$owstage"/*.sh "$owstage"/wakeroute.init "$owstage/wakeroute-${name}"
+            tar -C "$owstage" -czf "dist/wakeroute-${version}-${name}-openwrt.tar.gz" .
+            ( cd dist && sha256sum "wakeroute-${version}-${name}.tar.gz" "wakeroute-${version}-${name}-openwrt.tar.gz" )
+          }
+          build_one mipsle mipsle softfloat
+          build_one mips   mips   softfloat
+          build_one arm    arm    ''        7
+          build_one arm64  arm64
+          build_one amd64  amd64
+          ( cd dist && sha256sum *.tar.gz > SHA256SUMS.txt )
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          ( cd artifacts && sha256sum *.tar.gz > SHA256SUMS.txt )
-          gh release create "${GITHUB_REF_NAME}" artifacts/*.tar.gz artifacts/SHA256SUMS.txt \
+          gh release create "${GITHUB_REF_NAME}" dist/*.tar.gz dist/SHA256SUMS.txt \
             --repo "${GITHUB_REPOSITORY}" \
             --title "WakeRoute ${GITHUB_REF_NAME}" \
             --generate-notes
