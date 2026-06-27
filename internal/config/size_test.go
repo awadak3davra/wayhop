@@ -9,7 +9,9 @@ import (
 func TestConfigSize(t *testing.T) {
 	cfg := Default()
 	size := unsafe.Sizeof(*cfg)
-	fmt.Printf("\nConfig struct size: %d bytes\n", size)
+	// Reference a default value (not just types) so the Default() result is actually
+	// used — unsafe.Sizeof alone reads only the type, which trips staticcheck SA4006.
+	fmt.Printf("\nConfig struct size: %d bytes (e.g. listen default %q)\n", size, cfg.Listen)
 	fmt.Printf("Config fields breakdown:\n")
 	fmt.Printf("  Listen (string): %d bytes\n", unsafe.Sizeof(cfg.Listen))
 	fmt.Printf("  DataDir (string): %d bytes\n", unsafe.Sizeof(cfg.DataDir))

@@ -39,6 +39,9 @@ All notable changes to WakeRoute are documented here. This project adheres to
 - **OpenWrt routers with AmneziaWG are no longer told to install plain WireGuard** they already
   have — the AmneziaWG kernel module carries vanilla WireGuard too.
 - **Share links escape special characters** in passwords and connection names correctly.
+- **A Reality connection imported with a standard-base64 public key now generates a valid config** —
+  the key is normalized to the url-safe base64 the proxy core requires, so a `+/=`-style key (rather
+  than the url-safe form) no longer produces a config that fails to load on apply.
 - **Sturdier failover & supervision** — the Apply rollback can no longer fire twice, and the
   sing-box watchdog won't restart a core you deliberately stopped; a boot-time config-generation
   error is logged instead of silently leaving routing down.

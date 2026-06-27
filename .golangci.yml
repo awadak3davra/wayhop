@@ -25,9 +25,13 @@ linters:
       # and string(Body.Bytes()) vs Body.String() is readability-only.
       - linters: [errcheck]
         path: _test\.go
+      # S1030: string(buf.Bytes()) vs buf.String() — readability-only.
+      # SA5011: false positive in tests — this staticcheck build doesn't model
+      # (*testing.T).Fatal as terminating, so an idiomatic `if x == nil { t.Fatal }`
+      # guard before a deref trips it; a real nil-deref in a test just panics the test.
       - linters: [staticcheck]
         path: _test\.go
-        text: 'S1030'
+        text: 'S1030|SA5011'
       # Two long-standing unused private symbols (a duplicate const + a helper).
       # Kept per the project's preserve-code rule; flagged for a removal review.
       - linters: [unused]

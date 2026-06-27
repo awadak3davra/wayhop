@@ -49,12 +49,11 @@ func ProbeTLS(ctx context.Context, host string) ProbeTLSResult {
 
 	// Split an optional :port; default to 443. The SNI must be the bare hostname
 	// (no port), or the handshake's server_name extension is malformed.
-	sni, addr := host, host
+	sni := host
+	addr := net.JoinHostPort(host, "443") // default when host carries no :port
 	if h, p, err := net.SplitHostPort(host); err == nil {
 		sni = h
 		addr = net.JoinHostPort(h, p)
-	} else {
-		addr = net.JoinHostPort(host, "443")
 	}
 
 	dctx, cancel := context.WithTimeout(ctx, probeTLSTimeout)

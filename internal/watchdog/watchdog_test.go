@@ -70,7 +70,6 @@ func (f *fakeSup) spawnLocked() error {
 // --- lock-protected accessors for the concurrency tests ----------------------
 
 func (f *fakeSup) setDesired(v bool) { f.mu.Lock(); f.desired = v; f.mu.Unlock() }
-func (f *fakeSup) setAlive(v bool)   { f.mu.Lock(); f.alive = v; f.mu.Unlock() }
 func (f *fakeSup) startCount() int   { f.mu.Lock(); defer f.mu.Unlock(); return f.starts }
 func (f *fakeSup) isDesired() bool   { f.mu.Lock(); defer f.mu.Unlock(); return f.desired }
 func (f *fakeSup) isAlive() bool     { f.mu.Lock(); defer f.mu.Unlock(); return f.alive }

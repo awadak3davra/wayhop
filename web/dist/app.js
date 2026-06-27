@@ -160,6 +160,9 @@ const DICTS = window.WR_DICTS || {};
     "{0}h ago": "{0} ч назад",
     "{0}d ago": "{0} дн назад",
     "matched {0} log lines": "совпало строк лога: {0}",
+    "Reality mimics a real site — pick a major TLS-1.3 host (suggestions in the field), then Check it's reachable + TLS 1.3.": "Reality маскируется под реальный сайт — выберите крупный хост с TLS 1.3 (подсказки в поле), затем нажмите «Проверить» (доступен + TLS 1.3).",
+    "not a valid x25519 key (base64 of 32 bytes)": "недействительный ключ x25519 (base64 из 32 байт)",
+    "must be hex, even length, ≤16 chars": "только hex, чётная длина, ≤16 символов",
     "Could not load subscription info.": "Не удалось загрузить данные подписки.",
     "present": "присутствует",
     "not required": "не требуется",
@@ -1805,6 +1808,44 @@ function fCheck(id, label, checked) {
   return el("label", { class: "check" }, c, el("span", {}, label));
 }
 
+// REALITY_FRONTS — known-good, globally-reachable TLS-1.3 sites that make sensible Reality
+// camouflage destinations. Offered as SNI suggestions ONLY when security=reality (a plain-TLS
+// SNI must be the server's own domain). Starting points — the Check button verifies each is
+// reachable + TLS 1.3 from the router's vantage before saving.
+const REALITY_FRONTS = ["www.microsoft.com", "www.cloudflare.com", "www.apple.com", "dl.google.com", "www.amazon.com", "aws.amazon.com", "www.bing.com"];
+
+// Reality crypto-field format checks (mirror the generator's validRealityPubKey/validShortID),
+// surfaced inline so a truncated/typo'd paste is caught at input — otherwise the generator
+// silently degrades the endpoint to plain TLS, which fails against a Reality server with no
+// hint why. Return "" when ok, else a short reason.
+function b64Bytes(s) {
+  try {
+    let t = String(s).replace(/-/g, "+").replace(/_/g, "/");
+    while (t.length % 4) t += "=";
+    return atob(t).length;
+  } catch (e) { return -1; }
+}
+function realityPubkeyError(v) { return b64Bytes(v) === 32 ? "" : t("not a valid x25519 key (base64 of 32 bytes)"); }
+function shortIdError(v) { return (/^[0-9a-fA-F]+$/.test(v) && v.length % 2 === 0 && v.length <= 16) ? "" : t("must be hex, even length, ≤16 chars"); }
+
+// fInputValidated — an input with an inline format indicator. validate(trimmedValue) returns ""
+// (ok) or a short error; an EMPTY field never errors (the Reality fields are unused for plain
+// TLS). Keeps the input id so collect()'s g(id) is unchanged.
+function fInputValidated(id, label, value, ph, validate) {
+  const input = el("input", { type: "text", id, value: value != null ? String(value) : "", placeholder: ph || "" });
+  const result = el("span", { class: "hint", style: "margin-left:8px" });
+  const run = () => {
+    const v = (input.value || "").trim();
+    const err = v ? validate(v) : "";
+    result.textContent = err ? "✗ " + err : "";
+    result.style.color = err ? "var(--err)" : "";
+  };
+  input.addEventListener("input", run);
+  run();
+  return el("div", { class: "field" }, el("label", {}, label),
+    el("div", { class: "row", style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap" }, input, result));
+}
+
 // fSniCheck is the SNI field (used by the vless tls/reality branch AND hysteria2/tuic)
 // with a "Check" button that probes the entered SNI from the router's vantage:
 // TCP-reachable + speaks TLS + negotiates TLS 1.3. Reality borrows a real public
@@ -1885,13 +1926,29 @@ function manualForm(ep) {
 
     if (["vless", "vmess", "trojan"].includes(proto)) {
       add(el("div", { class: "card-title", style: "margin:16px 0 8px" }, "Security"));
+      // Reality borrows a real TLS-1.3 site's SNI as camouflage; a bad/unreachable front
+      // silently breaks the connection. Suggest known-good fronts + remind to Check — shown
+      // only for Reality (a plain-TLS SNI must be the server's OWN domain, not a front).
+      const frontHint = el("div", { class: "hint", id: "f-sni-fronthint", style: "margin:-2px 0 8px;display:none" },
+        t("Reality mimics a real site — pick a major TLS-1.3 host (suggestions in the field), then Check it's reachable + TLS 1.3."));
       add(fSelect("f-sec", "TLS", ["none", "tls", "reality"], T.type || (T.enabled ? "tls" : "none")),
-        fSniCheck("f-sni", "SNI", T.sni), fInput("f-fp", "uTLS fingerprint (chrome…, optional)", T.fingerprint),
-        fInput("f-pbk", "Reality public key", T.public_key), fInput("f-sid", "Reality short id", T.short_id));
+        fSniCheck("f-sni", "SNI", T.sni), frontHint, fInput("f-fp", "uTLS fingerprint (chrome…, optional)", T.fingerprint),
+        fInputValidated("f-pbk", "Reality public key", T.public_key, "base64 x25519 (43–44 chars)", realityPubkeyError),
+        fInputValidated("f-sid", "Reality short id", T.short_id, "hex, even length, ≤16 (optional)", shortIdError));
       add(el("div", { class: "card-title", style: "margin:16px 0 8px" }, "Transport"));
       add(fSelect("f-tt", "Type", ["tcp", "ws", "grpc", "http", "httpupgrade"], R.type || "tcp"),
         fInput("f-path", "Path (ws/http)", R.path), fInput("f-host", "Host header (ws/http)", R.host),
         fInput("f-sname", "gRPC service name", R.service_name));
+      // Offer the Reality fronts (datalist) + the hint ONLY when security=reality.
+      dyn.appendChild(el("datalist", { id: "f-sni-fronts" }, ...REALITY_FRONTS.map(d => el("option", { value: d }))));
+      const secSel = dyn.querySelector("#f-sec"), sniInp = dyn.querySelector("#f-sni");
+      const syncFronts = () => {
+        const on = secSel && secSel.value === "reality";
+        if (sniInp) { if (on) sniInp.setAttribute("list", "f-sni-fronts"); else sniInp.removeAttribute("list"); }
+        frontHint.style.display = on ? "" : "none";
+      };
+      if (secSel) secSel.addEventListener("change", syncFronts);
+      syncFronts();
     }
   }
   renderDyn(proto0);

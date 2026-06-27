@@ -241,7 +241,7 @@ fi
 # ===========================================================================
 hdr "Dependencies"
 
-command -v opkg >/dev/null 2>&1 && ok "opkg present" || warn "opkg not found (unusual for Entware)"
+if command -v opkg >/dev/null 2>&1; then ok "opkg present"; else warn "opkg not found (unusual for Entware)"; fi
 MISSING=""
 for c in ip ipset iptables; do
   if command -v "$c" >/dev/null 2>&1; then ok "$c present"; else warn "$c not found (needed for list-based / kernel routing)"; MISSING="$MISSING $c"; fi
@@ -293,6 +293,9 @@ port_listener() {
 port_busy() { { netstat -tln 2>/dev/null || ss -ltn 2>/dev/null; } | grep -qE "[:.]$1[[:space:]]"; }
 
 # busybox-safe kill-by-name. Dry-run pure (returns without sleeping/killing).
+# $pids below is a deliberate whitespace-separated PID list from pgrep_f (POSIX sh
+# has no arrays); the word-split on `kill $pids` is intended, so SC2086 is expected.
+# shellcheck disable=SC2086
 kill_by_name() {
   pat="$1"
   if [ "$DRY_RUN" = 1 ]; then printf '  %b(dry-run)%b would stop processes matching: %s\n' "$C_DIM" "$C_0" "$pat"; return 0; fi

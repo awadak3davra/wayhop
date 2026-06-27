@@ -1281,7 +1281,7 @@ func tlsJSON(t *model.TLS) map[string]any {
 		if _, ok := out["utls"]; !ok {
 			out["utls"] = map[string]any{"enabled": true, "fingerprint": "chrome"}
 		}
-		r := map[string]any{"enabled": true, "public_key": t.PublicKey}
+		r := map[string]any{"enabled": true, "public_key": normalizeRealityPubKey(t.PublicKey)}
 		if validShortID(t.ShortID) {
 			r["short_id"] = t.ShortID
 		}
@@ -1302,6 +1302,23 @@ func validRealityPubKey(s string) bool {
 		}
 	}
 	return false
+}
+
+// normalizeRealityPubKey re-encodes a reality public key (in any base64 variant
+// validRealityPubKey accepts) as base64url-WITHOUT-padding — the only form
+// sing-box's reality decoder accepts. A std-base64 key (`=` padding, or `+`/`/`
+// chars) passes validRealityPubKey but sing-box rejects it verbatim with "decode
+// public_key: illegal base64 data", failing the whole config; emitting the
+// canonical form keeps such an import working. The caller has already gated on
+// validRealityPubKey so the decode is expected to succeed; on the impossible miss
+// return s unchanged.
+func normalizeRealityPubKey(s string) string {
+	for _, enc := range []*base64.Encoding{base64.RawURLEncoding, base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding} {
+		if b, err := enc.DecodeString(s); err == nil && len(b) == 32 {
+			return base64.RawURLEncoding.EncodeToString(b)
+		}
+	}
+	return s
 }
 
 // validShortID reports whether s is a usable reality short_id: an even-length hex

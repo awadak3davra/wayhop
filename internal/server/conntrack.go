@@ -70,9 +70,10 @@ func parseConntrack(s string) []Conn {
 				}
 			case "bytes":
 				n, _ := strconv.ParseInt(v, 10, 64)
-				if seenBytes == 0 {
+				switch seenBytes {
+				case 0:
 					c.UpBytes = n
-				} else if seenBytes == 1 {
+				case 1:
 					c.DownBytes = n
 				}
 				seenBytes++

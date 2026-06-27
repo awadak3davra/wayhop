@@ -130,6 +130,7 @@ BIN="$SRC/wakeroute-$ARCH"
 [ -f "$BIN" ] || BIN="$SRC/wakeroute"
 [ -f "$BIN" ] || die "binary not found -- expected $SRC/wakeroute-$ARCH or $SRC/wakeroute (wrong arch tarball?)"
 ok "arch: $ARCH ($(uname -m))   binary: $(basename "$BIN")"
+# shellcheck disable=SC1091  # /etc/openwrt_release exists only on the target device, not at lint time
 [ -f /etc/openwrt_release ] && info "$(. /etc/openwrt_release; echo "$DISTRIB_DESCRIPTION")"
 case "$ARCH" in mips|mipsle) info "MIPS builds are softfloat; if the daemon crashes on start, re-run with the other MIPS arch.";; esac
 
@@ -157,7 +158,7 @@ MISSING=""
 for c in ip nft; do
   if command -v "$c" >/dev/null 2>&1; then ok "$c present"; else warn "$c not found"; MISSING="$MISSING $c"; fi
 done
-command -v ipset >/dev/null 2>&1 && ok "ipset present" || info "ipset not present (only needed for some kernel-routing modes)"
+if command -v ipset >/dev/null 2>&1; then ok "ipset present"; else info "ipset not present (only needed for some kernel-routing modes)"; fi
 if [ -n "$MISSING" ] && [ -n "$PKG" ]; then
   pkgs=""; for c in $MISSING; do case "$c" in ip) pkgs="$pkgs $([ "$PKG" = apk ] && echo ip || echo ip-full)";; nft) pkgs="$pkgs nftables";; esac; done
   if ask "Install missing packages via $PKG (${pkgs# }) ?" n; then
@@ -225,7 +226,9 @@ ok "binary installed"
 
 [ -f "$SRC/wakeroute.init" ] || die "wakeroute.init not found next to this installer"
 say "installing procd init -> $INITD/wakeroute"
-cp "$SRC/wakeroute.init" "$INITD/wakeroute.new" && chmod 0755 "$INITD/wakeroute.new" && mv "$INITD/wakeroute.new" "$INITD/wakeroute" || die "failed to install init"
+cp "$SRC/wakeroute.init" "$INITD/wakeroute.new" || die "failed to install init"
+chmod 0755 "$INITD/wakeroute.new" || die "failed to install init"
+mv "$INITD/wakeroute.new" "$INITD/wakeroute" || die "failed to install init"
 
 if [ ! -f "$ETC/config.json" ]; then
   say "writing default config -> $ETC/config.json  (UI port :$PORT)"
