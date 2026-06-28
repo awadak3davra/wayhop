@@ -3,6 +3,7 @@ package pbr
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -16,6 +17,49 @@ func (pl *Plan) markSet(mark uint32) string {
 }
 
 func nftElements(cidrs []string) string { return strings.Join(cidrs, ", ") }
+
+// nftStrSet renders an anonymous nft set of quoted strings (iface names). nft accepts trailing-*
+// wildcards inside an iifname set (validated on-device), so SrcIface entries pass through verbatim.
+func nftStrSet(ss []string) string {
+	q := make([]string, len(ss))
+	for i, s := range ss {
+		q[i] = `"` + s + `"`
+	}
+	return "{ " + strings.Join(q, ", ") + " }"
+}
+
+// nftRawSet renders an anonymous nft set of raw tokens (MAC addresses).
+func nftRawSet(ss []string) string { return "{ " + strings.Join(ss, ", ") + " }" }
+
+// nftIntSet renders an anonymous nft set of integers (ports).
+func nftIntSet(ns []int) string {
+	q := make([]string, len(ns))
+	for i, n := range ns {
+		q[i] = strconv.Itoa(n)
+	}
+	return "{ " + strings.Join(q, ", ") + " }"
+}
+
+// srcMatchPrefix renders the family-agnostic nft source-match terms (iface, mac, port) for a
+// source-scoped zone, in a stable order, each as an anonymous set. Returns "" when the zone has
+// none. The caller appends the family-specific `ip/ip6 saddr @<name>_s4/_s6` term after this.
+func (z *Zone) srcMatchPrefix() string {
+	var parts []string
+	if len(z.SrcIface) > 0 {
+		parts = append(parts, "iifname "+nftStrSet(z.SrcIface))
+	}
+	if len(z.SrcMAC) > 0 {
+		parts = append(parts, "ether saddr "+nftRawSet(z.SrcMAC))
+	}
+	if len(z.SrcPort) > 0 {
+		// th sport needs a transport header — guard with l4proto so non-tcp/udp packets skip it.
+		parts = append(parts, "meta l4proto { tcp, udp } th sport "+nftIntSet(z.SrcPort))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " ") + " "
+}
 
 // RenderNft returns the full nftables ruleset for this plan's OWN table (applied via
 // `nft -f -`). It only ever touches `table inet <pl.Table>`, so it coexists with fw4
@@ -55,6 +99,14 @@ func (pl *Plan) RenderNft() string {
 		if len(z.V6) > 0 {
 			fmt.Fprintf(&b, "\tset %s_6 { type ipv6_addr; flags interval; elements = { %s } }\n", z.Name, nftElements(z.V6))
 		}
+		// Source-scoped zones (Phase C): a separate saddr set per family so the wr_mark line
+		// can match `ip saddr @<name>_s4` in addition to its dest set.
+		if len(z.SrcV4) > 0 {
+			fmt.Fprintf(&b, "\tset %s_s4 { type ipv4_addr; flags interval; elements = { %s } }\n", z.Name, nftElements(z.SrcV4))
+		}
+		if len(z.SrcV6) > 0 {
+			fmt.Fprintf(&b, "\tset %s_s6 { type ipv6_addr; flags interval; elements = { %s } }\n", z.Name, nftElements(z.SrcV6))
+		}
 	}
 
 	// Chain name must NOT be an nft reserved keyword — `chain mark { ... }` fails to
@@ -71,12 +123,64 @@ func (pl *Plan) RenderNft() string {
 	if len(pl.BypassV6) > 0 {
 		fmt.Fprintf(&b, "\t\tip6 daddr @bypass6 %s\n", pl.markSet(wanMark))
 	}
+	sourceOnly := false
 	for _, z := range pl.Zones {
-		if len(z.V4) > 0 {
-			fmt.Fprintf(&b, "\t\tip daddr @%s_4 %s\n", z.Name, pl.markSet(z.Mark))
+		// Source-scoped zones prepend source matches so ONLY traffic from the matching source
+		// gets the mark (the dest set still bounds it to the rule's destinations — so this line
+		// never matches a tunnel peer IP, which lives in @bypass and was marked WAN above; no
+		// bypass re-assert is needed for source+dest zones). pre = the family-agnostic terms
+		// (iface/mac/port); the per-family `ip/ip6 saddr @<name>_s4/_s6` is added after it.
+		pre := z.srcMatchPrefix()
+		// Cross-family guard: if the zone carries a source IP but NOT in this family (e.g. a v6
+		// source on a v4 dest line), the source can't constrain this family's traffic — emitting
+		// it would mark the dest for every source (an over-route). Skip that line. A zone with no
+		// source IP (plain dest, or iface/mac/port only) is unaffected.
+		if len(z.V4) > 0 && (len(z.SrcV4) > 0 || len(z.SrcV6) == 0) {
+			src := ""
+			if len(z.SrcV4) > 0 {
+				src = fmt.Sprintf("ip saddr @%s_s4 ", z.Name)
+			}
+			fmt.Fprintf(&b, "\t\t%s%sip daddr @%s_4 %s\n", pre, src, z.Name, pl.markSet(z.Mark))
 		}
-		if len(z.V6) > 0 {
-			fmt.Fprintf(&b, "\t\tip6 daddr @%s_6 %s\n", z.Name, pl.markSet(z.Mark))
+		if len(z.V6) > 0 && (len(z.SrcV6) > 0 || len(z.SrcV4) == 0) {
+			src := ""
+			if len(z.SrcV6) > 0 {
+				src = fmt.Sprintf("ip6 saddr @%s_s6 ", z.Name)
+			}
+			fmt.Fprintf(&b, "\t\t%s%sip6 daddr @%s_6 %s\n", pre, src, z.Name, pl.markSet(z.Mark))
+		}
+		// Source-only zone (no dest): matches EVERY destination from the matching source. Emit a
+		// per-family saddr line when the source carries IPs; otherwise one family-agnostic line
+		// (iface/mac/port). Never emit a condition-less line (pre=="" with no saddr would mark
+		// everything) — a SrcScoped zone always has at least one matcher, but guard regardless.
+		if len(z.V4) == 0 && len(z.V6) == 0 && z.SrcScoped {
+			wrote := false
+			if len(z.SrcV4) > 0 {
+				fmt.Fprintf(&b, "\t\t%sip saddr @%s_s4 %s\n", pre, z.Name, pl.markSet(z.Mark))
+				wrote = true
+			}
+			if len(z.SrcV6) > 0 {
+				fmt.Fprintf(&b, "\t\t%sip6 saddr @%s_s6 %s\n", pre, z.Name, pl.markSet(z.Mark))
+				wrote = true
+			}
+			if !wrote && pre != "" {
+				fmt.Fprintf(&b, "\t\t%s%s\n", pre, pl.markSet(z.Mark))
+				wrote = true
+			}
+			if wrote {
+				sourceOnly = true
+			}
+		}
+	}
+	// Re-assert the anti-loop bypass AFTER any source-only line: such a line has no dest, so it
+	// also matches a tunnel-peer IP — re-mark peer-destined traffic back to WAN (last matching
+	// mark wins) so a tunnel's own packets to its peer never loop back into the tunnel.
+	if sourceOnly {
+		if len(pl.BypassV4) > 0 {
+			fmt.Fprintf(&b, "\t\tip daddr @bypass4 %s\n", pl.markSet(wanMark))
+		}
+		if len(pl.BypassV6) > 0 {
+			fmt.Fprintf(&b, "\t\tip6 daddr @bypass6 %s\n", pl.markSet(wanMark))
 		}
 	}
 	// Save the chosen egress fwmark into the connmark so the connection's exit is visible in
@@ -95,6 +199,22 @@ func (pl *Plan) RenderNft() string {
 		b.WriteString("\t\ttype filter hook forward priority filter - 1; policy accept;\n")
 		fmt.Fprintf(&b, "\t\tmeta mark & %s != 0x0 return\n", hexMark(pl.Mask))
 		b.WriteString("\t\tmeta l4proto { tcp, udp } flow add @ft\n")
+		b.WriteString("\t}\n")
+	}
+
+	// TCP MSS clamping chain (QW1): SYN packets forwarded out any kernel tunnel egress have
+	// their MSS option rewritten to `rt mtu` (the kernel's per-flow route MTU, updated by
+	// ICMP frag-needed PMTU discovery). Without this, the AWG/WG encapsulation overhead
+	// (~120 B typically → 1500-byte LAN frames become ~1380-byte tunnel frames) silently
+	// fragments large TCP flows or causes PMTU blackholes — the primary cause of slow sites
+	// and long TLS-handshake setup delays. `rt mtu` is dynamic, so it self-adjusts when the
+	// path MTU changes (no hard-coded value). Only SYN packets carry the MSS option: at most
+	// one match per TCP connection, negligible overhead. Chain lives in OUR self-flushing
+	// table → RenderTeardown's `delete table` removes it atomically (fail-safe-safe).
+	if ifaces := pl.mssIfaces(); len(ifaces) > 0 {
+		b.WriteString("\tchain wr_mss {\n")
+		b.WriteString("\t\ttype filter hook forward priority mangle; policy accept;\n")
+		fmt.Fprintf(&b, "\t\toifname %s tcp flags & (fin|syn|rst|ack) == syn tcp option maxseg size set rt mtu\n", nftStrSet(ifaces))
 		b.WriteString("\t}\n")
 	}
 
@@ -197,6 +317,11 @@ func (pl *Plan) hasV6() bool {
 	return false
 }
 
+// failClosedMetric is the route metric for a kill-switched egress's blackhole fallback. It must be
+// strictly greater than the tunnel route's metric (0) so the `default dev <iface>` route wins while
+// the iface is up, and only the blackhole remains once that route is flushed on link-down.
+const failClosedMetric = 1000
+
 // RenderIP returns the idempotent `ip rule`/`ip route` (and symmetric `ip -6 rule`/
 // `ip -6 route` when the plan marks v6) commands to install the plan.
 // WAN-marked traffic (the bypass) needs no rule — it falls through to the main table.
@@ -225,6 +350,19 @@ func (pl *Plan) RenderIP(opt Options) []string {
 			cmds = append(cmds, fmt.Sprintf("ip route replace default dev %s table %d", e.Iface, e.Table))
 			if v6 {
 				cmds = append(cmds, fmt.Sprintf("ip -6 route replace default dev %s table %d", e.Iface, e.Table))
+			}
+			if e.FailClosed {
+				// Kill switch: a fail-closed fallback in the SAME table at a high metric. While the
+				// tunnel iface is up its `default dev` route (metric 0) wins; if the iface goes down
+				// the kernel flushes that route and this blackhole (no iface dependency) catches the
+				// fwmark'd traffic and DROPS it — instead of the lookup falling through to the main
+				// table (WAN). The high metric keeps it strictly below the live tunnel route.
+				// (Verified on-device: busybox iproute2 accepts `blackhole default metric N table N`
+				// and orders it below the metric-0 dev route.)
+				cmds = append(cmds, fmt.Sprintf("ip route replace blackhole default metric %d table %d", failClosedMetric, e.Table))
+				if v6 {
+					cmds = append(cmds, fmt.Sprintf("ip -6 route replace blackhole default metric %d table %d", failClosedMetric, e.Table))
+				}
 			}
 		case EgressBlackhole:
 			cmds = append(cmds, fmt.Sprintf("ip route replace blackhole default table %d", e.Table))
@@ -296,6 +434,22 @@ func (pl *Plan) masqWanIfaces(skip []string) []string {
 		}
 		seen[e.Iface] = true
 		out = append(out, e.Iface)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// mssIfaces returns unique sorted kernel tunnel ifnames needing TCP MSS clamping — every
+// EgressInterface egress in this plan. Derives directly from pl.Egresses so it is
+// self-consistent independent of whether MasqIfaces was populated by Compile.
+func (pl *Plan) mssIfaces() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, e := range pl.Egresses {
+		if e.Kind == EgressInterface && e.Iface != "" && !seen[e.Iface] {
+			seen[e.Iface] = true
+			out = append(out, e.Iface)
+		}
 	}
 	sort.Strings(out)
 	return out

@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os/exec"
+	"sync/atomic"
 	"time"
 
 	"wakeroute/internal/netdiag"
@@ -15,6 +16,10 @@ import (
 // when opted in, on-device) reboots as a last resort.
 func (s *Server) armFailSafe(nativeOnly bool) {
 	c := s.config()
+	// This window's epoch (set by Arm below). The rollback/reboot closures capture it
+	// and skip if a newer Apply has superseded this window — see the rollback closure.
+	// atomic: Arm starts run() (which can reach the closures) before this Store returns.
+	var myEpoch atomic.Int64
 	target := c.FailSafe.Target
 	if target == "" {
 		target = "1.1.1.1"
@@ -54,6 +59,14 @@ func (s *Server) armFailSafe(nativeOnly bool) {
 		// handleApply's, so there is no lock-ordering cycle.
 		s.applyMu.Lock()
 		defer s.applyMu.Unlock()
+		// applyMu serializes this rollback against handleApply's apply+Arm, so the epoch
+		// check is now authoritative: if a newer Apply superseded this window while we were
+		// blocked on the lock, its Arm already bumped the epoch — skip, or we'd restore a
+		// config the user just replaced and clobber the fresh Apply.
+		if !s.failsafe.IsCurrent(myEpoch.Load()) {
+			log.Printf("fail-safe: a newer Apply superseded this window — skipping the stale rollback")
+			return nil
+		}
 		log.Printf("fail-safe: connectivity lost — rolling back to the previous config")
 		// Notify (fire-and-forget, async) so a remote operator learns their Apply was
 		// auto-reverted — the key event for managing the router from away.
@@ -80,12 +93,15 @@ func (s *Server) armFailSafe(nativeOnly bool) {
 		return sbErr
 	}
 	reboot := func() {
+		if !s.failsafe.IsCurrent(myEpoch.Load()) {
+			return // a newer Apply superseded this window — don't reboot on its behalf
+		}
 		log.Printf("fail-safe: still no connectivity after rollback — rebooting router")
 		s.alert("⚠️ WakeRoute fail-safe: no connectivity even after rollback — rebooting the router.")
 		_ = exec.Command("reboot").Start()
 	}
 	allowReboot := !c.Demo && c.FailSafe.AutoReboot
-	s.failsafe.Arm(check, rollback, reboot, allowReboot)
+	myEpoch.Store(s.failsafe.Arm(check, rollback, reboot, allowReboot))
 }
 
 // routingBrainUp reports whether sing-box is in a state where the fail-safe's

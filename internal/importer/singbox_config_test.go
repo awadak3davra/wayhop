@@ -441,3 +441,26 @@ func validRealityKey() string {
 	}
 	return base64.StdEncoding.EncodeToString(b[:])
 }
+
+// TestSbIntRejectsOverflow: sbInt must reject a value beyond int32 range (returning 0)
+// instead of overflowing the int(t) conversion to a junk value on a 32-bit router arch —
+// mirroring asInt's guard. A real port/MTU/alter_id is tiny, so a huge number in a pasted
+// sing-box config is bogus.
+func TestSbIntRejectsOverflow(t *testing.T) {
+	const overMaxInt32 = 3000000000 // > math.MaxInt32 (2147483647)
+	cases := []struct {
+		name string
+		v    any
+		want int
+	}{
+		{"valid float port", float64(443), 443},
+		{"valid json.Number", json.Number("1500"), 1500},
+		{"overflow float", float64(overMaxInt32), 0},
+		{"overflow json.Number", json.Number("3000000000"), 0},
+	}
+	for _, c := range cases {
+		if got := sbInt(map[string]any{"x": c.v}, "x"); got != c.want {
+			t.Errorf("%s: sbInt=%d, want %d", c.name, got, c.want)
+		}
+	}
+}

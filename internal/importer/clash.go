@@ -381,6 +381,8 @@ func proxyToEndpoint(p proxyMap) (*model.Endpoint, error) {
 		return clashVMess(p, server, port, name)
 	case "trojan":
 		return clashTrojan(p, server, port, name)
+	case "anytls":
+		return clashAnyTLS(p, server, port, name)
 	case "vless":
 		return clashVLESS(p, server, port, name)
 	case "hysteria2", "hy2":
@@ -523,6 +525,32 @@ func clashTrojan(p proxyMap, server string, port int, name string) (*model.Endpo
 			Insecure:    clashInsecure(p),
 			ALPN:        clashList(p["alpn"]),
 		}
+	}
+	return e, nil
+}
+
+// clashAnyTLS maps a clash-meta anytls proxy to a model endpoint — like clashTrojan (password + TLS)
+// but AnyTLS is always TLS and has no stream transport.
+func clashAnyTLS(p proxyMap, server string, port int, name string) (*model.Endpoint, error) {
+	if port == 0 {
+		return nil, fmt.Errorf("anytls: missing/invalid port")
+	}
+	e := &model.Endpoint{
+		Engine:   model.EngineSingBox,
+		Protocol: model.ProtoAnyTLS,
+		Server:   server,
+		Port:     port,
+		Name:     name,
+		Enabled:  true,
+		Params:   map[string]any{"password": p["password"]},
+		TLS: &model.TLS{
+			Enabled:     true,
+			Type:        "tls",
+			SNI:         util.FirstNonEmpty(p["sni"], p["servername"], server),
+			Fingerprint: util.FirstNonEmpty(p["client-fingerprint"], p["fingerprint"]),
+			Insecure:    clashInsecure(p),
+			ALPN:        clashList(p["alpn"]),
+		},
 	}
 	return e, nil
 }

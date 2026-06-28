@@ -150,7 +150,7 @@ func (s *Server) handleServerScript(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "enter a valid host or IP")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"script": initserver.BuildScript(b.Protocols, b.Host)})
+	writeJSON(w, http.StatusOK, map[string]any{"script": initserver.BuildScript(b.Protocols, b.Host, s.config().Updater.Mirrors...)})
 }
 
 // ---- provisioning (job-based, with smart console) ----
@@ -184,8 +184,13 @@ func (s *Server) handleServerProvision(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if !netdiag.ValidTarget(b.Host) || b.User == "" {
-		writeErr(w, http.StatusBadRequest, "host and SSH user are required")
+	// Validate the SSH user, not just the host: b.User flows verbatim into the ssh argv
+	// (user@host), so a leading-hyphen user like "-oProxyCommand=…" would be reparsed by ssh
+	// as an option and run a command before auth (argument injection, CWE-88 → RCE as the
+	// daemon uid). ValidTarget's leading-char class excludes '-'. This matches the invariant
+	// resolveHardenTarget already enforces for the other SSH handlers (harden/lockdown/etc.).
+	if !netdiag.ValidTarget(b.Host) || b.User == "" || !netdiag.ValidTarget(b.User) {
+		writeErr(w, http.StatusBadRequest, "a valid host and SSH user are required")
 		return
 	}
 	if len(b.Protocols) == 0 {
@@ -296,7 +301,7 @@ func (s *Server) provisionReal(ctx context.Context, job *initserver.Job, b provi
 	job.OK("SSH port " + itoa(b.Port) + " open")
 
 	job.Start("Install " + strings.Join(protoNames(b.Protocols), " + "))
-	script := initserver.BuildScript(b.Protocols, b.Host)
+	script := initserver.BuildScript(b.Protocols, b.Host, s.config().Updater.Mirrors...)
 	creds := initserver.Creds{Host: b.Host, Port: b.Port, User: b.User, Password: b.Password, Key: b.Key, KnownHostsFile: s.sshKnownHostsPath()}
 	out, ran, err := initserver.Provision(ctx, creds, script)
 	if !ran {
@@ -653,7 +658,7 @@ func (s *Server) runUpdateServerBinary(job *initserver.Job, b serverBinUpdateReq
 		job.Finish(true, map[string]any{"binary": b.Binary, "new_version": updater.ParseVersion(b.Version)})
 		return
 	}
-	script, _ := initserver.UpdateScriptFor(b.Binary, b.Version)
+	script, _ := initserver.UpdateScriptFor(b.Binary, b.Version, s.config().Updater.Mirrors...)
 	creds := initserver.Creds{Host: b.Host, Port: b.Port, User: b.User, Password: b.Password, Key: b.Key, KnownHostsFile: s.sshKnownHostsPath()}
 	job.Logf("the current binary is backed up as <path>.wakeroute.bak on the server before the swap")
 	out, ran, err := initserver.Provision(ctx, creds, script)

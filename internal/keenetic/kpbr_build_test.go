@@ -1,6 +1,7 @@
 package keenetic
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -72,6 +73,18 @@ func TestBuildKernelPlan_FullArtifacts(t *testing.T) {
 	has(t, "cron", art.FailoverCron, "latest-handshakes")
 	if strings.Index(art.FailoverCron, `rx_advanced "$1" && return 0`) > strings.Index(art.FailoverCron, "ping -c3") {
 		t.Error("probe must try the cheap RX signal before falling to ICMP ping")
+	}
+	// L1 stickiness: the cron reads the installed default and KEEPS a still-healthy tunnel egress
+	// instead of preemptively failing back (the zero-debounce up-switch that dropped live calls).
+	has(t, "cron", art.FailoverCron, "ip route show default table")
+	has(t, "cron", art.FailoverCron, `if probe "$cur"; then`)
+	// The generated failover cron must be valid POSIX shell.
+	if sh, err := exec.LookPath("sh"); err == nil {
+		cmd := exec.Command(sh, "-n")
+		cmd.Stdin = strings.NewReader(art.FailoverCron)
+		if out, e := cmd.CombinedOutput(); e != nil {
+			t.Fatalf("sh -n rejected the failover cron:\n%v\n%s", e, out)
+		}
 	}
 
 	// netfilter.d hook re-creates sets if gone + re-asserts iptables/ip.

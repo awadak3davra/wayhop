@@ -151,6 +151,9 @@ func parseConf(text string) (*model.Endpoint, error) {
 			e.Params["mtu"] = n
 		}
 	}
+	// NB: we deliberately do NOT invent an MTU when the .conf omits one — the model stays
+	// faithful to the config and the safe default is applied at the consumer (awgUp for the
+	// AmneziaWG kernel iface, see plugin.awgMTU). TestParseConf_AWG_MTU enforces this.
 
 	if isAWG {
 		e.Protocol = model.ProtoAmneziaWG

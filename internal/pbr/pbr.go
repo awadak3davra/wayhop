@@ -35,6 +35,12 @@ type Egress struct {
 	Iface string     `json:"iface,omitempty"` // kernel ifname when Kind==EgressInterface
 	Mark  uint32     `json:"mark"`            // fwmark (masked by Plan.Mask)
 	Table int        `json:"table"`           // routing table number
+	// FailClosed marks a kill-switched tunnel egress: RenderIP adds a high-metric `blackhole
+	// default` fallback in this egress's table so that if the tunnel iface goes down (its metric-0
+	// `default dev <iface>` route is flushed) the fwmark'd traffic is DROPPED instead of falling
+	// through to the main table (WAN). Set from a Group's opt-in KillSwitch; only meaningful for
+	// EgressInterface. Zero value = no fallback = byte-identical render for existing profiles.
+	FailClosed bool `json:"fail_closed,omitempty"`
 }
 
 // Zone is an IP-CIDR set whose matching destination traffic is marked for an egress.
@@ -49,6 +55,18 @@ type Zone struct {
 	// ipset at query-time (so an 81k-domain list costs ~0 standing RAM — never pre-resolved).
 	// Empty on the OpenWrt nft path (domains there are warned and handled by sing-box).
 	Domains []string `json:"domains,omitempty"`
+	// Source predicates (Phase C): a zone is SOURCE-SCOPED when any of these is set — it marks
+	// only traffic FROM the matching source, in addition to its dest set (if any). SrcV4/SrcV6
+	// render as `ip/ip6 saddr @<name>_s4/_s6` (their own nft sets); SrcMAC/SrcIface/SrcPort are
+	// family-agnostic match prefixes. SrcScoped flags the zone so the hybrid TUN-exclude (§6.4)
+	// does NOT drop its dest CIDR from the TUN — a source-scoped dest must still reach the
+	// non-matching clients via the tunnel default. See docs/SPEC_SOURCE_BASED_ROUTING.md §5.
+	SrcV4     []string `json:"src_v4,omitempty"`
+	SrcV6     []string `json:"src_v6,omitempty"`
+	SrcMAC    []string `json:"src_mac,omitempty"`
+	SrcIface  []string `json:"src_iface,omitempty"`
+	SrcPort   []int    `json:"src_port,omitempty"`
+	SrcScoped bool     `json:"src_scoped,omitempty"`
 }
 
 // Warning flags model content the IP-based Phase-1 compiler does not kernel-route.
@@ -152,6 +170,57 @@ func isExternalEndpoint(p *model.Profile, tag string) bool {
 	return e != nil && e.Engine == model.EngineExternal
 }
 
+// localAddrDeclaresV6 reports (known, hasV6) for an endpoint's recorded interface addresses.
+// known=false means the model carries no local_address at all (nothing to judge from). The
+// value may be []string (fresh import) or []any (after a JSON store round-trip), so both are
+// handled. A v6 literal is the only address form containing a colon, which is a cheap, exact test.
+func localAddrDeclaresV6(e *model.Endpoint) (known, hasV6 bool) {
+	raw, ok := e.Params["local_address"]
+	if !ok {
+		return false, false
+	}
+	var addrs []string
+	switch v := raw.(type) {
+	case []string:
+		addrs = v
+	case []any:
+		for _, a := range v {
+			if s, ok := a.(string); ok {
+				addrs = append(addrs, s)
+			}
+		}
+	}
+	if len(addrs) == 0 {
+		return false, false
+	}
+	for _, a := range addrs {
+		if strings.Contains(a, ":") {
+			return true, true
+		}
+	}
+	return true, false
+}
+
+// egressV4OnlyPosture reports whether v6 destination CIDRs routed to this egress should be
+// stripped (kept out of the fwmark plane so a v6 dest can't blackhole inside a v4-only tunnel).
+//   - EngineExternal (adopted OS tunnel): always v4-only fail-closed — its v6 capability isn't
+//     modeled, so we never fwmark-route v6 into it (unchanged behavior).
+//   - EngineAmneziaWG: v4-only ONLY when it POSITIVELY declares a v4-only local_address (present,
+//     no v6). A dual-stack AWG keeps v6, and an AWG whose address we don't know keeps v6 too
+//     (fail-open: no existing config regresses; the strip kicks in only with positive evidence
+//     the tunnel cannot carry v6 — otherwise a v6 dest fwmark-routed into a v4-only AWG black-holes).
+func egressV4OnlyPosture(p *model.Profile, tag string) bool {
+	if isExternalEndpoint(p, tag) {
+		return true
+	}
+	e := p.EndpointByID(tag)
+	if e == nil || e.Engine != model.EngineAmneziaWG {
+		return false
+	}
+	known, hasV6 := localAddrDeclaresV6(e)
+	return known && !hasV6
+}
+
 // Compile turns the profile into a kernel-routing Plan plus warnings for anything the
 // IP-based Phase-1 compiler cannot kernel-route (domains, geoip/geosite rule-sets,
 // group failover, proxy-engine targets).
@@ -198,8 +267,25 @@ func Compile(p *model.Profile, opt Options) (*Plan, []Warning, error) {
 	// Collect zones from IP-based rules + routing lists; track which egress tags are used.
 	usedEgress := map[string]struct{}{}
 	usedNames := map[string]bool{}
-	addZone := func(name, egTag string, cidrs []string, scope string) {
+	// srcSpec carries a rule's source matchers into addZone (nil for non-source rules + routing
+	// lists). cidrs is classified into SrcV4/SrcV6; mac/iface/port pass through as family-agnostic
+	// nft match prefixes. A non-nil spec with any populated field makes the zone SrcScoped.
+	type srcSpec struct {
+		cidrs []string
+		mac   []string
+		iface []string
+		port  []int
+	}
+	addZone := func(name, egTag string, cidrs []string, src *srcSpec, scope string) {
 		v4, v6, bad := classifyCIDRs(cidrs)
+		// Classify the source CIDRs up front so the no-matcher early-return can keep a source-only
+		// zone (no dest) when the rule still carries a source matcher (ip/mac/iface/port).
+		var sv4, sv6 []string
+		srcScoped := false
+		if src != nil {
+			sv4, sv6, _ = classifyCIDRs(src.cidrs)
+			srcScoped = len(sv4) > 0 || len(sv6) > 0 || len(src.mac) > 0 || len(src.iface) > 0 || len(src.port) > 0
+		}
 		var domains []string
 		if opt.CollectDomainZones {
 			domains = normalizeDomains(bad) // the non-IP entries are domains for dnsmasq
@@ -208,7 +294,7 @@ func Compile(p *model.Profile, opt Options) (*Plan, []Warning, error) {
 				warn(scope, "skipped non-IP entry "+b+" (domain matching is Phase 2)")
 			}
 		}
-		if len(v4) == 0 && len(v6) == 0 && len(domains) == 0 {
+		if len(v4) == 0 && len(v6) == 0 && len(domains) == 0 && !srcScoped {
 			return
 		}
 		// Disambiguate set names that collide after nftName() squashes non-alnum to '_'
@@ -225,11 +311,28 @@ func Compile(p *model.Profile, opt Options) (*Plan, []Warning, error) {
 		}
 		usedNames[name] = true
 		usedEgress[egTag] = struct{}{}
-		plan.Zones = append(plan.Zones, Zone{Name: name, EgressTag: egTag, V4: v4, V6: v6, Domains: domains})
+		z := Zone{Name: name, EgressTag: egTag, V4: v4, V6: v6, Domains: domains}
+		// Source-scoped zone (Phase C): the source matchers narrow this zone so its mark is set
+		// ONLY for the matching source. source_ip_cidr → SrcV4/SrcV6; mac/iface/port pass through
+		// as family-agnostic nft prefixes. With a dest the dest set bounds it; source-only (no
+		// dest) the renderer emits a destination-less line + a bypass re-assert. §6.4 keeps any
+		// dest in the TUN so non-matching clients still reach it.
+		if srcScoped {
+			z.SrcV4, z.SrcV6 = sv4, sv6
+			z.SrcMAC, z.SrcIface, z.SrcPort = src.mac, src.iface, src.port
+			z.SrcScoped = true
+		}
+		plan.Zones = append(plan.Zones, z)
 	}
 
 	for i := range p.Rules {
 		r := &p.Rules[i]
+		// A disabled rule is honored on BOTH planes: the sing-box generator skips it (Phase B),
+		// so the kernel plane must not route it either — otherwise "disabled" would silently
+		// still apply in fast/hybrid.
+		if r.Disabled {
+			continue
+		}
 		// A default rule is sing-box's catch-all (route.final): its matcher fields are
 		// meaningless (sing-box ignores them), so a stale IPCIDR on it must NOT become a
 		// zone — that would TUN-exclude the CIDR and silently shadow an earlier proxy
@@ -238,26 +341,42 @@ func Compile(p *model.Profile, opt Options) (*Plan, []Warning, error) {
 		if r.Default {
 			continue
 		}
+		// Source matchers (source_ip_cidr/mac/iface/port) build a source-scoped zone on BOTH
+		// kernel planes — nft (RenderNft) and iptables/ipset (RenderIptablesScript). A source+dest
+		// rule is bounded by its dest set; a source-only rule (no dest) is allowed through by the
+		// dest check below and routes every dest from the source. addZone marks the zone SrcScoped;
+		// §6.4 keeps any dest in the TUN so non-matching clients still reach it.
 		if len(r.Domain)+len(r.DomainSuffix)+len(r.GeoSite) > 0 {
 			warn(r.ID, "domain/geosite matching not kernel-routed in Phase 1")
 		}
 		if len(r.GeoIP) > 0 {
 			warn(r.ID, "geoip rule-set not kernel-routed in Phase 1 (expand to a CIDR set in Phase 2)")
 		}
-		if len(r.IPCIDR) == 0 {
+		// A rule with no dest AND no source matcher has nothing to kernel-route — skip. A
+		// source-only rule (no dest, has source) proceeds: it builds a destination-less zone.
+		if len(r.IPCIDR) == 0 && !r.HasSourceMatcher() {
 			continue
 		}
 		if k, _, ok := resolveEgress(r.ID, r.Outbound); ok && k != "" {
 			cidrsForZone := r.IPCIDR
-			if k == EgressInterface && isExternalEndpoint(p, r.Outbound) {
-				// Adopted native-OS interface (EngineExternal): v4-only fail-closed posture.
-				// IPv6 flows stay in the tunnel's own routing table rather than be fwmark-routed.
-				// AmneziaWG/WG-managed interfaces also resolve to EgressInterface but CAN carry
-				// IPv6, so the guard is on the engine type, not just the egress kind.
+			srcForZone := r.SourceIPCIDR // empty for non-source rules → no source-scoping
+			if k == EgressInterface && egressV4OnlyPosture(p, r.Outbound) {
+				// v4-only fail-closed posture: v6 flows stay in the tunnel's own routing table
+				// rather than be fwmark-routed into a tunnel that cannot carry them. Applies to an
+				// adopted EngineExternal tunnel (capability unmodeled) AND to an EngineAmneziaWG
+				// egress that POSITIVELY declares a v4-only local_address; a dual-stack/unknown AWG
+				// keeps v6 (see egressV4OnlyPosture).
 				cidrsForZone, _, _ = classifyCIDRs(cidrsForZone)
+				srcForZone, _, _ = classifyCIDRs(srcForZone) // align source families with the v4-only dest
 			}
-			if len(cidrsForZone) > 0 {
-				addZone("rule_"+nftName(r.ID), r.Outbound, cidrsForZone, r.ID)
+			var src *srcSpec
+			if r.HasSourceMatcher() {
+				src = &srcSpec{cidrs: srcForZone, mac: r.SourceMAC, iface: r.SourceIface, port: r.SourcePort}
+			}
+			// Build a zone when there is a dest OR a source matcher (source-only zone). addZone's
+			// early-return drops a zone that ends up with neither after classification.
+			if len(cidrsForZone) > 0 || src != nil {
+				addZone("rule_"+nftName(r.ID), r.Outbound, cidrsForZone, src, r.ID)
 			}
 		}
 	}
@@ -282,12 +401,12 @@ func Compile(p *model.Profile, opt Options) (*Plan, []Warning, error) {
 		}
 		if k, _, ok := resolveEgress(rl.ID, rl.Outbound); ok && k != "" {
 			cidrList := cidrs
-			if k == EgressInterface && isExternalEndpoint(p, rl.Outbound) {
-				// Adopted native-OS interface only: v4-only fail-closed posture.
+			if k == EgressInterface && egressV4OnlyPosture(p, rl.Outbound) {
+				// v4-only fail-closed posture (EngineExternal, or a positively-v4-only AmneziaWG).
 				cidrList, _, _ = classifyCIDRs(cidrList)
 			}
 			if len(cidrList) > 0 {
-				addZone("list_"+nftName(rl.ID), rl.Outbound, cidrList, rl.ID)
+				addZone("list_"+nftName(rl.ID), rl.Outbound, cidrList, nil, rl.ID)
 			}
 		}
 	}
@@ -347,11 +466,21 @@ func Compile(p *model.Profile, opt Options) (*Plan, []Warning, error) {
 	sort.Strings(others)
 	for i, tag := range others {
 		k, ifc, _ := resolveEgress(tag, tag) // already validated above; re-resolve for kind/iface
-		plan.Egresses = append(plan.Egresses, Egress{
+		eg := Egress{
 			Tag: tag, Kind: k, Iface: ifc,
 			Mark:  uint32(i+2) * opt.MarkStep,
 			Table: opt.TableBase + i,
-		})
+		}
+		// A kill-switched GROUP makes its tunnel table fail closed. Each outbound tag gets its own
+		// table, so this is per-group: rules routing to this same group share the table and its
+		// fail-closed fate; rules routing elsewhere (even out the same iface via another tag) are
+		// unaffected. Only a kernel tunnel egress can fail closed.
+		if k == EgressInterface {
+			if g := p.GroupByID(tag); g != nil && g.KillSwitch {
+				eg.FailClosed = true
+			}
+		}
+		plan.Egresses = append(plan.Egresses, eg)
 	}
 
 	// Denormalize each zone's mark from its egress, and sort for stable output.

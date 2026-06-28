@@ -112,6 +112,18 @@ button { font-family:inherit; }
 .card-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:var(--sp-4); }
 .card-title { font-size:var(--fs-caption); letter-spacing:var(--ls-caps); font-weight:600; color:var(--ink-2); text-transform:uppercase; }
 .dots { color:var(--ink-3); letter-spacing:2px; cursor:grab; }
+/* Action-button cluster in a card-head (e.g. the failover group card): a spaced,
+   right-aligned row. This bare .acts is NOT the .conn/.rlrow-scoped one, so it needs
+   its own flex base. */
+.card-head > .acts { display:flex; gap:6px; align-items:center; }
+/* On phones the failover card-head's 4-button cluster overflows beside the name;
+   stack the name full-width and let the buttons wrap below. Scoped via :has(> .acts)
+   so title-only card-heads are unaffected. */
+@media (max-width:760px){
+  .card-head:has(> .acts){ flex-wrap:wrap; gap:12px; }
+  .card-head:has(> .acts) > div:first-child{ width:100%; }
+  .card-head > .acts{ width:100%; flex-wrap:wrap; }
+}
 
 /* connection / endpoint rows */
 .conn { display:flex; align-items:flex-start; gap:var(--sp-3); padding:var(--sp-3) 0; border-top:1px solid var(--divider); }
@@ -250,6 +262,7 @@ input[type=text], input[type=number], select, textarea {
   color:var(--ink); padding:9px 11px; font-size:var(--fs-control); font-family:inherit; }
 textarea { min-height:90px; resize:vertical; }
 input:focus, select:focus, textarea:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-tint); }
+input:disabled, select:disabled, textarea:disabled { opacity:.6; cursor:not-allowed; }
 .kv { display:grid; grid-template-columns:repeat(2,1fr); gap:10px 18px; }
 .kv .k { font-size:var(--fs-small); color:var(--ink-2); }
 .kv .v { font-size:14px; word-break:break-all; }
@@ -382,6 +395,9 @@ input:focus, select:focus, textarea:focus { outline:none; border-color:var(--acc
 /* daemon-unreachable auto-reconnect banner (shown on any daemon-down render) */
 .wr-reconnect { position:fixed; top:0; left:0; right:0; z-index:9999; display:flex; justify-content:center; padding:12px; pointer-events:none; }
 .wr-reconnect-box { display:flex; gap:12px; align-items:center; background:var(--card); border:1px solid var(--accent); border-radius:10px; padding:12px 18px; box-shadow:0 8px 28px rgba(0,0,0,.4); pointer-events:auto; max-width:92vw; }
+/* Light mode: the near-white box on the light bg with a thin accent border reads as
+   low-contrast; a subtle accent-tint fill + brighter border makes it a clear surface. */
+[data-theme="light"] .wr-reconnect-box { background:var(--accent-tint); border-color:var(--accent-600); }
 @media (max-width:560px){ .health-row{ flex-wrap:wrap } .health-row .res{ order:10; flex-basis:100%; text-align:left; margin-left:30px } }
 /* reachability matrix — sortable semantic table, stacks to cards <=480px */
 .rm-table { width:100%; border-collapse:collapse; font-size:var(--fs-control); }

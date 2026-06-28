@@ -47,8 +47,11 @@ func (s *Server) handlePBRStatus(w http.ResponseWriter, r *http.Request) {
 // first "hybrid" routing mode (docs/ARCHITECTURE_NATIVE_FIRST.md). It does NOT touch the
 // router — no nft/ip is executed.
 func (s *Server) handlePBRPreview(w http.ResponseWriter, r *http.Request) {
+	c := s.config()
 	p := s.store.Profile()
-	plan, warns, err := pbr.Compile(&p, pbr.Options{})
+	// Compile with the SAME options the apply path uses (flow-offload flowtable et al.),
+	// so the preview reflects what Apply would actually install — a bare Options{} omits it.
+	plan, warns, err := pbr.Compile(&p, s.pbrCompileOptions(c))
 	if err != nil || plan == nil {
 		msg := "no routing plan compiled (add routing lists with IP/CIDR sources)"
 		if err != nil {
@@ -61,7 +64,7 @@ func (s *Server) handlePBRPreview(w http.ResponseWriter, r *http.Request) {
 		warns = []pbr.Warning{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"mode":     s.config().RoutingMode,
+		"mode":     c.RoutingMode,
 		"plan":     plan,
 		"nft":      plan.RenderNft(),
 		"ip":       plan.RenderIP(pbr.Options{}),

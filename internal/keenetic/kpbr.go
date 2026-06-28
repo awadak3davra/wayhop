@@ -110,17 +110,26 @@ probe() { # $1=iface -> 0 alive. Cheap load-independent signals first; ICMP only
 }
 set_table() { # $1=table; rest=ordered members
   T="$1"; shift; ST="/tmp/wr-fo-$T"
-  # A reachable tunnel is elected immediately (and clears the miss counter). Falling to the
-  # terminal WAN/BLOCK needs 3 CONSECUTIVE all-tunnels-down runs (the -ge 3 test below) —
-  # hysteresis so a single transient probe miss (e.g. ping timing out under a CPU-load spike
-  # from heavy TUN traffic) does NOT flap the list onto the WAN for ~3 minutes.
+  # L1 stickiness: if the currently-installed TUNNEL default is still a healthy member, KEEP it and
+  # stop — NEVER preemptively fail back to a recovered higher-priority member, because that
+  # zero-debounce up-switch tears down live calls (the top call-drop cause on Keenetic). We re-elect
+  # ONLY when the current egress is down, is no longer a member, or is the WAN/blackhole fallback
+  # (which we DO want to leave the moment a tunnel recovers).
+  cur=$(ip route show default table "$T" 2>/dev/null | awk '{for(i=1;i<NF;i++)if($i=="dev"){print $(i+1);exit}}')
+  if [ -n "$cur" ] && [ "$cur" != "$WAN_IF" ]; then
+    case " $* " in *" $cur "*) if probe "$cur"; then echo 0 > "$ST"; return; fi;; esac
+  fi
+  # Re-elect the first reachable member in preference order. Falling to the terminal WAN/BLOCK needs
+  # 3 CONSECUTIVE all-tunnels-down runs (the -ge 3 hysteresis) so a single transient probe miss under
+  # a CPU-load spike does NOT flap the list onto the WAN for ~3 minutes. ip route replace is skipped
+  # when it would re-install the current egress (idempotent; no needless route churn).
   for m in "$@"; do
     case "$m" in
       WAN) n=$(cat "$ST" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$ST"
-           [ "$n" -ge 3 ] && ip route replace default via "$WAN_GW" dev "$WAN_IF" table "$T"; return;;
+           [ "$n" -ge 3 ] && [ "$cur" != "$WAN_IF" ] && ip route replace default via "$WAN_GW" dev "$WAN_IF" table "$T"; return;;
       BLOCK) n=$(cat "$ST" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$ST"
              [ "$n" -ge 3 ] && ip route replace blackhole default table "$T"; return;;
-      *) if probe "$m"; then ip route replace default dev "$m" table "$T"; echo 0 > "$ST"; return; fi;;
+      *) if probe "$m"; then [ "$m" != "$cur" ] && ip route replace default dev "$m" table "$T"; echo 0 > "$ST"; return; fi;;
     esac
   done
 }

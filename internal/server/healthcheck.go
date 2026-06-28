@@ -38,10 +38,15 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	// The checks are independent + each fans out to remote probes, so run them
 	// concurrently — sequential would risk blowing the request timeout.
-	checks := []func(context.Context) healthRow{clockSkewCheck, ipv6LeakCheck, dnsHealthCheck, flowOffloadCheck,
+	checks := []func(context.Context) healthRow{clockSkewCheck, ipv6LeakCheck, dnsHealthCheck, flowOffloadCheck, conntrackCheck,
 		func(ctx context.Context) healthRow { return s.pbrKernelCheck(ctx) },
 		func(ctx context.Context) healthRow { return s.nativeOnlyCheck(ctx) },
-		func(ctx context.Context) healthRow { return s.endpointReachCheck(ctx) }}
+		func(ctx context.Context) healthRow { return s.endpointReachCheck(ctx) },
+		func(ctx context.Context) healthRow { return s.sourceRuleCheck(ctx) },
+		func(ctx context.Context) healthRow { return s.dnsBypassCheck(ctx) },
+		func(ctx context.Context) healthRow { return s.singboxBuildCheck(ctx) },
+		func(ctx context.Context) healthRow { return s.diskSpaceCheck(ctx) },
+		func(ctx context.Context) healthRow { return s.subscriptionCheck(ctx) }}
 	rows := make([]healthRow, len(checks))
 	var wg sync.WaitGroup
 	for i, fn := range checks {
@@ -362,11 +367,17 @@ func (s *Server) endpointReachCheck(ctx context.Context) healthRow {
 		ok   bool
 	}
 	out := make([]res, len(tgts))
+	// Bound concurrent dials: this fans out one DialPort per enabled endpoint, so a
+	// many-endpoint profile would otherwise open every socket at once during a single
+	// "Run all checks" — spiking FDs on a small router. Cap mirrors the other probes.
+	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
 	for i, t := range tgts {
 		wg.Add(1)
 		go func(i int, t tgt) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			out[i] = res{t.name, netdiag.DialPort(t.host, t.port, 4*time.Second)}
 		}(i, t)
 	}

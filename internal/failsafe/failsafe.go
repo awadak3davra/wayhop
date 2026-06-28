@@ -62,7 +62,8 @@ type Manager struct {
 	bad        bool
 	badSince   int64
 	rolledBack bool
-	dispatched bool // rb() has been (or is being) invoked for this window — gates fire-once
+	dispatched bool  // rb() has been (or is being) invoked for this window — gates fire-once
+	epoch      int64 // bumped on every Arm; identifies the current window so a superseded run() can't fire
 	lastOk     bool
 	lastAt     int64
 	lastErr    string
@@ -83,7 +84,16 @@ func nowMS() int64 { return time.Now().UnixMilli() }
 // Re-arming supersedes any prior window so exactly one run() goroutine is ever
 // live (a repeated un-saved Apply must not leak a goroutine that double-drives
 // the state machine and could double-fire rollback/reboot).
-func (m *Manager) Arm(check func() bool, rollback func() error, reboot func(), allowReboot bool) {
+//
+// Returns the new window's EPOCH. A caller whose rollback/reboot closure takes a
+// lock that serializes it against the next Apply (e.g. the server's applyMu) should
+// capture this and skip the side effect when !IsCurrent(epoch): that closes the race
+// where a prior window's run() already CLAIMED its rollback (passing claimRollback)
+// just before this Arm, then fires it after the new config is live — clobbering it.
+// Arm deliberately does NOT wait for an in-flight prior rollback: the production
+// rollback holds applyMu while handleApply holds applyMu across this call, so waiting
+// here would deadlock (see server/failsafe.go).
+func (m *Manager) Arm(check func() bool, rollback func() error, reboot func(), allowReboot bool) int64 {
 	now := nowMS()
 	ctx, cancel := context.WithCancel(context.Background())
 	m.mu.Lock()
@@ -91,6 +101,8 @@ func (m *Manager) Arm(check func() bool, rollback func() error, reboot func(), a
 		m.cancel() // stop the previous window's goroutine
 	}
 	m.cancel = cancel
+	m.epoch++ // supersede any prior window
+	myEpoch := m.epoch
 	m.pending = true
 	m.phase = "armed"
 	m.rolledBack = false
@@ -107,10 +119,21 @@ func (m *Manager) Arm(check func() bool, rollback func() error, reboot func(), a
 	// Pass the callbacks to run() so its loop uses local copies instead of reading
 	// the shared m.rollback/m.reboot/m.allowReboot fields lock-free (which would
 	// race a concurrent re-Arm writing them).
-	go m.run(ctx, check, rollback, reboot, allowReboot)
+	go m.run(ctx, myEpoch, check, rollback, reboot, allowReboot)
+	return myEpoch
 }
 
-func (m *Manager) run(ctx context.Context, check func() bool, rollback func() error, reboot func(), allowReboot bool) {
+// IsCurrent reports whether epoch is still the current (non-superseded) window. A
+// rollback/reboot closure calls this AFTER taking the lock that serializes it against
+// the next Apply, so the answer is authoritative: if a newer Apply has run, its Arm
+// already bumped the epoch under m.mu, so a stale closure observes !IsCurrent and skips.
+func (m *Manager) IsCurrent(epoch int64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.epoch == epoch
+}
+
+func (m *Manager) run(ctx context.Context, myEpoch int64, check func() bool, rollback func() error, reboot func(), allowReboot bool) {
 	grace := time.NewTimer(m.d.Grace)
 	select {
 	case <-grace.C:
@@ -134,14 +157,20 @@ func (m *Manager) run(ctx context.Context, check func() bool, rollback func() er
 		switch m.tick(nowMS(), check()) {
 		case ActRollback:
 			// Fire at most once per window: skip if a manual RollbackNow already
-			// claimed (and is running/ran) the rollback for this window.
-			if rollback != nil && m.claimRollback() {
+			// claimed (and is running/ran) the rollback for this window, OR if a newer
+			// Apply has superseded this window (epoch bumped) — a stale rollback would
+			// clobber the freshly-applied config. The closure SHOULD also re-check
+			// IsCurrent(myEpoch) under its own serializing lock for the residual where
+			// this claim wins just before the supersede (see Arm / server/failsafe.go).
+			if rollback != nil && m.claimRollback(myEpoch) {
 				if err := rollback(); err != nil {
 					m.markRollbackFailed(err)
 				}
 			}
 		case ActReboot:
-			if allowReboot && reboot != nil {
+			// Only the current window may reboot: a superseded window rebooting moments
+			// after a fresh Apply would be a spurious reboot.
+			if allowReboot && reboot != nil && m.claimReboot(myEpoch) {
 				reboot()
 			}
 			return
@@ -156,19 +185,30 @@ func (m *Manager) run(ctx context.Context, check func() bool, rollback func() er
 	}
 }
 
-// claimRollback atomically claims the right to invoke rb() for the current
-// fail-safe window. It returns true to exactly ONE caller; every later caller
-// (a concurrent RollbackNow racing tick()'s auto path, or a second RollbackNow)
-// gets false and must NOT call rb(). This makes the rollback fire at most once
-// per window even though rb() is invoked unlocked. The flag is reset on Arm().
-func (m *Manager) claimRollback() bool {
+// claimRollback atomically claims the right to invoke rb() for the fail-safe window
+// identified by myEpoch. It returns true to exactly ONE caller and only while that
+// window is still current; every later caller (a concurrent RollbackNow racing
+// tick()'s auto path, or a second RollbackNow) and any SUPERSEDED window's run()
+// gets false and must NOT call rb(). This makes the rollback fire at most once per
+// window even though rb() is invoked unlocked. dispatched is reset on Arm(); the
+// epoch check rejects a run() whose window a newer Arm already replaced.
+func (m *Manager) claimRollback(myEpoch int64) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.dispatched {
+	if m.epoch != myEpoch || m.dispatched {
 		return false
 	}
 	m.dispatched = true
 	return true
+}
+
+// claimReboot reports whether the window identified by myEpoch may still reboot — i.e.
+// it has not been superseded by a newer Apply. There is no fire-once flag because run()
+// returns immediately after a reboot; the epoch check alone prevents a stale reboot.
+func (m *Manager) claimReboot(myEpoch int64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.epoch == myEpoch
 }
 
 // markRollbackFailed records that the rollback could not restore the config, so

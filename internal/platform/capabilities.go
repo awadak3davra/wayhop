@@ -21,6 +21,13 @@ type Capabilities struct {
 	Installable     map[string]string `json:"installable"`      // proto -> recommended package to install
 	SingboxRequired []string          `json:"singbox_required"` // proxy protos with NO native path
 	SingboxPresent  bool              `json:"singbox_present"`
+	// PackageManager is the detected installer ("apk" | "opkg" | ""), and InstallCmds maps a
+	// proto from Installable to the exact copy-paste install command for THIS host — so the
+	// recommend UX shows `apk add …` on newer OpenWrt and `opkg install …` elsewhere instead of
+	// a hardcoded (and possibly wrong) verb. Only real packages get a command; firmware-component
+	// notes (Keenetic) are omitted. Additive — existing keys are unchanged.
+	PackageManager string            `json:"package_manager,omitempty"`
+	InstallCmds    map[string]string `json:"install_cmds,omitempty"`
 }
 
 // Proxy protocols have no kernel/firmware path on any platform, so sing-box is always required
@@ -83,7 +90,7 @@ func decideOpenWrt(in hostInputs) Capabilities {
 		caps.Installable["wireguard"] = "kmod-wireguard"
 	}
 
-	return caps
+	return withInstallCmds(caps, in.packageManager())
 }
 
 // decideKeenetic builds the Keenetic capability matrix from the NDM component + interface text.
@@ -133,6 +140,51 @@ func decideKeenetic(in hostInputs) Capabilities {
 		}
 	}
 
+	return withInstallCmds(caps, in.packageManager())
+}
+
+// packageManager picks the host's installer from the probed tools: apk (OpenWrt 24.10+) wins over
+// opkg when both are present (a transitional system), else opkg, else "".
+func (in hostInputs) packageManager() string {
+	switch {
+	case in.tools["apk"]:
+		return "apk"
+	case in.tools["opkg"]:
+		return "opkg"
+	default:
+		return ""
+	}
+}
+
+// installCmd builds the copy-paste install command for a package under the given manager (apk uses
+// `add`, opkg uses `install`). Returns "" for an unknown manager or a non-package value (a name
+// with a space, e.g. a Keenetic firmware-component note, isn't installable via apk/opkg).
+func installCmd(manager, pkg string) string {
+	if pkg == "" || strings.Contains(pkg, " ") {
+		return ""
+	}
+	switch manager {
+	case "apk":
+		return "apk add " + pkg
+	case "opkg":
+		return "opkg install " + pkg
+	default:
+		return ""
+	}
+}
+
+// withInstallCmds records the detected package manager and, for each real installable package, the
+// exact install command for this host. Pure; called at the tail of every decide function.
+func withInstallCmds(caps Capabilities, manager string) Capabilities {
+	caps.PackageManager = manager
+	for proto, pkg := range caps.Installable {
+		if cmd := installCmd(manager, pkg); cmd != "" {
+			if caps.InstallCmds == nil {
+				caps.InstallCmds = map[string]string{}
+			}
+			caps.InstallCmds[proto] = cmd
+		}
+	}
 	return caps
 }
 
@@ -190,6 +242,8 @@ func DetectCapabilities() Capabilities {
 			"wg":       commandExists("wg"),
 			"openvpn":  commandExists("openvpn"),
 			"sing-box": commandExists("sing-box"),
+			"apk":      commandExists("apk"),  // OpenWrt 24.10+ package manager
+			"opkg":     commandExists("opkg"), // older OpenWrt + Entware/Keenetic
 		},
 	}
 

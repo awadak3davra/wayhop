@@ -301,6 +301,13 @@ var entries = []Entry{
 		Sources:     []string{"https://github.com/SagerNet/sing-box/issues/620"},
 	},
 	{
+		ID: "sb-decode-key", Engine: "sing-box", Pattern: `decode (private|public|peer.?public)[ _]?key\b|decode short_id\b|invalid public_key`,
+		Title:       "A protocol key or short-id is malformed",
+		Explanation: "sing-box could not decode a key while loading the config — a WireGuard private/peer key, a Reality public key, or a Reality short-id is not valid. WireGuard keys are standard base64; a Reality public key is url-safe base64; a short-id is even-length hex (≤16 chars). The usual cause is a truncated or wrongly-encoded copy-paste, or a hand-edited profile.",
+		Fix:         "Re-copy the key / short-id from its source (the server config or the share link) and re-import — WakeRoute normalizes key encodings on import, so importing the link or .conf is more reliable than hand-editing the profile JSON. A short-id must be hex, e.g. `0123abcd`.",
+		Sources:     []string{"https://sing-box.sagernet.org/configuration/shared/tls/", "https://sing-box.sagernet.org/configuration/endpoint/wireguard/"},
+	},
+	{
 		ID: "sb-conn-reset", Engine: "sing-box", Pattern: `open outbound connection:.*\b(connection )?reset by peer\b`,
 		Title:       "Connection reset by peer (likely DPI / blocking)",
 		Explanation: "A proxied connection was forcibly reset mid-stream. On censored networks this is the classic DPI signature — the firewall injects an RST once it fingerprints the proxy (especially Reality/VLESS on :443). It can also be the upstream server or an overloaded CDN dropping the connection.",
@@ -334,6 +341,22 @@ var entries = []Entry{
 		Explanation: "awg-quick tried to add a route or IP the kernel already has — usually a previous tunnel instance wasn't torn down, two tunnels share the same AllowedIPs/subnet, or another VPN owns the same route table, so bring-up fails.",
 		Fix:         "Tear down the stale interface (`awg-quick down <iface>` / `ip link del <iface>`) and retry. If two tunnels overlap, give them distinct subnets or set 'Table = off' so awg-quick doesn't manage the route, then re-Apply.",
 		Sources:     []string{"https://github.com/amnezia-vpn/amneziawg-tools"},
+	},
+
+	// --- WakeRoute's own local ports + host resource limits ---
+	{
+		ID: "local-port-in-use", Engine: "sing-box", Pattern: `(inbound/mixed|clash.?api|external_controller).*address already in use|listen.*:(7890|9090)\b.*address already in use`,
+		Title:       "WakeRoute's local proxy / Clash-API port is already in use",
+		Explanation: "sing-box couldn't bind WakeRoute's own local mixed-proxy (default :7890) or Clash-API (default :9090) port — distinct from the provisioned server inbounds (8443/8444/…). Almost always a previous sing-box/WakeRoute instance that didn't exit cleanly still holds the socket, or another proxy is listening on the same port.",
+		Fix:         "Find the holder with `ss -tlnp | grep -E ':(7890|9090)'`. If it's a stale `sing-box`, `killall sing-box` and let WakeRoute's watchdog restart it cleanly; or change WakeRoute's mixed/Clash port in Settings if another app needs that port.",
+		Sources:     []string{"https://github.com/SagerNet/sing-box/issues/3411", "https://sing-box.sagernet.org/configuration/inbound/"},
+	},
+	{
+		ID: "gen-too-many-files", Engine: "any", Pattern: `too many open files`,
+		Title:       "Out of file descriptors (open-files limit)",
+		Explanation: "The engine hit the per-process open-files limit (`ulimit -n`) — common on routers with a low default (often 1024) under many concurrent connections. New connections then fail until descriptors free up, so traffic stalls intermittently.",
+		Fix:         "Raise the limit for the service and restart it — on OpenWrt add a procd `limits { nofile = '16384 16384'; }` block to the init script (or `ulimit -n 16384` before launch on Entware). If it keeps recurring, something is leaking connections — look for a flapping endpoint reconnecting in a loop.",
+		Sources:     []string{"https://openwrt.org/docs/guide-developer/procd-init-scripts"},
 	},
 }
 

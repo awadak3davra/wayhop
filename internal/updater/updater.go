@@ -190,7 +190,7 @@ func (u *Updater) apiGet(ctx context.Context, path string, v any) error {
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
-			_, _ = io.Copy(io.Discard, resp.Body)
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 8<<20)) // bounded drain (keep-alive reuse) so a hostile mirror can't stream forever
 			resp.Body.Close()
 			lastErr = fmt.Errorf("%s: status %d", url, resp.StatusCode)
 			continue
@@ -199,7 +199,7 @@ func (u *Updater) apiGet(ctx context.Context, path string, v any) error {
 		// list is a few KB, so 8 MiB is generous, but an unbounded Decode would let a
 		// hostile or misbehaving mirror stream arbitrary bytes into RAM on a small-RAM router.
 		err = json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(v)
-		_, _ = io.Copy(io.Discard, resp.Body)
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 8<<20)) // bounded drain (keep-alive reuse) so a hostile mirror can't stream forever
 		resp.Body.Close()
 		if err != nil {
 			lastErr = err
@@ -352,7 +352,7 @@ func (u *Updater) Install(ctx context.Context, e Engine, tag string) (string, er
 	if err := os.MkdirAll(u.BinDir, 0o755); err != nil {
 		return "", err
 	}
-	if avail, ok := availBytes(u.BinDir); !enoughSpaceFor(avail, ok, len(bin), false) {
+	if avail, ok := AvailBytes(u.BinDir); !enoughSpaceFor(avail, ok, len(bin), false) {
 		return "", fmt.Errorf("not enough free space to install %s in %s (~%d MiB free) — free some space and retry", e.ID, u.BinDir, avail>>20)
 	}
 	dst := filepath.Join(u.BinDir, e.BinName)
@@ -695,7 +695,7 @@ func (u *Updater) SelfUpdate(ctx context.Context, repo, tag, exePath string) (st
 	// Pre-flight: the staged binary AND the .bak backup both land on exePath's
 	// filesystem. On the tiny router overlay a swap that runs out of space mid-write
 	// would otherwise leave a truncated binary — abort cleanly instead, untouched.
-	if avail, ok := availBytes(dir); !enoughSpaceFor(avail, ok, len(bin), true) {
+	if avail, ok := AvailBytes(dir); !enoughSpaceFor(avail, ok, len(bin), true) {
 		return "", fmt.Errorf("not enough free space to self-update safely on %s (~%d MiB free, need ~%d MiB for the new binary + backup) — free some space and retry", dir, avail>>20, (uint64(len(bin))*2+(2<<20))>>20)
 	}
 	staged := filepath.Join(dir, ".wakeroute.new")

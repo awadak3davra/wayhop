@@ -287,11 +287,17 @@ func (s *Server) handleNetDiagAll(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 	defer cancel()
 	results := make([]netdiag.Reach, len(egrs))
+	// Bound concurrent exit probes: a profile with many endpoints+groups would
+	// otherwise fan out one TLS-probing goroutine per exit all at once, spiking
+	// sockets/FDs/RAM on a low-memory router. Cap mirrors the health monitor.
+	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
 	for i, e := range egrs {
 		wg.Add(1)
 		go func(i int, e egress) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			rc := s.probeExit(ctx, body.Target, e.tag)
 			rc.Name = e.name
 			results[i] = rc

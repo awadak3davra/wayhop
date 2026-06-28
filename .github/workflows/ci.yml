@@ -104,8 +104,33 @@ jobs:
           curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${ver}/sing-box-${ver}-linux-amd64.tar.gz" -o sb.tgz
           tar -xzf sb.tgz
           echo "WR_SINGBOX=$PWD/sing-box-${ver}-linux-amd64/sing-box" >> "$GITHUB_ENV"
-      - name: sing-box ${{ matrix.singbox }} check on an all-protocols config
-        run: go test -run TestAllProtocolsGenerate -count=1 ./internal/generator/
+      # Explicit allowlist, NOT the whole package: TestHybridSingBoxCheck is intentionally excluded
+      # because `sing-box check` on a hybrid config initializes TUN auto-redirect, which needs a
+      # router (nftables) environment and FATALs "auto-redirect: invalid argument" on a CI runner.
+      # Add any new sing-box-gated generator test to this list.
+      - name: sing-box ${{ matrix.singbox }} check on all-protocols + transport + clash + WG-conf configs
+        run: go test -run 'TestAllProtocolsGenerate|TestGeneratorTransportMatrix|TestClashSubscriptionGenerate|TestWireGuardConfGenerate|TestSourceRuleSingBoxCheck' -count=1 ./internal/generator/
+
+  # --- validate the clash subscription EXPORT against the real mihomo (clash-meta) client ---
+  # The export was previously only round-trip tested (re-imported into WakeRoute); this runs
+  # `mihomo -t` on a generated subscription (incl. the failover proxy-groups) so a field a real
+  # clash client rejects is caught before users are. mihomo is pinned; bump deliberately.
+  clash-export-check:
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with: { go-version: '${{ env.GO_VERSION }}', cache: false}
+      - name: Fetch mihomo
+        run: |
+          set -euo pipefail
+          ver='1.19.27'
+          curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/download/v${ver}/mihomo-linux-amd64-compatible-v${ver}.gz" -o mihomo.gz
+          gunzip mihomo.gz
+          chmod +x mihomo
+          echo "WR_MIHOMO=$PWD/mihomo" >> "$GITHUB_ENV"
+      - name: mihomo -t on the exported clash subscription
+        run: go test -run TestClashExportMihomo -count=1 ./internal/exporter/
 
   # --- source-build the engine binaries WakeRoute orchestrates ---
   # Heavy (olcRTC pulls a large WebRTC stack and needs Go 1.26), so it is skipped

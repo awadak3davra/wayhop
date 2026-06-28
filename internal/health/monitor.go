@@ -16,6 +16,7 @@ import (
 	"wakeroute/internal/model"
 	"wakeroute/internal/netdiag"
 	"wakeroute/internal/store"
+	"wakeroute/internal/util"
 )
 
 type State string
@@ -112,6 +113,10 @@ type Monitor struct {
 	testURL   string
 	interval  time.Duration
 	timeoutMS int
+	// ifaceBytesFn reads a kernel iface's cumulative rx/tx byte counters (injectable for tests;
+	// defaults to ifaceBytes/sysfs). Kernel-routed endpoints bypass sing-box and never appear in
+	// Clash /connections, so their throughput is read from the tunnel iface here instead.
+	ifaceBytesFn func(iface string) (rx, tx int64, ok bool)
 
 	// causeFor scans the entire engine log on every call; since the derived cause
 	// is global (not per-endpoint) and changes slowly, cache it for a short TTL so a
@@ -130,14 +135,15 @@ const causeTTLms int64 = 30_000
 // what real data looks like without a running sing-box).
 func NewMonitor(cl *clash.Client, st *store.Store, logs LogSource, demo bool) *Monitor {
 	return &Monitor{
-		stats:     map[string]*stat{},
-		clash:     cl,
-		store:     st,
-		logs:      logs,
-		demo:      demo,
-		testURL:   "http://cp.cloudflare.com/generate_204",
-		interval:  10 * time.Second,
-		timeoutMS: 5000,
+		stats:        map[string]*stat{},
+		clash:        cl,
+		store:        st,
+		logs:         logs,
+		demo:         demo,
+		testURL:      "http://cp.cloudflare.com/generate_204",
+		interval:     10 * time.Second,
+		timeoutMS:    5000,
+		ifaceBytesFn: ifaceBytes,
 	}
 }
 
@@ -236,7 +242,15 @@ func (m *Monitor) targetsFrom(p model.Profile) []target {
 			if e.Health != nil {
 				u = e.Health.URL
 			}
-			iface, _ := e.Params["interface"].(string) // native-interface endpoints (nwgN)
+			// The kernel iface this endpoint is probed through (ReachableViaIface) instead of a Clash
+			// delay test. EngineExternal carries it in params["interface"]; EngineAmneziaWG derives it
+			// from the id (mirrors pbr.kernelIface — keep in sync). Without resolving the AWG iface, a
+			// kernel-routed AWG endpoint that is NOT a sing-box outbound (fast mode) falls to the Clash
+			// probe, which can't see it, and shows Unknown health even when the tunnel is up.
+			iface, _ := e.Params["interface"].(string)
+			if iface == "" && e.Engine == model.EngineAmneziaWG {
+				iface = util.AWGIface(e.ID)
+			}
 			t = append(t, target{e.ID, e.Name, "endpoint", u, iface})
 		}
 	}
@@ -293,55 +307,74 @@ func (m *Monitor) tick(ctx context.Context) {
 	if tctx.Err() != nil {
 		return
 	}
-	m.sampleTraffic(tctx, now)
+	m.sampleTraffic(tctx, tgs, now)
 }
 
-// sampleTraffic attributes Clash /connections bytes to endpoints/groups (a
-// connection's chain names include the outbound + group tags) and derives a
-// best-effort rate + accumulated total from sample-to-sample deltas.
-func (m *Monitor) sampleTraffic(ctx context.Context, now int64) {
-	if m.clash == nil {
-		return
+// addCumulativeTraffic updates a stat from a new pair of CUMULATIVE byte counters (the active-
+// connection sums from Clash, or a tunnel iface's monotonic rx/tx): it derives per-second rates and
+// accumulates totals from the delta since the last sample, ignoring a non-increase (a closed
+// connection, or an iface that was recreated and reset to 0) so a drop never yields a negative rate
+// or total. Caller holds m.mu.
+func (s *stat) addCumulativeTraffic(up, down, now int64) {
+	if s.lastConnSample > 0 && now > s.lastConnSample {
+		dt := float64(now-s.lastConnSample) / 1000.0
+		if du := up - s.activeUp; du > 0 {
+			s.rateUp = int64(float64(du) / dt)
+			s.totalUp += du
+		} else {
+			s.rateUp = 0
+		}
+		if dd := down - s.activeDown; dd > 0 {
+			s.rateDown = int64(float64(dd) / dt)
+			s.totalDown += dd
+		} else {
+			s.rateDown = 0
+		}
 	}
-	conns, err := m.clash.Connections(ctx)
-	if err != nil {
-		return
-	}
+	s.activeUp, s.activeDown, s.lastConnSample = up, down, now
+}
+
+// sampleTraffic attributes per-endpoint/group throughput from two disjoint sources and derives a
+// best-effort rate + accumulated total from sample-to-sample deltas:
+//   - Clash /connections: a connection's chain names include the outbound + group tags, so
+//     sing-box-carried endpoints/groups are summed by tag. Best-effort — when sing-box is stopped
+//     (native-only fast mode) /connections is unreachable and simply contributes nothing.
+//   - tunnel iface counters: a KERNEL-routed endpoint (AmneziaWG / adopted EngineExternal) bypasses
+//     sing-box, never appears in /connections, and would otherwise read as zero — so its throughput
+//     comes from its interface (up=tx, down=rx). A kernel endpoint is not a sing-box outbound, so
+//     the two sources never double-count.
+func (m *Monitor) sampleTraffic(ctx context.Context, tgs []target, now int64) {
 	agg := map[string][2]int64{} // id -> {up, down}
-	for _, c := range conns.Connections {
-		for _, tag := range c.Chains {
-			v := agg[tag]
-			agg[tag] = [2]int64{v[0] + c.Upload, v[1] + c.Download}
+	if m.clash != nil {
+		if conns, err := m.clash.Connections(ctx); err == nil {
+			for _, c := range conns.Connections {
+				for _, tag := range c.Chains {
+					v := agg[tag]
+					agg[tag] = [2]int64{v[0] + c.Upload, v[1] + c.Download}
+				}
+			}
+		}
+	}
+	for _, tg := range tgs {
+		if tg.kind != "endpoint" || tg.iface == "" {
+			continue
+		}
+		if rx, tx, ok := m.ifaceBytesFn(tg.iface); ok {
+			agg[tg.id] = [2]int64{tx, rx} // up=tx (sent into the tunnel), down=rx
 		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for id, a := range agg {
-		s := m.stats[id]
-		if s == nil {
-			continue
+		if s := m.stats[id]; s != nil {
+			s.addCumulativeTraffic(a[0], a[1], now)
 		}
-		if s.lastConnSample > 0 && now > s.lastConnSample {
-			dt := float64(now-s.lastConnSample) / 1000.0
-			if du := a[0] - s.activeUp; du > 0 {
-				s.rateUp = int64(float64(du) / dt)
-				s.totalUp += du
-			} else {
-				s.rateUp = 0
-			}
-			if dd := a[1] - s.activeDown; dd > 0 {
-				s.rateDown = int64(float64(dd) / dt)
-				s.totalDown += dd
-			} else {
-				s.rateDown = 0
-			}
-		}
-		s.activeUp, s.activeDown, s.lastConnSample = a[0], a[1], now
 	}
-	// Decay endpoints that contributed NO bytes this tick (all their connections closed,
-	// e.g. traffic moved off them after a failover) to 0 — otherwise rateUp/rateDown keep
-	// their last positive value on the dashboard/metrics forever. Reset the active baseline
-	// too so a later reappearance computes a fresh delta, not a spike against a stale total.
+	// Decay endpoints that contributed NO bytes this tick (all their connections closed, e.g.
+	// traffic moved off them after a failover; or a kernel iface that went away) to 0 — otherwise
+	// rateUp/rateDown keep their last positive value on the dashboard/metrics forever. Reset the
+	// active baseline too so a later reappearance computes a fresh delta, not a spike against a stale
+	// total (a recreated iface restarts its counters at 0, so this stays correct there too).
 	for id, s := range m.stats {
 		if _, ok := agg[id]; ok {
 			continue
@@ -445,27 +478,61 @@ func (m *Monitor) Snapshot() []View {
 	}
 	m.mu.Unlock()
 	// A group selector can't be Clash-delay-probed, so derive its health from its members:
-	// alive if any member endpoint is alive (or a "direct"/WAN member, always reachable) —
-	// otherwise the dashboard shows a failover group as a misleading "down".
+	// alive if any member endpoint is alive (or a "direct"/WAN member, always reachable); down only
+	// if at least one member is down and none alive; otherwise Unknown — all members unprobed/unknown
+	// (e.g. before the first probe completes) is NOT a "down" and must not show a failover group as a
+	// misleading down.
 	stateByID := make(map[string]string, len(views))
 	for _, v := range views {
 		stateByID[v.ID] = v.State
 	}
 	for _, g := range p.Groups {
-		alive := false
+		anyAlive, anyDown := false, false
 		for _, mem := range g.Members {
-			if mem == "direct" || stateByID[mem] == string(Alive) {
-				alive = true
-				break
+			switch {
+			case mem == "direct" || stateByID[mem] == string(Alive):
+				anyAlive = true
+			case stateByID[mem] == string(Down):
+				anyDown = true
 			}
 		}
 		for i := range views {
-			if views[i].ID == g.ID {
-				if alive {
-					views[i].State, views[i].Handshake = string(Alive), "ok"
-				} else {
-					views[i].State, views[i].Handshake = string(Down), "failed"
-				}
+			if views[i].ID != g.ID {
+				continue
+			}
+			switch {
+			case anyAlive:
+				views[i].State, views[i].Handshake = string(Alive), "ok"
+			case anyDown:
+				views[i].State, views[i].Handshake = string(Down), "failed"
+			default:
+				views[i].State = string(Unknown)
+			}
+		}
+	}
+	// Kernel groups have no Clash chain, so their view reads zero traffic even when their members
+	// (iface-accounted) carry it. Fill any group still at zero by summing its members' bytes/rates; a
+	// sing-box group already carries its chain totals, so non-zero groups are left untouched (no
+	// double-count).
+	idx := make(map[string]int, len(views))
+	for i := range views {
+		idx[views[i].ID] = i
+	}
+	for _, g := range p.Groups {
+		gi, ok := idx[g.ID]
+		if !ok {
+			continue
+		}
+		v := &views[gi]
+		if v.BytesUp != 0 || v.BytesDown != 0 || v.RateUpBps != 0 || v.RateDownBps != 0 {
+			continue
+		}
+		for _, mem := range g.Members {
+			if mi, ok := idx[mem]; ok {
+				v.BytesUp += views[mi].BytesUp
+				v.BytesDown += views[mi].BytesDown
+				v.RateUpBps += views[mi].RateUpBps
+				v.RateDownBps += views[mi].RateDownBps
 			}
 		}
 	}

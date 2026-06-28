@@ -65,21 +65,29 @@ func allProtocolProfile() *model.Profile {
 	// (allowInsecure=1) on the /wakeroute path.
 	vmess := generator_singBoxEndpoint("p-vmess", model.ProtoVMess, map[string]any{"uuid": uuid, "alter_id": 0, "security": "auto"})
 	vmess.Transport = &model.Transport{Type: "ws", Path: "/wakeroute", Host: "wakeroute.local"}
-	vmess.TLS = &model.TLS{Enabled: true, Type: "tls", SNI: "wakeroute.local", Insecure: true}
+	vmess.TLS = &model.TLS{Enabled: true, Type: "tls", SNI: "wakeroute.local", Insecure: true, Fragment: true, RecordFragment: true}
 	// Trojan endpoint mirrors scriptTrojan's link: trojan over TLS (self-signed,
 	// insecure=1).
 	trojan := generator_singBoxEndpoint("p-trojan", model.ProtoTrojan, map[string]any{"password": "pw"})
 	trojan.TLS = &model.TLS{Enabled: true, Type: "tls", SNI: "wakeroute.local", Insecure: true}
+	// AnyTLS endpoint: password + TLS (self-signed, insecure=1), like Trojan (sing-box 1.12+).
+	anytls := generator_singBoxEndpoint("p-anytls", model.ProtoAnyTLS, map[string]any{"password": "pw"})
+	anytls.TLS = &model.TLS{Enabled: true, Type: "tls", SNI: "wakeroute.local", Insecure: true}
 	// AmneziaWG endpoint mirrors scriptAmneziaWG: a WG-shaped peer that the plugin
 	// engine brings up; the generator emits a `direct` outbound bound to its iface.
 	awg := generator_singBoxEndpoint("p-awg", model.ProtoAmneziaWG, map[string]any{
 		"private_key": wgKey, "peer_public_key": wgKey, "local_address": []string{"10.0.0.2/32"},
 	})
 	awg.Engine = model.EngineAmneziaWG
+	// An adopted native OS tunnel (EngineExternal, the /api/vpn/adopt output): the generator emits a
+	// `direct` outbound bound to the interface (no Plugin). Covers that path in the real sing-box check.
+	ext := generator_singBoxEndpoint("p-ext", model.ProtoWireGuard, map[string]any{"interface": "wg-native"})
+	ext.Engine = model.EngineExternal
 	eps := []model.Endpoint{
 		vlessReality,
 		vmess,
 		trojan,
+		anytls,
 		generator_singBoxEndpoint("p-ss", model.ProtoShadowsocks, map[string]any{"method": "2022-blake3-aes-256-gcm", "password": ssKey256}),
 		// Keep the 128-bit cipher covered too (the importer/generator support both).
 		generator_singBoxEndpoint("p-ss128", model.ProtoShadowsocks, map[string]any{"method": "2022-blake3-aes-128-gcm", "password": ssKey128}),
@@ -93,12 +101,20 @@ func allProtocolProfile() *model.Profile {
 			"private_key": wgKey, "peer_public_key": wgKey, "local_address": []string{"10.0.0.2/32"},
 		}),
 		awg,
+		ext,
 	}
 	return &model.Profile{
 		Endpoints: eps,
-		Groups:    []model.Group{{ID: "g", Name: "G", Type: model.GroupURLTest, Members: []string{"p-vless", "p-hy2"}}},
+		Groups: []model.Group{
+			// urltest carries the opt-in interrupt-on-switch flag (emits interrupt_exist_connections).
+			{ID: "g", Name: "G", Type: model.GroupURLTest, Members: []string{"p-vless", "p-hy2"}, InterruptOnSwitch: true},
+			// a selector group covers the selector outbound (and interrupt_exist_connections on it too).
+			{ID: "sel", Name: "S", Type: model.GroupSelector, Members: []string{"p-trojan", "p-vmess"}, InterruptOnSwitch: true},
+		},
 		Rules: []model.Rule{
 			{ID: "r1", DomainSuffix: []string{"example.com"}, Outbound: "g"},
+			// a source-based rule covers the sing-box source_ip_cidr + source_port matchers.
+			{ID: "src", SourceIPCIDR: []string{"192.168.50.0/24"}, SourcePort: []int{8080}, Outbound: "sel"},
 			{ID: "def", Default: true, Outbound: model.OutboundDirect},
 		},
 		RoutingLists: []model.RoutingList{

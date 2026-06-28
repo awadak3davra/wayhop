@@ -252,3 +252,36 @@ func assertSingboxRequired(t *testing.T, caps Capabilities) {
 		t.Errorf("SingboxRequired = %v, want (sorted) %v", caps.SingboxRequired, want)
 	}
 }
+
+// TestInstallCmdsByPackageManager: the recommend install command uses the host's actual package
+// manager (apk add vs opkg install); a firmware-component note (Keenetic) gets no command.
+func TestInstallCmdsByPackageManager(t *testing.T) {
+	// OpenWrt, nothing native → Installable has real packages; apk present → "apk add".
+	apk := decideOpenWrt(hostInputs{tools: map[string]bool{"apk": true}})
+	if apk.PackageManager != "apk" {
+		t.Errorf("PackageManager = %q, want apk", apk.PackageManager)
+	}
+	if apk.InstallCmds["amneziawg"] != "apk add kmod-amneziawg" || apk.InstallCmds["wireguard"] != "apk add kmod-wireguard" {
+		t.Errorf("apk install cmds = %v, want apk-add forms", apk.InstallCmds)
+	}
+	// opkg present → "opkg install".
+	opkg := decideOpenWrt(hostInputs{tools: map[string]bool{"opkg": true}})
+	if opkg.PackageManager != "opkg" || opkg.InstallCmds["wireguard"] != "opkg install kmod-wireguard" {
+		t.Errorf("opkg: pm=%q cmd=%q", opkg.PackageManager, opkg.InstallCmds["wireguard"])
+	}
+	// apk wins when both are present (a transitional system).
+	both := decideOpenWrt(hostInputs{tools: map[string]bool{"apk": true, "opkg": true}})
+	if both.PackageManager != "apk" {
+		t.Errorf("both managers: pm=%q, want apk (newer wins)", both.PackageManager)
+	}
+	// No manager → no commands.
+	none := decideOpenWrt(hostInputs{})
+	if none.PackageManager != "" || len(none.InstallCmds) != 0 {
+		t.Errorf("no manager: pm=%q cmds=%v, want empty", none.PackageManager, none.InstallCmds)
+	}
+	// Keenetic WG/AWG are firmware components (value has a space) → no apk/opkg command emitted.
+	keen := decideKeenetic(hostInputs{tools: map[string]bool{"opkg": true}})
+	if len(keen.InstallCmds) != 0 {
+		t.Errorf("firmware-component notes must not get an install command, got %v", keen.InstallCmds)
+	}
+}

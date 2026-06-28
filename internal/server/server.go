@@ -109,6 +109,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/import", s.handleImport)
 	mux.HandleFunc("POST /api/subscription", s.handleSubscription)
 	mux.HandleFunc("GET /api/profile", s.handleGetProfile)
+	mux.HandleFunc("POST /api/profile", s.handleRestoreProfile)
 	mux.HandleFunc("POST /api/endpoints", s.handleUpsertEndpoint)
 	mux.HandleFunc("POST /api/endpoints/bulk", s.handleBulkEndpoints)
 	mux.HandleFunc("DELETE /api/endpoints/{id}", s.handleDeleteEndpoint)
@@ -149,10 +150,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/vpn/discover", s.handleVPNDiscover)
 	mux.HandleFunc("POST /api/vpn/adopt", s.handleVPNAdopt)
 	mux.HandleFunc("GET /api/native/capabilities", s.handleNativeCapabilities)
+	mux.HandleFunc("GET /api/interfaces", s.handleInterfaces)
+	mux.HandleFunc("GET /api/devices", s.handleDevices)
+	mux.HandleFunc("GET /api/clients/destinations", s.handleClientDestinations)
+	mux.HandleFunc("GET /api/dns/doh-resolvers", s.handleDoHResolvers)
 
 	// Diagnostics + error knowledgebase.
 	mux.HandleFunc("GET /api/diagnostics", s.handleDiagnostics)
 	mux.HandleFunc("POST /api/diagnostics", s.handleDiagnosticsAnalyze)
+	mux.HandleFunc("GET /api/diagnostics/trace", s.handleTrace)
 	mux.HandleFunc("GET /api/healthcheck", s.handleHealthCheck)
 	mux.HandleFunc("POST /api/netdiag", s.handleNetDiag)
 	mux.HandleFunc("POST /api/netdiag/all", s.handleNetDiagAll)

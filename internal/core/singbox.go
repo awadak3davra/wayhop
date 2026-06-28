@@ -112,6 +112,20 @@ func (s *SingBox) CheckConfig(ctx context.Context, path string) error {
 	return nil
 }
 
+// Version returns the raw `sing-box version` output (version line + the "Tags:" build-feature
+// line). Used to detect which protocols the deployed build supports (e.g. with_quic for
+// hysteria2/tuic). Read-only.
+func (s *SingBox) Version(ctx context.Context) (string, error) {
+	if !s.Available() {
+		return "", fmt.Errorf("sing-box binary not found at %q", s.bin)
+	}
+	out, err := exec.CommandContext(ctx, s.bin, "version").CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("sing-box version failed: %w", err)
+	}
+	return string(out), nil
+}
+
 // Start launches sing-box if it is not already running. It marks the process as
 // "desired" (the watchdog restarts it if it later crashes) and tracks its exit
 // via a goroutine so Alive() stays accurate without a separate Wait() caller.

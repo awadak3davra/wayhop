@@ -177,6 +177,82 @@ func TestApplyTeardownSymmetry(t *testing.T) {
 }
 
 // CollectDomainZones=false (the OpenWrt path) must still drop domains to warnings (unchanged).
+// TestKeeneticRender_SourceScoped covers the iptables/ipset source twin: a source-scoped zone
+// gets a per-family `_s4` source set (created + populated + torn down), and its mangle MARK rule
+// carries the cartesian source matches (`-i`, `-m mac --mac-source`, `-p tcp/udp -m multiport
+// --sports`, `--match-set <s> src`) alongside the dest set. The compiler builds the zone on the
+// nft plane (Options{}); the iptables renderer reads the same plan.
+func TestKeeneticRender_SourceScoped(t *testing.T) {
+	p := &model.Profile{
+		Endpoints: []model.Endpoint{
+			{ID: "ru-awg1", Engine: model.EngineExternal, Server: "198.51.100.20", Enabled: true, Params: map[string]any{"interface": "awg1"}},
+		},
+		Rules: []model.Rule{
+			{ID: "dev", IPCIDR: []string{"8.8.8.0/24"}, SourceIPCIDR: []string{"192.168.1.50/32"},
+				SourceIface: []string{"br-guest"}, SourceMAC: []string{"aa:bb:cc:dd:ee:ff"}, SourcePort: []int{443}, Outbound: "ru-awg1"},
+		},
+	}
+	plan, _, err := Compile(p, Options{})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	io := IpsetOptions{}
+	restore := plan.RenderIpsetRestore(io)
+	if !strings.Contains(restore, "create wr_rule_dev_s4 hash:net family inet") {
+		t.Errorf("missing source set creation:\n%s", restore)
+	}
+	if !strings.Contains(restore, "add wr_rule_dev_s4 192.168.1.50/32") {
+		t.Errorf("source set not populated:\n%s", restore)
+	}
+	ipt := plan.RenderIptablesScript(io)
+	wantRule := "-i br-guest -m mac --mac-source aa:bb:cc:dd:ee:ff -p tcp -m multiport --sports 443 -m set --match-set wr_rule_dev_s4 src -m set --match-set wr_rule_dev_4 dst -j MARK"
+	if !strings.Contains(ipt, wantRule) {
+		t.Errorf("missing/wrong source MARK rule; want substring:\n%s\ngot:\n%s", wantRule, ipt)
+	}
+	// tcp + udp → two rules (multiport requires a proto).
+	if c := strings.Count(ipt, "-m multiport --sports 443"); c != 2 {
+		t.Errorf("want tcp+udp source-port rules (2), got %d:\n%s", c, ipt)
+	}
+	// Teardown must destroy the source set too.
+	found := false
+	for _, n := range plan.IpsetNames(io) {
+		if n == "wr_rule_dev_s4" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("IpsetNames must include the source set for teardown: %v", plan.IpsetNames(io))
+	}
+}
+
+// TestKeeneticRender_SourceOnly: a source-only zone (no dest) emits a MARK rule with the source
+// set but NO dst match. The bypass RETURN runs first so a peer-dst packet never reaches it — no
+// nft-style re-assert is needed on the iptables plane.
+func TestKeeneticRender_SourceOnly(t *testing.T) {
+	p := &model.Profile{
+		Endpoints: []model.Endpoint{
+			{ID: "ru-awg1", Engine: model.EngineExternal, Server: "198.51.100.20", Enabled: true, Params: map[string]any{"interface": "awg1"}},
+		},
+		Rules: []model.Rule{
+			{ID: "devall", SourceIPCIDR: []string{"192.168.1.50/32"}, Outbound: "ru-awg1"},
+		},
+	}
+	plan, _, err := Compile(p, Options{})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	ipt := plan.RenderIptablesScript(IpsetOptions{})
+	if !strings.Contains(ipt, "-m set --match-set wr_rule_devall_s4 src -j MARK") {
+		t.Errorf("missing source-only MARK rule (src set, no dst):\n%s", ipt)
+	}
+	if strings.Contains(ipt, "wr_rule_devall_4 dst") {
+		t.Errorf("source-only zone must carry no dst set:\n%s", ipt)
+	}
+	if c := strings.Count(ipt, "--match-set wr_bypass_4 dst -j RETURN"); c != 1 {
+		t.Errorf("want exactly one bypass RETURN (no re-assert on iptables), got %d:\n%s", c, ipt)
+	}
+}
+
 func TestKeeneticRender_DomainsOffByDefault(t *testing.T) {
 	p := keeneticProfile()
 	plan, warns, _ := Compile(p, Options{}) // CollectDomainZones not set

@@ -437,6 +437,9 @@ func TestServerjobs_ProvisionRejectsBadInput(t *testing.T) {
 	}{
 		{"missing host", provisionReq{User: "root", Protocols: []string{initserver.ProtoReality}}},
 		{"missing user", provisionReq{Host: "203.0.113.7", Protocols: []string{initserver.ProtoReality}}},
+		// A leading-hyphen user is SSH argument injection (CWE-88 → RCE): it must be rejected
+		// up front, exactly as the other SSH handlers reject it via resolveHardenTarget.
+		{"argument-injection user", provisionReq{Host: "203.0.113.7", User: "-oProxyCommand=touch /tmp/pwned", Protocols: []string{initserver.ProtoReality}}},
 		{"no protocols", provisionReq{Host: "203.0.113.7", User: "root"}},
 		{"unknown option", provisionReq{Host: "203.0.113.7", User: "root", Protocols: []string{"wireguard-classic"}}},
 	}

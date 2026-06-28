@@ -220,6 +220,35 @@ func TestGenOptions_AutoRefreshKernelModesOnly(t *testing.T) {
 	}
 }
 
+// TestGenOptionsHybrid_SourceScopedExcludeSkip verifies §6.4: in hybrid mode a SOURCE-SCOPED
+// zone's dest CIDR must NOT be excluded from the TUN (non-matching clients still reach that dest
+// via the tunnel default — excluding it would strand them with neither a kernel mark nor a TUN
+// route → WAN leak), while a plain zone's dest IS excluded.
+func TestGenOptionsHybrid_SourceScopedExcludeSkip(t *testing.T) {
+	s, _ := sharehandlers_server(t)
+	if err := s.store.UpsertEndpoint(model.Endpoint{
+		ID: "ru-awg1", Name: "RU", Engine: model.EngineExternal, Server: "198.51.100.20",
+		Enabled: true, Params: map[string]any{"interface": "awg1"},
+	}); err != nil {
+		t.Fatalf("UpsertEndpoint: %v", err)
+	}
+	if err := s.store.UpsertRule(model.Rule{ID: "plain", IPCIDR: []string{"9.9.9.0/24"}, Outbound: "ru-awg1"}); err != nil {
+		t.Fatalf("UpsertRule plain: %v", err)
+	}
+	if err := s.store.UpsertRule(model.Rule{ID: "scoped", IPCIDR: []string{"8.8.8.0/24"}, SourceIPCIDR: []string{"192.168.1.50/32"}, Outbound: "ru-awg1"}); err != nil {
+		t.Fatalf("UpsertRule scoped: %v", err)
+	}
+	p := s.store.Profile()
+	s.cfg.RoutingMode = "hybrid"
+	o := s.genOptions(&p)
+	if !genopts_has(o.KernelExcludeV4, "9.9.9.0/24") {
+		t.Errorf("plain dest zone must be TUN-excluded: %v", o.KernelExcludeV4)
+	}
+	if genopts_has(o.KernelExcludeV4, "8.8.8.0/24") {
+		t.Errorf("§6.4: source-scoped dest must NOT be TUN-excluded: %v", o.KernelExcludeV4)
+	}
+}
+
 func genopts_has(ss []string, want string) bool {
 	for _, s := range ss {
 		if s == want {

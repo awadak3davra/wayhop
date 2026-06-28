@@ -163,3 +163,62 @@ func TestStoreCRUDAndPersist(t *testing.T) {
 		t.Fatalf("persistence mismatch: %d endpoints, %d groups", len(s2.Profile().Endpoints), len(s2.Profile().Groups))
 	}
 }
+
+// TestMutatorSaveFailureLeavesMemoryMatchingDisk: when the durable write fails (a full
+// router overlay / EROFS), a mutator must roll back its in-memory change — otherwise the
+// panel and the next Apply would use a phantom edit that silently vanishes on reboot
+// (memory diverges from disk). Covers an Upsert (whole-element replace) AND a Delete
+// (in-place slice + Group.Members compaction), the two mutation shapes.
+func TestMutatorSaveFailureLeavesMemoryMatchingDisk(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "profile.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk := func(id, name string) model.Endpoint {
+		return model.Endpoint{ID: id, Name: name, Engine: model.EngineSingBox, Protocol: model.ProtoVLESS, Server: "1.1.1.1", Port: 443, Enabled: true}
+	}
+	if err := s.UpsertEndpoint(mk("a", "A")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertEndpoint(mk("b", "B")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertGroup(model.Group{ID: "g", Name: "G", Members: []string{"a", "b"}}); err != nil {
+		t.Fatal(err)
+	}
+	before := s.Profile()
+
+	// Redirect persistence to an unwritable location so the next saves fail.
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.path = filepath.Join(blocker, "sub", "profile.json") // MkdirAll over a file → error
+
+	if err := s.UpsertEndpoint(mk("a", "MUTATED")); err == nil {
+		t.Fatal("UpsertEndpoint should have failed on the unwritable path")
+	}
+	if err := s.DeleteEndpoint("b"); err == nil {
+		t.Fatal("DeleteEndpoint should have failed on the unwritable path")
+	}
+
+	after := s.Profile()
+	if len(after.Endpoints) != len(before.Endpoints) {
+		t.Fatalf("endpoint count diverged after failed writes: %d vs %d", len(after.Endpoints), len(before.Endpoints))
+	}
+	names := map[string]string{}
+	for _, e := range after.Endpoints {
+		names[e.ID] = e.Name
+	}
+	if names["a"] != "A" {
+		t.Fatalf("failed Upsert leaked into memory: a=%q, want A", names["a"])
+	}
+	if _, ok := names["b"]; !ok {
+		t.Fatal("failed Delete leaked into memory: endpoint b is gone")
+	}
+	// The group's members must also be intact (DeleteEndpoint prunes Members in place).
+	if len(after.Groups) != 1 || len(after.Groups[0].Members) != 2 {
+		t.Fatalf("failed Delete leaked into group members: %+v", after.Groups)
+	}
+}

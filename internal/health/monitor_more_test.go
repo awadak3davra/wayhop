@@ -437,7 +437,7 @@ func (m *Monitor) sampleTrafficWith(t *testing.T, now int64, conns clash.Connect
 	}
 	old := m.clash
 	m.clash = c
-	m.sampleTraffic(context.Background(), now)
+	m.sampleTraffic(context.Background(), nil, now)
 	m.clash = old
 }
 

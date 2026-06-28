@@ -179,6 +179,13 @@ func (p *Profile) Validate() error {
 			return fmt.Errorf("duplicate id %q (already used by %s)", r.ID, prev)
 		}
 		ids[r.ID] = "rule"
+		// A disabled rule is an inert no-op: skip its matcher / outbound / default-count
+		// validation (it is never emitted on any plane), mirroring how a disabled endpoint
+		// is exempt from its identity checks. The id-namespace checks above stay
+		// unconditional — UpsertRule/DeleteRule key off the id even for a disabled rule.
+		if r.Disabled {
+			continue
+		}
 		if r.Default {
 			defaults++
 		} else {
@@ -200,6 +207,28 @@ func (p *Profile) Validate() error {
 			for _, port := range r.Port {
 				if port < 0 || port > 65535 {
 					return fmt.Errorf("rule %q: port %d out of range (must be 0-65535)", r.ID, port)
+				}
+			}
+			// Source matchers (v1): same fail-safe checks as the destination matchers, so a
+			// bad value fails the apply precisely instead of bricking the shared config.
+			if bad := firstInvalidCIDR(r.SourceIPCIDR); bad != "" {
+				return fmt.Errorf("rule %q: invalid source_ip_cidr %q (must be an IP or CIDR)", r.ID, bad)
+			}
+			for _, port := range r.SourcePort {
+				if port < 0 || port > 65535 {
+					return fmt.Errorf("rule %q: source_port %d out of range (must be 0-65535)", r.ID, port)
+				}
+			}
+			for _, m := range r.SourceMAC {
+				if s := strings.TrimSpace(m); s != "" {
+					if _, err := net.ParseMAC(s); err != nil {
+						return fmt.Errorf("rule %q: invalid source_mac %q (must be a MAC, e.g. aa:bb:cc:dd:ee:ff)", r.ID, m)
+					}
+				}
+			}
+			for _, ifn := range r.SourceIface {
+				if s := strings.TrimSpace(ifn); s != "" && !validSourceIface(s) {
+					return fmt.Errorf("rule %q: invalid source_iface %q (max 15 chars; letters/digits/.-_@ and an optional trailing *)", r.ID, ifn)
 				}
 			}
 		}
@@ -425,7 +454,18 @@ func isResolvable(target string, ids map[string]string) bool {
 
 func ruleHasNoMatcher(r Rule) bool {
 	return !hasNonBlank(r.DomainSuffix) && !hasNonBlank(r.Domain) && !hasNonBlank(r.GeoSite) &&
-		!hasNonBlank(r.GeoIP) && !hasNonBlank(r.IPCIDR) && len(r.Port) == 0
+		!hasNonBlank(r.GeoIP) && !hasNonBlank(r.IPCIDR) && len(r.Port) == 0 &&
+		!hasNonBlank(r.SourceIPCIDR) && !hasNonBlank(r.SourceMAC) &&
+		!hasNonBlank(r.SourceIface) && len(r.SourcePort) == 0
+}
+
+// HasSourceMatcher reports whether the rule carries any source matcher
+// (source_ip_cidr / source_mac / source_iface / source_port). Blank string entries
+// do not count (they impose no constraint). Shared so the kernel-PBR compiler and the
+// sing-box generator agree on which rules are source-scoped.
+func (r *Rule) HasSourceMatcher() bool {
+	return hasNonBlank(r.SourceIPCIDR) || hasNonBlank(r.SourceMAC) ||
+		hasNonBlank(r.SourceIface) || len(r.SourcePort) > 0
 }
 
 // hasNonBlank reports whether ss has at least one non-whitespace entry. A matcher
@@ -464,4 +504,30 @@ func firstInvalidCIDR(cidrs []string) string {
 		return c
 	}
 	return ""
+}
+
+// validSourceIface reports whether s is a safe ingress-interface name for a source rule's
+// kernel plane: 1..15 chars (IFNAMSIZ-1, counting an optional trailing "*" wildcard) made of
+// [A-Za-z0-9._@-] (plus that trailing "*"). A whitelist keeps it both nft-safe (emitted
+// quoted as `iifname "x"`) and shell-safe (the Keenetic iptables path interpolates `-i x`),
+// so the name can never carry whitespace or an injection metacharacter. A bare "*" is
+// rejected — it is match-anything, not a real source constraint.
+func validSourceIface(s string) bool {
+	if s == "" || len(s) > 15 {
+		return false
+	}
+	if strings.HasSuffix(s, "*") {
+		s = s[:len(s)-1]
+	}
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+			c == '.' || c == '-' || c == '_' || c == '@') {
+			return false
+		}
+	}
+	return true
 }

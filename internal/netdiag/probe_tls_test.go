@@ -3,10 +3,12 @@ package netdiag
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"syscall"
 	"testing"
 )
 
@@ -40,6 +42,32 @@ func TestProbeTLS_Loopback(t *testing.T) {
 	}
 	if res.TLS13 && res.Version != "1.3" {
 		t.Fatalf("TLS13=true but Version=%q", res.Version)
+	}
+}
+
+// TestProbeTLSWithControl_BlocksDial: the dial-time Control hook gates the TCP connection — even a
+// reachable server is refused when the hook errors. This is what makes the probe's SSRF guard
+// rebinding-proof: it vets the IP actually dialed (via blockInternalDial in the handler), not a
+// separate resolve-time lookup that a rebinding DNS name could slip past.
+func TestProbeTLSWithControl_BlocksDial(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	defer srv.Close()
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	// Baseline: with no control the loopback server is reachable.
+	if res := ProbeTLS(context.Background(), u.Host); !res.Reachable {
+		t.Fatalf("baseline: expected Reachable=true, got %q", res.Error)
+	}
+	// With a Control hook that rejects the dial, the same reachable server must be refused.
+	blocked := func(_, _ string, _ syscall.RawConn) error { return errors.New("refused by control") }
+	res := ProbeTLSWithControl(context.Background(), u.Host, blocked)
+	if res.Reachable {
+		t.Fatal("the Control hook should have blocked the dial, but Reachable=true")
+	}
+	if res.Error == "" {
+		t.Fatal("expected a dial error when the Control hook refuses the connection")
 	}
 }
 

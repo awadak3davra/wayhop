@@ -51,6 +51,11 @@ func main() {
 		return
 	}
 
+	// Cap the daemon's heap with a memory soft-limit so a spike (bulk import,
+	// config reload) can't OOM-kill it — and take routing down — on a low-RAM
+	// router. No-op when GOMEMLIMIT is set or RAM can't be read (demo/non-Linux).
+	applyMemSoftLimit()
+
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatalf("config: %v", err)

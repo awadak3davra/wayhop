@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -40,6 +41,17 @@ const probeTLSTimeout = 6 * time.Second
 // It never panics; any dial/handshake failure yields Reachable=false with a short
 // Error.
 func ProbeTLS(ctx context.Context, host string) ProbeTLSResult {
+	return ProbeTLSWithControl(ctx, host, nil)
+}
+
+// ProbeTLSWithControl is ProbeTLS with a net.Dialer.Control hook applied to the TCP dial,
+// so the caller can vet the ACTUALLY-RESOLVED address at connect time (e.g. the server's
+// blockInternalDial). That makes an SSRF guard rebinding-proof: a resolve-time host check
+// re-resolves independently at dial time and can be defeated by a name that rebinds to an
+// internal IP between the two lookups, whereas Control fires on the IP actually dialed (for
+// every candidate address). A nil control keeps the unrestricted dial the loopback handshake
+// tests rely on.
+func ProbeTLSWithControl(ctx context.Context, host string, control func(network, address string, c syscall.RawConn) error) ProbeTLSResult {
 	host = strings.TrimSpace(host)
 	res := ProbeTLSResult{Host: host}
 	if host == "" {
@@ -60,7 +72,7 @@ func ProbeTLS(ctx context.Context, host string) ProbeTLSResult {
 	defer cancel()
 
 	d := tls.Dialer{
-		NetDialer: &net.Dialer{},
+		NetDialer: &net.Dialer{Control: control},
 		Config: &tls.Config{
 			ServerName:         sni,
 			InsecureSkipVerify: true, //nolint:gosec // reachability/version probe, not a trust check (see doc)

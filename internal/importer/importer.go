@@ -68,6 +68,8 @@ func Parse(raw string) (*model.Endpoint, error) {
 		return finalize(parseVLESS(u))
 	case "trojan":
 		return finalize(parseTrojan(u))
+	case "anytls":
+		return finalize(parseAnyTLS(u))
 	case "hysteria2", "hy2":
 		return finalize(parseHysteria2(u))
 	case "tuic":
@@ -135,6 +137,22 @@ func parseTrojan(u *url.URL) (*model.Endpoint, error) {
 	e.Transport = transportFromQuery(q)
 	// Trojan is TLS by default unless explicitly disabled.
 	e.TLS = tlsFromQuery(q, true, e.Server)
+	return e, nil
+}
+
+// parseAnyTLS parses an anytls:// share link (anytls://<password>@<host>:<port>?sni=&insecure=&fp=).
+// Like Trojan — the password is the userinfo and TLS comes from the query — but AnyTLS is always TLS
+// and has no ws/grpc sub-transport, so no transport is parsed.
+func parseAnyTLS(u *url.URL) (*model.Endpoint, error) {
+	e := &model.Endpoint{
+		Engine:   model.EngineSingBox,
+		Protocol: model.ProtoAnyTLS,
+		Server:   u.Hostname(),
+		Port:     atoiDefault(u.Port(), 443),
+		Name:     fragmentName(u),
+		Params:   map[string]any{"password": u.User.Username()},
+	}
+	e.TLS = tlsFromQuery(u.Query(), true, e.Server)
 	return e, nil
 }
 

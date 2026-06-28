@@ -59,15 +59,38 @@ func ClashConfigWithGroups(eps []model.Endpoint, groups []model.Group) (string, 
 		order = append(order, epRef{e.ID, name})
 	}
 
-	// Map each group to a unique clash name first (so members that reference a
-	// nested group resolve regardless of order), then resolve members to names.
 	type rgrp struct {
 		name, gtype string
 		members     []string
 		test        *model.Health
 	}
+	// Decide which groups are renderable BEFORE assigning names, so a parent never
+	// references — nor reserves a name that collides with — a group that gets omitted.
+	// A group is renderable iff it has >=1 exportable endpoint member or >=1 renderable
+	// nested-group member; a fixpoint, because a parent renders only once its child does.
+	renderable := map[string]bool{}
+	for changed := true; changed; {
+		changed = false
+		for _, g := range groups {
+			if renderable[g.ID] {
+				continue
+			}
+			for _, mid := range g.Members {
+				if _, ok := idName[mid]; ok || (mid != g.ID && renderable[mid]) {
+					renderable[g.ID] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	// Name only the renderable groups (so an omitted group neither occupies a name nor
+	// can be referenced as a nested member); members then resolve regardless of order.
 	groupName := map[string]string{}
 	for _, g := range groups {
+		if !renderable[g.ID] {
+			continue
+		}
 		gn := uniqueName(util.FirstNonEmpty(g.Name, g.ID), usedNames)
 		usedNames[gn] = true
 		groupName[g.ID] = gn
@@ -75,17 +98,20 @@ func ClashConfigWithGroups(eps []model.Endpoint, groups []model.Group) (string, 
 	var rendered []rgrp
 	grouped := map[string]bool{} // endpoint IDs that belong to some group
 	for _, g := range groups {
+		if !renderable[g.ID] {
+			continue // no exportable members, directly or transitively — omit the group
+		}
 		var mem []string
 		for _, mid := range g.Members {
 			if n, ok := idName[mid]; ok {
 				mem = append(mem, n)
 				grouped[mid] = true
 			} else if n, ok := groupName[mid]; ok && mid != g.ID {
-				mem = append(mem, n) // nested group
+				mem = append(mem, n) // nested group (renderable: groupName holds only those)
 			}
 		}
 		if len(mem) == 0 {
-			continue // no exportable members — omit the group
+			continue // defensive: a renderable group always has >=1 resolvable member
 		}
 		ct := "select"
 		switch g.Type {
@@ -187,6 +213,8 @@ func clashProxy(e model.Endpoint, used map[string]bool) (block, name string, ok 
 		clashVMessOut(kv, e)
 	case model.ProtoTrojan:
 		clashTrojanOut(kv, e)
+	case model.ProtoAnyTLS:
+		clashAnyTLSOut(kv, e)
 	case model.ProtoVLESS:
 		clashVLESSOut(kv, e)
 	case model.ProtoHysteria2:
@@ -296,6 +324,22 @@ func clashTrojanOut(kv *clashKV, e model.Endpoint) {
 	} else if e.TLS != nil {
 		// Explicitly TLS-disabled trojan (rare): tell clash so it round-trips.
 		kv.addBool("tls", false)
+	}
+}
+
+// clashAnyTLSOut renders a clash-meta anytls proxy — like clashTrojanOut but with no stream
+// transport (AnyTLS has none) and always TLS.
+func clashAnyTLSOut(kv *clashKV, e model.Endpoint) {
+	kv.add("type", "anytls")
+	kv.addServerPort(e)
+	kv.add("password", str(e.Params, "password"))
+	if e.TLS != nil && e.TLS.Enabled {
+		kv.addIf("sni", e.TLS.SNI)
+		kv.addIf("client-fingerprint", e.TLS.Fingerprint)
+		if e.TLS.Insecure {
+			kv.addBool("skip-cert-verify", true)
+		}
+		kv.addList("alpn", e.TLS.ALPN)
 	}
 }
 
@@ -421,15 +465,20 @@ func clashTransportOut(kv *clashKV, t *model.Transport) {
 	case "http":
 		// model "http" is HTTP/2; clash names that network "h2".
 		kv.add("network", "h2")
-		var opts [][2]string
+		// h2-opts.host is typed []string by mihomo — it must be a real flow sequence
+		// `host: [a.com]`, NOT a scalar-quoted "[a.com]" string. addMap re-quotes every
+		// value (the leading '[' trips needsQuote), which the strict decoder rejects,
+		// failing the WHOLE config. Build the block verbatim via addRaw (mirrors addList):
+		// path stays a quoted scalar, host is a one-element flow sequence.
+		var parts []string
 		if t.Path != "" {
-			opts = append(opts, [2]string{"path", t.Path})
+			parts = append(parts, "path: "+yamlScalar(t.Path))
 		}
 		if t.Host != "" {
-			opts = append(opts, [2]string{"host", "[" + yamlScalar(t.Host) + "]"})
+			parts = append(parts, "host: ["+yamlScalar(t.Host)+"]")
 		}
-		if len(opts) > 0 {
-			kv.addMap("h2-opts", opts)
+		if len(parts) > 0 {
+			kv.addRaw("h2-opts", "{"+strings.Join(parts, ", ")+"}")
 		}
 	case "httpupgrade":
 		kv.add("network", "httpupgrade")

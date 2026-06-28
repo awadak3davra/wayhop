@@ -142,6 +142,21 @@ func TestProvisionSSHArgs(t *testing.T) {
 	if !hasOptPair(dflt, "-p", "22") {
 		t.Errorf("expected default -p 22 when Port==0: %v", dflt)
 	}
+
+	// Defense-in-depth: a "--" end-of-options marker must immediately precede the user@host
+	// destination so a leading-hyphen user/host can never be reparsed by ssh as an option (CWE-88).
+	for name, args := range map[string][]string{"withKH": withKH, "noKH": noKH, "dflt": dflt} {
+		guarded := false
+		for i := 1; i < len(args); i++ {
+			if args[i] == "root@1.2.3.4" && args[i-1] == "--" {
+				guarded = true
+				break
+			}
+		}
+		if !guarded {
+			t.Errorf("%s: destination not preceded by a `--` end-of-options marker: %v", name, args)
+		}
+	}
 }
 
 func hasOptPair(args []string, flag, val string) bool {

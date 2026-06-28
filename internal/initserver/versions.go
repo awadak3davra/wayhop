@@ -86,7 +86,7 @@ func VerCheckRan(output string) bool { return strings.Contains(output, "WR_VERCH
 // from the official GitHub download (HTTPS, upstream). The script resolves the server
 // arch itself, backs up the current binary, swaps atomically, restarts the service,
 // and prints WR_UPDATE_OK=<new version> on success. DESTRUCTIVE (brief endpoint drop).
-func UpdateSingBoxScript(version string) string {
+func UpdateSingBoxScript(version string, mirrors ...string) string {
 	// Sanitize: embed ONLY the extracted x.y.z, never the raw caller string, so no shell
 	// metacharacters can reach the remote VER= assignment / download URL (command-injection
 	// guard). An input with no valid x.y.z yields "" → the script's own `[ -n "$VER" ]`
@@ -95,6 +95,7 @@ func UpdateSingBoxScript(version string) string {
 	return fmt.Sprintf(`#!/bin/sh
 set -e
 log(){ echo "[wakeroute-update] $*"; }
+%s
 VER=%q
 [ -n "$VER" ] || { echo "WR_UPDATE_ERR=no version"; exit 1; }
 case "$(uname -m)" in
@@ -107,7 +108,7 @@ URL="https://github.com/SagerNet/sing-box/releases/download/v${VER}/sing-box-${V
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 cd "$TMP"
 log "downloading $URL"
-curl -fsSL "$URL" -o sb.tgz || { echo "WR_UPDATE_ERR=download failed"; exit 1; }
+wr_fetch "$URL" sb.tgz || { echo "WR_UPDATE_ERR=download failed"; exit 1; }
 tar -xzf sb.tgz
 BIN=$(find . -type f -name sing-box | head -n1)
 [ -n "$BIN" ] || { echo "WR_UPDATE_ERR=binary not in archive"; exit 1; }
@@ -130,7 +131,7 @@ else
   exit 1
 fi
 log "done"
-`, clean)
+`, mirrorFetchShell(mirrors), clean)
 }
 
 // UpdateAWGScript upgrades the apt-managed AmneziaWG packages and reports the new
@@ -155,10 +156,10 @@ func UpdateConfirmed(output string) (ok bool, newVersion string) {
 }
 
 // UpdateScriptFor returns the install script for a server binary key (or "", false).
-func UpdateScriptFor(key, version string) (string, bool) {
+func UpdateScriptFor(key, version string, mirrors ...string) (string, bool) {
 	switch key {
 	case "singbox":
-		return UpdateSingBoxScript(version), true
+		return UpdateSingBoxScript(version, mirrors...), true
 	case "awg":
 		return UpdateAWGScript, true
 	default:

@@ -65,6 +65,15 @@ func Open(path string) (*Store, error) {
 func (s *Store) Profile() model.Profile {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.cloneLocked()
+}
+
+// cloneLocked returns a copy of the profile with its top-level slices (and each
+// Group.Members) cloned, sharing inner element fields by reference per Profile()'s
+// invariant above. Callers must hold s.mu (read OR write). Profile() uses it for
+// race-safe reads; the mutators use it to snapshot pre-mutation state so commitLocked
+// can roll back a failed durable write (persist-then-commit).
+func (s *Store) cloneLocked() model.Profile {
 	p := s.prof
 	p.Endpoints = append([]model.Endpoint{}, s.prof.Endpoints...)
 	p.Groups = append([]model.Group{}, s.prof.Groups...)
@@ -92,8 +101,9 @@ func (s *Store) Replace(p model.Profile) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	prev := s.cloneLocked()
 	s.prof = p
-	return s.saveLocked()
+	return s.commitLocked(prev)
 }
 
 // UpsertEndpoint inserts or replaces an endpoint by ID.
@@ -103,14 +113,15 @@ func (s *Store) UpsertEndpoint(e model.Endpoint) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	prev := s.cloneLocked()
 	for i := range s.prof.Endpoints {
 		if s.prof.Endpoints[i].ID == e.ID {
 			s.prof.Endpoints[i] = e
-			return s.saveLocked()
+			return s.commitLocked(prev)
 		}
 	}
 	s.prof.Endpoints = append(s.prof.Endpoints, e)
-	return s.saveLocked()
+	return s.commitLocked(prev)
 }
 
 // DeleteEndpoint removes an endpoint, pruning it from group members. It refuses
@@ -137,6 +148,7 @@ func (s *Store) DeleteEndpoint(id string) error {
 			return fmt.Errorf("endpoint %q is used by routing list %q (route/download via); repoint it first", id, rl.ID)
 		}
 	}
+	prev := s.cloneLocked()
 	kept := s.prof.Endpoints[:0]
 	found := false
 	for _, e := range s.prof.Endpoints {
@@ -153,7 +165,7 @@ func (s *Store) DeleteEndpoint(id string) error {
 	for gi := range s.prof.Groups {
 		s.prof.Groups[gi].Members = removeString(s.prof.Groups[gi].Members, id)
 	}
-	return s.saveLocked()
+	return s.commitLocked(prev)
 }
 
 // UpsertGroup inserts or replaces a group by ID.
@@ -163,14 +175,15 @@ func (s *Store) UpsertGroup(g model.Group) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	prev := s.cloneLocked()
 	for i := range s.prof.Groups {
 		if s.prof.Groups[i].ID == g.ID {
 			s.prof.Groups[i] = g
-			return s.saveLocked()
+			return s.commitLocked(prev)
 		}
 	}
 	s.prof.Groups = append(s.prof.Groups, g)
-	return s.saveLocked()
+	return s.commitLocked(prev)
 }
 
 // DeleteGroup removes a group; refuses if a rule targets it.
@@ -195,6 +208,7 @@ func (s *Store) DeleteGroup(id string) error {
 			return fmt.Errorf("group %q is used by routing list %q (route/download via); repoint it first", id, rl.ID)
 		}
 	}
+	prev := s.cloneLocked()
 	kept := s.prof.Groups[:0]
 	found := false
 	for _, g := range s.prof.Groups {
@@ -213,7 +227,7 @@ func (s *Store) DeleteGroup(id string) error {
 	for gi := range s.prof.Groups {
 		s.prof.Groups[gi].Members = removeString(s.prof.Groups[gi].Members, id)
 	}
-	return s.saveLocked()
+	return s.commitLocked(prev)
 }
 
 // onlyMember reports whether id is in members and every member equals id, so
@@ -237,20 +251,22 @@ func (s *Store) UpsertRule(r model.Rule) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	prev := s.cloneLocked()
 	for i := range s.prof.Rules {
 		if s.prof.Rules[i].ID == r.ID {
 			s.prof.Rules[i] = r
-			return s.saveLocked()
+			return s.commitLocked(prev)
 		}
 	}
 	s.prof.Rules = append(s.prof.Rules, r)
-	return s.saveLocked()
+	return s.commitLocked(prev)
 }
 
 // DeleteRule removes a rule by ID.
 func (s *Store) DeleteRule(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	prev := s.cloneLocked()
 	kept := s.prof.Rules[:0]
 	found := false
 	for _, r := range s.prof.Rules {
@@ -264,7 +280,7 @@ func (s *Store) DeleteRule(id string) error {
 		return fmt.Errorf("rule %q not found", id)
 	}
 	s.prof.Rules = kept
-	return s.saveLocked()
+	return s.commitLocked(prev)
 }
 
 // UpsertRoutingList inserts or replaces a routing list by ID.
@@ -274,6 +290,7 @@ func (s *Store) UpsertRoutingList(rl model.RoutingList) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	prev := s.cloneLocked()
 	for i := range s.prof.RoutingLists {
 		if s.prof.RoutingLists[i].ID == rl.ID {
 			// Keep the system-managed CIDRCache consistent with CIDRSource across a user
@@ -290,11 +307,11 @@ func (s *Store) UpsertRoutingList(rl model.RoutingList) error {
 				rl.CIDRCache = s.prof.RoutingLists[i].CIDRCache
 			}
 			s.prof.RoutingLists[i] = rl
-			return s.saveLocked()
+			return s.commitLocked(prev)
 		}
 	}
 	s.prof.RoutingLists = append(s.prof.RoutingLists, rl)
-	return s.saveLocked()
+	return s.commitLocked(prev)
 }
 
 // SetRoutingListCache replaces a routing list's system-managed CIDRCache (the last-good
@@ -302,10 +319,11 @@ func (s *Store) UpsertRoutingList(rl model.RoutingList) error {
 func (s *Store) SetRoutingListCache(id string, cidrs []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	prev := s.cloneLocked()
 	for i := range s.prof.RoutingLists {
 		if s.prof.RoutingLists[i].ID == id {
 			s.prof.RoutingLists[i].CIDRCache = cidrs
-			return s.saveLocked()
+			return s.commitLocked(prev)
 		}
 	}
 	return fmt.Errorf("routing list %q not found", id)
@@ -315,6 +333,7 @@ func (s *Store) SetRoutingListCache(id string, cidrs []string) error {
 func (s *Store) DeleteRoutingList(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	prev := s.cloneLocked()
 	kept := s.prof.RoutingLists[:0]
 	found := false
 	for _, rl := range s.prof.RoutingLists {
@@ -328,7 +347,7 @@ func (s *Store) DeleteRoutingList(id string) error {
 		return fmt.Errorf("routing list %q not found", id)
 	}
 	s.prof.RoutingLists = kept
-	return s.saveLocked()
+	return s.commitLocked(prev)
 }
 
 // saveLocked atomically + durably writes the profile. Callers must hold s.mu (write).
@@ -338,6 +357,19 @@ func (s *Store) saveLocked() error {
 		return err
 	}
 	return atomicfile.Write(s.path, data, 0o600)
+}
+
+// commitLocked persists the already-mutated profile; if the durable write fails it
+// restores prev so the in-memory profile never diverges from disk. The router overlay
+// can ENOSPC mid-edit, and a phantom in-RAM change that feeds an Apply yet vanishes on
+// reboot is worse than a surfaced error. prev must be a pre-mutation cloneLocked()
+// snapshot. Callers must hold s.mu (write).
+func (s *Store) commitLocked(prev model.Profile) error {
+	if err := s.saveLocked(); err != nil {
+		s.prof = prev
+		return err
+	}
+	return nil
 }
 
 func removeString(ss []string, target string) []string {

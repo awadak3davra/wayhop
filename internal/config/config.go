@@ -263,14 +263,19 @@ func (p Ports) Validate() error {
 const RedactedMark = "***"
 
 // Redacted returns a copy with secrets masked — the clash secret, the
-// subscription token, and the watchdog webhook URL (which commonly embeds a
-// token) — for a backup that is safe to share. Empty secrets stay empty.
+// subscription token, the subscription URL and the watchdog webhook URL (both of
+// which commonly embed a per-account token) — for a backup that is safe to share.
+// Empty secrets stay empty. Round-trips safely: the import path never copies the
+// Subscription block, so a re-imported "***" URL is ignored, not persisted.
 func (c Config) Redacted() Config {
 	if c.Clash.Secret != "" {
 		c.Clash.Secret = RedactedMark
 	}
 	if c.Subscription.Token != "" {
 		c.Subscription.Token = RedactedMark
+	}
+	if c.Subscription.URL != "" {
+		c.Subscription.URL = RedactedMark
 	}
 	if c.Watchdog.NotifyURL != "" {
 		c.Watchdog.NotifyURL = RedactedMark

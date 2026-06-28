@@ -130,6 +130,37 @@ func TestMutatorWriteFailureLeavesMemoryUnchanged(t *testing.T) {
 	}
 }
 
+// TestPatchInPlaceSliceMutationDoesNotLeakOnWriteFailure covers the slice case that
+// TestMutatorWriteFailureLeavesMemoryUnchanged (a Name value mutation) cannot catch:
+// Patch deep-clones Installed before fn, so an IN-PLACE mutation — append(sv.Installed[:0],
+// ...), the pattern race_test.go notes a future Init-Server protocol-list edit would use —
+// cannot write through a shared backing array into the live element when the save fails.
+func TestPatchInPlaceSliceMutationDoesNotLeakOnWriteFailure(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "servers.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Upsert(Server{ID: "a", Name: "A", Installed: []string{"orig1", "orig2"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Redirect persistence to an unwritable location so the next Patch's save fails.
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.path = filepath.Join(blocker, "sub", "servers.json") // MkdirAll over a file → error
+
+	if err := s.Patch("a", func(sv *Server) { sv.Installed = append(sv.Installed[:0], "HACKED") }); err == nil {
+		t.Fatal("Patch should have failed on the unwritable path")
+	}
+	got, _ := s.Get("a")
+	if len(got.Installed) != 2 || got.Installed[0] != "orig1" || got.Installed[1] != "orig2" {
+		t.Fatalf("failed Patch leaked an in-place Installed mutation into the live element: %v", got.Installed)
+	}
+}
+
 func TestCRUDAndPersistence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "servers.json")
 	s, err := Open(path)

@@ -35,6 +35,7 @@ const (
 	ProtoShadowsocks Protocol = "shadowsocks"
 	ProtoHysteria2   Protocol = "hysteria2"
 	ProtoTUIC        Protocol = "tuic"
+	ProtoAnyTLS      Protocol = "anytls"
 	ProtoWireGuard   Protocol = "wireguard"
 	ProtoAmneziaWG   Protocol = "amneziawg"
 	ProtoOlcRTC      Protocol = "olcrtc"
@@ -53,6 +54,12 @@ type TLS struct {
 	// Reality
 	PublicKey string `json:"public_key,omitempty"`
 	ShortID   string `json:"short_id,omitempty"`
+	// TLS handshake fragmentation (anti-DPI, sing-box 1.12+, client-only): split the ClientHello so a
+	// plaintext SNI-matching firewall can't fingerprint it. Opt-in — a zero value is omitted, so this
+	// is byte-identical for existing profiles. Not applied to Reality (it has its own evasion, and a
+	// fragmented ClientHello would disturb its fingerprint mimicry).
+	Fragment       bool `json:"fragment,omitempty"`
+	RecordFragment bool `json:"record_fragment,omitempty"` // fragment into TLS records (sing-box: "performs better")
 }
 
 // Transport is the stream transport when not raw TCP (ws/grpc/http/httpupgrade).
@@ -125,6 +132,13 @@ type Group struct {
 	// the current behavior (WAN fallback). Opt-in, so an unset/zero value is a
 	// byte-identical no-op for existing profiles.
 	KillSwitch bool `json:"kill_switch,omitempty"`
+	// InterruptOnSwitch, when true, drops this group's existing connections whenever it switches the
+	// selected member (a urltest/fallback failover or a manual selector change), so in-flight
+	// connections re-establish through the NEW exit instead of staying pinned to the old/dead one.
+	// Default false keeps sing-box's behavior (existing connections survive a switch — convenient for
+	// long-lived transfers, but ones stuck on a just-failed exit hang until the app times out and
+	// retries). Opt-in, so an unset/zero value is a byte-identical no-op for existing profiles.
+	InterruptOnSwitch bool `json:"interrupt_on_switch,omitempty"`
 }
 
 // Rule routes matching traffic to a target outbound.
@@ -136,8 +150,26 @@ type Rule struct {
 	GeoIP        []string `json:"geoip,omitempty"`
 	IPCIDR       []string `json:"ip_cidr,omitempty"`
 	Port         []int    `json:"port,omitempty"`
-	Default      bool     `json:"default,omitempty"` // catch-all (route final)
-	Outbound     string   `json:"outbound"`          // endpoint id | group id | "direct" | "block"
+
+	// Source matchers (v1): select traffic by WHERE it comes from, not just where it is
+	// going. Each source group is AND-combined with the destination matchers and the
+	// other source groups; entries WITHIN a group are OR'd. Every field is omitempty with
+	// a match-anything zero value, so adding them is byte-identical for existing profiles
+	// (the KillSwitch zero-value-is-a-no-op convention, above). MAC and iface are
+	// KERNEL-ONLY (no sing-box matcher pre-1.14); see docs/SPEC_SOURCE_BASED_ROUTING.md.
+	SourceIPCIDR []string `json:"source_ip_cidr,omitempty"` // src IP/CIDR (v4+v6); kernel ip/ip6 saddr + sing-box source_ip_cidr
+	SourceMAC    []string `json:"source_mac,omitempty"`     // src MAC(s); KERNEL-ONLY (nft ether saddr); same-L2 clients only
+	SourceIface  []string `json:"source_iface,omitempty"`   // ingress iface name(s); KERNEL-ONLY (nft iifname)
+	SourcePort   []int    `json:"source_port,omitempty"`    // src L4 port(s); kernel th sport + sing-box source_port
+
+	Default bool `json:"default,omitempty"` // catch-all (route final)
+	// Disabled is an INVERTED on/off toggle: zero (false) = enabled = today's behavior;
+	// true = the rule is skipped on every plane. Inverted (NOT "Enabled") on purpose —
+	// Endpoint/RoutingList use json:"enabled" WITHOUT omitempty, so a positive Enabled
+	// here would decode every existing keyless rule to false and silently disable them
+	// all. omitempty + zero-default keeps existing profiles byte-identical.
+	Disabled bool   `json:"disabled,omitempty"`
+	Outbound string `json:"outbound"` // endpoint id | group id | "direct" | "block"
 }
 
 // RoutingList steers traffic matching a domain/IP set to a chosen outbound. The

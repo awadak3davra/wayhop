@@ -3,6 +3,97 @@
 All notable changes to WakeRoute are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Source-based routing** — route by *who's asking*, not just where to. A routing rule can now
+  match the **source**: a device IP or subnet, a MAC address, a LAN interface, or a source port —
+  so you can send one device (or your whole guest network) out a specific tunnel while everything
+  else routes normally, and combine it with the usual destination match. Enforced natively in the
+  kernel (nftables on OpenWrt, iptables + ipset on Keenetic / Entware) and by sing-box in TUN mode,
+  with the anti-loop and kill-switch carve-outs preserved.
+- **Network pickers for routing rules** — two read-only endpoints (`/api/interfaces`,
+  `/api/devices`) list the router's network interfaces and DHCP-leased devices, so a rule editor
+  can offer dropdowns instead of hand-typed IPs / MACs / interface names.
+- **Device-discovery view** — see what each LAN device has actually been reaching (per-client
+  external destinations from the live connection table, with the egress each took and the sniffed
+  domain where known), so you can spot a service and turn it into a routing rule instead of
+  guessing its IPs.
+- **DNS-bypass diagnostics** — the "Run all checks" battery now flags two silent
+  rule-won't-fire causes: a source-routing rule whose interface doesn't exist, and a LAN client
+  resolving names through its own public DoH/DoT resolver (which bypasses the router so
+  domain-based rules never apply to it). A curated public-resolver list is available to build a
+  one-click block.
+- **Per-domain trace** — type a domain and see where its traffic actually goes: the resolved IPs,
+  the live connections to them and the exit each took (the observed truth, from the connection
+  table), plus the configured rules / lists / kernel carve-outs that reference it. Answers "why
+  isn't *this* site going through the VPN" without nslookup + manual CIDR tests.
+- **Correct install commands in recommendations** — when WakeRoute suggests installing a package
+  for native routing, it now shows the command for *your* router's package manager (`apk add …` on
+  newer OpenWrt, `opkg install …` elsewhere) instead of a hardcoded one.
+- **Restore a routing-profile backup** — the whole routing config (endpoints, groups, rules, lists)
+  can now be restored from a backup, so you can roll back a bad change or migrate a complete setup to
+  another router. The download side already existed; this adds the upload/restore side, validated
+  before it lands (a bad backup is rejected, your current config untouched).
+- **Optional drop-on-failover for groups** — a failover or selector group can now be set to drop its
+  existing connections when it switches exits, so in-flight connections move off a just-failed exit
+  onto the healthy one immediately instead of hanging until they time out. Off by default, which
+  keeps long-lived transfers alive across a switch.
+- **Kill switch for kernel-routed groups** — a group can now be set to fail closed: if its tunnel
+  goes down, traffic that was using it is dropped rather than falling back to your normal internet
+  connection. Off by default; turn it on for a group whose traffic must never leave unprotected.
+- **TLS handshake fragmentation (anti-DPI)** — a TLS-based connection can now split its handshake so
+  a firewall that blocks by inspecting the server name in the first packet can't see it. Off by
+  default; enable it on a TLS endpoint that a network is blocking by SNI. (Not used with Reality,
+  which already hides the server name.)
+- **AnyTLS protocol** — import an `anytls://` link (or add one by hand) and route through AnyTLS, a
+  newer TLS-based protocol designed to resist traffic-analysis fingerprinting of proxied TLS.
+- **Detects your router's native VPN support** — WakeRoute now checks which protocols your router can
+  run directly in its kernel (WireGuard, AmneziaWG) versus which need sing-box, and tailors its
+  install recommendations to that.
+- **Route through a VPN tunnel your router already has** — if WireGuard / AmneziaWG tunnels are
+  already configured on the router, WakeRoute can detect them and route through one directly without
+  re-entering its keys. It never modifies or tears down a tunnel the system owns.
+- **Runs without sing-box when your setup is fully native** — a fast-mode profile that uses only
+  kernel-native tunnels now runs entirely on the router's own routing, and WakeRoute stops sing-box
+  instead of leaving it running as a redundant path — less memory and CPU for the same result.
+
+### Fixed
+- **A group's chosen exit now survives a reboot** — when a profile had failover/selector groups but
+  no list-based routing, the selected member reset to the first one on every restart or config apply.
+  The selection is now remembered across reboots.
+- **Health and throughput now shown for kernel-routed tunnels** — a WireGuard / AmneziaWG tunnel
+  routed entirely in the kernel (fast mode) previously showed Unknown health and zero traffic on the
+  dashboard, because both readings came only from the proxy engine, which such a tunnel bypasses. Its
+  health is now probed directly through the interface and its throughput read from the interface's own
+  counters, so the dashboard and metrics reflect the real state — for the tunnels and for the failover
+  groups built on them.
+- **The share-safe config backup no longer leaks the subscription URL** — the default (redacted) config
+  export masked the subscription token but not the subscription URL, which often embeds a per-account
+  token in its path. The URL is now masked too; the full value is still included with the explicit
+  "include secrets" option.
+- **A configuration edit that fails to save no longer appears applied** — if writing the profile failed
+  (e.g. a full router overlay), the edit stayed in memory and the panel showed it as applied while it
+  silently vanished on the next reboot. A failed save now leaves the configuration exactly as it was.
+- **A second Apply in quick succession can no longer trigger a stale rollback of the previous one** — if
+  a new "Apply (until reboot)" landed while an earlier apply's fail-safe window was deciding to roll
+  back, the old window could roll back (or even reboot) on top of the just-applied config. Each Apply
+  now cleanly supersedes the previous fail-safe window.
+- **Clash/mihomo subscriptions with HTTP/2 endpoints or nested failover groups now load** — two export
+  defects could make a strict mihomo client reject the WHOLE subscription: an HTTP/2 endpoint's host
+  was emitted as a quoted string instead of a list, and a failover group that nested an unexportable
+  group left a dangling reference. Both are fixed.
+
+### Security
+- **Remote-server provisioning now rejects a malformed SSH username** — the "set up a server" form
+  validated the host but not the SSH user, so a crafted username could be misread by the ssh client as
+  a command-line option and run a command on the router. The user is now validated (matching every other
+  SSH action), with an extra end-of-options guard on the ssh invocation as a second layer.
+- **The Reality dest/SNI checker can no longer be steered at internal addresses** — its block on
+  internal targets was applied at name-resolution time and could be sidestepped by a hostname that
+  re-resolved to an internal IP at connect time. The check now also runs on the address actually dialed,
+  matching the subscription fetcher.
+
 ## [0.3.3]
 
 ### Added

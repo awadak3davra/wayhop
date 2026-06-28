@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"wakeroute/internal/model"
+	"wakeroute/internal/platform"
 )
 
 // ep builds a synthetic endpoint with the given engine/protocol/enabled flag. Params are
@@ -239,6 +240,30 @@ func TestProtocolNeedsSingbox(t *testing.T) {
 		if ProtocolNeedsSingbox(p) {
 			t.Errorf("ProtocolNeedsSingbox(%s) = true, want false", p)
 		}
+	}
+}
+
+// TestSingboxFloorLockstepWithPlatform enforces the invariant native_only.go documents but
+// no test previously checked across packages: the generator's sing-box protocol floor must
+// equal platform.Capabilities.SingboxRequired EXACTLY. A drift here is a real correctness bug —
+// the dangerous direction (a protocol platform requires the core for, but the classifier treats
+// as native) makes DatapathNativeOnly skip sing-box and black-hole that protocol's traffic.
+// (TestProtocolNeedsSingbox only checks generator against a hardcoded list, so it can't catch a
+// platform-side drift.)
+func TestSingboxFloorLockstepWithPlatform(t *testing.T) {
+	platformFloor := platform.DetectCapabilities().SingboxRequired // SingboxRequired is host-independent
+	// (A) the black-hole-risk direction: every protocol platform requires the core for must
+	// also force the core in the classifier.
+	for _, p := range platformFloor {
+		if !ProtocolNeedsSingbox(model.Protocol(p)) {
+			t.Errorf("platform requires sing-box for %q but ProtocolNeedsSingbox=false — DatapathNativeOnly would wrongly skip the core for it (drift)", p)
+		}
+	}
+	// (B) equal sizes: (A) gives platform ⊆ generator-floor, so equal sizes ⇒ equal sets — no
+	// protocol on either side the other lacks.
+	got := SingboxRequiredProtocols()
+	if len(got) != len(platformFloor) {
+		t.Errorf("sing-box floor size drift: generator=%d %v, platform=%d %v", len(got), got, len(platformFloor), platformFloor)
 	}
 }
 

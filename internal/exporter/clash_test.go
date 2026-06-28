@@ -46,6 +46,16 @@ func TestClashConfigPerType(t *testing.T) {
 			want: []string{"type: trojan", "password: tjpw", "sni: sni.example.com"},
 		},
 		{
+			name: "anytls",
+			ep: model.Endpoint{
+				Name: "AT", Engine: model.EngineSingBox, Protocol: model.ProtoAnyTLS,
+				Server: "2.2.2.3", Port: 8443, Enabled: true,
+				Params: map[string]any{"password": "atpw"},
+				TLS:    &model.TLS{Enabled: true, Type: "tls", SNI: "at.example.com", Insecure: true},
+			},
+			want: []string{"type: anytls", "password: atpw", "sni: at.example.com", "skip-cert-verify: true"},
+		},
+		{
 			name: "vless-reality",
 			ep: model.Endpoint{
 				Name: "VL", Engine: model.EngineSingBox, Protocol: model.ProtoVLESS,
@@ -164,6 +174,56 @@ func TestClashReservedIsFlowList(t *testing.T) {
 	}
 	if strings.Contains(yaml, `reserved: "[`) || strings.Contains(yaml, `reserved: '[`) {
 		t.Errorf("reserved was scalar-quoted into a string (clash/mihomo reject it):\n%s", yaml)
+	}
+}
+
+// TestClashH2OptsHostIsFlowList guards the h2 (HTTP/2) transport export: mihomo types
+// h2-opts.host as []string, so it must be a real flow sequence `host: [a.com]`, not a
+// scalar-quoted "[a.com]" string — the latter trips mihomo's strict decoder and fails the
+// WHOLE config load (same class as TestClashReservedIsFlowList).
+func TestClashH2OptsHostIsFlowList(t *testing.T) {
+	ep := model.Endpoint{
+		ID: "h", Name: "H2", Engine: model.EngineSingBox, Protocol: model.ProtoVLESS,
+		Server: "1.1.1.1", Port: 443, Enabled: true, Params: map[string]any{"uuid": "u1"},
+		TLS:       &model.TLS{Enabled: true, SNI: "cdn.example.com"},
+		Transport: &model.Transport{Type: "http", Path: "/h2", Host: "cdn.example.com"},
+	}
+	yaml, skipped := ClashConfig([]model.Endpoint{ep})
+	if len(skipped) != 0 {
+		t.Fatalf("unexpectedly skipped: %v\n%s", skipped, yaml)
+	}
+	if !strings.Contains(yaml, "host: [cdn.example.com]") {
+		t.Errorf("h2-opts host not a flow list; want `host: [cdn.example.com]` in:\n%s", yaml)
+	}
+	if strings.Contains(yaml, `host: "[`) || strings.Contains(yaml, `host: '[`) {
+		t.Errorf("h2-opts host was scalar-quoted into a string (mihomo rejects it):\n%s", yaml)
+	}
+	if got, errs := importer.ParseClash(yaml); len(got) != 1 {
+		t.Fatalf("round-trip of h2 config: got %d (errs %v)\n%s", len(got), errs, yaml)
+	}
+}
+
+// TestClashOmittedNestedGroupNotReferenced guards the group renderer: a group whose members
+// are all unexportable is omitted, and a parent that nested it must NOT keep a dangling
+// reference to the omitted name — mihomo rejects a proxy-group referencing an undefined
+// proxy/group, failing the entire config load.
+func TestClashOmittedNestedGroupNotReferenced(t *testing.T) {
+	eps := []model.Endpoint{
+		{ID: "e1", Name: "NL", Engine: model.EngineSingBox, Protocol: model.ProtoVLESS, Server: "1.1.1.1", Port: 443, Enabled: true, Params: map[string]any{"uuid": "u1"}},
+	}
+	groups := []model.Group{
+		{ID: "g-empty", Name: "EmptyGrp", Members: []string{"does-not-exist"}},
+		{ID: "g-top", Name: "TopGrp", Members: []string{"e1", "g-empty"}},
+	}
+	yaml, _ := ClashConfigWithGroups(eps, groups)
+	if strings.Contains(yaml, "EmptyGrp") {
+		t.Errorf("omitted all-unexportable group EmptyGrp must not appear (a dangling ref breaks mihomo):\n%s", yaml)
+	}
+	if !strings.Contains(yaml, "TopGrp") || !strings.Contains(yaml, "- NL") {
+		t.Errorf("TopGrp should still render with its exportable member:\n%s", yaml)
+	}
+	if got, errs := importer.ParseClash(yaml); len(got) != 1 {
+		t.Fatalf("round-trip: got %d (errs %v)\n%s", len(got), errs, yaml)
 	}
 }
 

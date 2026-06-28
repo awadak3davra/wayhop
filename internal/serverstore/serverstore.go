@@ -135,6 +135,11 @@ func (s *Store) Patch(id string, fn func(*Server)) error {
 		if s.srv[i].ID == id {
 			cand := make([]Server, len(s.srv))
 			copy(cand, s.srv)
+			// Deep-clone the only reference field: a shallow copy aliases the live
+			// element's Installed backing array, so an in-place mutation in fn (e.g.
+			// append(sv.Installed[:0], ...)) would leak into s.srv even when the save
+			// below fails, breaking persist-then-commit. Mirrors List/Get's cloning.
+			cand[i].Installed = append([]string{}, cand[i].Installed...)
 			fn(&cand[i]) // mutate the copy, not the live element
 			if err := s.saveLocked(cand); err != nil {
 				return err

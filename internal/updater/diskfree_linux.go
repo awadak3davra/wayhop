@@ -4,11 +4,11 @@ package updater
 
 import "syscall"
 
-// availBytes returns the free space (bytes available to the caller) on the filesystem
-// holding dir. ok=false when it can't be determined — the caller then SKIPS the space
-// guard rather than blocking an update on a stat failure. The router overlay is tiny
-// (~60 MB), so a pre-flight check here stops a binary swap from failing mid-write.
-func availBytes(dir string) (uint64, bool) {
+// AvailBytes returns the free space (bytes available to the caller) on the filesystem holding
+// dir. ok=false when it can't be determined — callers then SKIP their space guard rather than
+// blocking on a stat failure. Used by the update pre-flight and the disk-space diagnostic; the
+// router overlay is tiny (~60 MB), so both watch it.
+func AvailBytes(dir string) (uint64, bool) {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(dir, &st); err != nil {
 		return 0, false

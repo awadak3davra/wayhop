@@ -42,6 +42,8 @@ func Export(e model.Endpoint) (Result, bool) {
 		return Result{Kind: "link", Text: vlessLink(e)}, true
 	case model.ProtoTrojan:
 		return Result{Kind: "link", Text: trojanLink(e)}, true
+	case model.ProtoAnyTLS:
+		return Result{Kind: "link", Text: anytlsLink(e)}, true
 	case model.ProtoHysteria2:
 		return Result{Kind: "link", Text: hysteria2Link(e)}, true
 	case model.ProtoTUIC:
@@ -87,6 +89,14 @@ func trojanLink(e model.Endpoint) string {
 	setTransportQuery(q, e.Transport)
 	setTLSQuery(q, e.TLS)
 	return buildURI("trojan", str(e.Params, "password"), "", e, q)
+}
+
+// anytlsLink mirrors trojanLink (password + TLS in the query) but emits no transport — AnyTLS has no
+// ws/grpc sub-transport.
+func anytlsLink(e model.Endpoint) string {
+	q := url.Values{}
+	setTLSQuery(q, e.TLS)
+	return buildURI("anytls", str(e.Params, "password"), "", e, q)
 }
 
 func hysteria2Link(e model.Endpoint) string {

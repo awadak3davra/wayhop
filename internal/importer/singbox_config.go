@@ -18,6 +18,7 @@ package importer
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -460,11 +461,20 @@ func sbStr(m map[string]any, k string) string {
 func sbInt(m map[string]any, k string) int {
 	switch t := m[k].(type) {
 	case float64:
+		// Reject out-of-int32-range floats (incl. NaN/Inf) instead of overflowing the
+		// int(t) conversion to a junk value on 32-bit router arches — mirrors asInt. A
+		// real port/MTU/alter_id is tiny, so anything past MaxInt32 is bogus.
+		if t < math.MinInt32 || t > math.MaxInt32 {
+			return 0
+		}
 		return int(t)
 	case int:
 		return t
 	case json.Number:
 		if n, err := t.Int64(); err == nil {
+			if n < math.MinInt32 || n > math.MaxInt32 {
+				return 0
+			}
 			return int(n)
 		}
 	case string:

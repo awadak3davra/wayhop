@@ -166,18 +166,23 @@ func TestRedacted(t *testing.T) {
 	c := Default()
 	c.Clash.Secret = "supersecret"
 	c.Subscription.Token = "tok123"
+	c.Subscription.URL = "https://provider.example/sub/secrettoken"
 	c.Watchdog.NotifyURL = "https://hook.test/abc"
 	r := c.Redacted()
 	if r.Clash.Secret != RedactedMark || r.Subscription.Token != RedactedMark || r.Watchdog.NotifyURL != RedactedMark {
 		t.Fatalf("Redacted left a secret exposed: %+v", r)
 	}
+	// The subscription URL embeds a per-account token, so the share-safe export must mask it.
+	if r.Subscription.URL != RedactedMark {
+		t.Fatalf("Redacted leaked the token-bearing subscription URL: %q", r.Subscription.URL)
+	}
 	// Original must be untouched (value receiver — operates on a copy).
-	if c.Clash.Secret != "supersecret" {
+	if c.Clash.Secret != "supersecret" || c.Subscription.URL != "https://provider.example/sub/secrettoken" {
 		t.Fatalf("Redacted mutated the original config")
 	}
 	// Empty secrets stay empty (not masked into a sentinel).
 	empty := Default().Redacted()
-	if empty.Clash.Secret != "" || empty.Subscription.Token != "" || empty.Watchdog.NotifyURL != "" {
+	if empty.Clash.Secret != "" || empty.Subscription.Token != "" || empty.Subscription.URL != "" || empty.Watchdog.NotifyURL != "" {
 		t.Fatalf("Redacted masked an empty secret: %+v", empty)
 	}
 }

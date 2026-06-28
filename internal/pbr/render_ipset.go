@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -57,6 +58,63 @@ func (io IpsetOptions) setName(zone, fam string) string {
 	return (io.SetPrefix + zone)[:keep] + suf
 }
 
+// srcSetName returns the kernel ipset name holding a source-scoped zone's SOURCE CIDRs (matched
+// with `--match-set ... src`), distinct from the zone's dest set by an "s" family marker
+// (e.g. wr_rule_dev_s4 vs the dest wr_rule_dev_4).
+func (io IpsetOptions) srcSetName(zone, fam string) string {
+	return io.setName(zone, "s"+fam)
+}
+
+// iptablesSourceMatchCombos returns the OR-expansion of a zone's family-agnostic source matches
+// (iface × mac × proto) as iptables match-arg fragments — iptables v1.4.21 has no anonymous sets,
+// so multiple ifaces/MACs/protocols become multiple rules. Each fragment is the leading match for
+// ONE rule (the source-IP set + dest set are appended per-family by the caller). A zone with no
+// iface/mac/port yields a single empty fragment (one rule carrying just the set matches). A
+// trailing-* iface wildcard is translated to iptables' "+" suffix.
+func (z Zone) iptablesSourceMatchCombos() []string {
+	ifaces := z.SrcIface
+	if len(ifaces) == 0 {
+		ifaces = []string{""}
+	}
+	macs := z.SrcMAC
+	if len(macs) == 0 {
+		macs = []string{""}
+	}
+	protos := []string{""}
+	ports := ""
+	if len(z.SrcPort) > 0 {
+		protos = []string{"tcp", "udp"}
+		ps := make([]string, len(z.SrcPort))
+		for i, p := range z.SrcPort {
+			ps[i] = strconv.Itoa(p)
+		}
+		ports = strings.Join(ps, ",")
+	}
+	var out []string
+	for _, ifc := range ifaces {
+		for _, mac := range macs {
+			for _, proto := range protos {
+				var m string
+				if ifc != "" {
+					oifc := ifc
+					if strings.HasSuffix(oifc, "*") { // nft trailing-* wildcard → iptables "+"
+						oifc = oifc[:len(oifc)-1] + "+"
+					}
+					m += " -i " + oifc
+				}
+				if mac != "" {
+					m += " -m mac --mac-source " + mac
+				}
+				if proto != "" {
+					m += " -p " + proto + " -m multiport --sports " + ports
+				}
+				out = append(out, m)
+			}
+		}
+	}
+	return out
+}
+
 func nextPow2(n int) int {
 	p := 1
 	for p < n {
@@ -100,6 +158,12 @@ func (pl *Plan) IpsetNames(io IpsetOptions) []string {
 		}
 		if len(z.V6) > 0 {
 			out = append(out, io.setName(z.Name, "6"))
+		}
+		if len(z.SrcV4) > 0 {
+			out = append(out, io.srcSetName(z.Name, "4"))
+		}
+		if len(z.SrcV6) > 0 {
+			out = append(out, io.srcSetName(z.Name, "6"))
 		}
 	}
 	return out
@@ -160,6 +224,25 @@ func (pl *Plan) RenderIpsetRestore(io IpsetOptions) string {
 				fmt.Fprintf(&b, "add %s %s -exist\n", name, c)
 			}
 		}
+		// Source sets (Phase C): a source-scoped zone's SOURCE CIDRs get their own `_s4`/`_s6`
+		// set, matched with `--match-set ... src` in the mangle chain (the dest set, if any,
+		// still bounds the rule).
+		if len(z.SrcV4) > 0 {
+			name := io.srcSetName(z.Name, "4")
+			hs, me := staticSizing(len(z.SrcV4))
+			createNet(name, "inet", hs, me, 0)
+			for _, c := range z.SrcV4 {
+				fmt.Fprintf(&b, "add %s %s -exist\n", name, c)
+			}
+		}
+		if len(z.SrcV6) > 0 {
+			name := io.srcSetName(z.Name, "6")
+			hs, me := staticSizing(len(z.SrcV6))
+			createNet(name, "inet6", hs, me, 0)
+			for _, c := range z.SrcV6 {
+				fmt.Fprintf(&b, "add %s %s -exist\n", name, c)
+			}
+		}
 	}
 	return b.String()
 }
@@ -191,6 +274,35 @@ func (pl *Plan) RenderIptablesScript(io IpsetOptions) string {
 		// silently falling back to the WAN default mid-connection (a censored-traffic leak).
 		fmt.Fprintf(&b, "%s -t mangle -A %s -j CONNMARK --restore-mark --nfmask %s --ctmask %s\n", ipt, ch, mask, mask)
 		for _, z := range pl.Zones {
+			if z.SrcScoped {
+				// Source-scoped zone: the bypass RETURN above already exited peer-dst traffic, so a
+				// source-only line here can't loop a tunnel-peer packet (no nft-style re-assert
+				// needed). Emit the cartesian iface/mac/proto rules, each with the per-family source
+				// set (when the source carries IPs for this family) and the dest set (when present).
+				hasDest := (fam == "4" && len(z.V4) > 0) || (fam == "6" && len(z.V6) > 0)
+				srcIPThisFam := (fam == "4" && len(z.SrcV4) > 0) || (fam == "6" && len(z.SrcV6) > 0)
+				hasAnySrcIP := len(z.SrcV4) > 0 || len(z.SrcV6) > 0
+				noDest := len(z.V4) == 0 && len(z.V6) == 0
+				// The IP source (if any) must be satisfiable in this family; otherwise an opposite-
+				// family source-IP rule would match every dst here (an over-route) — skip it.
+				srcConstraintOK := srcIPThisFam || !hasAnySrcIP
+				if !srcConstraintOK || !(hasDest || noDest) {
+					continue
+				}
+				srcMatch := ""
+				if srcIPThisFam {
+					srcMatch = " -m set --match-set " + io.srcSetName(z.Name, fam) + " src"
+				}
+				destMatch := ""
+				if hasDest {
+					destMatch = " -m set --match-set " + io.setName(z.Name, fam) + " dst"
+				}
+				for _, sm := range z.iptablesSourceMatchCombos() {
+					fmt.Fprintf(&b, "%s -t mangle -A %s%s%s%s -j MARK --set-xmark %s/%s\n",
+						ipt, ch, sm, srcMatch, destMatch, hexMark(z.Mark), mask)
+				}
+				continue
+			}
 			has := (fam == "4" && (len(z.V4) > 0 || zoneHasDomains(z))) || (fam == "6" && len(z.V6) > 0)
 			if !has {
 				continue
@@ -218,12 +330,32 @@ func (pl *Plan) RenderIptablesScript(io IpsetOptions) string {
 		fmt.Fprintf(&b, "iptables -t nat -C POSTROUTING -o %s -m mark --mark %s/%s -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o %s -m mark --mark %s/%s -j MASQUERADE\n",
 			io.WanIface, hexMark(e.Mark), mask, io.WanIface, hexMark(e.Mark), mask)
 	}
+	// TCP MSS clamping (QW1): iptables FORWARD mangle TCPMSS per kernel tunnel egress.
+	// Mirrors the nft wr_mss chain: --clamp-mss-to-pmtu is the iptables equivalent of
+	// `rt mtu` (dynamically tracks path MTU from ICMP frag-needed). Idempotent (check→append).
+	// ip6tables mirrors it so AWG tunnels carrying IPv6 also clamp v6 TCP SYN.
+	seenMSS := map[string]bool{}
+	for _, e := range pl.nonWanEgresses() {
+		if e.Kind != EgressInterface || e.Iface == "" || seenMSS[e.Iface] {
+			continue
+		}
+		seenMSS[e.Iface] = true
+		for _, ipt := range []string{"iptables", "ip6tables"} {
+			fmt.Fprintf(&b, "%s -t mangle -C FORWARD -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || %s -t mangle -A FORWARD -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\n",
+				ipt, e.Iface, ipt, e.Iface)
+		}
+	}
 	return b.String()
 }
 
 func (pl *Plan) hasV6Zone() bool {
 	for _, z := range pl.Zones {
-		if len(z.V6) > 0 {
+		if len(z.V6) > 0 || len(z.SrcV6) > 0 {
+			return true
+		}
+		// A source-only zone with only iface/mac/port (no source IP) applies to BOTH families,
+		// so the v6 datapath (ip6tables chain + v6 ip rules) must be emitted for it too.
+		if z.SrcScoped && len(z.V4) == 0 && len(z.V6) == 0 && len(z.SrcV4) == 0 && len(z.SrcV6) == 0 {
 			return true
 		}
 	}
@@ -303,6 +435,18 @@ func (pl *Plan) RenderTeardownScript(opt Options, io IpsetOptions) string {
 			continue
 		}
 		fmt.Fprintf(&b, "iptables -t nat -D POSTROUTING -o %s -m mark --mark %s/%s -j MASQUERADE 2>/dev/null || true\n", io.WanIface, hexMark(e.Mark), mask)
+	}
+	// TCP MSS clamping teardown (QW1): remove TCPMSS rules from the FORWARD chain.
+	seenMSS := map[string]bool{}
+	for _, e := range pl.nonWanEgresses() {
+		if e.Kind != EgressInterface || e.Iface == "" || seenMSS[e.Iface] {
+			continue
+		}
+		seenMSS[e.Iface] = true
+		for _, ipt := range []string{"iptables", "ip6tables"} {
+			fmt.Fprintf(&b, "%s -t mangle -D FORWARD -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true\n",
+				ipt, e.Iface)
+		}
 	}
 	for i, e := range pl.nonWanEgresses() {
 		pref := opt.RulePref + i

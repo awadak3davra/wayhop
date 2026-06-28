@@ -82,12 +82,12 @@ func generator_genOne(t *testing.T, e model.Endpoint) map[string]any {
 // --- Per-protocol outbound shape -------------------------------------------
 
 // TestOutboundVMess covers the vmess branch incl. alter_id (intp) and the
-// security default path (strDefault) when no security param is given.
+// security default ("auto") when no security param is given.
 func TestOutboundVMess(t *testing.T) {
 	e := generator_singBoxEndpoint("vmess-1", model.ProtoVMess, map[string]any{
 		"uuid":     "v-uuid",
 		"alter_id": 7,
-		// security intentionally omitted -> strDefault should fill "auto".
+		// security intentionally omitted -> the generator should default it to "auto".
 	})
 	ob := generator_genOne(t, e)
 

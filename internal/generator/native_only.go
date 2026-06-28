@@ -1,11 +1,13 @@
 package generator
 
 // native_only.go is the PURE, design-independent classification layer P4 (sing-box
-// optionality, docs/NATIVE_P2_DESIGN.md) builds on: it answers "could this endpoint /
+// optionality, docs/NATIVE_P4_DESIGN.md) builds on: it answers "could this endpoint /
 // profile be carried with NO sing-box process at all?" purely from the model, with no
 // host probing and no routing-mode/TUN/default-egress analysis. It is intentionally
 // SEPARATE from generator.Generate (which still always emits a sing-box config) so it
-// can be reasoned about and unit-tested on its own; nothing calls it yet.
+// can be reasoned about and unit-tested on its own. The apply path now uses it: the
+// server's s.datapathNativeOnly (handleApply + SyncPlugins) calls DatapathNativeOnly to
+// skip — and stop — the sing-box core when the kernel plane provably carries everything.
 //
 // The two functions here mirror — but do not duplicate — the engine classification
 // generator.Generate already performs:
@@ -54,6 +56,19 @@ var singboxRequiredProtos = map[model.Protocol]bool{
 // narrower question than EndpointNeedsSingbox, which also weighs the engine (e.g. socks/
 // http endpoints are not in this floor yet still need the core as sing-box outbounds).
 func ProtocolNeedsSingbox(p model.Protocol) bool { return singboxRequiredProtos[p] }
+
+// SingboxRequiredProtocols returns the protocol FLOOR — every proxy protocol with no
+// kernel/firmware data path, the set that forces the sing-box core — as a slice (unordered).
+// It mirrors platform.Capabilities.SingboxRequired EXACTLY; a cross-package lockstep test
+// enforces the two never drift, so the native-only classifier (which decides whether the core
+// can be skipped) and the host-capability report can never disagree about a protocol.
+func SingboxRequiredProtocols() []model.Protocol {
+	out := make([]model.Protocol, 0, len(singboxRequiredProtos))
+	for p := range singboxRequiredProtos {
+		out = append(out, p)
+	}
+	return out
+}
 
 // EndpointNeedsSingbox reports whether an endpoint can ONLY be carried by the sing-box
 // userspace core (i.e. it is NOT realizable purely by the kernel / a chained plugin).

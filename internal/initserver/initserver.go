@@ -224,9 +224,12 @@ if ! command -v sing-box >/dev/null 2>&1; then
   apt-get install -y curl tar >/dev/null 2>&1 || true
   A=$(dpkg --print-architecture 2>/dev/null || echo amd64)
   case "$A" in amd64) SB=amd64;; arm64) SB=arm64;; armhf) SB=armv7;; *) SB=amd64;; esac
-  VER=$(curl -fsS https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep -o '"tag_name":[^,]*' | head -1 | sed 's/.*"v\{0,1\}\([0-9][^"]*\)".*/\1/')
-  [ -n "$VER" ] || { log "failed to resolve sing-box version from GitHub API"; exit 1; }
-  curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${VER}/sing-box-${VER}-linux-${SB}.tar.gz" -o /tmp/sb.tgz || { log "failed to download sing-box ${VER}"; exit 1; }
+  VER=$(curl -fsS https://api.github.com/repos/SagerNet/sing-box/releases/latest 2>/dev/null | grep -o '"tag_name":[^,]*' | head -1 | sed 's/.*"v\{0,1\}\([0-9][^"]*\)".*/\1/')
+  # GitHub API blocked from this server? fall back to the releases atom feed (proxiable by
+  # wr_fetch's mirror chain), taking the newest STABLE tag (skip -alpha/-beta/-rc suffixes).
+  [ -n "$VER" ] || VER=$(wr_fetch https://github.com/SagerNet/sing-box/releases.atom 2>/dev/null | grep -o 'releases/tag/v[0-9][^"<]*' | sed 's@releases/tag/v@@' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+  [ -n "$VER" ] || { log "failed to resolve sing-box version (GitHub API + mirror both failed)"; exit 1; }
+  wr_fetch "https://github.com/SagerNet/sing-box/releases/download/v${VER}/sing-box-${VER}-linux-${SB}.tar.gz" /tmp/sb.tgz || { log "failed to download sing-box ${VER}"; exit 1; }
   tar -xzf /tmp/sb.tgz -C /tmp || { log "failed to extract sing-box archive"; exit 1; }
   install -m755 "/tmp/sing-box-${VER}-linux-${SB}/sing-box" /usr/local/bin/sing-box
   rm -rf /tmp/sb.tgz "/tmp/sing-box-${VER}-linux-${SB}" 2>/dev/null || true
@@ -275,9 +278,12 @@ if ! command -v sing-box >/dev/null 2>&1; then
   apt-get install -y curl tar >/dev/null 2>&1 || true
   A=$(dpkg --print-architecture 2>/dev/null || echo amd64)
   case "$A" in amd64) SB=amd64;; arm64) SB=arm64;; armhf) SB=armv7;; *) SB=amd64;; esac
-  VER=$(curl -fsS https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep -o '"tag_name":[^,]*' | head -1 | sed 's/.*"v\{0,1\}\([0-9][^"]*\)".*/\1/')
-  [ -n "$VER" ] || { log "failed to resolve sing-box version from GitHub API"; exit 1; }
-  curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${VER}/sing-box-${VER}-linux-${SB}.tar.gz" -o /tmp/sb.tgz || { log "failed to download sing-box ${VER}"; exit 1; }
+  VER=$(curl -fsS https://api.github.com/repos/SagerNet/sing-box/releases/latest 2>/dev/null | grep -o '"tag_name":[^,]*' | head -1 | sed 's/.*"v\{0,1\}\([0-9][^"]*\)".*/\1/')
+  # GitHub API blocked from this server? fall back to the releases atom feed (proxiable by
+  # wr_fetch's mirror chain), taking the newest STABLE tag (skip -alpha/-beta/-rc suffixes).
+  [ -n "$VER" ] || VER=$(wr_fetch https://github.com/SagerNet/sing-box/releases.atom 2>/dev/null | grep -o 'releases/tag/v[0-9][^"<]*' | sed 's@releases/tag/v@@' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+  [ -n "$VER" ] || { log "failed to resolve sing-box version (GitHub API + mirror both failed)"; exit 1; }
+  wr_fetch "https://github.com/SagerNet/sing-box/releases/download/v${VER}/sing-box-${VER}-linux-${SB}.tar.gz" /tmp/sb.tgz || { log "failed to download sing-box ${VER}"; exit 1; }
   tar -xzf /tmp/sb.tgz -C /tmp || { log "failed to extract sing-box archive"; exit 1; }
   install -m755 "/tmp/sing-box-${VER}-linux-${SB}/sing-box" /usr/local/bin/sing-box
   rm -rf /tmp/sb.tgz "/tmp/sing-box-${VER}-linux-${SB}" 2>/dev/null || true
@@ -409,27 +415,35 @@ echo "WR_PROTO=shadowsocks"
 echo "WR_CLIENT_CONFIG=ss://$SSUI@$PUBLIC_IP:8388#wakeroute-ss"
 `
 
-// scriptHysteria2 provisions a sing-box Hysteria2 inbound (QUIC + TLS, self-signed).
-// The password is generated once and persisted. The client link is the standard
-// hysteria2://password@host:port?sni=...&insecure=1#name form parseHysteria2 reads.
+// scriptHysteria2 provisions a sing-box Hysteria2 inbound (QUIC + TLS, self-signed) with
+// Salamander obfuscation ON by default — the QUIC handshake is camouflaged as random UDP so
+// DPI can't fingerprint Hysteria2, the camouflage that matters in a censored region. The
+// password and the obfs password are each generated once and persisted. The client link is
+// hysteria2://password@host:port?sni=...&insecure=1&obfs=salamander&obfs-password=...#name,
+// which parseHysteria2 + the generator already round-trip (model obfs / obfs_password).
 const scriptHysteria2 = `
 # ---- sing-box Hysteria2 (QUIC + TLS) ----
 log "installing sing-box (Hysteria2)..."
 ` + scriptSingboxInstall + scriptSelfSignedTLS + `
 [ -f "$SBD/wr-hy2-pass" ] || sing-box generate rand --base64 18 > "$SBD/wr-hy2-pass"
-chmod 600 "$SBD/wr-hy2-pass" 2>/dev/null || true
+# Salamander obfs password (persisted, like the auth password) — both ends share it; WR bakes
+# it into the client link below so an imported endpoint matches the server automatically.
+[ -f "$SBD/wr-hy2-obfs" ] || sing-box generate rand --base64 18 > "$SBD/wr-hy2-obfs"
+chmod 600 "$SBD/wr-hy2-pass" "$SBD/wr-hy2-obfs" 2>/dev/null || true
 HY2PASS=$(cat "$SBD/wr-hy2-pass")
+HY2OBFS=$(cat "$SBD/wr-hy2-obfs")
 mkdir -p /etc/sing-box/conf.d
 cat > /etc/sing-box/conf.d/wr-hysteria2.json <<EOF
-{"inbounds":[{"type":"hysteria2","tag":"wr-hy2-in","listen":"::","listen_port":8445,"users":[{"password":"$HY2PASS"}],"tls":{"enabled":true,"server_name":"$WR_TLS_SNI","alpn":["h3"],"certificate_path":"$SBD/wr-tls.crt","key_path":"$SBD/wr-tls.key"}}],"outbounds":[{"type":"direct","tag":"wr-hy2-direct"}]}
+{"inbounds":[{"type":"hysteria2","tag":"wr-hy2-in","listen":"::","listen_port":8445,"users":[{"password":"$HY2PASS"}],"obfs":{"type":"salamander","password":"$HY2OBFS"},"tls":{"enabled":true,"server_name":"$WR_TLS_SNI","alpn":["h3"],"certificate_path":"$SBD/wr-tls.crt","key_path":"$SBD/wr-tls.key"}}],"outbounds":[{"type":"direct","tag":"wr-hy2-direct"}]}
 EOF
 # Hysteria2 is UDP/QUIC — open the port if a firewall is active (best-effort).
 iptables -C INPUT -p udp --dport 8445 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 8445 -j ACCEPT 2>/dev/null || true
 ` + singboxServiceUnit + `
 # hysteria2://<urlencoded-password>@host:port?sni=...&insecure=1#name (parseHysteria2).
 HY2ENC=$(printf '%s' "$HY2PASS" | sed 's/+/%2B/g;s/\//%2F/g;s/=/%3D/g')
+HY2OBFSENC=$(printf '%s' "$HY2OBFS" | sed 's/+/%2B/g;s/\//%2F/g;s/=/%3D/g')
 echo "WR_PROTO=hysteria2"
-echo "WR_CLIENT_CONFIG=hysteria2://$HY2ENC@$PUBLIC_IP:8445?sni=$WR_TLS_SNI&insecure=1#wakeroute-hy2"
+echo "WR_CLIENT_CONFIG=hysteria2://$HY2ENC@$PUBLIC_IP:8445?sni=$WR_TLS_SNI&insecure=1&obfs=salamander&obfs-password=$HY2OBFSENC#wakeroute-hy2"
 `
 
 // scriptTUIC provisions a sing-box TUIC v5 inbound (QUIC + TLS, self-signed). A uuid
@@ -468,9 +482,10 @@ echo "WR_CLIENT_CONFIG=tuic://$TUUUID:$TUENC@$PUBLIC_IP:8446?sni=$WR_TLS_SNI&ins
 // by the remote shell. ValidTarget's charset (alnum . _ : - [ ]) contains no such
 // characters, so %q is safe here; do NOT call BuildScript with unvalidated input, or
 // shell-quote publicHost first.
-func BuildScript(protocols []string, publicHost string) string {
+func BuildScript(protocols []string, publicHost string, mirrors ...string) string {
 	var b strings.Builder
 	b.WriteString(scriptHeader)
+	b.WriteString(mirrorFetchShell(mirrors)) // defines wr_fetch before any fragment uses it
 	if publicHost != "" {
 		// prepend an override (placed after header sets the default; re-set it).
 		b.WriteString(fmt.Sprintf("PUBLIC_IP=%q\n", publicHost))
@@ -482,6 +497,51 @@ func BuildScript(protocols []string, publicHost string) string {
 	}
 	b.WriteString("\nlog \"done\"\n")
 	return b.String()
+}
+
+// mirrorFetchShell renders the wr_fetch shell helper the install fragments use to download
+// from GitHub through a mirror chain — the same prefix list the self-updater uses
+// (config.Updater.Mirrors), so provisioning a server from a censored region works the way
+// updating the router does. Each prefix is tried in order ("" = direct); wr_fetch writes to
+// its optional second arg (a file) or to stdout, and fails only if every mirror fails. A
+// direct attempt is always included first, and any mirror that isn't a plain http(s) URL free
+// of shell metacharacters is dropped — so a nil/empty/garbage list degrades safely to a
+// direct-only fetch (the historical behaviour) and a hostile config value can't inject.
+func mirrorFetchShell(mirrors []string) string {
+	prefixes := []string{""} // always try direct first
+	for _, m := range mirrors {
+		if m == "" || !safeMirrorPrefix(m) {
+			continue
+		}
+		prefixes = append(prefixes, m)
+	}
+	quoted := make([]string, len(prefixes))
+	for i, p := range prefixes {
+		quoted[i] = "'" + p + "'"
+	}
+	// curl is the if-CONDITION (never the left of &&) so a failed attempt is exempt from
+	// `set -e` on every shell (ash/dash/bash) — the loop simply tries the next mirror.
+	return "\n# wr_fetch URL [OUTFILE]: download via the GitHub mirror chain (each prefix tried\n" +
+		"# in order; '' = direct). Writes to OUTFILE, else stdout. Fails only if all mirrors fail.\n" +
+		"wr_fetch() {\n" +
+		"  for __pre in " + strings.Join(quoted, " ") + "; do\n" +
+		"    if [ -n \"$2\" ]; then\n" +
+		"      if curl -fsSL \"${__pre}$1\" -o \"$2\"; then return 0; fi\n" +
+		"    else\n" +
+		"      if curl -fsSL \"${__pre}$1\"; then return 0; fi\n" +
+		"    fi\n" +
+		"  done\n" +
+		"  return 1\n" +
+		"}\n"
+}
+
+// safeMirrorPrefix reports whether m is a plain http(s) URL prefix with no shell
+// metacharacters, so it can be single-quoted into the generated wr_fetch list verbatim.
+func safeMirrorPrefix(m string) bool {
+	if !strings.HasPrefix(m, "http://") && !strings.HasPrefix(m, "https://") {
+		return false
+	}
+	return !strings.ContainsAny(m, " \t\r\n'\"`$;|&<>(){}\\")
 }
 
 // Creds are per-request SSH credentials. They are never stored or logged.
@@ -502,10 +562,15 @@ type Creds struct {
 
 // provisionSSHArgs builds the ssh option/positional argument vector shared by every
 // auth path (key, password-via-sshpass). It is a pure helper so the exact argv can be
-// unit-tested. When c.KnownHostsFile is empty the result is byte-identical to the
-// historical command (default port 22 when c.Port==0). When it is set, two extra
-// options pin the key to that persistent file (HashKnownHosts=no keeps the recorded
-// entry greppable so Provision can fingerprint it).
+// unit-tested. When c.KnownHostsFile is set, two extra options pin the key to that
+// persistent file (HashKnownHosts=no keeps the recorded entry greppable so Provision can
+// fingerprint it).
+//
+// A "--" end-of-options marker precedes the user@host destination as defense-in-depth: ssh
+// (OpenSSH and dropbear, both getopt-based) then treats the destination as a positional even
+// if c.User/c.Host begins with '-', so a hostile value can never be reparsed as an option
+// (argument injection, CWE-88). Callers MUST still validate user+host with netdiag.ValidTarget
+// (the primary guard); this only ensures the arg-builder is self-safe if a future caller forgets.
 func provisionSSHArgs(c Creds) []string {
 	port := c.Port
 	if port == 0 {
@@ -522,7 +587,7 @@ func provisionSSHArgs(c Creds) []string {
 			"-o", "HashKnownHosts=no",
 		)
 	}
-	args = append(args, c.User+"@"+c.Host, "sh -s")
+	args = append(args, "--", c.User+"@"+c.Host, "sh -s")
 	return args
 }
 

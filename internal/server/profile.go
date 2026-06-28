@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"syscall"
 	"time"
@@ -44,6 +45,28 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetProfile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.store.Profile())
+}
+
+// handleRestoreProfile replaces the ENTIRE routing profile (endpoints/groups/rules/lists) from an
+// uploaded backup — the JSON that GET /api/profile returns. store.Replace validates it before it
+// lands (a bad backup is rejected, the current profile untouched), and persists atomically; the
+// change goes live on the next Apply (with the fail-safe net). The companion to handleConfigExport
+// for the daemon config — together they let a user back up + restore or migrate a full WakeRoute
+// setup. POST /api/profile.
+func (s *Server) handleRestoreProfile(w http.ResponseWriter, r *http.Request) {
+	var p model.Profile
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid profile JSON")
+		return
+	}
+	if err := s.store.Replace(p); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid profile: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"restored": true, "endpoints": len(p.Endpoints), "groups": len(p.Groups),
+		"rules": len(p.Rules), "lists": len(p.RoutingLists),
+	})
 }
 
 func (s *Server) handleUpsertEndpoint(w http.ResponseWriter, r *http.Request) {
@@ -155,6 +178,11 @@ func (s *Server) handleRoutingStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	res := make([]st, len(prof.RoutingLists))
 	client := s.subscriptionFetchClient()
+	// Bound concurrent source fetches: a profile with many auto-refresh lists would
+	// otherwise open one HTTP connection per list at once (each a 12s download),
+	// spiking connections/FDs on a low-memory router. Slightly tighter than the exit
+	// probe cap since each fetch holds a connection for longer.
+	sem := make(chan struct{}, 6)
 	var wg sync.WaitGroup
 	for i, rl := range prof.RoutingLists {
 		if rl.Source == "" {
@@ -164,6 +192,8 @@ func (s *Server) handleRoutingStatus(w http.ResponseWriter, r *http.Request) {
 		wg.Add(1)
 		go func(i int, id, src string) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			cur := st{ID: id}
 			ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 			defer cancel()
@@ -482,7 +512,71 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 	if commitErr != "" {
 		resp["commit_error"] = commitErr
 	}
+	// L5: warn (non-blocking) when fast mode has domain/geo rules that won't apply to LAN traffic
+	// (no TUN). Only-when-present so a clean apply keeps a byte-identical response.
+	if warn := fastModeDomainWarning(&p, s.routingMode(c)); warn != "" {
+		resp["routing_warning"] = warn
+	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// entryIsDomain reports whether a routing-list Manual entry is a domain (not an IP/CIDR), so a list
+// carrying domain matchers the kernel/IP plane can't route can be detected.
+func entryIsDomain(s string) bool {
+	if s == "" {
+		return false
+	}
+	if net.ParseIP(s) != nil {
+		return false
+	}
+	if _, _, err := net.ParseCIDR(s); err == nil {
+		return false
+	}
+	return true
+}
+
+// fastModeDomainWarning (L5) returns a non-blocking warning when RoutingMode is "fast" and the
+// profile has domain/geo-based routing rules. In fast mode there is NO TUN (genOptionsWithPlan sets
+// TunEnabled=false), so sing-box serves only the local mixed-proxy inbound — domain/geo rules do NOT
+// apply to transparently-routed LAN traffic (the kernel plane matches IP/CIDR only). A user adding a
+// domain rule usually expects it to steer their devices' traffic, so surface the gap. Returns "" when
+// there is nothing to warn about, so a clean apply response stays byte-identical.
+func fastModeDomainWarning(p *model.Profile, mode string) string {
+	if mode != "fast" || p == nil {
+		return ""
+	}
+	n := 0
+	for i := range p.Rules {
+		r := &p.Rules[i]
+		if r.Default {
+			continue // a default rule's matcher fields are inert (it's the catch-all)
+		}
+		if len(r.Domain) > 0 || len(r.DomainSuffix) > 0 || len(r.GeoSite) > 0 || len(r.GeoIP) > 0 {
+			n++
+		}
+	}
+	for i := range p.RoutingLists {
+		rl := &p.RoutingLists[i]
+		if !rl.Enabled {
+			continue
+		}
+		if rl.Source != "" { // a remote rule_set is sing-box-loaded → no LAN match without a TUN
+			n++
+			continue
+		}
+		for _, m := range rl.Manual {
+			if entryIsDomain(m) {
+				n++
+				break
+			}
+		}
+	}
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d domain/geo routing rule(s)/list(s) won't apply to LAN traffic in fast mode: "+
+		"with no TUN, sing-box matches domains only for apps using the local proxy port, not "+
+		"transparently-routed LAN devices. Use hybrid or tun mode for domain-based LAN routing, or an IP/CIDR list.", n)
 }
 
 // handleSubscription parses a subscription (pasted text or a fetched URL) into
@@ -670,6 +764,27 @@ func (s *Server) routingMode(c config.Config) string {
 	return mode
 }
 
+// pbrCompileOptions builds the pbr.Options the kernel-PBR compiler is driven with for a
+// config, so the read-only preview handler compiles the SAME plan the apply path does — in
+// particular the flow-offload flowtable, which is baked into the plan at Compile time, so a
+// bare Options{} would silently omit it from the preview (the preview would not match Apply).
+// Offload applies to "fast" mode only (it accelerates the general kernel fast-path that
+// exists only there; in hybrid, general traffic transits the capture-all TUN). The WAN+LAN
+// host probe runs ONLY in the opt-in case: offload set, no explicit device list, not demo.
+func (s *Server) pbrCompileOptions(c config.Config) pbr.Options {
+	opts := pbr.Options{}
+	if s.routingMode(c) != "fast" {
+		return opts
+	}
+	opts.Offload = c.Offload
+	devs := c.OffloadDevices
+	if (c.Offload == "sw" || c.Offload == "hw") && len(devs) == 0 && !c.Demo {
+		devs = probeOffloadDevices()
+	}
+	opts.OffloadDevices = devs
+	return opts
+}
+
 // genOptionsWithPlan builds the generator options for the given profile AND returns the
 // kernel-routing Plan it compiled (nil unless hybrid). handleApply and the boot sync use
 // the SAME returned plan to install the kernel plane (applyPBR), so the TUN route_exclude
@@ -691,23 +806,8 @@ func (s *Server) genOptionsWithPlan(p *model.Profile, c config.Config) (generato
 	if (mode != "hybrid" && mode != "fast") || p == nil {
 		return opts, nil
 	}
-	// Phase 1b flow-offload applies to "fast" only: it accelerates the GENERAL kernel
-	// fast-path, which exists only in fast mode. In hybrid, general traffic transits the
-	// capture-all TUN (there is no LAN↔WAN flow to offload), so offload is left off there.
-	pbrOpts := pbr.Options{}
-	if mode == "fast" {
-		pbrOpts.Offload = c.Offload
-		devs := c.OffloadDevices
-		// Auto-discover the WAN+LAN devices when offload is requested without an explicit
-		// list. Gated so the host probe runs ONLY in the opt-in case (never in demo/tests):
-		// offload set + no devices given + not demo. The probe is best-effort (empty on a
-		// non-router host → Compile skips offload + warns).
-		if (c.Offload == "sw" || c.Offload == "hw") && len(devs) == 0 && !c.Demo {
-			devs = probeOffloadDevices()
-		}
-		pbrOpts.OffloadDevices = devs
-	}
-	plan, _, err := pbr.Compile(p, pbrOpts)
+	// Flow-offload (fast mode only) is baked into the plan at Compile; see pbrCompileOptions.
+	plan, _, err := pbr.Compile(p, s.pbrCompileOptions(c))
 	if err != nil {
 		// Fail-safe: never emit a half-hybrid config that excludes CIDRs nothing routes.
 		// Fall back to the non-hybrid (TUN) shape and return no plan — both planes agree
@@ -744,6 +844,13 @@ func (s *Server) genOptionsWithPlan(p *model.Profile, c config.Config) (generato
 	}
 	for _, z := range plan.Zones {
 		if blackhole[z.EgressTag] {
+			continue
+		}
+		// Source-scoped zones (§6.4): the kernel marks this dest ONLY for the matching source.
+		// Other sources' traffic to the same dest must still reach it via the TUN default, so its
+		// dest CIDR must NOT be excluded from the TUN — excluding it would leave a non-matching
+		// client with neither a kernel mark nor a TUN route, falling through to WAN (a leak).
+		if z.SrcScoped {
 			continue
 		}
 		opts.KernelExcludeV4 = append(opts.KernelExcludeV4, z.V4...)
@@ -789,6 +896,16 @@ func (s *Server) applyPBR(newPlan *pbr.Plan) error {
 	s.pbrMu.Lock()
 	defer s.pbrMu.Unlock()
 	if s.pbrRunner == nil {
+		return nil
+	}
+	// QW3 idempotency: if the new plan is identical to the one already installed, skip the whole
+	// teardown+apply. Re-applying an unchanged plan would tear down and rebuild the live nft table +
+	// ip rules for nothing, opening a brief routing gap (drops calls / stalls flows) on every config
+	// save that doesn't actually change routing. Plan is pure data so reflect.DeepEqual is exact;
+	// both-nil (no PBR) compares equal too. The pre-Teardown below is KEPT for the changed-plan case
+	// — it clears ip rules/routes a SHRINKING plan no longer uses (see this func's doc), so it must
+	// NOT be dropped (the nft self-flush only covers the nft table, not the ip rules).
+	if reflect.DeepEqual(newPlan, s.pbrPlan) {
 		return nil
 	}
 	if s.pbrPlan != nil {

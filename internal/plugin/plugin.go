@@ -6,6 +6,7 @@
 package plugin
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
@@ -48,11 +49,38 @@ func mtuStr(e model.Endpoint) string {
 	return numStr(e.Params["mtu"])
 }
 
+// awgMTU is the MTU to set on an AmneziaWG kernel iface at bring-up (QW2): the configured
+// value, or a safe 1280 floor when the config omits one. The kernel default (1500) fragments
+// or PMTU-blackholes large packets once AmneziaWG's junk + WG encap overhead is added — a
+// dominant slow-site / setup-latency cause. 1280 (the IPv6 minimum) always fits and is only
+// ever locally conservative (never too large for any path); an explicit MTU still wins. The
+// importer deliberately leaves the model MTU unset when the .conf omits it, so this consumer-
+// side default is where the floor is applied.
+func awgMTU(e model.Endpoint) string {
+	if m := mtuStr(e); m != "" {
+		return m
+	}
+	return "1280"
+}
+
 func keepaliveStr(e model.Endpoint) string {
 	if e.PersistentKeepalive > 0 {
 		return strconv.Itoa(e.PersistentKeepalive)
 	}
 	return numStr(e.Params["persistent_keepalive"])
+}
+
+// awgKeepalive is the PersistentKeepalive to set on an AmneziaWG peer (L4): the configured value,
+// or a 20s default when the config omits one. An idle WG/AmneziaWG tunnel with no keepalive lets
+// its NAT/firewall UDP mapping expire, so the link silently dies until new traffic forces a
+// re-handshake — a dropped call/flow. 20s is the wireguard-tools convention. The importer
+// deliberately leaves the model keepalive unset when the .conf omits it (conf.go), so this
+// consumer-side default is where the floor is applied — mirroring awgMTU.
+func awgKeepalive(e model.Endpoint) string {
+	if ka := keepaliveStr(e); ka != "" {
+		return ka
+	}
+	return "20"
 }
 
 // NativeConfig renders the engine-native config text + filename for an endpoint.
@@ -105,11 +133,32 @@ func confLine(s string) string {
 	return s
 }
 
+// normalizeWGKey re-encodes a WireGuard/AmneziaWG key (any base64 variant) as standard
+// base64 WITH padding — the only form `awg`/`wg` accept. amneziawg-tools' key_from_base64
+// requires exactly a 44-char std-base64 key ending in '=' (it rejects url-safe `-`/`_` AND
+// unpadded keys via a std-alphabet decode), so a non-std key rendered verbatim makes the
+// interface fail to come up ("awg setconf" / key parse error) while its bind_interface
+// outbound still routes to the dead tunnel. A string that does not decode to a 32-byte key
+// (a placeholder, or a confLine-guarded injection attempt) is returned unchanged for
+// confLine to sanitize. Mirrors the generator's sing-box-side normalizeWGKey — both cores'
+// WireGuard key decoders share the std-base64-with-padding rule.
+func normalizeWGKey(s string) string {
+	for _, enc := range []*base64.Encoding{
+		base64.StdEncoding, base64.RawStdEncoding,
+		base64.URLEncoding, base64.RawURLEncoding,
+	} {
+		if b, err := enc.DecodeString(s); err == nil && len(b) == 32 {
+			return base64.StdEncoding.EncodeToString(b)
+		}
+	}
+	return s
+}
+
 func awgConfig(e model.Endpoint) string {
 	p := e.Params
 	var b strings.Builder
 	b.WriteString("[Interface]\n")
-	b.WriteString("PrivateKey = " + confLine(str(p, "private_key")) + "\n")
+	b.WriteString("PrivateKey = " + confLine(normalizeWGKey(str(p, "private_key"))) + "\n")
 	if a := util.LocalAddr(p); a != "" {
 		b.WriteString("Address = " + a + "\n")
 	}
@@ -134,17 +183,18 @@ func awgConfig(e model.Endpoint) string {
 		}
 	}
 	b.WriteString("\n[Peer]\n")
-	b.WriteString("PublicKey = " + confLine(str(p, "peer_public_key")) + "\n")
-	if psk := confLine(str(p, "pre_shared_key")); psk != "" {
+	b.WriteString("PublicKey = " + confLine(normalizeWGKey(str(p, "peer_public_key"))) + "\n")
+	if psk := confLine(normalizeWGKey(str(p, "pre_shared_key"))); psk != "" {
 		b.WriteString("PresharedKey = " + psk + "\n")
 	}
 	b.WriteString("Endpoint = " + e.Server + ":" + strconv.Itoa(e.Port) + "\n")
 	b.WriteString("AllowedIPs = 0.0.0.0/0\n")
-	// PersistentKeepalive survives awgStrip (it is a peer cryptokey-routing field
-	// `awg setconf` honors) and keeps an idle tunnel's NAT mapping from expiring.
-	if ka := keepaliveStr(e); ka != "" {
-		b.WriteString("PersistentKeepalive = " + ka + "\n")
-	}
+	// PersistentKeepalive survives awgStrip (it is a peer cryptokey-routing field `awg setconf`
+	// honors) and keeps an idle tunnel's NAT mapping from expiring. This .conf (fed to setconf) is
+	// keepalive's live consumer, so awgKeepalive applies a 20s default when the config omits one (L4)
+	// — without it an idle AmneziaWG tunnel silently drops behind NAT until new traffic forces a
+	// re-handshake. The importer/model stays faithful (unset); an explicit value still wins.
+	b.WriteString("PersistentKeepalive = " + awgKeepalive(e) + "\n")
 	return b.String()
 }
 
@@ -390,10 +440,13 @@ func (m *Manager) awgUp(e model.Endpoint, cfgText string) (string, error) {
 	// MTU is stripped from the setconf input (awg setconf rejects it) but is a real
 	// ip-layer setting; apply it here like the address, or the tunnel uses the kernel
 	// default and over a constrained path large packets fragment/blackhole.
-	if mtu := mtuStr(e); mtu != "" {
-		if out, err := exec.Command(ipBin, "link", "set", iface, "mtu", mtu).CombinedOutput(); err != nil {
-			log.Printf("wakeroute: awg %s: set mtu %s failed: %v: %s", iface, mtu, err, strings.TrimSpace(string(out)))
-		}
+	// MTU is stripped from the setconf input (awg setconf rejects it) but is a real ip-layer
+	// setting; apply it here (QW2). awgMTU returns a safe 1280 floor when the config omits one
+	// so the tunnel never falls back to the kernel 1500 (which fragments/blackholes over the
+	// AmneziaWG encap+junk overhead); an explicit MTU still wins.
+	mtu := awgMTU(e)
+	if out, err := exec.Command(ipBin, "link", "set", iface, "mtu", mtu).CombinedOutput(); err != nil {
+		log.Printf("wakeroute: awg %s: set mtu %s failed: %v: %s", iface, mtu, err, strings.TrimSpace(string(out)))
 	}
 	if out, err := exec.Command(ipBin, "link", "set", iface, "up").CombinedOutput(); err != nil {
 		_ = exec.Command(ipBin, "link", "del", iface).Run()

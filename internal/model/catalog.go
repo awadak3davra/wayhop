@@ -52,6 +52,7 @@ func RoutingPresets() []RoutingPreset {
 		srs("svc-discord", "Discord", "https://github.com/itdoginfo/allow-domains/releases/latest/download/discord.srs", "domain", service, "Discord domains.", "proxy"),
 		srs("svc-discord-voice", "Discord voice IPs", "https://github.com/legiz-ru/sb-rule-sets/raw/main/discord-voice-ip-list.srs", "ip", service, "Discord voice server IPs.", "proxy"),
 		srs("svc-telegram", "Telegram", "https://github.com/itdoginfo/allow-domains/releases/latest/download/telegram.srs", "domain", service, "Telegram domains.", "proxy"),
+		srs("svc-telegram-calls", "Telegram calls (voice IPs)", "https://raw.githubusercontent.com/vernette/rulesets/master/srs/telegram-voice-chats.srs", "ip", service, "Telegram voice/call server IPs — calls use raw UDP IPs the Telegram domain list misses, so add this too to keep calls on the tunnel.", "proxy"),
 		srs("svc-youtube", "YouTube", "https://github.com/itdoginfo/allow-domains/releases/latest/download/youtube.srs", "domain", service, "YouTube domains.", "proxy"),
 		srs("svc-meta", "Meta (IG/FB/WA)", "https://github.com/itdoginfo/allow-domains/releases/latest/download/meta.srs", "domain", service, "Instagram / Facebook / WhatsApp.", "proxy"),
 		srs("svc-twitter", "Twitter / X", "https://github.com/itdoginfo/allow-domains/releases/latest/download/twitter.srs", "domain", service, "Twitter / X domains.", "proxy"),

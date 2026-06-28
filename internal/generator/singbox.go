@@ -70,11 +70,16 @@ func kernelEgress(p *model.Profile, tag string) bool {
 // verbatim; a domain/geo matcher (pbr ignores it → over-routes the whole IP set) or a
 // port matcher (pbr has no port concept) would make pbr's routing diverge from sing-
 // box's AND semantics, so such a rule is KEPT in sing-box (and its kernel outbound
-// preserved). The caller checks the outbound is kernel-class via kernelEgress.
+// preserved). The caller checks the outbound is kernel-class via kernelEgress. A rule
+// carrying ANY source matcher is likewise KEPT in sing-box — pbr has no source concept
+// until taught one (Phase C), and a source rule's semantics differ from a pure kernel
+// zone — so source rules are never dropped to the kernel plane by this predicate.
 func ipOnlyKernelRule(r *model.Rule) bool {
 	return len(r.IPCIDR) > 0 &&
 		len(r.Domain) == 0 && len(r.DomainSuffix) == 0 &&
-		len(r.GeoSite) == 0 && len(r.GeoIP) == 0 && len(r.Port) == 0
+		len(r.GeoSite) == 0 && len(r.GeoIP) == 0 && len(r.Port) == 0 &&
+		len(r.SourceIPCIDR) == 0 && len(r.SourceMAC) == 0 &&
+		len(r.SourceIface) == 0 && len(r.SourcePort) == 0
 }
 
 // hybridReachable returns the set of outbound tags reachable from the route references
@@ -99,6 +104,9 @@ func hybridReachable(p *model.Profile) map[string]bool {
 	}
 	for i := range p.Rules {
 		r := &p.Rules[i]
+		if r.Disabled {
+			continue // mirrors routeFrom: a disabled rule is never emitted, references nothing
+		}
 		// A non-default pure-IP rule pointed at a kernel egress is dropped from sing-box
 		// (pbr routes it); its outbound is therefore not referenced by it. Every other
 		// rule — including a default (its outbound becomes route.final) — keeps its ref.
@@ -275,6 +283,7 @@ func Generate(p *model.Profile, opts Options) (*Result, error) {
 		outbounds = append(outbounds, ob)
 	}
 
+	groupsEmitted := false
 	for i := range p.Groups {
 		g := &p.Groups[i]
 		// Hybrid: a kernel-bearing group is routed by pbr (kernel primary — pbr picks
@@ -287,6 +296,7 @@ func Generate(p *model.Profile, opts Options) (*Result, error) {
 			continue
 		}
 		outbounds = append(outbounds, groupOutbound(g))
+		groupsEmitted = true
 	}
 
 	res.Config["outbounds"] = outbounds
@@ -377,9 +387,15 @@ func Generate(p *model.Profile, opts Options) (*Result, error) {
 	if opts.ClashAddr != "" {
 		exp["clash_api"] = map[string]any{"external_controller": opts.ClashAddr, "secret": opts.ClashSecret}
 	}
-	// cache_file lets the remote rule-sets survive reboots (so 10-40 lists don't
-	// re-download every boot) and auto-refresh on their update_interval.
-	if len(sets) > 0 {
+	// cache_file persists sing-box state across reboots: remote rule-sets (so 10-40 lists don't
+	// re-download every boot, auto-refreshing on their update_interval) AND the chosen member of each
+	// selector/urltest group — so a manual exit pick (or the last-good failover choice) survives an
+	// Apply/reboot instead of snapping back to the first member. Modern sing-box persists the
+	// selection automatically whenever the cache is enabled; the old `store_selected` flag was
+	// removed and is REJECTED by 1.12.x ("unknown field"), which would take ALL routing down on
+	// apply — so it must NOT be emitted (verified on-device). Enabled when there are rule-sets OR
+	// groups.
+	if len(sets) > 0 || groupsEmitted {
 		cf := map[string]any{"enabled": true}
 		if opts.CacheFile != "" {
 			cf["path"] = opts.CacheFile
@@ -566,8 +582,16 @@ func groupOutbound(g *model.Group) map[string]any {
 			if g.Test.URL != "" {
 				url = g.Test.URL
 			}
-			if g.Test.Interval > 0 {
-				interval = fmt.Sprintf("%ds", g.Test.Interval)
+			if iv := g.Test.Interval; iv > 0 {
+				// Floor the urltest interval: sub-5s probing re-handshakes the test URL
+				// through EVERY member that often — a CPU/socket/log storm on a weak router.
+				// A pathological value can arrive via the API, a hand-edited profile, or a
+				// subscription, so bound it here (mirrors the WG-MTU clamp). The 60s default
+				// and any deliberate >=5s choice are untouched.
+				if iv < 5 {
+					iv = 5
+				}
+				interval = fmt.Sprintf("%ds", iv)
 			}
 			if g.Test.Tolerance > 0 {
 				tol = g.Test.Tolerance
@@ -576,6 +600,14 @@ func groupOutbound(g *model.Group) map[string]any {
 		ob["url"], ob["interval"], ob["tolerance"] = url, interval, tol
 	default:
 		ob["type"] = "selector"
+	}
+	if g.InterruptOnSwitch {
+		// Drop in-flight connections when this group switches members, so a failover (or a manual
+		// selector change) actually moves existing connections off the old/dead exit onto the new
+		// one rather than leaving them pinned to whatever was selected when they opened. sing-box
+		// honors this on both urltest and selector outbounds; default-off elsewhere keeps the
+		// long-lived-transfer-survives-a-switch behavior.
+		ob["interrupt_exist_connections"] = true
 	}
 	return ob
 }
@@ -716,6 +748,12 @@ func outboundFor(e *model.Endpoint) (map[string]any, error) {
 		}
 	case model.ProtoTrojan:
 		ob["type"] = "trojan"
+		ob["password"] = str(e.Params, "password")
+	case model.ProtoAnyTLS:
+		// AnyTLS (sing-box 1.12+): a TLS-session-multiplexing anti-traffic-analysis protocol. Like
+		// Trojan it is just password + TLS (the tls block comes from tlsCapable below); the optional
+		// session-pool knobs (idle_session_*/min_idle_session) keep their sing-box defaults.
+		ob["type"] = "anytls"
 		ob["password"] = str(e.Params, "password")
 	case model.ProtoShadowsocks:
 		ob["type"] = "shadowsocks"
@@ -942,6 +980,26 @@ func validWGKey(s string) bool {
 	return false
 }
 
+// normalizeWGKey re-encodes a WireGuard key (any base64 variant validWGKey accepts)
+// as standard base64 WITH padding — the only form sing-box's WireGuard key decoder
+// accepts (it rejects url-safe `-`/`_` AND unpadded keys: "decode private/public key:
+// illegal base64 data"). validWGKey deliberately accepts std/raw/url so a link-imported
+// (padded) and a .conf (sometimes raw/url-safe) key both validate, but emitting either
+// non-std form verbatim fatally fails the whole shared config on apply — so canonicalize
+// here. A string that does not decode to 32 bytes (e.g. an unvalidated optional
+// pre_shared_key) is returned unchanged.
+func normalizeWGKey(s string) string {
+	for _, enc := range []*base64.Encoding{
+		base64.StdEncoding, base64.RawStdEncoding,
+		base64.URLEncoding, base64.RawURLEncoding,
+	} {
+		if b, err := enc.DecodeString(s); err == nil && len(b) == 32 {
+			return base64.StdEncoding.EncodeToString(b)
+		}
+	}
+	return s
+}
+
 // endpointFor renders a native WireGuard endpoint in sing-box's top-level
 // `endpoints` schema (1.11+), the replacement for the removed `wireguard`
 // outbound. The endpoint carries the interface address + private key; the single
@@ -954,9 +1012,12 @@ func validWGKey(s string) bool {
 //
 // Returns an error if the private key or the peer public key is not valid
 // WireGuard base64 (32-byte key) — sing-box fatals on "decode private key" for
-// an invalid key, blocking the entire apply for every other endpoint too. Callers
-// skip the offending endpoint (drop-don't-brick) rather than letting one bad key
-// take down the whole config.
+// an invalid key, which would block the whole config. Generate propagates this
+// error, so handleApply aborts the apply (HTTP error, the offending endpoint
+// named) with the live config left untouched by the apply-gate; the user corrects
+// that endpoint. NB: this is fail-fast at the endpoint level, not endpoint-level
+// drop-don't-brick — a bad peer WITHIN a multi-[Peer] config IS dropped (wgPeers),
+// but one bad endpoint fails the apply rather than silently vanishing from it.
 func endpointFor(e *model.Endpoint) (map[string]any, error) {
 	privKey := str(e.Params, "private_key")
 	if !validWGKey(privKey) {
@@ -969,11 +1030,11 @@ func endpointFor(e *model.Endpoint) (map[string]any, error) {
 	peer := map[string]any{
 		"address":     e.Server,
 		"port":        e.Port,
-		"public_key":  peerPubKey,
+		"public_key":  normalizeWGKey(peerPubKey),
 		"allowed_ips": []string{"0.0.0.0/0", "::/0"},
 	}
 	if psk := str(e.Params, "pre_shared_key"); psk != "" {
-		peer["pre_shared_key"] = psk
+		peer["pre_shared_key"] = normalizeWGKey(psk)
 	}
 	// `reserved` (the 3 WARP reserved bytes) is a documented param; pass it
 	// through so a WARP-style peer isn't silently stripped of it. sing-box
@@ -1003,7 +1064,7 @@ func endpointFor(e *model.Endpoint) (map[string]any, error) {
 	ep := map[string]any{
 		"type":        "wireguard",
 		"tag":         e.ID,
-		"private_key": privKey,
+		"private_key": normalizeWGKey(privKey),
 		"peers":       peerEntries,
 	}
 	// The endpoint interface address (was `local_address` on the outbound).
@@ -1067,7 +1128,7 @@ func wgPeers(params map[string]any) []map[string]any {
 		peer := map[string]any{
 			"address":     addr,
 			"port":        intp(p, "port"),
-			"public_key":  pubKey,
+			"public_key":  normalizeWGKey(pubKey),
 			"allowed_ips": []string{"0.0.0.0/0", "::/0"},
 		}
 		// Honor a per-peer AllowedIPs when the .conf scoped one (mesh peers usually
@@ -1076,7 +1137,7 @@ func wgPeers(params map[string]any) []map[string]any {
 			peer["allowed_ips"] = aips
 		}
 		if psk := str(p, "pre_shared_key"); psk != "" {
-			peer["pre_shared_key"] = psk
+			peer["pre_shared_key"] = normalizeWGKey(psk)
 		}
 		if ka := intp(p, "persistent_keepalive"); ka > 0 {
 			peer["persistent_keepalive_interval"] = ka
@@ -1142,7 +1203,7 @@ func transportCapable(p model.Protocol) bool {
 func tlsCapable(p model.Protocol) bool {
 	switch p {
 	case model.ProtoVLESS, model.ProtoVMess, model.ProtoTrojan,
-		model.ProtoHysteria2, model.ProtoTUIC, model.ProtoHTTP:
+		model.ProtoHysteria2, model.ProtoTUIC, model.ProtoHTTP, model.ProtoAnyTLS:
 		return true
 	default:
 		return false
@@ -1287,6 +1348,18 @@ func tlsJSON(t *model.TLS) map[string]any {
 		}
 		out["reality"] = r
 	}
+	// TLS handshake fragmentation (anti-DPI): split the ClientHello so a plaintext SNI-matching
+	// firewall can't fingerprint it (sing-box 1.12+, client-only). Skip when a Reality block was
+	// emitted — Reality has its own evasion and fragmenting its ClientHello disturbs the fingerprint
+	// mimicry. Accepted (and harmless) on QUIC TLS too, verified on-device (1.12.17).
+	if _, isReality := out["reality"]; !isReality {
+		if t.Fragment {
+			out["fragment"] = true
+		}
+		if t.RecordFragment {
+			out["record_fragment"] = true
+		}
+	}
 	return out
 }
 
@@ -1356,6 +1429,9 @@ func routeFrom(p *model.Profile, hybrid bool) (out map[string]any, geoSets []map
 	final := model.OutboundDirect
 	for i := range p.Rules {
 		r := &p.Rules[i]
+		if r.Disabled {
+			continue // an inert no-op rule — never emitted on any plane
+		}
 		if r.Default {
 			// `final` must be a real outbound in sing-box >=1.12; a default that
 			// targets block becomes a terminal catch-all reject rule instead. A kernel
@@ -1384,6 +1460,14 @@ func routeFrom(p *model.Profile, hybrid bool) (out map[string]any, geoSets []map
 		// route's rule_set by Generate. A rule with only domain/ip/port produces no
 		// geoSets, so its output is unchanged.
 		gs, gi := geoRuleSets(r, &geoSets, seen)
+		// A rule whose only matchers are kernel-only (source_mac / source_iface) has no
+		// sing-box expression: ruleMatch is empty and there are no geo sets. Emitting it
+		// would be a condition-less match-all that shadows every later rule and the final —
+		// a routing leak. Skip it on the sing-box plane (the kernel plane enforces it in
+		// fast/hybrid; in pure tun/mixed a kernel-only source rule simply cannot apply). §3.7
+		if len(rule) == 0 && len(gs) == 0 && len(gi) == 0 {
+			continue
+		}
 		switch {
 		case len(gs) > 0 && len(gi) > 0:
 			// A rule with BOTH geosite AND geoip: inline these were different field
@@ -1465,6 +1549,12 @@ func ruleMatch(r *model.Rule) map[string]any {
 	if len(r.Port) > 0 {
 		rule["port"] = r.Port
 	}
+	// Source matchers (sing-box plane). source_mac / source_iface are KERNEL-ONLY (no
+	// sing-box matcher pre-1.14) — the pbr plane emits those, never here.
+	addIf(rule, "source_ip_cidr", r.SourceIPCIDR)
+	if len(r.SourcePort) > 0 {
+		rule["source_port"] = r.SourcePort
+	}
 	return rule
 }
 
@@ -1493,13 +1583,6 @@ func str(m map[string]any, k string) string {
 		}
 	}
 	return ""
-}
-
-func strDefault(m map[string]any, k, def string) string {
-	if s := str(m, k); s != "" {
-		return s
-	}
-	return def
 }
 
 func intp(m map[string]any, k string) int {
