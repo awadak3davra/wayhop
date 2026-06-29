@@ -3,7 +3,7 @@ name: ci
 # Comprehensive per-element quality gates. Complements build.yml (which runs the
 # unit tests, cross-compiles the 5 router arches, and publishes releases). Here we
 # add the checks build.yml lacks: format/vet, fuzzing, the real sing-box config
-# validation for every protocol, source-builds of the engine binaries WakeRoute
+# validation for every protocol, source-builds of the engine binaries Velinx
 # orchestrates (so a broken/upgraded olcRTC or amneziawg-go is caught in CI), and
 # informational static analysis (golangci-lint / govulncheck / shellcheck).
 on:
@@ -78,7 +78,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck
           shellcheck packaging/*.sh packaging/openwrt/*.sh \
-                     packaging/S99wakeroute packaging/openwrt/wakeroute.init
+                     packaging/S99velinx packaging/openwrt/velinx.init
 
   # --- validate EVERY protocol against the real sing-box core, on BOTH the
   # deployed 1.12.x line AND 1.13.x (which REMOVED the legacy wireguard outbound).
@@ -91,7 +91,7 @@ jobs:
       fail-fast: false
       matrix:
         # 1.12.17 = the version on the AX3000T today; 1.13.13 = the line that
-        # removed the wireguard outbound. Bump deliberately when WakeRoute moves.
+        # removed the wireguard outbound. Bump deliberately when Velinx moves.
         singbox: ['1.12.17', '1.13.13']
     steps:
       - uses: actions/checkout@v6
@@ -112,7 +112,7 @@ jobs:
         run: go test -run 'TestAllProtocolsGenerate|TestGeneratorTransportMatrix|TestClashSubscriptionGenerate|TestWireGuardConfGenerate|TestSourceRuleSingBoxCheck' -count=1 ./internal/generator/
 
   # --- validate the clash subscription EXPORT against the real mihomo (clash-meta) client ---
-  # The export was previously only round-trip tested (re-imported into WakeRoute); this runs
+  # The export was previously only round-trip tested (re-imported into Velinx); this runs
   # `mihomo -t` on a generated subscription (incl. the failover proxy-groups) so a field a real
   # clash client rejects is caught before users are. mihomo is pinned; bump deliberately.
   clash-export-check:
@@ -132,7 +132,7 @@ jobs:
       - name: mihomo -t on the exported clash subscription
         run: go test -run TestClashExportMihomo -count=1 ./internal/exporter/
 
-  # --- source-build the engine binaries WakeRoute orchestrates ---
+  # --- source-build the engine binaries Velinx orchestrates ---
   # Heavy (olcRTC pulls a large WebRTC stack and needs Go 1.26), so it is skipped
   # on PRs to keep them fast and runs on push / the weekly schedule / manual.
   engines:

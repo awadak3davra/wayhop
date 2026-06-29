@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/importer"
-	"wakeroute/internal/model"
+	"velinx/internal/importer"
+	"velinx/internal/model"
 )
 
 // TestAnyTLSRoundTrip: an AnyTLS endpoint exports to an anytls:// link that re-imports to the same

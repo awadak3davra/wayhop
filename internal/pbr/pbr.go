@@ -15,8 +15,8 @@ import (
 	"sort"
 	"strings"
 
-	"wakeroute/internal/model"
-	"wakeroute/internal/util"
+	"velinx/internal/model"
+	"velinx/internal/util"
 )
 
 // EgressKind classifies a kernel routing destination.
@@ -100,7 +100,7 @@ type Plan struct {
 
 // Options tune the marking/table scheme (a conventional fwmark/table layout).
 type Options struct {
-	Table     string // default "wakeroute_pbr"
+	Table     string // default "velinx_pbr"
 	MarkMask  uint32 // default 0x00ff0000
 	MarkStep  uint32 // default 0x00010000 (egress N gets N*MarkStep)
 	TableBase int    // default 151 (first non-main routing table)
@@ -122,7 +122,7 @@ type Options struct {
 
 func (o *Options) withDefaults() {
 	if o.Table == "" {
-		o.Table = "wakeroute_pbr"
+		o.Table = "velinx_pbr"
 	}
 	if o.MarkMask == 0 {
 		o.MarkMask = 0x00ff0000

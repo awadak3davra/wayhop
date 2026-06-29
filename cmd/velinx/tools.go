@@ -5,20 +5,20 @@ import (
 	"fmt"
 	"os"
 
-	"wakeroute/internal/generator"
-	"wakeroute/internal/importer"
-	"wakeroute/internal/model"
+	"velinx/internal/generator"
+	"velinx/internal/importer"
+	"velinx/internal/model"
 )
 
 // runTool handles non-daemon CLI subcommands used for quick testing:
 //
-//	wakeroute import <share-link-or-conf>   # parse a link into the wakeroute model (JSON)
-//	wakeroute gen    <share-link-or-conf>   # parse + wrap in a profile + emit sing-box config
+//	velinx import <share-link-or-conf>   # parse a link into the velinx model (JSON)
+//	velinx gen    <share-link-or-conf>   # parse + wrap in a profile + emit sing-box config
 func runTool(args []string) error {
 	switch args[0] {
 	case "import":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: wakeroute import <share-link-or-conf>")
+			return fmt.Errorf("usage: velinx import <share-link-or-conf>")
 		}
 		e, err := importer.Parse(args[1])
 		if err != nil {
@@ -28,7 +28,7 @@ func runTool(args []string) error {
 
 	case "gen":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: wakeroute gen <share-link-or-conf>")
+			return fmt.Errorf("usage: velinx gen <share-link-or-conf>")
 		}
 		e, err := importer.Parse(args[1])
 		if err != nil {
@@ -49,12 +49,12 @@ func runTool(args []string) error {
 		return printJSON(res.Config)
 
 	case "gen-profile":
-		// wakeroute gen-profile <profile.json> [tun]
+		// velinx gen-profile <profile.json> [tun]
 		// Generate the sing-box config from a FULL profile file (e.g. fetched from
 		// GET /api/profile), optionally in TUN gateway mode — for offline validation
 		// (pipe into `sing-box check`) without touching a running daemon.
 		if len(args) < 2 {
-			return fmt.Errorf("usage: wakeroute gen-profile <profile.json> [tun]")
+			return fmt.Errorf("usage: velinx gen-profile <profile.json> [tun]")
 		}
 		data, err := os.ReadFile(args[1])
 		if err != nil {

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // TestPlanApply drives the full write path against the httptest RCI mock (NOT a real

@@ -12,7 +12,7 @@ import (
 	"os"
 	"sync"
 
-	"wakeroute/internal/atomicfile"
+	"velinx/internal/atomicfile"
 )
 
 // Server is one managed VPN server. No password/key is ever persisted here.
@@ -48,7 +48,7 @@ func Open(path string) (*Store, error) {
 	// still falls through to the parse error below.
 	if errors.Is(err, os.ErrNotExist) || (err == nil && len(bytes.TrimSpace(data)) == 0) {
 		if err == nil {
-			log.Printf("wakeroute: servers %s is empty; recreating empty list", path)
+			log.Printf("velinx: servers %s is empty; recreating empty list", path)
 			if werr := s.saveLocked(s.srv); werr != nil {
 				return nil, fmt.Errorf("rewrite empty servers %s: %w", path, werr)
 			}

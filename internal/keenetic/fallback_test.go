@@ -3,7 +3,7 @@ package keenetic
 import (
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 func TestSingboxFallback(t *testing.T) {

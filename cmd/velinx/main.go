@@ -1,4 +1,4 @@
-// Command wakeroute is the WakeRoute daemon: it serves the web panel and
+// Command velinx is the Velinx daemon: it serves the web panel and
 // supervises the proxy cores (sing-box plus engine plugins).
 package main
 
@@ -15,23 +15,23 @@ import (
 	"syscall"
 	"time"
 
-	"wakeroute/internal/clash"
-	"wakeroute/internal/config"
-	"wakeroute/internal/core"
-	"wakeroute/internal/generator"
-	"wakeroute/internal/health"
-	"wakeroute/internal/platform"
-	"wakeroute/internal/server"
-	"wakeroute/internal/serverstore"
-	"wakeroute/internal/store"
-	"wakeroute/internal/traffic"
-	"wakeroute/internal/version"
-	"wakeroute/web"
+	"velinx/internal/clash"
+	"velinx/internal/config"
+	"velinx/internal/core"
+	"velinx/internal/generator"
+	"velinx/internal/health"
+	"velinx/internal/platform"
+	"velinx/internal/server"
+	"velinx/internal/serverstore"
+	"velinx/internal/store"
+	"velinx/internal/traffic"
+	"velinx/internal/version"
+	"velinx/web"
 )
 
 func main() {
 	var (
-		configPath = flag.String("config", "/opt/etc/wakeroute/config.json", "path to the wakeroute config file")
+		configPath = flag.String("config", "/opt/etc/velinx/config.json", "path to the velinx config file")
 		listen     = flag.String("listen", "", "override the UI listen address (e.g. :8088)")
 		demo       = flag.Bool("demo", false, "synthesize traffic for UI development without sing-box")
 		showVer    = flag.Bool("version", false, "print version and exit")
@@ -39,11 +39,11 @@ func main() {
 	flag.Parse()
 
 	if *showVer {
-		fmt.Printf("wakeroute %s (%s, %s)\n", version.Version, version.Commit, version.Date)
+		fmt.Printf("velinx %s (%s, %s)\n", version.Version, version.Commit, version.Date)
 		return
 	}
 
-	// Non-daemon subcommands: `wakeroute import <link>`, `wakeroute gen <link>`.
+	// Non-daemon subcommands: `velinx import <link>`, `velinx gen <link>`.
 	if args := flag.Args(); len(args) > 0 {
 		if err := runTool(args); err != nil {
 			log.Fatalf("%s: %v", args[0], err)
@@ -137,7 +137,7 @@ func main() {
 
 	srv := server.New(cfg, hub, cl, sb, st, mon, ss, web.FS())
 	go srv.SyncPlugins()                // bring engine plugins (AmneziaWG interfaces, olcRTC) up from boot
-	go srv.AutoUpdateLoop(ctx)          // self-update WakeRoute when Updater.AutoUpdate is on (default off)
+	go srv.AutoUpdateLoop(ctx)          // self-update Velinx when Updater.AutoUpdate is on (default off)
 	go srv.SubscriptionRefreshLoop(ctx) // re-fetch an imported subscription when auto-refresh is opted in (off by default)
 	// Crash-restart supervision for sing-box (+ best-effort engine plugins).
 	wdDone := make(chan struct{})
@@ -149,7 +149,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("wakeroute %s listening on %s (demo=%v)", version.Version, cfg.Listen, cfg.Demo)
+		log.Printf("velinx %s listening on %s (demo=%v)", version.Version, cfg.Listen, cfg.Demo)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("http server: %v", err)
 		}

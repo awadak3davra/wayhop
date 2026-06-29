@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // run_real_test.go exercises the REAL process paths of the plugin Manager

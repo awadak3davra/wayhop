@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"wakeroute/internal/model"
-	"wakeroute/internal/pbr"
-	"wakeroute/internal/util"
+	"velinx/internal/model"
+	"velinx/internal/pbr"
+	"velinx/internal/util"
 )
 
 // isBlock reports whether a rule outbound names the builtin block target,
@@ -243,7 +243,7 @@ func Generate(p *model.Profile, opts Options) (*Result, error) {
 			continue
 		}
 		if e.Engine == model.EngineExternal {
-			// Route through an existing OS interface WakeRoute does NOT manage
+			// Route through an existing OS interface Velinx does NOT manage
 			// (UCI/netifd owns it) — a direct outbound bound to it. No Plugin entry:
 			// the daemon must not try to bring this interface up or tear it down.
 			// Hybrid: same as AmneziaWG above, but there's no Plugin (netifd owns the

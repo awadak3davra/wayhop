@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/config"
+	"velinx/internal/config"
 )
 
 // cfgFileServer builds a *Server whose config is backed by a fresh file (so

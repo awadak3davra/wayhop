@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 func feedServer(t *testing.T, body string) *httptest.Server {

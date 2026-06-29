@@ -110,7 +110,7 @@ func TestHardenScripts(t *testing.T) {
 
 	// Round-trip the printed key markers.
 	priv := "PRIVATE-KEY-BODY"
-	out := "log line\nWR_SSH_PUB=ssh-ed25519 AAAAC3Nz wakeroute\nWR_SSH_KEY_B64=" + base64.StdEncoding.EncodeToString([]byte(priv)) + "\n"
+	out := "log line\nWR_SSH_PUB=ssh-ed25519 AAAAC3Nz velinx\nWR_SSH_KEY_B64=" + base64.StdEncoding.EncodeToString([]byte(priv)) + "\n"
 	gotPriv, gotPub := ExtractSSHKey(out)
 	if gotPriv != priv {
 		t.Errorf("priv = %q, want %q", gotPriv, priv)

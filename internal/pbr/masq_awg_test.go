@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/model"
-	"wakeroute/internal/util"
+	"velinx/internal/model"
+	"velinx/internal/util"
 )
 
 // TestCompile_AWGMasquerade guards the AmneziaWG-egress blackhole fix: a kernel-routed

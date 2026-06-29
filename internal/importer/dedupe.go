@@ -5,12 +5,12 @@ import (
 	"strconv"
 	"strings"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // ContentKey is a normalized identity signature for an endpoint: two endpoints with
 // the same key describe the same upstream connection (same protocol/engine, host,
-// port, and identifying credential) regardless of their WakeRoute ID or display
+// port, and identifying credential) regardless of their Velinx ID or display
 // name. Used to skip content-duplicate imports — re-fetching a subscription with
 // fresh IDs would otherwise pile up identical endpoints.
 func ContentKey(e model.Endpoint) string {

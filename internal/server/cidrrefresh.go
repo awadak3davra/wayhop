@@ -7,8 +7,8 @@ import (
 	"sort"
 	"time"
 
-	"wakeroute/internal/cidrfeed"
-	"wakeroute/internal/model"
+	"velinx/internal/cidrfeed"
+	"velinx/internal/model"
 )
 
 // handleRoutingRefresh (POST /api/routing/refresh) re-fetches every routing list that has a

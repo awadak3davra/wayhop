@@ -3,7 +3,7 @@ package generator
 import (
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 func gen_tunInbound(res *Result) map[string]any {

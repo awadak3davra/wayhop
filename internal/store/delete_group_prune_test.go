@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // TestDeleteGroupPrunesNestedMembers: deleting a group must remove its id from

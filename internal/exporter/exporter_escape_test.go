@@ -3,8 +3,8 @@ package exporter
 import (
 	"testing"
 
-	"wakeroute/internal/importer"
-	"wakeroute/internal/model"
+	"velinx/internal/importer"
+	"velinx/internal/model"
 )
 
 // TestShareLinkEscapesSpecialCredsAndName guards the userinfo + fragment encoding fixes:

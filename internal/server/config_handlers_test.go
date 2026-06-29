@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"wakeroute/internal/config"
+	"velinx/internal/config"
 )
 
 // TestPutConfig_RoundTripsGateway guards the cutover toggle: PUT /api/config must

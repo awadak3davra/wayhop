@@ -3,8 +3,8 @@ package server
 import (
 	"testing"
 
-	"wakeroute/internal/model"
-	"wakeroute/internal/netvpn"
+	"velinx/internal/model"
+	"velinx/internal/netvpn"
 )
 
 // TestEndpointFromDiscovered locks the EngineExternal adoption mapping: an OS-owned

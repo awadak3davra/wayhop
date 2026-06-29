@@ -7,7 +7,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // ParseSubscription parses a subscription blob into endpoints, returning a

@@ -8,13 +8,13 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/config"
-	"wakeroute/internal/core"
-	"wakeroute/internal/health"
-	"wakeroute/internal/model"
-	"wakeroute/internal/store"
-	"wakeroute/internal/traffic"
-	"wakeroute/internal/version"
+	"velinx/internal/config"
+	"velinx/internal/core"
+	"velinx/internal/health"
+	"velinx/internal/model"
+	"velinx/internal/store"
+	"velinx/internal/traffic"
+	"velinx/internal/version"
 )
 
 // metrics_server builds a *Server with a store + hub, mirroring the construction
@@ -100,16 +100,16 @@ func TestMetrics_StaticAndPerEndpoint(t *testing.T) {
 
 	// Static metrics with HELP/TYPE preamble.
 	for _, want := range []string{
-		"# HELP wakeroute_build_info",
-		"# TYPE wakeroute_build_info gauge",
-		`wakeroute_build_info{version="0.2.0-test"} 1`,
-		"# HELP wakeroute_up",
-		"wakeroute_up 1",
-		"# TYPE wakeroute_singbox_running gauge",
-		"wakeroute_singbox_running 0",
-		"wakeroute_singbox_available 0",
-		"wakeroute_traffic_rx_bytes_per_second 8192",
-		"wakeroute_traffic_tx_bytes_per_second 4096",
+		"# HELP velinx_build_info",
+		"# TYPE velinx_build_info gauge",
+		`velinx_build_info{version="0.2.0-test"} 1`,
+		"# HELP velinx_up",
+		"velinx_up 1",
+		"# TYPE velinx_singbox_running gauge",
+		"velinx_singbox_running 0",
+		"velinx_singbox_available 0",
+		"velinx_traffic_rx_bytes_per_second 8192",
+		"velinx_traffic_tx_bytes_per_second 4096",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing %q in:\n%s", want, body)
@@ -117,7 +117,7 @@ func TestMetrics_StaticAndPerEndpoint(t *testing.T) {
 	}
 
 	// Per-endpoint series with id/name/protocol labels.
-	if !strings.Contains(body, `wakeroute_endpoint_up{id="e1",name="Reality",protocol="vless"} `) {
+	if !strings.Contains(body, `velinx_endpoint_up{id="e1",name="Reality",protocol="vless"} `) {
 		t.Errorf("missing e1 endpoint_up series in:\n%s", body)
 	}
 
@@ -165,11 +165,11 @@ func TestMetrics_NilMonitorAndHubStillServeStatic(t *testing.T) {
 	}
 	body := w.Body.String()
 	for _, want := range []string{
-		`wakeroute_build_info{version="0.2.0-nil"} 1`,
-		"wakeroute_up 1",
-		"wakeroute_singbox_running 0",
-		"wakeroute_traffic_rx_bytes_per_second 0",
-		"wakeroute_traffic_tx_bytes_per_second 0",
+		`velinx_build_info{version="0.2.0-nil"} 1`,
+		"velinx_up 1",
+		"velinx_singbox_running 0",
+		"velinx_traffic_rx_bytes_per_second 0",
+		"velinx_traffic_tx_bytes_per_second 0",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing %q in:\n%s", want, body)

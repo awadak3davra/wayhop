@@ -8,8 +8,8 @@ import (
 	"os"
 	"time"
 
-	"wakeroute/internal/updater"
-	"wakeroute/internal/version"
+	"velinx/internal/updater"
+	"velinx/internal/version"
 )
 
 // handleUpdaterEngines lists managed engines with their installed status (no network).
@@ -17,10 +17,11 @@ func (s *Server) handleUpdaterEngines(w http.ResponseWriter, r *http.Request) {
 	type item struct {
 		updater.Engine
 		Installed updater.Installed `json:"installed"`
+		LastError string            `json:"last_error,omitempty"`
 	}
 	out := make([]item, 0, len(updater.Engines))
 	for _, e := range updater.Engines {
-		out = append(out, item{Engine: e, Installed: s.updater.Installed(e)})
+		out = append(out, item{Engine: e, Installed: s.updater.Installed(e), LastError: s.updErr(e.ID)})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"arch":    s.updater.Arch,
@@ -92,9 +93,11 @@ func (s *Server) handleUpdaterInstall(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	tag, err := s.updater.Install(ctx, *e, body.Version)
 	if err != nil {
+		s.setUpdErr(e.ID, err.Error())
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	s.setUpdErr(e.ID, "") // a successful install clears any prior failure reason
 	// If we updated the running primary core, reload it — UNDER applyMu so it can't
 	// interleave with handleApply's / the fail-safe's Stop+Start+Reload. Reload drops the
 	// core's lock between Stop and Start, so two concurrent reloads could each spawn a
@@ -115,9 +118,51 @@ func (s *Server) handleUpdaterInstall(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"installed": tag, "engine": e.ID, "reloaded": reloaded})
 }
 
-// --- WakeRoute self-update ---------------------------------------------------
+// handleUpdaterUninstall deletes an installed engine binary from BinDir. It refuses to remove
+// the running primary core (sing-box) out from under the daemon — stop the VPN first.
+func (s *Server) handleUpdaterUninstall(w http.ResponseWriter, r *http.Request) {
+	e := updater.EngineByID(r.PathValue("id"))
+	if e == nil {
+		writeErr(w, http.StatusNotFound, "unknown engine")
+		return
+	}
+	if e.ID == "sing-box" && s.singbox != nil && s.singbox.Running() {
+		writeErr(w, http.StatusConflict, "sing-box is running; stop the VPN before removing the core")
+		return
+	}
+	if err := s.updater.Uninstall(*e); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.setUpdErr(e.ID, "") // a removed engine carries no stale failure reason
+	writeJSON(w, http.StatusOK, map[string]any{"removed": e.ID})
+}
 
-// handleSelfStatus reports WakeRoute's own version and whether a newer release exists.
+// setUpdErr records (msg != "") or clears (msg == "") an engine's last install-failure reason
+// so the Updater UI can show WHY it failed even after the toast fades or the page reloads.
+func (s *Server) setUpdErr(id, msg string) {
+	s.updErrMu.Lock()
+	defer s.updErrMu.Unlock()
+	if s.updErrs == nil {
+		s.updErrs = map[string]string{}
+	}
+	if msg == "" {
+		delete(s.updErrs, id)
+	} else {
+		s.updErrs[id] = msg
+	}
+}
+
+// updErr returns an engine's last recorded install-failure reason ("" if none).
+func (s *Server) updErr(id string) string {
+	s.updErrMu.Lock()
+	defer s.updErrMu.Unlock()
+	return s.updErrs[id]
+}
+
+// --- Velinx self-update ---------------------------------------------------
+
+// handleSelfStatus reports Velinx's own version and whether a newer release exists.
 func (s *Server) handleSelfStatus(w http.ResponseWriter, r *http.Request) {
 	c := s.config()
 	repo := c.Updater.SelfRepo
@@ -142,7 +187,7 @@ func (s *Server) handleSelfStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handleSelfUpdate downloads + swaps the WakeRoute binary for the latest (or a given)
+// handleSelfUpdate downloads + swaps the Velinx binary for the latest (or a given)
 // release, then restarts the service so the new binary takes over. The swap is guarded
 // by a sanity-run of the new binary (see updater.SelfUpdate); the old binary is kept at
 // <exe>.bak for manual rollback.
@@ -190,7 +235,7 @@ func (s *Server) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"installed": installed, "restarting": true})
 }
 
-// handleSelfAuto toggles background auto-update of WakeRoute itself.
+// handleSelfAuto toggles background auto-update of Velinx itself.
 func (s *Server) handleSelfAuto(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Enabled bool `json:"enabled"`
@@ -210,7 +255,7 @@ func (s *Server) handleSelfAuto(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"auto_update": body.Enabled})
 }
 
-// AutoUpdateLoop periodically (daily) checks for a newer WakeRoute release and, when
+// AutoUpdateLoop periodically (daily) checks for a newer Velinx release and, when
 // Updater.AutoUpdate is enabled, installs it and restarts. Off by default; the first
 // check is delayed so a crash-looping bad release can't hammer updates on boot.
 func (s *Server) AutoUpdateLoop(ctx context.Context) {
@@ -248,7 +293,7 @@ func (s *Server) AutoUpdateLoop(ctx context.Context) {
 			log.Printf("auto-update: %v", err)
 			continue
 		}
-		log.Printf("auto-update: installed wakeroute %s, restarting", installed)
+		log.Printf("auto-update: installed velinx %s, restarting", installed)
 		if cmd := restartCommand(); cmd != nil {
 			_ = cmd.Start()
 		}

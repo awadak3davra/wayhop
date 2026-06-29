@@ -12,9 +12,9 @@ import (
 	"strconv"
 	"strings"
 
-	"wakeroute/internal/model"
-	"wakeroute/internal/plugin"
-	"wakeroute/internal/util"
+	"velinx/internal/model"
+	"velinx/internal/plugin"
+	"velinx/internal/util"
 )
 
 // Result is an exported endpoint.

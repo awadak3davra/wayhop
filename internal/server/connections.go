@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	"wakeroute/internal/clash"
+	"velinx/internal/clash"
 )
 
 // handleConnections exposes the live Clash /connections list for the Dashboard's

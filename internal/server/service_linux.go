@@ -8,7 +8,7 @@ import (
 	"syscall"
 )
 
-// restartCommand builds the detached command that restarts the wakeroute service
+// restartCommand builds the detached command that restarts the velinx service
 // through whichever init system installed it. It returns nil if neither init
 // script is present (then the handler reports the feature unavailable).
 //
@@ -18,10 +18,10 @@ import (
 func restartCommand() *exec.Cmd {
 	var script string
 	switch {
-	case isFile("/etc/init.d/wakeroute"): // OpenWrt procd
-		script = "/etc/init.d/wakeroute restart"
-	case isFile("/opt/etc/init.d/S99wakeroute"): // Entware busybox sysvinit
-		script = "/opt/etc/init.d/S99wakeroute restart"
+	case isFile("/etc/init.d/velinx"): // OpenWrt procd
+		script = "/etc/init.d/velinx restart"
+	case isFile("/opt/etc/init.d/S99velinx"): // Entware busybox sysvinit
+		script = "/opt/etc/init.d/S99velinx restart"
 	default:
 		return nil
 	}

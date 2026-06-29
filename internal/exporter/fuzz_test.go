@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/importer"
-	"wakeroute/internal/model"
+	"velinx/internal/importer"
+	"velinx/internal/model"
 )
 
 // fuzzexporter_protocols is the set of link-form protocols the fuzzer cycles

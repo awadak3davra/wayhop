@@ -153,7 +153,7 @@ func get(ctx context.Context, client *http.Client, url string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "wakeroute")
+	req.Header.Set("User-Agent", "velinx")
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err

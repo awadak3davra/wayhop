@@ -4,7 +4,7 @@ import (
 	"encoding/base64"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // TestTLSFragment: the opt-in TLS-fragmentation flags emit on a plain-TLS outbound, are absent by

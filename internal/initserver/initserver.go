@@ -66,14 +66,14 @@ const (
 )
 
 const scriptHeader = `#!/bin/sh
-# WakeRoute — server provisioning (idempotent). Run as root on Debian/Ubuntu.
+# Velinx — server provisioning (idempotent). Run as root on Debian/Ubuntu.
 set -e
 # Born-secure: set a restrictive umask BEFORE any fragment writes a secret, so every
 # key/cert/config this script creates (WireGuard keys, AmneziaWG keys, sing-box Reality
 # identity, self-signed TLS, client configs) is owner-only from creation — never briefly
 # world-readable in the window between write and a per-file chmod.
 umask 077
-log() { echo "[wakeroute-init] $*"; }
+log() { echo "[velinx-init] $*"; }
 # Guard: WireGuard/AmneziaWG need kernel modules — OpenVZ/LXC containers can't load
 # them, so fail early with a clear message instead of a confusing runtime error.
 VIRT="$(systemd-detect-virt 2>/dev/null || echo unknown)"
@@ -84,7 +84,7 @@ log "public ip: ${PUBLIC_IP:-unknown}, wan iface: ${WANIF:-eth0}, virt: ${VIRT}"
 export DEBIAN_FRONTEND=noninteractive
 # Performance tuning (idempotent): BBR + fair queueing, and larger UDP buffers so
 # QUIC-based protocols aren't receive-starved. Best-effort; failures are non-fatal.
-cat > /etc/sysctl.d/99-wakeroute.conf <<'SYSCTL'
+cat > /etc/sysctl.d/99-velinx.conf <<'SYSCTL'
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 net.core.rmem_max=16777216
@@ -264,7 +264,7 @@ EOF
 systemctl daemon-reload 2>/dev/null || true
 systemctl enable --now sing-box 2>/dev/null || true
 echo "WR_PROTO=vless-reality"
-echo "WR_CLIENT_CONFIG=vless://$UUID@$PUBLIC_IP:443?security=reality&sni=$SNI&fp=chrome&pbk=$PUB&sid=$SID&flow=xtls-rprx-vision&type=tcp#wakeroute-server"
+echo "WR_CLIENT_CONFIG=vless://$UUID@$PUBLIC_IP:443?security=reality&sni=$SNI&fp=chrome&pbk=$PUB&sid=$SID&flow=xtls-rprx-vision&type=tcp#velinx-server"
 `
 
 // scriptSingboxInstall installs sing-box (idempotent) the same way scriptReality
@@ -293,14 +293,14 @@ mkdir -p /etc/sing-box
 
 // scriptSelfSignedTLS generates (once, then reuses) a self-signed certificate for
 // the TLS-bearing sing-box inbounds (VMess-WS-TLS, Trojan, Hysteria2, TUIC). The
-// SNI baked into the cert is wakeroute.local; because it is self-signed the client
+// SNI baked into the cert is velinx.local; because it is self-signed the client
 // share-links emitted below carry insecure=1 (skip-cert-verify), which the importer
 // honours (insecure / allowInsecure / allow_insecure). openssl is installed if
 // absent. The key/cert are persisted so a re-run reuses them (no client churn).
 const scriptSelfSignedTLS = `
 command -v openssl >/dev/null 2>&1 || apt-get install -y openssl >/dev/null 2>&1 || true
 SBD=/etc/sing-box
-WR_TLS_SNI=wakeroute.local
+WR_TLS_SNI=velinx.local
 if [ ! -f "$SBD/wr-tls.crt" ] || [ ! -f "$SBD/wr-tls.key" ]; then
   openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
     -keyout "$SBD/wr-tls.key" -out "$SBD/wr-tls.crt" \
@@ -353,7 +353,7 @@ log "installing sing-box (VMess)..."
 [ -f "$SBD/wr-vmess-uuid" ] || sing-box generate uuid > "$SBD/wr-vmess-uuid"
 chmod 600 "$SBD/wr-vmess-uuid" 2>/dev/null || true
 VMUUID=$(cat "$SBD/wr-vmess-uuid")
-VMPATH=/wakeroute
+VMPATH=/velinx
 mkdir -p /etc/sing-box/conf.d
 cat > /etc/sing-box/conf.d/wr-vmess.json <<EOF
 {"inbounds":[{"type":"vmess","tag":"wr-vmess-in","listen":"::","listen_port":8443,"users":[{"uuid":"$VMUUID","alterId":0}],"transport":{"type":"ws","path":"$VMPATH"},"tls":{"enabled":true,"server_name":"$WR_TLS_SNI","certificate_path":"$SBD/wr-tls.crt","key_path":"$SBD/wr-tls.key"}}],"outbounds":[{"type":"direct","tag":"wr-vmess-direct"}]}
@@ -361,7 +361,7 @@ EOF
 ` + singboxServiceUnit + `
 # vmess client config = base64(json). add/port/id/net/path/tls/sni/allowInsecure
 # are exactly the keys parseVMess reads. allowInsecure=1 because the cert is self-signed.
-VMJSON=$(printf '{"v":"2","ps":"wakeroute-vmess","add":"%s","port":"8443","id":"%s","aid":"0","scy":"auto","net":"ws","type":"none","host":"%s","path":"%s","tls":"tls","sni":"%s","allowInsecure":"1"}' "$PUBLIC_IP" "$VMUUID" "$WR_TLS_SNI" "$VMPATH" "$WR_TLS_SNI")
+VMJSON=$(printf '{"v":"2","ps":"velinx-vmess","add":"%s","port":"8443","id":"%s","aid":"0","scy":"auto","net":"ws","type":"none","host":"%s","path":"%s","tls":"tls","sni":"%s","allowInsecure":"1"}' "$PUBLIC_IP" "$VMUUID" "$WR_TLS_SNI" "$VMPATH" "$WR_TLS_SNI")
 echo "WR_PROTO=vmess"
 echo "WR_CLIENT_CONFIG=vmess://$(printf '%s' "$VMJSON" | base64 -w0 2>/dev/null || printf '%s' "$VMJSON" | base64 | tr -d '\n')"
 `
@@ -385,7 +385,7 @@ EOF
 # insecure=1 (skip-cert-verify) because the cert is self-signed; parseTrojan reads it.
 TJENC=$(printf '%s' "$TJPASS" | sed 's/+/%2B/g;s/\//%2F/g;s/=/%3D/g')
 echo "WR_PROTO=trojan"
-echo "WR_CLIENT_CONFIG=trojan://$TJENC@$PUBLIC_IP:8444?security=tls&sni=$WR_TLS_SNI&insecure=1&type=tcp#wakeroute-trojan"
+echo "WR_CLIENT_CONFIG=trojan://$TJENC@$PUBLIC_IP:8444?security=tls&sni=$WR_TLS_SNI&insecure=1&type=tcp#velinx-trojan"
 `
 
 // scriptShadowsocks provisions a sing-box Shadowsocks inbound (2022-blake3-
@@ -412,7 +412,7 @@ EOF
 # it then base64-decodes method:password (decodeB64 accepts std AND url alphabets).
 SSUI=$(printf '%s:%s' "$SSMETHOD" "$SSPSK" | base64 -w0 2>/dev/null || printf '%s:%s' "$SSMETHOD" "$SSPSK" | base64 | tr -d '\n')
 echo "WR_PROTO=shadowsocks"
-echo "WR_CLIENT_CONFIG=ss://$SSUI@$PUBLIC_IP:8388#wakeroute-ss"
+echo "WR_CLIENT_CONFIG=ss://$SSUI@$PUBLIC_IP:8388#velinx-ss"
 `
 
 // scriptHysteria2 provisions a sing-box Hysteria2 inbound (QUIC + TLS, self-signed) with
@@ -443,7 +443,7 @@ iptables -C INPUT -p udp --dport 8445 -j ACCEPT 2>/dev/null || iptables -I INPUT
 HY2ENC=$(printf '%s' "$HY2PASS" | sed 's/+/%2B/g;s/\//%2F/g;s/=/%3D/g')
 HY2OBFSENC=$(printf '%s' "$HY2OBFS" | sed 's/+/%2B/g;s/\//%2F/g;s/=/%3D/g')
 echo "WR_PROTO=hysteria2"
-echo "WR_CLIENT_CONFIG=hysteria2://$HY2ENC@$PUBLIC_IP:8445?sni=$WR_TLS_SNI&insecure=1&obfs=salamander&obfs-password=$HY2OBFSENC#wakeroute-hy2"
+echo "WR_CLIENT_CONFIG=hysteria2://$HY2ENC@$PUBLIC_IP:8445?sni=$WR_TLS_SNI&insecure=1&obfs=salamander&obfs-password=$HY2OBFSENC#velinx-hy2"
 `
 
 // scriptTUIC provisions a sing-box TUIC v5 inbound (QUIC + TLS, self-signed). A uuid
@@ -469,7 +469,7 @@ iptables -C INPUT -p udp --dport 8446 -j ACCEPT 2>/dev/null || iptables -I INPUT
 # tuic://uuid:<urlencoded-password>@host:port?sni=...&insecure=1&congestion_control=bbr#name (parseTUIC).
 TUENC=$(printf '%s' "$TUPASS" | sed 's/+/%2B/g;s/\//%2F/g;s/=/%3D/g')
 echo "WR_PROTO=tuic"
-echo "WR_CLIENT_CONFIG=tuic://$TUUUID:$TUENC@$PUBLIC_IP:8446?sni=$WR_TLS_SNI&insecure=1&congestion_control=bbr&alpn=h3#wakeroute-tuic"
+echo "WR_CLIENT_CONFIG=tuic://$TUUUID:$TUENC@$PUBLIC_IP:8446?sni=$WR_TLS_SNI&insecure=1&congestion_control=bbr&alpn=h3#velinx-tuic"
 `
 
 // BuildScript assembles the installer for the chosen protocols. publicHost (the
@@ -551,7 +551,7 @@ type Creds struct {
 	User     string
 	Password string
 	Key      string
-	// KnownHostsFile is an optional persistent, WakeRoute-owned known_hosts path. When
+	// KnownHostsFile is an optional persistent, Velinx-owned known_hosts path. When
 	// set, ssh records the host key there (instead of the ambiguous default known_hosts —
 	// which on a router may be non-persistent, re-TOFUing each reboot, or unreadable) so
 	// the pin survives across connects, and Provision can fingerprint the recorded key for
@@ -656,7 +656,7 @@ func Provision(ctx context.Context, c Creds, script string) (output string, ran 
 		c.Port = 22
 	}
 	base := provisionSSHArgs(c)
-	// When pinning to a WakeRoute-owned known_hosts, ensure its directory exists (0700)
+	// When pinning to a Velinx-owned known_hosts, ensure its directory exists (0700)
 	// so ssh can create the file on the first connect. Best-effort: a failure here is not
 	// fatal — ssh will still attempt the connection and simply may not record the key.
 	if c.KnownHostsFile != "" {
@@ -771,14 +771,14 @@ func ExtractTagged(output string) []TaggedConfig {
 }
 
 // OneLiner is the manual command the user can run themselves (creds inline are
-// theirs; wakeroute doesn't keep them).
+// theirs; velinx doesn't keep them).
 func OneLiner(c Creds) string {
 	port := c.Port
 	if port == 0 {
 		port = 22
 	}
 	if c.Key != "" {
-		return fmt.Sprintf("ssh -i <your-key> -p %d %s@%s 'sh -s' < wakeroute-install.sh", port, c.User, c.Host)
+		return fmt.Sprintf("ssh -i <your-key> -p %d %s@%s 'sh -s' < velinx-install.sh", port, c.User, c.Host)
 	}
-	return fmt.Sprintf("ssh -p %d %s@%s 'sh -s' < wakeroute-install.sh   # (or: sshpass -p '<pass>' ssh ...)", port, c.User, c.Host)
+	return fmt.Sprintf("ssh -p %d %s@%s 'sh -s' < velinx-install.sh   # (or: sshpass -p '<pass>' ssh ...)", port, c.User, c.Host)
 }

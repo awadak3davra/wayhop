@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 func TestParseSingboxTags(t *testing.T) {

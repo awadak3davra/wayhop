@@ -3,7 +3,7 @@ package server
 import (
 	"testing"
 
-	"wakeroute/internal/clash"
+	"velinx/internal/clash"
 )
 
 // TestUnambiguousHosts: an IP seen with one host maps to it; an IP seen with multiple hosts (shared

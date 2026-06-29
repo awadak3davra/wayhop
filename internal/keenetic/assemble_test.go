@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 func TestParseDomainFeed(t *testing.T) {

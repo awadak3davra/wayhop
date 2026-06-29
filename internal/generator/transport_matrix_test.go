@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/importer"
-	"wakeroute/internal/model"
+	"velinx/internal/importer"
+	"velinx/internal/model"
 )
 
 // TestGeneratorTransportMatrix imports a spread of real-world share-links that vary the

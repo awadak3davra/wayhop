@@ -3,10 +3,10 @@ package keenetic
 import (
 	"fmt"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
-// migrate.go builds the WakeRoute model of mama's LIVE Keenetic setup so WakeRoute can
+// migrate.go builds the Velinx model of mama's LIVE Keenetic setup so Velinx can
 // faithfully REPLACE keen-pbr + S89hy_failover (see memory keenetic-backend.md, DEPLOY
 // phase). Endpoint IDs match the keen-pbr outbound tags + the S89 tiers. The adopted
 // AmneziaWG tunnels are EngineExternal{interface:nwgX} (NDM-managed, reused not recreated —
@@ -87,7 +87,7 @@ func liveGroups() []model.Group {
 	}
 }
 
-// LiveProfile is the WakeRoute model of mama's setup — endpoints + the failover groups + a
+// LiveProfile is the Velinx model of mama's setup — endpoints + the failover groups + a
 // default rule (→ the 3-tier failover). The keen-pbr routing lists are added by BuildProfile.
 // Compile it with CompileOptions{AdoptInterfaces: …} so the live AmneziaWG tunnels are reused,
 // never recreated.
@@ -99,7 +99,7 @@ func LiveProfile() *model.Profile {
 	}
 }
 
-// keenPBRCatalogSRS maps keen-pbr list IDs to WakeRoute-catalog .srs rule-sets — the SAME
+// keenPBRCatalogSRS maps keen-pbr list IDs to Velinx-catalog .srs rule-sets — the SAME
 // upstreams (itdoginfo / 1andrevich / antizapret) as compiled binary rule-sets sing-box loads
 // natively as remote rule_sets. Used for the big/common lists so they aren't inlined as tens of
 // thousands of domains (rkn_full alone is ~81k → refilter .srs; antifilter ~15k → antizapret).
@@ -138,7 +138,7 @@ func applyCatalogSRS(p *model.Profile) {
 	}
 }
 
-// keenPBROutboundMap maps keen-pbr outbound tags to the WakeRoute failover groups.
+// keenPBROutboundMap maps keen-pbr outbound tags to the Velinx failover groups.
 func keenPBROutboundMap() map[string]string {
 	return map[string]string{
 		"keentest":               "blocked_rf",
@@ -148,7 +148,7 @@ func keenPBROutboundMap() map[string]string {
 	}
 }
 
-// BuildProfile assembles the full WakeRoute model for the cutover: the LiveProfile skeleton +
+// BuildProfile assembles the full Velinx model for the cutover: the LiveProfile skeleton +
 // the keen-pbr routing lists (ImportKeenPBR), RECONCILED against the live interfaces so an
 // endpoint with no live interface (keentest/nwg3 is gone) is dropped and remapped to remapTo
 // (default the next live tier — see the keentest open decision in keenetic-backend.md). It

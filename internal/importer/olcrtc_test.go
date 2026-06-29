@@ -3,7 +3,7 @@ package importer
 import (
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 func TestParseOlcRTC(t *testing.T) {

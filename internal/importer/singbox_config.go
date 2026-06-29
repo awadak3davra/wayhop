@@ -22,7 +22,7 @@ import (
 	"strconv"
 	"strings"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // looksLikeSingbox reports whether text is a sing-box config.json: valid JSON whose

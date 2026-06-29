@@ -1,6 +1,6 @@
 // Package store persists the user Profile (endpoints/groups/rules) to a JSON
 // file and offers thread-safe CRUD. It is intentionally tiny: no database, a
-// single atomically-written file under /opt/etc/wakeroute/ (see docs/ARCHITECTURE.md).
+// single atomically-written file under /opt/etc/velinx/ (see docs/ARCHITECTURE.md).
 package store
 
 import (
@@ -12,8 +12,8 @@ import (
 	"os"
 	"sync"
 
-	"wakeroute/internal/atomicfile"
-	"wakeroute/internal/model"
+	"velinx/internal/atomicfile"
+	"velinx/internal/model"
 )
 
 // Store guards a Profile persisted at path.
@@ -35,7 +35,7 @@ func Open(path string) (*Store, error) {
 	// still falls through to the parse error below.
 	if errors.Is(err, os.ErrNotExist) || (err == nil && len(bytes.TrimSpace(data)) == 0) {
 		if err == nil {
-			log.Printf("wakeroute: profile %s is empty; recreating empty profile", path)
+			log.Printf("velinx: profile %s is empty; recreating empty profile", path)
 		}
 		return s, s.saveLocked()
 	}

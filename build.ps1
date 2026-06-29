@@ -1,7 +1,7 @@
-# build.ps1 - cross-compile wakeroute for every router arch and package per-arch tarballs.
+# build.ps1 - cross-compile velinx for every router arch and package per-arch tarballs.
 # Windows-friendly (the Makefile covers Unix build hosts).
-# Output: dist\wakeroute-<ver>-<arch>.tar.gz          (Entware /opt sysvinit)
-#         dist\wakeroute-<ver>-<arch>-openwrt.tar.gz  (OpenWrt native procd)
+# Output: dist\velinx-<ver>-<arch>.tar.gz          (Entware /opt sysvinit)
+#         dist\velinx-<ver>-<arch>-openwrt.tar.gz  (OpenWrt native procd)
 $ErrorActionPreference = "Stop"
 
 $go = (Get-Command go -ErrorAction SilentlyContinue).Source
@@ -12,7 +12,7 @@ $env:GOTOOLCHAIN = "local"; $env:CGO_ENABLED = "0"
 $root = $PSScriptRoot
 Set-Location $root
 $ver = "0.1.0"
-$ld = "-s -w -X wakeroute/internal/version.Version=$ver"
+$ld = "-s -w -X velinx/internal/version.Version=$ver"
 $dist = Join-Path $root "dist"
 New-Item -ItemType Directory -Force $dist | Out-Null
 
@@ -35,33 +35,33 @@ foreach ($t in $targets) {
   $env:GOMIPS = $(if ($t.mips) { $t.mips } else { "" })
   $env:GOARM  = $(if ($t.arm)  { $t.arm }  else { "" })
 
-  $stage = Join-Path $dist "wakeroute-$($t.n)-pkg"
+  $stage = Join-Path $dist "velinx-$($t.n)-pkg"
   Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
   New-Item -ItemType Directory -Force $stage | Out-Null
 
-  $bin = Join-Path $stage "wakeroute-$($t.n)"
-  & $go build -ldflags $ld -o $bin ./cmd/wakeroute
+  $bin = Join-Path $stage "velinx-$($t.n)"
+  & $go build -ldflags $ld -o $bin ./cmd/velinx
   if ($LASTEXITCODE -ne 0) { throw "build $($t.n) failed" }
 
   # --- Entware tarball: binary + install/uninstall + sysvinit S99 script ---
   CopyLF (Join-Path $root "packaging\install.sh")   (Join-Path $stage "install.sh")
   CopyLF (Join-Path $root "packaging\uninstall.sh") (Join-Path $stage "uninstall.sh")
-  CopyLF (Join-Path $root "packaging\S99wakeroute")        (Join-Path $stage "S99wakeroute")
+  CopyLF (Join-Path $root "packaging\S99velinx")        (Join-Path $stage "S99velinx")
 
-  $tar = Join-Path $dist "wakeroute-$ver-$($t.n).tar.gz"
+  $tar = Join-Path $dist "velinx-$ver-$($t.n).tar.gz"
   tar -C $stage -czf $tar .
   Write-Output ("packaged {0}  ({1} KB)" -f (Split-Path $tar -Leaf), [math]::Round((Get-Item $tar).Length / 1KB))
 
   # --- OpenWrt tarball: same binary + native procd install/uninstall + procd init ---
-  $owstage = Join-Path $dist "wakeroute-$($t.n)-openwrt-pkg"
+  $owstage = Join-Path $dist "velinx-$($t.n)-openwrt-pkg"
   Remove-Item -Recurse -Force $owstage -ErrorAction SilentlyContinue
   New-Item -ItemType Directory -Force $owstage | Out-Null
-  Copy-Item $bin (Join-Path $owstage "wakeroute-$($t.n)")
+  Copy-Item $bin (Join-Path $owstage "velinx-$($t.n)")
   CopyLF (Join-Path $root "packaging\openwrt\install.sh")    (Join-Path $owstage "install.sh")
   CopyLF (Join-Path $root "packaging\openwrt\uninstall.sh")  (Join-Path $owstage "uninstall.sh")
-  CopyLF (Join-Path $root "packaging\openwrt\wakeroute.init") (Join-Path $owstage "wakeroute.init")
+  CopyLF (Join-Path $root "packaging\openwrt\velinx.init") (Join-Path $owstage "velinx.init")
 
-  $owtar = Join-Path $dist "wakeroute-$ver-$($t.n)-openwrt.tar.gz"
+  $owtar = Join-Path $dist "velinx-$ver-$($t.n)-openwrt.tar.gz"
   tar -C $owstage -czf $owtar .
   Remove-Item -Recurse -Force $owstage
   Write-Output ("packaged {0}  ({1} KB)" -f (Split-Path $owtar -Leaf), [math]::Round((Get-Item $owtar).Length / 1KB))

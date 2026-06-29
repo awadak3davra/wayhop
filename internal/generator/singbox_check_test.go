@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // allProtocolProfile builds a profile with one endpoint per stable sing-box-native
@@ -54,7 +54,7 @@ func allProtocolProfile() *model.Profile {
 	// block ("TLS required"); attach one. The provisioner's self-signed cert makes
 	// the importer set insecure=1 + alpn h3, so mirror that exact shape.
 	withQUICTLS := func(e model.Endpoint) model.Endpoint {
-		e.TLS = &model.TLS{Enabled: true, Type: "tls", SNI: "wakeroute.local", Insecure: true, ALPN: []string{"h3"}}
+		e.TLS = &model.TLS{Enabled: true, Type: "tls", SNI: "velinx.local", Insecure: true, ALPN: []string{"h3"}}
 		return e
 	}
 	// VLESS-Reality endpoint mirrors scriptReality's link:
@@ -62,17 +62,17 @@ func allProtocolProfile() *model.Profile {
 	vlessReality := generator_singBoxEndpoint("p-vless", model.ProtoVLESS, map[string]any{"uuid": uuid, "flow": "xtls-rprx-vision"})
 	vlessReality.TLS = &model.TLS{Enabled: true, Type: "reality", SNI: "www.microsoft.com", Fingerprint: "chrome", PublicKey: realityPub, ShortID: realitySID}
 	// VMess endpoint mirrors scriptVMess's link: vmess over ws + self-signed TLS
-	// (allowInsecure=1) on the /wakeroute path.
+	// (allowInsecure=1) on the /velinx path.
 	vmess := generator_singBoxEndpoint("p-vmess", model.ProtoVMess, map[string]any{"uuid": uuid, "alter_id": 0, "security": "auto"})
-	vmess.Transport = &model.Transport{Type: "ws", Path: "/wakeroute", Host: "wakeroute.local"}
-	vmess.TLS = &model.TLS{Enabled: true, Type: "tls", SNI: "wakeroute.local", Insecure: true, Fragment: true, RecordFragment: true}
+	vmess.Transport = &model.Transport{Type: "ws", Path: "/velinx", Host: "velinx.local"}
+	vmess.TLS = &model.TLS{Enabled: true, Type: "tls", SNI: "velinx.local", Insecure: true, Fragment: true, RecordFragment: true}
 	// Trojan endpoint mirrors scriptTrojan's link: trojan over TLS (self-signed,
 	// insecure=1).
 	trojan := generator_singBoxEndpoint("p-trojan", model.ProtoTrojan, map[string]any{"password": "pw"})
-	trojan.TLS = &model.TLS{Enabled: true, Type: "tls", SNI: "wakeroute.local", Insecure: true}
+	trojan.TLS = &model.TLS{Enabled: true, Type: "tls", SNI: "velinx.local", Insecure: true}
 	// AnyTLS endpoint: password + TLS (self-signed, insecure=1), like Trojan (sing-box 1.12+).
 	anytls := generator_singBoxEndpoint("p-anytls", model.ProtoAnyTLS, map[string]any{"password": "pw"})
-	anytls.TLS = &model.TLS{Enabled: true, Type: "tls", SNI: "wakeroute.local", Insecure: true}
+	anytls.TLS = &model.TLS{Enabled: true, Type: "tls", SNI: "velinx.local", Insecure: true}
 	// AmneziaWG endpoint mirrors scriptAmneziaWG: a WG-shaped peer that the plugin
 	// engine brings up; the generator emits a `direct` outbound bound to its iface.
 	awg := generator_singBoxEndpoint("p-awg", model.ProtoAmneziaWG, map[string]any{

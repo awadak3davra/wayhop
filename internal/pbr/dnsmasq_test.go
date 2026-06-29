@@ -12,9 +12,9 @@ func TestRenderDnsmasqSets_Nftset(t *testing.T) {
 	sets := []DomainSet{
 		{SetBase: "list_block", Domains: []string{"example.com", "sub.example.com"}},
 	}
-	got := RenderDnsmasqSets(sets, DnsmasqOptions{Table: "wakeroute_pbr"})
+	got := RenderDnsmasqSets(sets, DnsmasqOptions{Table: "velinx_pbr"})
 	want := dnsmasqHeader + "\n" +
-		"nftset=/example.com/sub.example.com/inet#wakeroute_pbr#list_block_4,inet#wakeroute_pbr#list_block_6\n"
+		"nftset=/example.com/sub.example.com/inet#velinx_pbr#list_block_4,inet#velinx_pbr#list_block_6\n"
 	if got != want {
 		t.Fatalf("nftset render mismatch:\n got: %q\nwant: %q", got, want)
 	}
@@ -51,11 +51,11 @@ func TestRenderDnsmasqSets_NoV6(t *testing.T) {
 }
 
 func TestRenderDnsmasqSets_DefaultTable(t *testing.T) {
-	// Empty Table → defaults to wakeroute_pbr for the nftset form.
+	// Empty Table → defaults to velinx_pbr for the nftset form.
 	sets := []DomainSet{{SetBase: "z", Domains: []string{"example.net"}}}
 	got := RenderDnsmasqSets(sets, DnsmasqOptions{})
-	if !strings.Contains(got, "inet#wakeroute_pbr#z_4") {
-		t.Fatalf("expected default table wakeroute_pbr, got: %q", got)
+	if !strings.Contains(got, "inet#velinx_pbr#z_4") {
+		t.Fatalf("expected default table velinx_pbr, got: %q", got)
 	}
 }
 
@@ -203,7 +203,7 @@ func TestRenderDnsmasq_FromCompiledPlan(t *testing.T) {
 	// Build via the public renderer path against a synthetic plan that mirrors what
 	// Compile(..., Options{CollectDomainZones:true}) produces for a domain list.
 	pl := &Plan{
-		Table: "wakeroute_pbr",
+		Table: "velinx_pbr",
 		Zones: []Zone{
 			{Name: "list_censored", EgressTag: "ep1", Domains: []string{"example.com", "test.example"}},
 		},
@@ -212,7 +212,7 @@ func TestRenderDnsmasq_FromCompiledPlan(t *testing.T) {
 	if !strings.HasPrefix(snippet, dnsmasqHeader) {
 		t.Fatalf("snippet missing header: %q", snippet)
 	}
-	if !strings.Contains(snippet, "nftset=/example.com/test.example/inet#wakeroute_pbr#list_censored_4") {
+	if !strings.Contains(snippet, "nftset=/example.com/test.example/inet#velinx_pbr#list_censored_4") {
 		t.Fatalf("snippet missing expected directive: %q", snippet)
 	}
 }

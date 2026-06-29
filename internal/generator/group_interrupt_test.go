@@ -3,7 +3,7 @@ package generator
 import (
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // TestGroupInterruptOnSwitch: the opt-in InterruptOnSwitch flag emits sing-box's

@@ -3,8 +3,8 @@ package server
 import (
 	"testing"
 
-	"wakeroute/internal/config"
-	"wakeroute/internal/model"
+	"velinx/internal/config"
+	"velinx/internal/model"
 )
 
 // TestServerDatapathNativeOnly exercises the SERVER gate that decides whether the apply path skips

@@ -3,8 +3,8 @@ package health
 import (
 	"testing"
 
-	"wakeroute/internal/clash"
-	"wakeroute/internal/model"
+	"velinx/internal/clash"
+	"velinx/internal/model"
 )
 
 // TestSampleTrafficDecaysWhenConnsGone guards the stale-rate fix: once an endpoint's

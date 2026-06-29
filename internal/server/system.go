@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"wakeroute/internal/version"
+	"velinx/internal/version"
 )
 
 // systemInfo is the host-resource snapshot surfaced on the Dashboard's system strip.

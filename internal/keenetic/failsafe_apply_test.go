@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"wakeroute/internal/failsafe"
+	"velinx/internal/failsafe"
 )
 
 // longGraceMgr builds a failsafe Manager whose timers never fire during a test, so the armed

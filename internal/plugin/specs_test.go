@@ -3,7 +3,7 @@ package plugin
 import (
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 func specs_awg(id string) Spec {

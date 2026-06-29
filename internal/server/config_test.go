@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/config"
+	"velinx/internal/config"
 )
 
 func TestValidatePorts(t *testing.T) {

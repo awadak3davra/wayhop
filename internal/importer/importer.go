@@ -15,8 +15,8 @@ import (
 	"strconv"
 	"strings"
 
-	"wakeroute/internal/model"
-	"wakeroute/internal/util"
+	"velinx/internal/model"
+	"velinx/internal/util"
 )
 
 const defaultHealthURL = "http://cp.cloudflare.com/generate_204"

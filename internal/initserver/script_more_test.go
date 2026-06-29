@@ -24,7 +24,7 @@ func TestBuildScriptHeaderAlwaysPresent(t *testing.T) {
 		"set -e",
 		"systemd-detect-virt",                 // virt detection
 		"openvz|lxc)",                         // the OpenVZ/LXC guard arm
-		"/etc/sysctl.d/99-wakeroute.conf",     // sysctl drop-in
+		"/etc/sysctl.d/99-velinx.conf",        // sysctl drop-in
 		"net.core.default_qdisc=fq",           // fair queueing
 		"net.ipv4.tcp_congestion_control=bbr", // BBR
 		"net.core.rmem_max=16777216",          // larger UDP buffers
@@ -236,11 +236,11 @@ func TestLockdownConfirmed(t *testing.T) {
 // key are both recovered from marker lines.
 func TestExtractSSHKeyRoundTrip(t *testing.T) {
 	priv := "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----"
-	pub := "ssh-ed25519 AAAAC3Nz wakeroute-managed"
-	out := "[wakeroute-harden] installing\n" +
+	pub := "ssh-ed25519 AAAAC3Nz velinx-managed"
+	out := "[velinx-harden] installing\n" +
 		"WR_SSH_PUB=" + pub + "\n" +
 		"WR_SSH_KEY_B64=" + kbinitserver_b64(priv) + "\n" +
-		"[wakeroute-harden] done\n"
+		"[velinx-harden] done\n"
 	gotPriv, gotPub := ExtractSSHKey(out)
 	if gotPriv != priv {
 		t.Errorf("priv = %q, want %q", gotPriv, priv)
@@ -273,15 +273,15 @@ func TestExtractSSHKeyMissingMarkers(t *testing.T) {
 // with the protocol from the WR_PROTO marker that precedes them, in order.
 func TestExtractTaggedMultipleWithMarkers(t *testing.T) {
 	awgConf := "[Interface]\nPrivateKey = k\n[Peer]\nEndpoint = 1.2.3.4:51820"
-	vless := "vless://uuid@1.2.3.4:443?security=reality#wakeroute"
+	vless := "vless://uuid@1.2.3.4:443?security=reality#velinx"
 	out := strings.Join([]string{
-		"[wakeroute-init] installing AmneziaWG...",
+		"[velinx-init] installing AmneziaWG...",
 		"WR_PROTO=amneziawg",
 		"WR_CLIENT_CONFIG_B64=" + kbinitserver_b64(awgConf),
-		"[wakeroute-init] installing sing-box...",
+		"[velinx-init] installing sing-box...",
 		"WR_PROTO=vless-reality",
 		"WR_CLIENT_CONFIG=" + vless,
-		"[wakeroute-init] done",
+		"[velinx-init] done",
 	}, "\n")
 	tagged := ExtractTagged(out)
 	if len(tagged) != 2 {

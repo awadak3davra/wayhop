@@ -1,7 +1,22 @@
 # Changelog
 
-All notable changes to WakeRoute are documented here. This project adheres to
+All notable changes to Velinx are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
+
+## [0.4.0] — 2026-06-29
+
+### Changed
+- **Renamed WakeRoute → Velinx.** Same project, new name. The Go module, binary, service, config
+  paths (`/opt/etc/velinx`, `/etc/velinx`, …), and self-update repository are all `velinx` now. The
+  installer **migrates an existing WakeRoute install in place** — it moves your saved config and runtime
+  state to the new paths, removes the old service, and treats a running `wakeroute` on the UI port as an
+  upgrade — so your connections, groups, and routing rules carry over untouched.
+
+### Added
+- **Low-memory guard for self-update** — a pre-download RAM check refuses an engine or self update that
+  wouldn't fit in available memory, instead of risking an out-of-memory kill mid-install on tight routers.
+- **Engine uninstall** — installed engines can be removed from the Updater (the running core and
+  source-only engines are guarded).
 
 ## [0.3.7] — 2026-06-28
 
@@ -28,7 +43,7 @@ All notable changes to WakeRoute are documented here. This project adheres to
   the live connections to them and the exit each took (the observed truth, from the connection
   table), plus the configured rules / lists / kernel carve-outs that reference it. Answers "why
   isn't *this* site going through the VPN" without nslookup + manual CIDR tests.
-- **Correct install commands in recommendations** — when WakeRoute suggests installing a package
+- **Correct install commands in recommendations** — when Velinx suggests installing a package
   for native routing, it now shows the command for *your* router's package manager (`apk add …` on
   newer OpenWrt, `opkg install …` elsewhere) instead of a hardcoded one.
 - **Restore a routing-profile backup** — the whole routing config (endpoints, groups, rules, lists)
@@ -48,14 +63,14 @@ All notable changes to WakeRoute are documented here. This project adheres to
   which already hides the server name.)
 - **AnyTLS protocol** — import an `anytls://` link (or add one by hand) and route through AnyTLS, a
   newer TLS-based protocol designed to resist traffic-analysis fingerprinting of proxied TLS.
-- **Detects your router's native VPN support** — WakeRoute now checks which protocols your router can
+- **Detects your router's native VPN support** — Velinx now checks which protocols your router can
   run directly in its kernel (WireGuard, AmneziaWG) versus which need sing-box, and tailors its
   install recommendations to that.
 - **Route through a VPN tunnel your router already has** — if WireGuard / AmneziaWG tunnels are
-  already configured on the router, WakeRoute can detect them and route through one directly without
+  already configured on the router, Velinx can detect them and route through one directly without
   re-entering its keys. It never modifies or tears down a tunnel the system owns.
 - **Runs without sing-box when your setup is fully native** — a fast-mode profile that uses only
-  kernel-native tunnels now runs entirely on the router's own routing, and WakeRoute stops sing-box
+  kernel-native tunnels now runs entirely on the router's own routing, and Velinx stops sing-box
   instead of leaving it running as a redundant path — less memory and CPU for the same result.
 
 ### Fixed
@@ -118,11 +133,11 @@ All notable changes to WakeRoute are documented here. This project adheres to
 
 ### Added
 - **Subscription auto-refresh** — keep an imported subscription current automatically. Turn it
-  on in Settings (pick an interval, or hit *Refresh now*) and WakeRoute periodically re-fetches
+  on in Settings (pick an interval, or hit *Refresh now*) and Velinx periodically re-fetches
   the URL and adds any servers the provider has rotated in, with no manual re-import. The card
   shows when it last ran and how many connections it added.
 - **Failover groups in the Clash subscription** — a Clash / Clash-Meta client subscribed to
-  WakeRoute now receives your failover groups as real `url-test` / `fallback` / `select` groups,
+  Velinx now receives your failover groups as real `url-test` / `fallback` / `select` groups,
   so it keeps the same automatic best-server selection the panel does instead of a flat list.
 - **SSH host-key pinning for the server provisioner** — provisioning a remote VPS now pins its
   SSH host key to a persistent file (so a later changed key is caught) and prints the key's
@@ -159,7 +174,7 @@ All notable changes to WakeRoute are documented here. This project adheres to
 - More accurate per-interface ping latency and per-connection speed tests.
 
 ### Security
-- **Self-update is checksum-verified** — the WakeRoute binary is replaced only when its release
+- **Self-update is checksum-verified** — the Velinx binary is replaced only when its release
   asset's SHA-256 digest is present and matches; the update tag and release metadata are now
   validated and size-capped.
 - The subscription-fetch and reachability-probe guards also block carrier-grade-NAT
@@ -270,7 +285,7 @@ All notable changes to WakeRoute are documented here. This project adheres to
   the public exit IP.
 - **Kernel-native policy routing** — an optional `hybrid` mode that programs per-destination
   carve-outs directly with `nft` + `ip rule` fwmark tables, alongside the sing-box TUN gateway.
-- **Self-update** — WakeRoute can check for and install its own releases, with opt-in auto-update.
+- **Self-update** — Velinx can check for and install its own releases, with opt-in auto-update.
 - **Mobile-responsive panel** and additional UI translations.
 
 ### Changed
@@ -302,7 +317,7 @@ All notable changes to WakeRoute are documented here. This project adheres to
 
 ## [0.1.0] — Initial public release
 
-First public release of WakeRoute: a self-hosted web panel for configuring any VPN/proxy
+First public release of Velinx: a self-hosted web panel for configuring any VPN/proxy
 protocol on Entware/OpenWrt routers, with failover, health checks and live traffic graphs.
 
 ### Added

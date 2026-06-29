@@ -3,8 +3,8 @@ package generator
 import (
 	"testing"
 
-	"wakeroute/internal/model"
-	"wakeroute/internal/platform"
+	"velinx/internal/model"
+	"velinx/internal/platform"
 )
 
 // ep builds a synthetic endpoint with the given engine/protocol/enabled flag. Params are

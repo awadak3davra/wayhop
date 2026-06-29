@@ -18,8 +18,8 @@ import (
 	"strconv"
 	"strings"
 
-	"wakeroute/internal/model"
-	"wakeroute/internal/util"
+	"velinx/internal/model"
+	"velinx/internal/util"
 )
 
 // ClashConfig renders eps into a complete clash-meta YAML config (no failover
@@ -31,7 +31,7 @@ func ClashConfig(eps []model.Endpoint) (string, []string) {
 	return ClashConfigWithGroups(eps, nil)
 }
 
-// ClashConfigWithGroups is ClashConfig plus the failover groups: each WakeRoute
+// ClashConfigWithGroups is ClashConfig plus the failover groups: each Velinx
 // group becomes a clash proxy-group (url-test / fallback / select mirroring its
 // type) so a clash/mihomo client keeps the same auto-failover the panel does,
 // instead of a flat manual list. A group's members resolve to their proxy names
@@ -124,7 +124,7 @@ func ClashConfigWithGroups(eps []model.Endpoint, groups []model.Group) (string, 
 	}
 
 	var b strings.Builder
-	b.WriteString("# WakeRoute clash-meta subscription\n")
+	b.WriteString("# Velinx clash-meta subscription\n")
 	b.WriteString("mixed-port: 7890\n")
 	b.WriteString("mode: rule\n")
 	if len(blocks) == 0 {
@@ -139,7 +139,7 @@ func ClashConfigWithGroups(eps []model.Endpoint, groups []model.Group) (string, 
 	}
 	b.WriteString("proxy-groups:\n")
 	// Top-level selector: the failover groups + any endpoints not in a group + DIRECT.
-	b.WriteString("  - name: WakeRoute\n")
+	b.WriteString("  - name: Velinx\n")
 	b.WriteString("    type: select\n")
 	b.WriteString("    proxies:\n")
 	for _, g := range rendered {
@@ -156,7 +156,7 @@ func ClashConfigWithGroups(eps []model.Endpoint, groups []model.Group) (string, 
 		writeClashGroup(&b, g.name, g.gtype, g.members, g.test)
 	}
 	b.WriteString("rules:\n")
-	b.WriteString("  - MATCH,WakeRoute\n")
+	b.WriteString("  - MATCH,Velinx\n")
 	return b.String(), skipped
 }
 

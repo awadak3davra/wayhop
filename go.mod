@@ -1,4 +1,4 @@
-module wakeroute
+module velinx
 
 go 1.22
 

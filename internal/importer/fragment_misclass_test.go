@@ -3,7 +3,7 @@ package importer
 import (
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // TestParse_FragmentNotMisclassified (#14/#15): a proxy share link whose #fragment (node name) contains

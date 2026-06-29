@@ -33,7 +33,7 @@ var catalog = []Option{
 		Details: []string{
 			"WireGuard fork that pads/obfuscates the handshake (Jc/Jmin/Jmax/S1/S2/H1-H4) to defeat DPI and TSPU.",
 			"Best choice where plain WireGuard is throttled or whitelisted (e.g. RU).",
-			"Server listens on UDP :51820; wakeroute generates the matching client automatically.",
+			"Server listens on UDP :51820; velinx generates the matching client automatically.",
 		},
 		Port:        51820,
 		Transport:   "udp",
@@ -48,7 +48,7 @@ var catalog = []Option{
 		Details: []string{
 			"Vanilla WireGuard (no DPI-obfuscation overhead), so any stock WireGuard client — mobile apps, in-kernel wg, routers — imports the generated .conf directly.",
 			"Best where WireGuard isn't blocked and you want maximum throughput and broad client compatibility; choose AmneziaWG instead where plain WireGuard is throttled or whitelisted.",
-			"Server listens on UDP :51821 (subnet 10.14.14.0/24, distinct from AmneziaWG's :51820) so both can run side by side; wakeroute generates the matching client automatically.",
+			"Server listens on UDP :51821 (subnet 10.14.14.0/24, distinct from AmneziaWG's :51820) so both can run side by side; velinx generates the matching client automatically.",
 		},
 		Port:      51821,
 		Transport: "udp",
@@ -91,8 +91,8 @@ var catalog = []Option{
 		Name:    "VMess",
 		Summary: "Classic V2Ray protocol over WebSocket + TLS (self-signed).",
 		Details: []string{
-			"sing-box VMess inbound on TCP :8443, WebSocket transport (path /wakeroute) wrapped in TLS.",
-			"TLS uses a self-signed certificate (SNI wakeroute.local); the generated client link carries allowInsecure=1 so it connects without a CA-signed cert or your own domain.",
+			"sing-box VMess inbound on TCP :8443, WebSocket transport (path /velinx) wrapped in TLS.",
+			"TLS uses a self-signed certificate (SNI velinx.local); the generated client link carries allowInsecure=1 so it connects without a CA-signed cert or your own domain.",
 			"Per-server uuid is generated once and persisted — re-running the installer never rotates it.",
 		},
 		Port:      8443,
@@ -105,7 +105,7 @@ var catalog = []Option{
 		Name:    "Trojan",
 		Summary: "TLS proxy that mimics plain HTTPS, authenticated by a password.",
 		Details: []string{
-			"sing-box Trojan inbound on TCP :8444 behind TLS (self-signed cert, SNI wakeroute.local).",
+			"sing-box Trojan inbound on TCP :8444 behind TLS (self-signed cert, SNI velinx.local).",
 			"The client link carries insecure=1 (skip-cert-verify) so the self-signed cert is accepted; bring your own domain + real cert for active-probing resistance.",
 			"Per-server password is generated once and persisted across re-runs.",
 		},
@@ -133,7 +133,7 @@ var catalog = []Option{
 		Name:    "Hysteria2",
 		Summary: "High-throughput QUIC proxy that shrugs off lossy links.",
 		Details: []string{
-			"sing-box Hysteria2 inbound on UDP :8445 over QUIC + TLS (self-signed cert, SNI wakeroute.local, ALPN h3).",
+			"sing-box Hysteria2 inbound on UDP :8445 over QUIC + TLS (self-signed cert, SNI velinx.local, ALPN h3).",
 			"Excellent on high-loss / high-latency networks; the client link carries insecure=1 for the self-signed cert.",
 			"Per-server password is generated once and persisted; the UDP port is opened in iptables best-effort.",
 		},
@@ -147,7 +147,7 @@ var catalog = []Option{
 		Name:    "TUIC",
 		Summary: "QUIC-based proxy (TUIC v5) with BBR congestion control.",
 		Details: []string{
-			"sing-box TUIC v5 inbound on UDP :8446 over QUIC + TLS (self-signed cert, SNI wakeroute.local, ALPN h3).",
+			"sing-box TUIC v5 inbound on UDP :8446 over QUIC + TLS (self-signed cert, SNI velinx.local, ALPN h3).",
 			"Low-latency UDP-native proxy; the client link carries insecure=1 for the self-signed cert and congestion_control=bbr.",
 			"Per-server uuid + password are generated once and persisted; the UDP port is opened in iptables best-effort.",
 		},

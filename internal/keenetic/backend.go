@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"net/netip"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
-// Plan is the full KeeneticOS config WakeRoute would apply for a profile: one NDM command
+// Plan is the full KeeneticOS config Velinx would apply for a profile: one NDM command
 // block per native VPN interface, an optional sing-box config for the non-native endpoints
 // (each behind its own TUN device), the `ip route` commands that steer traffic to either
 // kind of interface, and warnings for the residue that is still not representable (domain
@@ -53,7 +53,7 @@ func nativeIface(e *model.Endpoint) bool {
 		(e.Engine == model.EngineSingBox && e.Protocol == model.ProtoWireGuard)
 }
 
-// Compile turns a WakeRoute profile into a Keenetic Plan. Enabled AmneziaWG/WireGuard
+// Compile turns a Velinx profile into a Keenetic Plan. Enabled AmneziaWG/WireGuard
 // endpoints become native `interface WireguardN` (kernel + HW crypto); enabled non-native
 // endpoints (VLESS/Reality/Hysteria2/TUIC) become sing-box TUN devices (`wrtunN`) via the
 // fallback. Either kind is then a routable interface: routing-list IP-CIDRs become `ip route`

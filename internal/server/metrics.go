@@ -6,12 +6,12 @@ import (
 	"strconv"
 	"strings"
 
-	"wakeroute/internal/health"
-	"wakeroute/internal/version"
+	"velinx/internal/health"
+	"velinx/internal/version"
 )
 
 // handleMetrics serves a Prometheus text-exposition (version 0.0.4) scrape of the
-// data WakeRoute already collects: build info, sing-box state, per-endpoint health
+// data Velinx already collects: build info, sing-box state, per-endpoint health
 // (up / latency / success-ratio / traffic) from the monitor snapshot, and the latest
 // aggregate traffic sample from the hub. It is read-only and purely additive.
 //
@@ -30,13 +30,13 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	var b strings.Builder
 
 	// --- static metrics (always present) ---
-	writeHelpType(&b, "wakeroute_build_info", "WakeRoute build information.", "gauge")
-	b.WriteString("wakeroute_build_info{version=\"")
+	writeHelpType(&b, "velinx_build_info", "Velinx build information.", "gauge")
+	b.WriteString("velinx_build_info{version=\"")
 	b.WriteString(escapeLabel(version.Version))
 	b.WriteString("\"} 1\n")
 
-	writeHelpType(&b, "wakeroute_up", "Always 1; indicates the WakeRoute daemon is responding.", "gauge")
-	b.WriteString("wakeroute_up 1\n")
+	writeHelpType(&b, "velinx_up", "Always 1; indicates the Velinx daemon is responding.", "gauge")
+	b.WriteString("velinx_up 1\n")
 
 	// --- sing-box core state ---
 	var running, available int
@@ -48,13 +48,13 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			available = 1
 		}
 	}
-	writeHelpType(&b, "wakeroute_singbox_running", "1 if the sing-box core process is running, else 0.", "gauge")
-	b.WriteString("wakeroute_singbox_running ")
+	writeHelpType(&b, "velinx_singbox_running", "1 if the sing-box core process is running, else 0.", "gauge")
+	b.WriteString("velinx_singbox_running ")
 	b.WriteString(strconv.Itoa(running))
 	b.WriteByte('\n')
 
-	writeHelpType(&b, "wakeroute_singbox_available", "1 if the sing-box binary is present and runnable, else 0.", "gauge")
-	b.WriteString("wakeroute_singbox_available ")
+	writeHelpType(&b, "velinx_singbox_available", "1 if the sing-box binary is present and runnable, else 0.", "gauge")
+	b.WriteString("velinx_singbox_available ")
 	b.WriteString(strconv.Itoa(available))
 	b.WriteByte('\n')
 
@@ -76,35 +76,35 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	// Stable output: sort the series by id.
 	sort.Slice(views, func(i, j int) bool { return views[i].ID < views[j].ID })
 
-	writeHelpType(&b, "wakeroute_endpoint_up", "1 if the endpoint/group is alive, else 0.", "gauge")
+	writeHelpType(&b, "velinx_endpoint_up", "1 if the endpoint/group is alive, else 0.", "gauge")
 	for _, v := range views {
-		writeEndpointSample(&b, "wakeroute_endpoint_up", v, protoByID[v.ID], boolVal(v.State == string(health.Alive)))
+		writeEndpointSample(&b, "velinx_endpoint_up", v, protoByID[v.ID], boolVal(v.State == string(health.Alive)))
 	}
 
-	writeHelpType(&b, "wakeroute_endpoint_latency_ms", "Last measured endpoint latency in milliseconds.", "gauge")
+	writeHelpType(&b, "velinx_endpoint_latency_ms", "Last measured endpoint latency in milliseconds.", "gauge")
 	for _, v := range views {
 		// Omit the series when there is no measurement (latency 0 with a non-alive
 		// state means "never measured", not "0 ms").
 		if v.LatencyMs <= 0 {
 			continue
 		}
-		writeEndpointSample(&b, "wakeroute_endpoint_latency_ms", v, protoByID[v.ID], strconv.Itoa(v.LatencyMs))
+		writeEndpointSample(&b, "velinx_endpoint_latency_ms", v, protoByID[v.ID], strconv.Itoa(v.LatencyMs))
 	}
 
-	writeHelpType(&b, "wakeroute_endpoint_success_ratio", "Probe success ratio (0..1).", "gauge")
+	writeHelpType(&b, "velinx_endpoint_success_ratio", "Probe success ratio (0..1).", "gauge")
 	for _, v := range views {
 		ratio := float64(v.SuccessRate) / 100.0 // SuccessRate is a 0..100 percent integer
-		writeEndpointSample(&b, "wakeroute_endpoint_success_ratio", v, protoByID[v.ID], formatFloat(ratio))
+		writeEndpointSample(&b, "velinx_endpoint_success_ratio", v, protoByID[v.ID], formatFloat(ratio))
 	}
 
-	writeHelpType(&b, "wakeroute_endpoint_rx_bytes", "Approximate total bytes received (downloaded) attributed to the endpoint.", "gauge")
+	writeHelpType(&b, "velinx_endpoint_rx_bytes", "Approximate total bytes received (downloaded) attributed to the endpoint.", "gauge")
 	for _, v := range views {
-		writeEndpointSample(&b, "wakeroute_endpoint_rx_bytes", v, protoByID[v.ID], strconv.FormatInt(v.BytesDown, 10))
+		writeEndpointSample(&b, "velinx_endpoint_rx_bytes", v, protoByID[v.ID], strconv.FormatInt(v.BytesDown, 10))
 	}
 
-	writeHelpType(&b, "wakeroute_endpoint_tx_bytes", "Approximate total bytes transmitted (uploaded) attributed to the endpoint.", "gauge")
+	writeHelpType(&b, "velinx_endpoint_tx_bytes", "Approximate total bytes transmitted (uploaded) attributed to the endpoint.", "gauge")
 	for _, v := range views {
-		writeEndpointSample(&b, "wakeroute_endpoint_tx_bytes", v, protoByID[v.ID], strconv.FormatInt(v.BytesUp, 10))
+		writeEndpointSample(&b, "velinx_endpoint_tx_bytes", v, protoByID[v.ID], strconv.FormatInt(v.BytesUp, 10))
 	}
 
 	// --- aggregate live traffic (latest hub sample, already in bytes/s) ---
@@ -115,13 +115,13 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			rx, tx = last.Down, last.Up
 		}
 	}
-	writeHelpType(&b, "wakeroute_traffic_rx_bytes_per_second", "Latest aggregate download throughput in bytes per second.", "gauge")
-	b.WriteString("wakeroute_traffic_rx_bytes_per_second ")
+	writeHelpType(&b, "velinx_traffic_rx_bytes_per_second", "Latest aggregate download throughput in bytes per second.", "gauge")
+	b.WriteString("velinx_traffic_rx_bytes_per_second ")
 	b.WriteString(strconv.FormatInt(rx, 10))
 	b.WriteByte('\n')
 
-	writeHelpType(&b, "wakeroute_traffic_tx_bytes_per_second", "Latest aggregate upload throughput in bytes per second.", "gauge")
-	b.WriteString("wakeroute_traffic_tx_bytes_per_second ")
+	writeHelpType(&b, "velinx_traffic_tx_bytes_per_second", "Latest aggregate upload throughput in bytes per second.", "gauge")
+	b.WriteString("velinx_traffic_tx_bytes_per_second ")
 	b.WriteString(strconv.FormatInt(tx, 10))
 	b.WriteByte('\n')
 

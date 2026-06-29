@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"wakeroute/internal/config"
+	"velinx/internal/config"
 )
 
 // config returns a value snapshot of the live config taken under cfgMu. ALL
@@ -181,7 +181,7 @@ func (s *Server) handleConfigExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Disposition", `attachment; filename="wakeroute-config.json"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="velinx-config.json"`)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
 }

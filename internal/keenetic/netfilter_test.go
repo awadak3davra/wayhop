@@ -26,7 +26,7 @@ func TestNetfilterHookScript(t *testing.T) {
 }
 
 func TestInstallRemoveNetfilterHook(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "40-wakeroute.sh")
+	path := filepath.Join(t.TempDir(), "40-velinx.sh")
 	opt := NetfilterHookOptions{Path: path, TunIface: "wr-tun"}
 
 	if err := InstallNetfilterHook(opt); err != nil {

@@ -10,12 +10,12 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/config"
-	"wakeroute/internal/core"
-	"wakeroute/internal/failsafe"
-	"wakeroute/internal/model"
-	"wakeroute/internal/plugin"
-	"wakeroute/internal/store"
+	"velinx/internal/config"
+	"velinx/internal/core"
+	"velinx/internal/failsafe"
+	"velinx/internal/model"
+	"velinx/internal/plugin"
+	"velinx/internal/store"
 )
 
 // opshandlers_server builds a *Server with exactly the deps the ops handlers

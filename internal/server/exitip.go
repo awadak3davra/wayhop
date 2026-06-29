@@ -50,7 +50,7 @@ var exitIPEchos = []string{
 }
 
 // handleExitIP returns the public IP the active proxy egresses from. It works
-// both when WakeRoute MANAGES sing-box (probe through the local mixed proxy) and
+// both when Velinx MANAGES sing-box (probe through the local mixed proxy) and
 // in MONITOR mode over an EXTERNALLY-managed core (Keenetic: the daemon's own
 // sing-box isn't running, but a live core answers the Clash API and the device's
 // default route IS the exit — so a DIRECT probe yields the real exit IP). Degrades
@@ -100,7 +100,7 @@ func (s *Server) handleExitIP(w http.ResponseWriter, r *http.Request) {
 
 // coreUp reports whether a proxy core is live: the daemon's OWN sing-box, or an
 // EXTERNALLY-managed one answering the Clash API (monitor mode, e.g. on Keenetic
-// where sing-box is run by the OS init, not WakeRoute). A 2s probe of the Clash
+// where sing-box is run by the OS init, not Velinx). A 2s probe of the Clash
 // controller's /version is the cheapest liveness signal that an external core is up.
 func (s *Server) coreUp() bool {
 	if s.singbox != nil && s.singbox.Running() {

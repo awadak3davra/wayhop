@@ -3,7 +3,7 @@ package generator
 import (
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // TestRuleSetFormat: the format is inferred from the URL extension, but a ?query /

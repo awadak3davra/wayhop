@@ -8,14 +8,14 @@ import (
 	"path/filepath"
 	"testing"
 
-	"wakeroute/internal/config"
-	"wakeroute/internal/core"
-	"wakeroute/internal/failsafe"
-	"wakeroute/internal/health"
-	"wakeroute/internal/model"
-	"wakeroute/internal/store"
-	"wakeroute/internal/traffic"
-	"wakeroute/internal/version"
+	"velinx/internal/config"
+	"velinx/internal/core"
+	"velinx/internal/failsafe"
+	"velinx/internal/health"
+	"velinx/internal/model"
+	"velinx/internal/store"
+	"velinx/internal/traffic"
+	"velinx/internal/version"
 )
 
 // applyhealth_server builds a *Server with exactly the deps the apply/health/

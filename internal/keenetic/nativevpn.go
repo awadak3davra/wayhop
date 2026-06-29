@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"wakeroute/internal/model"
-	"wakeroute/internal/util"
+	"velinx/internal/model"
+	"velinx/internal/util"
 )
 
 // ascBase is the positional order of the AWG 1.x obfuscation params on KeeneticOS's
@@ -28,7 +28,7 @@ type WireguardOpts struct {
 }
 
 // WireguardCommands renders the NDM command sequence that configures a native KeeneticOS
-// `interface WireguardN` from a WakeRoute AmneziaWG/WireGuard endpoint — the heart of the
+// `interface WireguardN` from a Velinx AmneziaWG/WireGuard endpoint — the heart of the
 // native-first backend (the router runs the tunnel in-kernel, leveraging HW crypto, instead
 // of a userspace sing-box/awg-quick tunnel). The lines mirror the live running-config
 // structure validated on the Hopper SE; the apply layer submits them over RCI `/rci/parse`.

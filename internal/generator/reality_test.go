@@ -3,7 +3,7 @@ package generator
 import (
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // generatorTestPBK is a real x25519 reality public key (base64url of 32 bytes) for

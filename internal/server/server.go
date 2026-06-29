@@ -1,4 +1,4 @@
-// Package server exposes the wakeroute HTTP API and serves the embedded web UI.
+// Package server exposes the velinx HTTP API and serves the embedded web UI.
 package server
 
 import (
@@ -7,19 +7,19 @@ import (
 	"path/filepath"
 	"sync"
 
-	"wakeroute/internal/clash"
-	"wakeroute/internal/config"
-	"wakeroute/internal/core"
-	"wakeroute/internal/failsafe"
-	"wakeroute/internal/health"
-	"wakeroute/internal/initserver"
-	"wakeroute/internal/pbr"
-	"wakeroute/internal/plugin"
-	"wakeroute/internal/serverstore"
-	"wakeroute/internal/store"
-	"wakeroute/internal/traffic"
-	"wakeroute/internal/updater"
-	"wakeroute/internal/watchdog"
+	"velinx/internal/clash"
+	"velinx/internal/config"
+	"velinx/internal/core"
+	"velinx/internal/failsafe"
+	"velinx/internal/health"
+	"velinx/internal/initserver"
+	"velinx/internal/pbr"
+	"velinx/internal/plugin"
+	"velinx/internal/serverstore"
+	"velinx/internal/store"
+	"velinx/internal/traffic"
+	"velinx/internal/updater"
+	"velinx/internal/watchdog"
 )
 
 // Server wires the HTTP handlers to the daemon's components.
@@ -41,7 +41,7 @@ type Server struct {
 
 	// Kernel policy-based-routing plane (RoutingMode=="hybrid"). pbrMu is the SINGLE
 	// authority for pbrPlan+pbrBaseline AND for the whole nft/ip command stream against
-	// the shared "wakeroute_pbr" table — DISTINCT from applyMu. The rollback closure and
+	// the shared "velinx_pbr" table — DISTINCT from applyMu. The rollback closure and
 	// boot sync take ONLY pbrMu (never applyMu, which handleApply holds end-to-end), so
 	// there is no lock-ordering cycle. pbrRunner is injectable (a RecordRunner) for tests.
 	pbrRunner   pbr.Runner
@@ -67,6 +67,9 @@ type Server struct {
 
 	subStatus subRefreshStatus // last subscription auto-refresh outcome (for the Settings card)
 
+	updErrMu sync.Mutex        // guards updErrs
+	updErrs  map[string]string // engine id -> last install-failure reason, so the Updater can show WHY it failed after the toast fades / a reload
+
 	allowInternalFetch bool // test-only: skip the subscription-fetch SSRF dial guard so httptest (loopback) servers can be used
 }
 
@@ -76,7 +79,7 @@ func New(cfg *config.Config, hub *traffic.Hub, cl *clash.Client, sb *core.SingBo
 	pdir := filepath.Join(filepath.Dir(cfg.SingBox.Config), "plugins")
 	s := &Server{cfg: cfg, hub: hub, clash: cl, singbox: sb, store: st, updater: up, monitor: mon,
 		failsafe: failsafe.New(failsafe.DefaultDurations()), plugins: plugin.New(pdir, filepath.Dir(cfg.SingBox.Bin)),
-		servers: ss, jobs: initserver.NewJobManager(), ui: ui, pbrRunner: pbr.ExecRunner{}}
+		servers: ss, jobs: initserver.NewJobManager(), ui: ui, pbrRunner: pbr.ExecRunner{}, updErrs: map[string]string{}}
 	// Crash-restart supervision for sing-box (and best-effort the engine plugins).
 	wd := watchdog.New("sing-box", sb)
 	wd.SetPluginSupervisor(s.plugins.Supervise)
@@ -194,13 +197,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/backup/restore", s.handleBackupRestore)
 	mux.HandleFunc("POST /api/service/restart", s.handleServiceRestart)
 
-	// Engine version manager (Updater) + WakeRoute self-update.
+	// Engine version manager (Updater) + Velinx self-update.
 	mux.HandleFunc("GET /api/updater/engines", s.handleUpdaterEngines)
 	mux.HandleFunc("GET /api/updater/self", s.handleSelfStatus)
 	mux.HandleFunc("POST /api/updater/self/install", s.handleSelfUpdate)
 	mux.HandleFunc("PUT /api/updater/self/auto", s.handleSelfAuto)
 	mux.HandleFunc("GET /api/updater/{id}/versions", s.handleUpdaterVersions)
 	mux.HandleFunc("POST /api/updater/{id}/install", s.handleUpdaterInstall)
+	mux.HandleFunc("DELETE /api/updater/{id}", s.handleUpdaterUninstall)
 
 	if s.clash != nil {
 		mux.Handle("/api/clash/", s.clash.Proxy("/api/clash"))

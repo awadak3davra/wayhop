@@ -1,5 +1,5 @@
 #!/bin/sh
-# WakeRoute (wakeroute) installer for Entware / Keenetic.
+# Velinx (velinx) installer for Entware / Keenetic.
 #
 # What it does, in order:
 #   1. Detects the platform (Keenetic vs plain Entware) and CPU arch.
@@ -14,7 +14,7 @@
 # Idempotent: re-running upgrades in place. POSIX sh / busybox-safe (no bashisms,
 # no `pkill -f`/`pgrep` assumption, no base64, no `od -A`). See --help for flags.
 
-VERSION="0.3.3"
+VERSION="0.4.0"
 
 # ---------------------------------------------------------------------------
 # Output helpers (colour only on a TTY)
@@ -24,16 +24,16 @@ if [ -t 1 ]; then
 else
   C_R=''; C_G=''; C_Y=''; C_B=''; C_DIM=''; C_0=''
 fi
-say()  { printf '%b[wakeroute]%b %s\n' "$C_B" "$C_0" "$*"; }
+say()  { printf '%b[velinx]%b %s\n' "$C_B" "$C_0" "$*"; }
 ok()   { printf '  %b+%b %s\n' "$C_G" "$C_0" "$*"; }
 info() { printf '  %b·%b %s\n' "$C_DIM" "$C_0" "$*"; }
 warn() { printf '  %b!%b %s\n' "$C_Y" "$C_0" "$*"; }
 hdr()  { printf '\n%b== %s ==%b\n' "$C_B" "$*" "$C_0"; }
-die()  { printf '%b[wakeroute] ERROR:%b %s\n' "$C_R" "$C_0" "$*" >&2; exit 1; }
+die()  { printf '%b[velinx] ERROR:%b %s\n' "$C_R" "$C_0" "$*" >&2; exit 1; }
 
 usage() {
   cat <<'USAGE'
-WakeRoute installer for Entware / Keenetic.
+Velinx installer for Entware / Keenetic.
 
 Usage: sh ./install.sh [options] [arch]
 
@@ -146,12 +146,12 @@ native_summary() {
     info "for native wireguard: opkg install wireguard-tools  (+ kmod-wireguard)"
   fi
   if [ -n "$present" ]; then ok "native:$present"
-  else info "native: none detected -- WakeRoute will tunnel these via sing-box instead"; fi
-  info "(advisory only -- nothing was installed; WakeRoute carries non-native protocols via sing-box)"
+  else info "native: none detected -- Velinx will tunnel these via sing-box instead"; fi
+  info "(advisory only -- nothing was installed; Velinx carries non-native protocols via sing-box)"
 }
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
-say "WakeRoute installer $VERSION"
+say "Velinx installer $VERSION"
 [ "$DRY_RUN" = 1 ] && warn "DRY-RUN: no changes will be made"
 
 # ===========================================================================
@@ -190,9 +190,9 @@ detect_arch() {
 ARCH="${FORCE_ARCH:-$(detect_arch)}"
 [ "$ARCH" = unknown ] && die "could not detect arch (uname -m=$(uname -m)); pass one explicitly, e.g. 'sh ./install.sh mipsle'"
 
-BIN="$SRC/wakeroute-$ARCH"
-[ -f "$BIN" ] || BIN="$SRC/wakeroute"
-[ -f "$BIN" ] || die "binary not found -- expected $SRC/wakeroute-$ARCH (wrong arch tarball?)"
+BIN="$SRC/velinx-$ARCH"
+[ -f "$BIN" ] || BIN="$SRC/velinx"
+[ -f "$BIN" ] || die "binary not found -- expected $SRC/velinx-$ARCH (wrong arch tarball?)"
 
 ok "platform: $PLATFORM"
 ok "arch:     $ARCH  ($(uname -m))   binary: $(basename "$BIN")"
@@ -266,13 +266,13 @@ SB="/opt/sbin/sing-box"
 if [ -x "$SB" ]; then ok "sing-box: $SB"
 elif command -v sing-box >/dev/null 2>&1; then SB="$(command -v sing-box)"; ok "sing-box: $SB"
 else warn "sing-box not found -- the UI will start, but you cannot Apply a proxy config until it exists at $SB (opkg install sing-box, or drop the $ARCH build from github.com/SagerNet/sing-box/releases)"; fi
-# Version compatibility: WakeRoute targets sing-box 1.12.x (1.13 removed the wireguard outbound).
+# Version compatibility: Velinx targets sing-box 1.12.x (1.13 removed the wireguard outbound).
 if [ -x "$SB" ]; then
   SB_VER="$("$SB" version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)"
   SB_MAJOR="$(echo "$SB_VER" | cut -d. -f1)"
   SB_MINOR="$(echo "$SB_VER" | cut -d. -f2)"
   if [ -n "$SB_MAJOR" ] && [ "$SB_MAJOR" -eq 1 ] && [ "$SB_MINOR" -lt 12 ] 2>/dev/null; then
-    warn "sing-box $SB_VER is older than 1.12 — WakeRoute needs 1.12+ (upgrade: opkg install sing-box, or use the GitHub release)"
+    warn "sing-box $SB_VER is older than 1.12 — Velinx needs 1.12+ (upgrade: opkg install sing-box, or use the GitHub release)"
   fi
 fi
 
@@ -282,7 +282,7 @@ fi
 hdr "Conflicts"
 
 INITD="/opt/etc/init.d"
-ETC="/opt/etc/wakeroute"
+ETC="/opt/etc/velinx"
 
 # best-effort: who listens on tcp :$1  -> echoes a short "prog/pid" string for display
 port_listener() {
@@ -314,7 +314,7 @@ first_free_port() { for p in 8089 8090 8091 8099 18088; do port_busy "$p" || { e
 # read + validate a new UI port into $PORT, honouring -y/-n/no-TTY
 choose_new_port() {
   if [ "$ASSUME" = yes ] || [ "$ASSUME" = no ] || [ ! -t 0 ]; then
-    PORT="$(first_free_port)"; ok "WakeRoute UI will use :$PORT (auto-picked)"; return
+    PORT="$(first_free_port)"; ok "Velinx UI will use :$PORT (auto-picked)"; return
   fi
   while :; do
     printf '  new UI port [8089]: '; read -r np
@@ -324,25 +324,25 @@ choose_new_port() {
     if port_busy "$np"; then warn "  :$np is also in use, pick another"; continue; fi
     break
   done
-  PORT="$np"; ok "WakeRoute UI will use :$PORT"
+  PORT="$np"; ok "Velinx UI will use :$PORT"
 }
 
 UNRESOLVED=0
 
-# 4a. Previous WakeRoute install -> graceful upgrade (informational)
-if [ -x "$INITD/S99wakeroute" ] || [ -x /opt/sbin/wakeroute ]; then
-  ok "existing WakeRoute install detected -- this will upgrade it in place"
+# 4a. Previous Velinx install -> graceful upgrade (informational)
+if [ -x "$INITD/S99velinx" ] || [ -x /opt/sbin/velinx ]; then
+  ok "existing Velinx install detected -- this will upgrade it in place"
 fi
 
 # 4b. UI port occupant
 listener="$(port_listener "$PORT")"
 case "$listener" in
-  *wakeroute*) info "port :$PORT held by WakeRoute itself (upgrade) -- will restart it" ;;
+  *velinx*|*wakeroute*) info "port :$PORT held by Velinx itself (upgrade) -- will restart it" ;;
   *lighttpd*)
     UNRESOLVED=$((UNRESOLVED+1))
     warn "port :$PORT is held by lighttpd (stock firmware web server: $listener)"
-    echo "      WakeRoute's UI cannot bind :$PORT while lighttpd holds it."
-    if ask "  Stop and disable lighttpd so WakeRoute can use :$PORT?" n; then
+    echo "      Velinx's UI cannot bind :$PORT while lighttpd holds it."
+    if ask "  Stop and disable lighttpd so Velinx can use :$PORT?" n; then
       kill_by_name lighttpd
       for s in /opt/etc/init.d/S*lighttpd; do [ -f "$s" ] && [ -x "$s" ] && { info "disabling $s"; run chmod -x "$s"; }; done
       ok "lighttpd stopped/disabled"
@@ -357,13 +357,13 @@ case "$listener" in
     UNRESOLVED=$((UNRESOLVED+1))
     warn "port :$PORT is already in use ($listener)"
     if ask "  Use a different UI port?" y; then choose_new_port; UNRESOLVED=$((UNRESOLVED-1))
-    else warn "  continuing -- WakeRoute may fail to bind :$PORT"; fi ;;
+    else warn "  continuing -- Velinx may fail to bind :$PORT"; fi ;;
   *) ok "UI port :$PORT is free" ;;
 esac
 
 # 4c. secondary ports (configurable; warn only, never blocking)
 for p in 9090 5353 7890; do
-  port_busy "$p" && warn "port :$p in use ($(port_listener "$p")) -- adjust \"ports\" in config.json if WakeRoute needs it"
+  port_busy "$p" && warn "port :$p in use ($(port_listener "$p")) -- adjust \"ports\" in config.json if Velinx needs it"
 done
 
 # 4d. keen-pbr (selective routing -- can coexist)
@@ -371,32 +371,32 @@ KEENPBR=""
 for s in /opt/etc/init.d/S*keen-pbr; do [ -x "$s" ] && KEENPBR="$s"; done
 if [ -n "$KEENPBR" ]; then
   warn "keen-pbr is active ($KEENPBR)"
-  echo "      WakeRoute can coexist with keen-pbr (each uses its own fwmark + routing table),"
+  echo "      Velinx can coexist with keen-pbr (each uses its own fwmark + routing table),"
   echo "      but if BOTH route the same destinations the result is ambiguous."
-  if ask "  Disable keen-pbr so WakeRoute owns routing? (No = keep both, recommended)" n; then
+  if ask "  Disable keen-pbr so Velinx owns routing? (No = keep both, recommended)" n; then
     run "$KEENPBR" stop 2>/dev/null
     run chmod -x "$KEENPBR"
     ok "keen-pbr stopped/disabled (re-enable: chmod +x $KEENPBR && $KEENPBR start)"
-  else info "keeping keen-pbr -- WakeRoute will route only the traffic it marks"; fi
+  else info "keeping keen-pbr -- Velinx will route only the traffic it marks"; fi
 fi
 
-# 4e. stray sing-box not managed by WakeRoute (only relevant once we have a config)
+# 4e. stray sing-box not managed by Velinx (only relevant once we have a config)
 if proc_running '/opt/sbin/sing-box'; then
   if [ -f "$ETC/config.json" ] && grep -q '/opt/sbin/sing-box' "$ETC/config.json" 2>/dev/null; then
-    info "sing-box is running and already managed by WakeRoute -- ok"
+    info "sing-box is running and already managed by Velinx -- ok"
   elif [ -f "$ETC/config.json" ]; then
-    warn "sing-box is running but is NOT referenced by WakeRoute's config"
-    if ask "  Stop the independent sing-box (WakeRoute will manage its own)?" n; then
+    warn "sing-box is running but is NOT referenced by Velinx's config"
+    if ask "  Stop the independent sing-box (Velinx will manage its own)?" n; then
       kill_by_name '/opt/sbin/sing-box'; ok "stray sing-box stopped"
     else info "leaving it running -- watch for port/route clashes"; fi
   else
-    info "a sing-box is already running -- WakeRoute will manage its own once you Apply"
+    info "a sing-box is already running -- Velinx will manage its own once you Apply"
   fi
 fi
 
 # 4f. our routing table already populated (old install residue)
 if command -v ip >/dev/null 2>&1 && ip route show table 2025 2>/dev/null | grep -q .; then
-  info "routing table 2025 already has routes (old WakeRoute run); they will be reclaimed on Apply"
+  info "routing table 2025 already has routes (old Velinx run); they will be reclaimed on Apply"
 fi
 
 if [ "$UNRESOLVED" -gt 0 ]; then warn "$UNRESOLVED conflict(s) left as-is -- continuing anyway"
@@ -417,35 +417,56 @@ fi
 hdr "Install"
 
 SBIN="/opt/sbin"
-VAR="/opt/var/wakeroute"
-if [ -x "$SBIN/wakeroute" ]; then
-  PREV_VER="$("$SBIN/wakeroute" --version 2>/dev/null | head -1)"
+VAR="/opt/var/velinx"
+if [ -x "$SBIN/velinx" ]; then
+  PREV_VER="$("$SBIN/velinx" --version 2>/dev/null | head -1)"
   [ -n "$PREV_VER" ] && info "upgrading from: $PREV_VER"
+fi
+# --- one-time migration from a previous "wakeroute"-named install ----------
+# Preserves saved connections/config when upgrading across the rename. Runs
+# before mkdir so the "move only if the new dir is absent" guard holds.
+OLD_ETC="/opt/etc/wakeroute"; OLD_VAR="/opt/var/wakeroute"
+if [ -x "$INITD/S99wakeroute" ] || [ -d "$OLD_ETC" ] || [ -x "$SBIN/wakeroute" ]; then
+  say "migrating previous 'wakeroute' install -> velinx (your config is preserved)"
+  if [ -x "$INITD/S99wakeroute" ]; then
+    "$INITD/S99wakeroute" stop 2>/dev/null || true
+    rm -f "$INITD/S99wakeroute"
+  fi
+  if [ -d "$OLD_ETC" ] && [ ! -d "$ETC" ]; then
+    mv "$OLD_ETC" "$ETC" 2>/dev/null || { cp -a "$OLD_ETC" "$ETC" && rm -rf "$OLD_ETC"; } || warn "could not move $OLD_ETC -> $ETC"
+    ok "moved config $OLD_ETC -> $ETC"
+  elif [ -d "$OLD_ETC" ]; then warn "both $OLD_ETC and $ETC exist -- keeping $ETC"; fi
+  if [ -d "$OLD_VAR" ] && [ ! -d "$VAR" ]; then
+    mv "$OLD_VAR" "$VAR" 2>/dev/null || { cp -a "$OLD_VAR" "$VAR" && rm -rf "$OLD_VAR"; } || warn "could not move $OLD_VAR -> $VAR"
+    ok "moved runtime state $OLD_VAR -> $VAR"
+  fi
+  [ -f "$ETC/config.json" ] && { sed -i 's#/opt/etc/wakeroute#/opt/etc/velinx#g; s#/opt/var/wakeroute#/opt/var/velinx#g' "$ETC/config.json" 2>/dev/null && ok "rewrote paths in config.json" || warn "check data_dir/singbox.config in $ETC/config.json by hand"; }
+  rm -f "$SBIN/wakeroute" "$SBIN/wakeroute.bak"
 fi
 mkdir -p "$SBIN" "$INITD" "$ETC" "$VAR" || die "could not create install directories"
 
-if [ -x "$INITD/S99wakeroute" ]; then
+if [ -x "$INITD/S99velinx" ]; then
   say "stopping existing service"
-  "$INITD/S99wakeroute" stop 2>/dev/null || true
+  "$INITD/S99velinx" stop 2>/dev/null || true
   sleep 1
 fi
 
 # binary: stage -> back up previous -> atomic rename
-say "installing binary -> $SBIN/wakeroute"
-cp "$BIN" "$SBIN/wakeroute.new" || die "failed to copy binary"
-chmod 0755 "$SBIN/wakeroute.new" || die "failed to chmod binary"
-[ -f "$SBIN/wakeroute" ] && { cp "$SBIN/wakeroute" "$SBIN/wakeroute.bak" || warn "could not create backup (rollback with wakeroute.bak unavailable)"; }
-mv "$SBIN/wakeroute.new" "$SBIN/wakeroute" || die "failed to install binary"
-ok "binary installed ($(wc -c < "$SBIN/wakeroute" 2>/dev/null) bytes)"
+say "installing binary -> $SBIN/velinx"
+cp "$BIN" "$SBIN/velinx.new" || die "failed to copy binary"
+chmod 0755 "$SBIN/velinx.new" || die "failed to chmod binary"
+[ -f "$SBIN/velinx" ] && { cp "$SBIN/velinx" "$SBIN/velinx.bak" || warn "could not create backup (rollback with velinx.bak unavailable)"; }
+mv "$SBIN/velinx.new" "$SBIN/velinx" || die "failed to install binary"
+ok "binary installed ($(wc -c < "$SBIN/velinx" 2>/dev/null) bytes)"
 
 # init script (bundled in the tarball)
 HAVE_INIT=0
-if [ -f "$SRC/S99wakeroute" ]; then
-  say "installing init script -> $INITD/S99wakeroute"
-  if cp "$SRC/S99wakeroute" "$INITD/S99wakeroute" && chmod 0755 "$INITD/S99wakeroute"; then HAVE_INIT=1; ok "init script installed"
+if [ -f "$SRC/S99velinx" ]; then
+  say "installing init script -> $INITD/S99velinx"
+  if cp "$SRC/S99velinx" "$INITD/S99velinx" && chmod 0755 "$INITD/S99velinx"; then HAVE_INIT=1; ok "init script installed"
   else warn "could not install init script -- service won't auto-start on boot"; fi
 else
-  warn "S99wakeroute not found next to the installer (incomplete tarball?) -- no boot auto-start; will start the daemon directly"
+  warn "S99velinx not found next to the installer (incomplete tarball?) -- no boot auto-start; will start the daemon directly"
 fi
 
 # config: seed only if absent (never clobber an existing one)
@@ -483,7 +504,7 @@ fi
 # ===========================================================================
 if [ "$NO_START" = 1 ]; then
   hdr "Done (not started)"
-  say "installed but not started (--no-start). Start later: $INITD/S99wakeroute start"
+  say "installed but not started (--no-start). Start later: $INITD/S99velinx start"
   native_summary
   exit 0
 fi
@@ -491,10 +512,10 @@ fi
 hdr "Start"
 if [ "$HAVE_INIT" = 1 ]; then
   say "starting service"
-  "$INITD/S99wakeroute" start 2>/dev/null || warn "start returned non-zero -- check: $INITD/S99wakeroute start"
+  "$INITD/S99velinx" start 2>/dev/null || warn "start returned non-zero -- check: $INITD/S99velinx start"
 else
   warn "no init script -- starting the daemon directly (it will NOT survive a reboot)"
-  ( "$SBIN/wakeroute" --config "$ETC/config.json" >/dev/null 2>&1 & )
+  ( "$SBIN/velinx" --config "$ETC/config.json" >/dev/null 2>&1 & )
 fi
 sleep 2
 
@@ -518,11 +539,11 @@ done
 IP="$(ip route get 1 2>/dev/null | awk '{print $7; exit}')"
 [ -z "$IP" ] && IP="$(uname -n 2>/dev/null)"
 
-INSTALLED_VER="$("$SBIN/wakeroute" --version 2>/dev/null | head -1)"
+INSTALLED_VER="$("$SBIN/velinx" --version 2>/dev/null | head -1)"
 hdr "Done"
 [ -n "$INSTALLED_VER" ] && ok "version:  $INSTALLED_VER"
 if [ "$HEALTHY" = 1 ]; then ok "UI is up (HTTP 200 on :$PORT)"
-else warn "UI not answering yet on :$PORT -- give it a few seconds, then check: logread 2>/dev/null | grep wakeroute"; fi
+else warn "UI not answering yet on :$PORT -- give it a few seconds, then check: logread 2>/dev/null | grep velinx"; fi
 say "open  ->  http://${IP:-<router-ip>}:$PORT"
 native_summary
 echo ""

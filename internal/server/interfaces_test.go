@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // TestFilterInterfaces locks the pure filter: loopback dropped, the rest sorted by name with the

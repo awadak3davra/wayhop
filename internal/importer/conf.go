@@ -4,7 +4,7 @@ import (
 	"errors"
 	"strings"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // awgKeys are the AmneziaWG obfuscation parameters whose presence in an [Interface]

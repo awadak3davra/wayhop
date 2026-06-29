@@ -32,7 +32,7 @@ func TestBuildScriptBoth(t *testing.T) {
 }
 
 func TestExtractConfig(t *testing.T) {
-	link := "vless://uuid@1.2.3.4:443?security=reality#wakeroute"
+	link := "vless://uuid@1.2.3.4:443?security=reality#velinx"
 	if got := ExtractConfig("log line\nWR_CLIENT_CONFIG=" + link + "\nmore"); got != link {
 		t.Fatalf("vless extract=%q", got)
 	}

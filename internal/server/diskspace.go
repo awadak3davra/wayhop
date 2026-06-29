@@ -6,10 +6,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"wakeroute/internal/updater"
+	"velinx/internal/updater"
 )
 
-// diskVerdict maps free bytes on WakeRoute's filesystem to a battery status. The router overlay is
+// diskVerdict maps free bytes on Velinx's filesystem to a battery status. The router overlay is
 // tiny (~60 MB) and fills with logs; once it's nearly full, config applies (which write a temp
 // config), log writes, and binary updates all fail — so this is a real, confusing failure to
 // surface early. Pure for unit-testing.
@@ -28,7 +28,7 @@ func diskVerdict(avail uint64, ok bool) (status, summary, fix string) {
 }
 
 // diskSpaceCheck is a Diagnostics-battery probe: it reports the free space on the filesystem
-// holding the WakeRoute binary (where the binary swaps and, on most installs, the config lives)
+// holding the Velinx binary (where the binary swaps and, on most installs, the config lives)
 // and warns/fails when it's low. Read-only.
 func (s *Server) diskSpaceCheck(_ context.Context) healthRow {
 	row := healthRow{ID: "disk-space", Label: "Router storage has room"}

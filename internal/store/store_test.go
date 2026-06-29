@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // TestProfileMigrationCompat locks the deploy/rollback compat for the user's endpoint DATA —

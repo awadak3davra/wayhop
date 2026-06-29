@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // TestRenderNft_MasqInterfaceEgress: a plan with an EgressInterface egress (a tunnel iface)

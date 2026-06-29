@@ -15,9 +15,9 @@ import (
 
 	qrcode "github.com/skip2/go-qrcode"
 
-	"wakeroute/internal/exporter"
-	"wakeroute/internal/importer"
-	"wakeroute/internal/model"
+	"velinx/internal/exporter"
+	"velinx/internal/importer"
+	"velinx/internal/model"
 )
 
 // handleEndpointExport returns one endpoint's share link or .conf so the UI can
@@ -252,7 +252,7 @@ func (s *Server) serveSubLandingPage(w http.ResponseWriter, r *http.Request, ena
 	subURLJS = strings.ReplaceAll(subURLJS, "<", "\\u003c")
 	subURLQuery := url.QueryEscape(subURL) // for the deep-link import helpers
 	clashHref := html.EscapeString("clash://install-config?url=" + subURLQuery)
-	singboxHref := html.EscapeString("sing-box://import-remote-profile?url=" + subURLQuery + "&name=WakeRoute")
+	singboxHref := html.EscapeString("sing-box://import-remote-profile?url=" + subURLQuery + "&name=Velinx")
 
 	count := len(enabled)
 	connLabel := strconv.Itoa(count) + " connection"
@@ -266,7 +266,7 @@ func (s *Server) serveSubLandingPage(w http.ResponseWriter, r *http.Request, ena
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>WakeRoute subscription</title>
+<title>Velinx subscription</title>
 <style>
 :root{--bg:#0e1116;--card:#161b22;--border:#262d36;--fg:#e6edf3;--muted:#9aa7b4;--accent:#3fb950;--accent-d:#2ea043;}
 *{box-sizing:border-box}
@@ -295,7 +295,7 @@ button,.btn{cursor:pointer;border:1px solid var(--border);border-radius:8px;padd
 </head>
 <body>
 <div class="card">
-  <h1>WakeRoute subscription</h1>
+  <h1>Velinx subscription</h1>
   <p class="sub">Import this into your VPN client</p>
   <div class="count">` + html.EscapeString(connLabel) + `</div>
   ` + qrTag + `

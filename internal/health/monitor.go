@@ -11,12 +11,12 @@ import (
 	"sync"
 	"time"
 
-	"wakeroute/internal/clash"
-	"wakeroute/internal/kb"
-	"wakeroute/internal/model"
-	"wakeroute/internal/netdiag"
-	"wakeroute/internal/store"
-	"wakeroute/internal/util"
+	"velinx/internal/clash"
+	"velinx/internal/kb"
+	"velinx/internal/model"
+	"velinx/internal/netdiag"
+	"velinx/internal/store"
+	"velinx/internal/util"
 )
 
 type State string

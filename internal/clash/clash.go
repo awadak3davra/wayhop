@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"wakeroute/internal/traffic"
+	"velinx/internal/traffic"
 )
 
 const (

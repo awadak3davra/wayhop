@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // TestHandleRestoreProfile: a valid backup replaces the whole profile; an invalid one (fails

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // TestIfaceBytesFrom: parse rx/tx from a sysfs-shaped temp dir; missing iface -> ok=false.

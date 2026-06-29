@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/clash"
-	"wakeroute/internal/model"
+	"velinx/internal/clash"
+	"velinx/internal/model"
 )
 
 // TestMonitorGracefulWhenClashUnreachable locks the stability property the P4 native-only sing-box

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"wakeroute/internal/model"
-	"wakeroute/internal/netvpn"
+	"velinx/internal/model"
+	"velinx/internal/netvpn"
 )
 
 // handleVPNDiscover lists native VPN tunnels (WireGuard / AmneziaWG) already configured on
@@ -60,7 +60,7 @@ func peerEndpointHost(peers []netvpn.Peer) string {
 
 // endpointFromDiscovered maps a discovered native tunnel to a DISABLED
 // model.EngineExternal endpoint the user can then route through. It is pure (no I/O)
-// so it is unit-tested directly. The OS owns the iface; WakeRoute only uses it as an
+// so it is unit-tested directly. The OS owns the iface; Velinx only uses it as an
 // egress, so no Server/Port/keys are created. Enabled is false — adoption never
 // auto-enables or auto-applies; enabling + routing is the user's explicit next step.
 //

@@ -3,7 +3,7 @@ package server
 import (
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // TestFastModeDomainWarning (L5): fast mode has no TUN, so domain/geo rules don't apply to LAN

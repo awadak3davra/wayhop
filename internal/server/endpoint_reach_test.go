@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 func reach_hostPort(t *testing.T, rawURL string) (string, int) {

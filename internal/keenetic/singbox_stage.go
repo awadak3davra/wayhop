@@ -7,12 +7,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	"wakeroute/internal/atomicfile"
+	"velinx/internal/atomicfile"
 )
 
 // singbox_stage.go atomically swaps the sing-box config for the cutover, with a snapshot for
 // rollback. The device's S99sing-box runs `sing-box run -C /opt/etc/sing-box` — DIRECTORY
-// mode, which merges EVERY *.json in the dir (the red-team's hole). So WakeRoute overwrites
+// mode, which merges EVERY *.json in the dir (the red-team's hole). So Velinx overwrites
 // the single config.json, snapshots the original bytes (to a non-*.json sidecar so sing-box
 // won't merge it), and refuses to stage if a stray *.json would also load.
 
@@ -53,7 +53,7 @@ func strayJSON(dir, keep string) ([]string, error) {
 
 // StageSingboxConfig snapshots the original config.json (once) and atomically writes the new
 // one. It does NOT restart sing-box — the orchestrator does that after the rest of the plane
-// is staged. Re-staging keeps the FIRST snapshot (the true pre-WakeRoute config). ⚠️
+// is staged. Re-staging keeps the FIRST snapshot (the true pre-Velinx config). ⚠️
 // DEVICE-WRITING; cutover only.
 func StageSingboxConfig(cfg map[string]any, opt SingboxStageOptions) error {
 	opt.defaults()
@@ -65,7 +65,7 @@ func StageSingboxConfig(cfg map[string]any, opt SingboxStageOptions) error {
 		return fmt.Errorf("refusing to stage: stray *.json in %s would also load in directory mode: %v", dir, stray)
 	}
 
-	// Snapshot the ORIGINAL only once (never snapshot a WakeRoute config as "original").
+	// Snapshot the ORIGINAL only once (never snapshot a Velinx config as "original").
 	if _, err := os.Stat(opt.SnapshotPath); os.IsNotExist(err) {
 		if orig, rerr := os.ReadFile(opt.ConfigPath); rerr == nil {
 			if err := atomicfile.Write(opt.SnapshotPath, orig, 0o600); err != nil {

@@ -3,7 +3,7 @@ package health
 import (
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // TestGroupTrafficFromMembers: a kernel group (no Clash chain → its own view reads zero) has its

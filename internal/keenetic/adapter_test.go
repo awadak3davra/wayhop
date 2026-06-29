@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/model"
-	"wakeroute/internal/platform"
+	"velinx/internal/model"
+	"velinx/internal/platform"
 )
 
 func awgProfile() *model.Profile {

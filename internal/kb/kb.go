@@ -26,7 +26,7 @@ var entries = []Entry{
 		ID: "sb-tun-file-exists", Engine: "sing-box", Pattern: `configure tun interface:.*file exists`,
 		Title:       "TUN interface already exists",
 		Explanation: "sing-box could not create its TUN device because one with the same name already exists — usually a previous instance is still running or left a stale interface behind.",
-		Fix:         "Stop any other sing-box/wakeroute instance, delete the stale TUN (e.g. `ip link del tun0`), or reboot. Make sure only one router owns the TUN.",
+		Fix:         "Stop any other sing-box/velinx instance, delete the stale TUN (e.g. `ip link del tun0`), or reboot. Make sure only one router owns the TUN.",
 		Sources:     []string{"https://github.com/SagerNet/sing-box/issues/3411"},
 	},
 	{
@@ -47,7 +47,7 @@ var entries = []Entry{
 		ID: "sb-fatal-start", Engine: "sing-box", Pattern: `FATAL.*start service`,
 		Title:       "sing-box failed to start",
 		Explanation: "sing-box aborted at startup; the rest of the line names the failing inbound/outbound. Usually a config error or a port/interface already in use.",
-		Fix:         "Validate with `sing-box check -c config.json` (wakeroute's Apply does this automatically), then fix the named section or free the busy port.",
+		Fix:         "Validate with `sing-box check -c config.json` (velinx's Apply does this automatically), then fix the named section or free the busy port.",
 		Sources:     []string{"https://github.com/SagerNet/sing-box/issues"},
 	},
 
@@ -150,7 +150,7 @@ var entries = []Entry{
 		ID: "awg-junk-mismatch", Engine: "amneziawg", Pattern: `sending dummy junk|only \d+ bytes received`,
 		Title:       "AmneziaWG junk-packet parameters mismatch",
 		Explanation: "AmneziaWG's obfuscation params (Jc, Jmin, Jmax, S1, S2, H1–H4) must be IDENTICAL on both ends. When they differ the server can't parse the obfuscated handshake, so you see partial reads ('only 92 bytes received') or it never completes.",
-		Fix:         "Copy the exact Jc/Jmin/Jmax/S1/S2/H1–H4 from the server. (A plain WireGuard server also works if only Jc/Jmin/Jmax are set and the rest are 0.) Re-import the .conf so wakeroute captures every param.",
+		Fix:         "Copy the exact Jc/Jmin/Jmax/S1/S2/H1–H4 from the server. (A plain WireGuard server also works if only Jc/Jmin/Jmax are set and the rest are 0.) Re-import the .conf so velinx captures every param.",
 		Sources:     []string{"https://github.com/amnezia-vpn/amnezia-client/issues/1823", "https://github.com/amnezia-vpn/amnezia-client/issues/1041", "https://github.com/shtorm-7/sing-box-extended/issues/18"},
 	},
 
@@ -183,7 +183,7 @@ var entries = []Entry{
 		ID: "inbound-port-in-use", Engine: "sing-box", Pattern: `listen.*:(8443|8444|8388|8445|8446).*address already in use|bind.*:(8443|8444|8388|8445|8446).*address already in use|start inbound.*(8443|8444|8388|8445|8446).*address already in use`,
 		Title:       "Provisioned inbound port already in use",
 		Explanation: "sing-box could not bind to one of the provisioned inbound ports (8443/8444/8388/8445/8446) because another process already holds it — a stale sing-box instance, a system service (e.g. Apache on 8443), or a previous crash that left the socket open.",
-		Fix:         "Run `ss -tlunp | grep -E '8443|8444|8388|8445|8446'` to find the owner, stop it, then restart sing-box (or choose a different port in the WakeRoute Init-Server settings).",
+		Fix:         "Run `ss -tlunp | grep -E '8443|8444|8388|8445|8446'` to find the owner, stop it, then restart sing-box (or choose a different port in the Velinx Init-Server settings).",
 		Sources:     []string{"https://github.com/SagerNet/sing-box/issues/3411", "https://sing-box.sagernet.org/configuration/inbound/"},
 	},
 
@@ -237,7 +237,7 @@ var entries = []Entry{
 		ID: "inbound-tls-bad-cert", Engine: "sing-box", Pattern: `tls: bad certificate|tls: unknown certificate authority|remote error: tls:.*certificate|inbound.*tls.*(bad cert|unknown ca|certificate unknown)`,
 		Title:       "Client rejected the server's self-signed TLS certificate",
 		Explanation: "A client connected to a provisioned TLS inbound (VMess :8443, Trojan :8444, Hysteria2 :8445, TUIC :8446) but refused the self-signed certificate. The TLS alert 'bad certificate' or 'unknown certificate authority' is sent back to the server.",
-		Fix:         "Enable 'allow_insecure' / 'insecure=1' on the client (wakeroute's Init-Server share links include this flag). Alternatively, replace the self-signed cert with a Let's Encrypt cert matching the SNI domain.",
+		Fix:         "Enable 'allow_insecure' / 'insecure=1' on the client (velinx's Init-Server share links include this flag). Alternatively, replace the self-signed cert with a Let's Encrypt cert matching the SNI domain.",
 		Sources:     []string{"https://sing-box.sagernet.org/configuration/shared/tls/", "https://github.com/SagerNet/sing-box/issues/1844"},
 	},
 
@@ -255,7 +255,7 @@ var entries = []Entry{
 		ID: "gen-no-host", Engine: "any", Pattern: `no such host|name resolution failed|server misbehaving`,
 		Title:       "DNS resolution failed",
 		Explanation: "The engine couldn't resolve the server's hostname to an IP — DNS is failing, blocked, or hijacked.",
-		Fix:         "Use an IP instead of a hostname, point wakeroute's DNS at a working DoH/DoT resolver, or check that DNS isn't being intercepted upstream.",
+		Fix:         "Use an IP instead of a hostname, point velinx's DNS at a working DoH/DoT resolver, or check that DNS isn't being intercepted upstream.",
 		Sources:     []string{"https://sing-box.sagernet.org/configuration/dns/"},
 	},
 	{
@@ -283,7 +283,7 @@ var entries = []Entry{
 		ID: "gen-clock", Engine: "any", Pattern: `certificate has expired|not valid before|tls: failed to verify certificate because of clock`,
 		Title:       "System clock is wrong",
 		Explanation: "TLS and Reality handshakes fail when the router clock is off (common after a power loss on devices without an RTC). Certificates look 'expired' or 'not yet valid'.",
-		Fix:         "Sync the clock via NTP. wakeroute warns on large clock skew at startup.",
+		Fix:         "Sync the clock via NTP. velinx warns on large clock skew at startup.",
 		Sources:     []string{"https://github.com/XTLS/Xray-core/issues/2728"},
 	},
 	{
@@ -297,14 +297,14 @@ var entries = []Entry{
 		ID: "sb-decode-config", Engine: "sing-box", Pattern: `(decode|read) config at .+:`,
 		Title:       "sing-box rejected the config (parse error)",
 		Explanation: "sing-box could not load its config: either invalid JSON, or a field/value this sing-box version doesn't accept (a key removed/renamed across versions, or a typo). It aborts before any inbound/outbound starts.",
-		Fix:         "Run `sing-box check -c <config>` to see the exact bad key/line. An 'unknown field' means the JSON uses a key the installed core (target 1.12.x) doesn't support — re-Apply from WakeRoute so the JSON matches the core, or update the core.",
+		Fix:         "Run `sing-box check -c <config>` to see the exact bad key/line. An 'unknown field' means the JSON uses a key the installed core (target 1.12.x) doesn't support — re-Apply from Velinx so the JSON matches the core, or update the core.",
 		Sources:     []string{"https://github.com/SagerNet/sing-box/issues/620"},
 	},
 	{
 		ID: "sb-decode-key", Engine: "sing-box", Pattern: `decode (private|public|peer.?public)[ _]?key\b|decode short_id\b|invalid public_key`,
 		Title:       "A protocol key or short-id is malformed",
 		Explanation: "sing-box could not decode a key while loading the config — a WireGuard private/peer key, a Reality public key, or a Reality short-id is not valid. WireGuard keys are standard base64; a Reality public key is url-safe base64; a short-id is even-length hex (≤16 chars). The usual cause is a truncated or wrongly-encoded copy-paste, or a hand-edited profile.",
-		Fix:         "Re-copy the key / short-id from its source (the server config or the share link) and re-import — WakeRoute normalizes key encodings on import, so importing the link or .conf is more reliable than hand-editing the profile JSON. A short-id must be hex, e.g. `0123abcd`.",
+		Fix:         "Re-copy the key / short-id from its source (the server config or the share link) and re-import — Velinx normalizes key encodings on import, so importing the link or .conf is more reliable than hand-editing the profile JSON. A short-id must be hex, e.g. `0123abcd`.",
 		Sources:     []string{"https://sing-box.sagernet.org/configuration/shared/tls/", "https://sing-box.sagernet.org/configuration/endpoint/wireguard/"},
 	},
 	{
@@ -332,7 +332,7 @@ var entries = []Entry{
 		ID: "awg-resolvconf-missing", Engine: "amneziawg", Pattern: `(resolvconf|resolvectl): (command )?not found|wg-quick:.*resolvconf`,
 		Title:       "awg-quick can't apply DNS (resolvconf missing)",
 		Explanation: "The AmneziaWG .conf has a 'DNS =' line, so awg-quick tries to set DNS via resolvconf/resolvectl, but that tool isn't installed on this router — so DNS handling fails or the bring-up aborts.",
-		Fix:         "Install resolvconf/openresolv (`opkg install resolvconf` on Entware), OR remove the 'DNS =' line from the AmneziaWG profile and let WakeRoute handle DNS, OR set 'Table = off' and point DNS manually via PostUp.",
+		Fix:         "Install resolvconf/openresolv (`opkg install resolvconf` on Entware), OR remove the 'DNS =' line from the AmneziaWG profile and let Velinx handle DNS, OR set 'Table = off' and point DNS manually via PostUp.",
 		Sources:     []string{"https://github.com/amnezia-vpn/amneziawg-tools"},
 	},
 	{
@@ -343,12 +343,12 @@ var entries = []Entry{
 		Sources:     []string{"https://github.com/amnezia-vpn/amneziawg-tools"},
 	},
 
-	// --- WakeRoute's own local ports + host resource limits ---
+	// --- Velinx's own local ports + host resource limits ---
 	{
 		ID: "local-port-in-use", Engine: "sing-box", Pattern: `(inbound/mixed|clash.?api|external_controller).*address already in use|listen.*:(7890|9090)\b.*address already in use`,
-		Title:       "WakeRoute's local proxy / Clash-API port is already in use",
-		Explanation: "sing-box couldn't bind WakeRoute's own local mixed-proxy (default :7890) or Clash-API (default :9090) port — distinct from the provisioned server inbounds (8443/8444/…). Almost always a previous sing-box/WakeRoute instance that didn't exit cleanly still holds the socket, or another proxy is listening on the same port.",
-		Fix:         "Find the holder with `ss -tlnp | grep -E ':(7890|9090)'`. If it's a stale `sing-box`, `killall sing-box` and let WakeRoute's watchdog restart it cleanly; or change WakeRoute's mixed/Clash port in Settings if another app needs that port.",
+		Title:       "Velinx's local proxy / Clash-API port is already in use",
+		Explanation: "sing-box couldn't bind Velinx's own local mixed-proxy (default :7890) or Clash-API (default :9090) port — distinct from the provisioned server inbounds (8443/8444/…). Almost always a previous sing-box/Velinx instance that didn't exit cleanly still holds the socket, or another proxy is listening on the same port.",
+		Fix:         "Find the holder with `ss -tlnp | grep -E ':(7890|9090)'`. If it's a stale `sing-box`, `killall sing-box` and let Velinx's watchdog restart it cleanly; or change Velinx's mixed/Clash port in Settings if another app needs that port.",
 		Sources:     []string{"https://github.com/SagerNet/sing-box/issues/3411", "https://sing-box.sagernet.org/configuration/inbound/"},
 	},
 	{

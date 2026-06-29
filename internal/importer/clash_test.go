@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // All servers / keys here are SYNTHETIC.

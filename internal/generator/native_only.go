@@ -33,7 +33,7 @@ package generator
 import (
 	"strings"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // singboxRequiredProtos is the set of proxy protocols that have NO kernel/firmware data

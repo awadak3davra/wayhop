@@ -5,14 +5,14 @@ import (
 	"fmt"
 	"net/http"
 
-	"wakeroute/internal/model"
-	"wakeroute/internal/serverstore"
-	"wakeroute/internal/version"
+	"velinx/internal/model"
+	"velinx/internal/serverstore"
+	"velinx/internal/version"
 )
 
 // backupSchemaVersion is the on-disk schema version of a full-setup backup
 // bundle. A future incompatible change bumps this; handleBackupRestore refuses a
-// bundle whose wakeroute_backup is not exactly this value.
+// bundle whose velinx_backup is not exactly this value.
 const backupSchemaVersion = 1
 
 // backupBundle is the single-file, portable snapshot of the user's whole setup:
@@ -23,7 +23,7 @@ const backupSchemaVersion = 1
 // allow-list/subscription token/clash secret) so a restore can NEVER move the
 // panel's address or lock the operator out (see handleBackupRestore).
 type backupBundle struct {
-	Schema      int                  `json:"wakeroute_backup"`       // schema marker; must equal backupSchemaVersion
+	Schema      int                  `json:"velinx_backup"`          // schema marker; must equal backupSchemaVersion
 	Version     string               `json:"version"`                // build version that produced the file (informational)
 	Profile     model.Profile        `json:"profile"`                // endpoints/groups/rules/lists (carries secrets)
 	Servers     []serverstore.Server `json:"servers,omitempty"`      // saved-server registry (no SSH creds — see serverstore)
@@ -51,7 +51,7 @@ func (s *Server) handleBackupExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Disposition", `attachment; filename="wakeroute-backup.json"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="velinx-backup.json"`)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
 }
@@ -70,7 +70,7 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	if bundle.Schema != backupSchemaVersion {
 		writeErr(w, http.StatusBadRequest,
-			fmt.Sprintf("not a WakeRoute backup (wakeroute_backup=%d, want %d)", bundle.Schema, backupSchemaVersion))
+			fmt.Sprintf("not a Velinx backup (velinx_backup=%d, want %d)", bundle.Schema, backupSchemaVersion))
 		return
 	}
 	// Validate the profile BEFORE mutating any state so a bad bundle changes

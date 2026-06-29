@@ -67,22 +67,22 @@ jobs:
         run: |
           set -euo pipefail
           version="0.0.0-dev+$(git rev-parse --short HEAD)"
-          stage="wakeroute-${{ matrix.name }}-pkg"
+          stage="velinx-${{ matrix.name }}-pkg"
           mkdir -p "$stage"
           go build -trimpath \
-            -ldflags "-s -w -X wakeroute/internal/version.Version=${version}" \
-            -o "$stage/wakeroute-${{ matrix.name }}" ./cmd/wakeroute
+            -ldflags "-s -w -X velinx/internal/version.Version=${version}" \
+            -o "$stage/velinx-${{ matrix.name }}" ./cmd/velinx
           # Entware /opt tarball
-          cp packaging/install.sh packaging/uninstall.sh packaging/S99wakeroute "$stage/"
-          chmod +x "$stage"/*.sh "$stage"/S99wakeroute "$stage/wakeroute-${{ matrix.name }}"
-          tar -C "$stage" -czf "wakeroute-${version}-${{ matrix.name }}.tar.gz" .
+          cp packaging/install.sh packaging/uninstall.sh packaging/S99velinx "$stage/"
+          chmod +x "$stage"/*.sh "$stage"/S99velinx "$stage/velinx-${{ matrix.name }}"
+          tar -C "$stage" -czf "velinx-${version}-${{ matrix.name }}.tar.gz" .
           # OpenWrt native tarball
-          owstage="wakeroute-${{ matrix.name }}-openwrt-pkg"
+          owstage="velinx-${{ matrix.name }}-openwrt-pkg"
           mkdir -p "$owstage"
-          cp "$stage/wakeroute-${{ matrix.name }}" "$owstage/wakeroute-${{ matrix.name }}"
-          cp packaging/openwrt/install.sh packaging/openwrt/uninstall.sh packaging/openwrt/wakeroute.init "$owstage/"
-          chmod +x "$owstage"/*.sh "$owstage"/wakeroute.init "$owstage/wakeroute-${{ matrix.name }}"
-          tar -C "$owstage" -czf "wakeroute-${version}-${{ matrix.name }}-openwrt.tar.gz" .
+          cp "$stage/velinx-${{ matrix.name }}" "$owstage/velinx-${{ matrix.name }}"
+          cp packaging/openwrt/install.sh packaging/openwrt/uninstall.sh packaging/openwrt/velinx.init "$owstage/"
+          chmod +x "$owstage"/*.sh "$owstage"/velinx.init "$owstage/velinx-${{ matrix.name }}"
+          tar -C "$owstage" -czf "velinx-${version}-${{ matrix.name }}-openwrt.tar.gz" .
 
   # Tag-only: rebuild every arch in one job and create the GitHub Release with the tarballs
   # attached as RELEASE ASSETS (not Actions artifacts). One job → deterministic SHA256SUMS and
@@ -109,19 +109,19 @@ jobs:
           mkdir -p dist
           build_one() {  # name goarch [gomips] [goarm]
             local name="$1" stage owstage
-            stage="wakeroute-${name}-pkg"; owstage="wakeroute-${name}-openwrt-pkg"
+            stage="velinx-${name}-pkg"; owstage="velinx-${name}-openwrt-pkg"
             mkdir -p "$stage" "$owstage"
             GOARCH="$2" GOMIPS="${3:-}" GOARM="${4:-}" go build -trimpath \
-              -ldflags "-s -w -X wakeroute/internal/version.Version=${version}" \
-              -o "$stage/wakeroute-${name}" ./cmd/wakeroute
-            cp packaging/install.sh packaging/uninstall.sh packaging/S99wakeroute "$stage/"
-            chmod +x "$stage"/*.sh "$stage"/S99wakeroute "$stage/wakeroute-${name}"
-            tar -C "$stage" -czf "dist/wakeroute-${version}-${name}.tar.gz" .
-            cp "$stage/wakeroute-${name}" "$owstage/wakeroute-${name}"
-            cp packaging/openwrt/install.sh packaging/openwrt/uninstall.sh packaging/openwrt/wakeroute.init "$owstage/"
-            chmod +x "$owstage"/*.sh "$owstage"/wakeroute.init "$owstage/wakeroute-${name}"
-            tar -C "$owstage" -czf "dist/wakeroute-${version}-${name}-openwrt.tar.gz" .
-            ( cd dist && sha256sum "wakeroute-${version}-${name}.tar.gz" "wakeroute-${version}-${name}-openwrt.tar.gz" )
+              -ldflags "-s -w -X velinx/internal/version.Version=${version}" \
+              -o "$stage/velinx-${name}" ./cmd/velinx
+            cp packaging/install.sh packaging/uninstall.sh packaging/S99velinx "$stage/"
+            chmod +x "$stage"/*.sh "$stage"/S99velinx "$stage/velinx-${name}"
+            tar -C "$stage" -czf "dist/velinx-${version}-${name}.tar.gz" .
+            cp "$stage/velinx-${name}" "$owstage/velinx-${name}"
+            cp packaging/openwrt/install.sh packaging/openwrt/uninstall.sh packaging/openwrt/velinx.init "$owstage/"
+            chmod +x "$owstage"/*.sh "$owstage"/velinx.init "$owstage/velinx-${name}"
+            tar -C "$owstage" -czf "dist/velinx-${version}-${name}-openwrt.tar.gz" .
+            ( cd dist && sha256sum "velinx-${version}-${name}.tar.gz" "velinx-${version}-${name}-openwrt.tar.gz" )
           }
           build_one mipsle mipsle softfloat
           build_one mips   mips   softfloat
@@ -136,5 +136,5 @@ jobs:
           set -euo pipefail
           gh release create "${GITHUB_REF_NAME}" dist/*.tar.gz dist/SHA256SUMS.txt \
             --repo "${GITHUB_REPOSITORY}" \
-            --title "WakeRoute ${GITHUB_REF_NAME}" \
+            --title "Velinx ${GITHUB_REF_NAME}" \
             --generate-notes

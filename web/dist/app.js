@@ -180,10 +180,10 @@ const DICTS = window.WR_DICTS || {};
     "Adopt as exit": "Принять как выход",
     "Adopted": "Принят",
     "Already added as a routing exit": "Уже добавлен как маршрутный выход",
-    "Add this OS-owned tunnel as a routing exit (added disabled — WakeRoute will not manage it)":
-      "Добавить этот туннель ОС как маршрутный выход (добавляется отключённым — WakeRoute не управляет им)",
-    "WakeRoute will ROUTE THROUGH the tunnel but does not manage it (the OS owns it). It is added disabled — enable it in Connections to start routing.":
-      "WakeRoute будет МАРШРУТИЗИРОВАТЬ ЧЕРЕЗ туннель, но не управляет им (туннель принадлежит ОС). Он добавляется отключённым — включите его в разделе «Подключения», чтобы начать маршрутизацию.",
+    "Add this OS-owned tunnel as a routing exit (added disabled — Velinx will not manage it)":
+      "Добавить этот туннель ОС как маршрутный выход (добавляется отключённым — Velinx не управляет им)",
+    "Velinx will ROUTE THROUGH the tunnel but does not manage it (the OS owns it). It is added disabled — enable it in Connections to start routing.":
+      "Velinx будет МАРШРУТИЗИРОВАТЬ ЧЕРЕЗ туннель, но не управляет им (туннель принадлежит ОС). Он добавляется отключённым — включите его в разделе «Подключения», чтобы начать маршрутизацию.",
     "Adopted {0} — enable it in Connections to route through it":
       "Принят {0} — включите его в разделе «Подключения», чтобы маршрутизировать через него",
     // Set-up-Server option picker
@@ -231,11 +231,11 @@ const DICTS = window.WR_DICTS || {};
     "Full backup (everything)": "Полный бэкап (всё)",
     "Download full backup": "Скачать полный бэкап",
     "Restore full backup…": "Восстановить из полного бэкапа…",
-    "Save your whole setup — connections, failover groups, routing lists, saved servers and routing mode — to one file. Ideal before a firmware reflash or when moving to another WakeRoute. Restoring validates everything first and never applies on its own; you review it and press Apply.":
-      "Сохраните всю конфигурацию — подключения, группы отказоустойчивости, списки маршрутизации, сохранённые серверы и режим маршрутизации — в один файл. Удобно перед перепрошивкой или при переносе на другой WakeRoute. При восстановлении всё сначала проверяется и ничего не применяется автоматически; вы просматриваете и нажимаете «Применить».",
+    "Save your whole setup — connections, failover groups, routing lists, saved servers and routing mode — to one file. Ideal before a firmware reflash or when moving to another Velinx. Restoring validates everything first and never applies on its own; you review it and press Apply.":
+      "Сохраните всю конфигурацию — подключения, группы отказоустойчивости, списки маршрутизации, сохранённые серверы и режим маршрутизации — в один файл. Удобно перед перепрошивкой или при переносе на другой Velinx. При восстановлении всё сначала проверяется и ничего не применяется автоматически; вы просматриваете и нажимаете «Применить».",
     "The backup file contains your connection secrets (keys, passwords) — keep it private. Daemon access settings (panel port and host allow-list) are NOT changed by a restore.":
       "Файл бэкапа содержит секреты подключений (ключи, пароли) — храните его в тайне. Настройки доступа к демону (порт панели и список разрешённых хостов) при восстановлении НЕ меняются.",
-    "That is not a WakeRoute full backup.": "Это не файл полного бэкапа WakeRoute.",
+    "That is not a Velinx full backup.": "Это не файл полного бэкапа Velinx.",
     "Restore your whole setup from this backup? It replaces all connections, groups and routing lists (validated first). Nothing is applied automatically — review it, then press Apply. Your panel address and access settings are NOT changed.":
       "Восстановить всю конфигурацию из этого бэкапа? Это заменит все подключения, группы и списки маршрутизации (сначала с проверкой). Ничего не применяется автоматически — просмотрите и нажмите «Применить». Адрес панели и настройки доступа НЕ меняются.",
     "Restored {0} connections, {1} groups, {2} servers — review and press Apply to activate.":
@@ -367,9 +367,9 @@ function translateChrome() {
   try { updateStatusPill(); } catch (e) {} // re-localize the live status pill
 }
 
-/* ---------- restart the WakeRoute service ---------- */
+/* ---------- restart the Velinx service ---------- */
 async function restartService() {
-  if (!confirm(t("Restart the WakeRoute service now?\nThe web panel will be unavailable for a few seconds while the init system brings it back."))) return;
+  if (!confirm(t("Restart the Velinx service now?\nThe web panel will be unavailable for a few seconds while the init system brings it back."))) return;
   try { await api.post("/api/service/restart"); }
   catch (e) { return toast(e.message, "err"); }
   toast("Restarting… the panel will reconnect when it's back.", "info");
@@ -500,7 +500,7 @@ function updateStatusPill() {
   if (h.singbox && h.singbox.running) { pill.className = "pill ok"; text.textContent = t("ONLINE"); }
   else if (isNativeOnly(h)) { pill.className = "pill ok"; text.textContent = t("NATIVE"); }
   else { pill.className = "pill muted"; text.textContent = t("IDLE"); }
-  $("#foot").textContent = "wakeroute " + (h.version || "");
+  $("#foot").textContent = "velinx " + (h.version || "");
 }
 
 /* ---------- routing ---------- */
@@ -533,7 +533,7 @@ function showReconnect() {
   const sub = el("div", { class: "hint", style: "margin-top:4px" }, t("The panel will return as soon as the service is back."));
   const ov = el("div", { class: "wr-reconnect" }, el("div", { class: "wr-reconnect-box" },
     el("span", { class: "spin" }),
-    el("div", {}, el("div", { style: "font-weight:600" }, t("Reconnecting to WakeRoute…")), sub)));
+    el("div", {}, el("div", { style: "font-weight:600" }, t("Reconnecting to Velinx…")), sub)));
   document.body.appendChild(ov);
   let tries = 0;
   const iv = setInterval(async () => {
@@ -2075,7 +2075,7 @@ function externalForm(ep) {
   const epip = el("input", { type: "text", id: "f-epip", value: P.endpoint_ip || "", placeholder: "optional — e.g. 198.51.100.20" });
   const wrap = el("div", {},
     el("div", { class: "hint", style: "margin-bottom:12px" },
-      t("Routes through an existing kernel interface (an AmneziaWG / WireGuard tunnel configured outside WakeRoute). It has no protocol of its own.")),
+      t("Routes through an existing kernel interface (an AmneziaWG / WireGuard tunnel configured outside Velinx). It has no protocol of its own.")),
     el("div", { class: "field" }, el("label", {}, t("Name")), name),
     el("div", { class: "field" }, el("label", {}, t("Bound interface")), iface),
     el("div", { class: "field" }, el("label", {}, t("Endpoint IP (anti-recursion bypass, optional)")), epip));
@@ -2417,7 +2417,7 @@ function paintEngineTile(node) {
 function subMeta(e) {
   const sub = el("div", { class: "sub" });
   // External endpoints bind an existing kernel interface (e.g. an AmneziaWG/WireGuard
-  // tunnel set up outside WakeRoute) — they have no protocol/server of their own, so
+  // tunnel set up outside Velinx) — they have no protocol/server of their own, so
   // showing an empty proto badge + ":0" reads as a broken/mislabeled (vless) entry.
   // Render the bound interface instead, which is what actually carries the traffic.
   if (e.engine === "external") {
@@ -2638,8 +2638,8 @@ async function renderUpdater(view) {
   view.appendChild(el("div", { class: "block-head" },
     el("div", {},
       el("div", { class: "ttl" }, "Updater"),
-      el("div", { class: "desc" }, "Keep WakeRoute and its proxy engines up to date."))));
-  view.appendChild(selfUpdateCard()); // WakeRoute self-update — at the top (fills async, non-blocking)
+      el("div", { class: "desc" }, "Keep Velinx and its proxy engines up to date."))));
+  view.appendChild(selfUpdateCard()); // Velinx self-update — at the top (fills async, non-blocking)
   const loadingEngines = el("div", { class: "hint", style: "margin:18px 0" }, "checking engine versions…");
   view.appendChild(loadingEngines);
   let data;
@@ -2669,12 +2669,12 @@ async function renderUpdater(view) {
 }
 const ENGINE_ROLE_HINT = { "core": "core", "kernel-plugin": "kernel plugin", "socks-plugin": "SOCKS plugin", "standalone": "standalone core" };
 
-// WakeRoute self-update card: current version, available release, "Update now",
+// Velinx self-update card: current version, available release, "Update now",
 // and an auto-update toggle. Backed by /api/updater/self*. Returns synchronously with a
 // placeholder and fills in async so the slow GitHub check never blocks the page render.
 function selfUpdateCard() {
   const card = el("div", { class: "card" });
-  card.appendChild(el("div", { class: "card-title", style: "margin-bottom:10px" }, "WakeRoute"));
+  card.appendChild(el("div", { class: "card-title", style: "margin-bottom:10px" }, "Velinx"));
   const body = el("div", {}, el("div", { class: "hint" }, t("checking for updates…")));
   card.appendChild(body);
   (async () => {
@@ -2693,7 +2693,7 @@ function selfUpdateCard() {
         avail ? el("button", { class: "btn btn-primary btn-sm", onclick: ev => selfUpdate(ev.target) }, "Update now") : null)));
     const tog = el("div", { class: "toggle" + (s.auto_update ? " on" : ""), onclick: () => selfAutoToggle(tog) });
     body.appendChild(el("div", { class: "row-between", style: "margin-top:14px" },
-      el("div", { class: "hint", style: "max-width:70%" }, "Auto-update: install new WakeRoute releases automatically (daily check) and restart"),
+      el("div", { class: "hint", style: "max-width:70%" }, "Auto-update: install new Velinx releases automatically (daily check) and restart"),
       tog));
   } catch (e) {
     body.innerHTML = "";
@@ -2704,11 +2704,11 @@ function selfUpdateCard() {
 }
 
 async function selfUpdate(btn) {
-  if (!confirm("Download the latest WakeRoute release, replace the running binary, and restart the service? The panel will briefly drop, then return.")) return;
+  if (!confirm("Download the latest Velinx release, replace the running binary, and restart the service? The panel will briefly drop, then return.")) return;
   btn.setAttribute("disabled", "true"); btn.textContent = "Updating…";
   try {
     const r = await api.post("/api/updater/self/install", {});
-    toast("WakeRoute → " + r.installed + (r.restarting ? " · restarting…" : (r.note ? " · " + r.note : "")), "ok");
+    toast("Velinx → " + r.installed + (r.restarting ? " · restarting…" : (r.note ? " · " + r.note : "")), "ok");
   } catch (e) { toast("Update failed: " + e.message, "err"); btn.removeAttribute("disabled"); btn.textContent = "Update now"; }
 }
 
@@ -2728,9 +2728,14 @@ function engineCard(e) {
           ? el("span", { class: "badge", style: "margin-left:8px" }, inst.version || "installed")
           : el("span", { class: "pill muted", style: "margin-left:8px" }, el("span", { class: "dot" }), "not installed")),
       el("div", { class: "sub", style: "margin-top:3px" }, e.repo + (e.role ? " · runs as " + (ENGINE_ROLE_HINT[e.role] || e.role) : ""))),
-    el("div", { class: "acts" }, el("button", { class: "btn btn-sm", onclick: () => loadVersions(e, card) }, "Check updates"))));
+    el("div", { class: "acts" },
+      el("button", { class: "btn btn-sm", onclick: () => loadVersions(e, card) }, "Check updates"),
+      (inst.present && !e.source_only)
+        ? el("button", { class: "btn btn-sm btn-danger", onclick: ev => removeEngine(e, ev.currentTarget) }, "Remove")
+        : null)));
   const box = el("div", { class: "vbox", style: "margin-top:12px" });
   if (e.source_only) box.appendChild(el("div", { class: "hint" }, e.note || "No prebuilt releases."));
+  if (e.last_error) box.appendChild(el("div", { class: "hint", style: "color:var(--err);margin-top:4px" }, t("Last update failed:") + " " + e.last_error));
   card.appendChild(box);
   return card;
 }
@@ -2766,7 +2771,23 @@ async function installVersion(e, version, btn) {
     const r = await api.post("/api/updater/" + encodeURIComponent(e.id) + "/install", { version });
     toast(e.name + " → " + r.installed + (r.reloaded ? " (reloaded)" : ""), "ok");
     route();
-  } catch (err) { toast("Install failed: " + err.message, "err"); btn.removeAttribute("disabled"); btn.textContent = "Install selected"; }
+  } catch (err) {
+    toast("Install failed: " + err.message, "err");
+    const card = btn.closest(".card");
+    const box = card && card.querySelector(".vbox");
+    if (box) box.appendChild(el("div", { class: "hint", style: "color:var(--err);margin-top:8px" }, t("Install failed:") + " " + err.message));
+    btn.removeAttribute("disabled"); btn.textContent = "Install selected";
+  }
+}
+
+async function removeEngine(e, btn) {
+  if (!confirm(t("Delete the installed {0} binary from this router?", e.name))) return;
+  btn.setAttribute("disabled", "true"); btn.textContent = t("Removing…");
+  try {
+    await api.del("/api/updater/" + encodeURIComponent(e.id));
+    toast(t("{0} removed", e.name), "ok");
+    route();
+  } catch (err) { toast(t("Remove failed:") + " " + err.message, "err"); btn.removeAttribute("disabled"); btn.textContent = t("Remove"); }
 }
 
 /* ---------- Diagnostics (log error knowledgebase) ---------- */
@@ -2899,7 +2920,7 @@ async function loadNativeCaps() {
 
   // Detected native tunnels — what /api/vpn/discover already found on the router
   // (iface · type · name). Each row gets an "Adopt as exit" button that POSTs to
-  // /api/vpn/adopt: the OS keeps owning the tunnel; WakeRoute only adds a DISABLED
+  // /api/vpn/adopt: the OS keeps owning the tunnel; Velinx only adds a DISABLED
   // external endpoint that ROUTES THROUGH it. Best-effort: a 404 / empty list shows
   // nothing extra, mirroring loadNativeCaps' own graceful try/catch.
   try {
@@ -2915,7 +2936,7 @@ async function loadNativeCaps() {
         el("div", { class: "hint", style: "font-weight:600;margin-bottom:var(--sp-2)" }, t("Detected native tunnels")),
         // One-time explainer: adopting is non-destructive and never auto-enables.
         el("div", { class: "hint", style: "color:var(--ink-2);margin-bottom:var(--sp-2);line-height:1.5" },
-          t("WakeRoute will ROUTE THROUGH the tunnel but does not manage it (the OS owns it). It is added disabled — enable it in Connections to start routing.")));
+          t("Velinx will ROUTE THROUGH the tunnel but does not manage it (the OS owns it). It is added disabled — enable it in Connections to start routing.")));
       vpns.forEach(v => {
         const parts = [v.iface, v.type, v.public_key].filter(Boolean);
         const statusPill = v.active
@@ -2925,7 +2946,7 @@ async function loadNativeCaps() {
         // for this iface; otherwise a btn-sm that adopts + refreshes the card.
         const adoptBtn = adopted(v.iface)
           ? el("button", { class: "btn btn-sm", disabled: "true", title: t("Already added as a routing exit") }, t("Adopted"))
-          : el("button", { class: "btn btn-sm", title: t("Add this OS-owned tunnel as a routing exit (added disabled — WakeRoute will not manage it)"),
+          : el("button", { class: "btn btn-sm", title: t("Add this OS-owned tunnel as a routing exit (added disabled — Velinx will not manage it)"),
               onclick: async () => {
                 try {
                   await api.post("/api/vpn/adopt", { iface: v.iface });
@@ -3207,7 +3228,7 @@ function buildReport(h, mask) {
   const res = h.results, done = HC_ORDER.filter(id => res[id]);
   const worst = done.map(id => res[id]).reduce((a, r) => r.status === "fail" ? "fail" : (r.status === "warn" && a !== "fail") ? "warn" : a, "pass");
   const sys = (res.system && res.system.meta) || {}, exit = (res.exit && res.exit.geo) || {};
-  let out = "## WakeRoute diagnostics\n";
+  let out = "## Velinx diagnostics\n";
   out += "- time: " + new Date(h.ranAt).toISOString() + "\n";
   if (sys.version) out += "- build: " + sys.version + (sys.arch ? " (" + sys.arch + ")" : "") + "\n";
   if (exit.ip) out += "- exit: " + exit.ip + (exit.cc ? " " + exit.cc : "") + (exit.asn ? " · " + exit.asn : "") + "\n";
@@ -3554,7 +3575,7 @@ async function renderServer(view) {
   view.appendChild(el("div", { class: "block-head" },
     el("div", {},
       el("div", { class: "ttl" }, "Set up Server"),
-      el("div", { class: "desc" }, "Provision and manage proxy servers over SSH. WakeRoute installs what you pick, auto-adds the client to Connections and tests it — keep several servers for redundancy, and harden fresh ones with key-only login.")),
+      el("div", { class: "desc" }, "Provision and manage proxy servers over SSH. Velinx installs what you pick, auto-adds the client to Connections and tests it — keep several servers for redundancy, and harden fresh ones with key-only login.")),
     el("div", { class: "side" },
       el("button", { class: "btn btn-primary", title: "Provision a new remote server over SSH and add its client to Connections", onclick: openAddServer }, "+ Add server"))));
 
@@ -3652,7 +3673,7 @@ function protoCard(o, checked) {
   return { cb, card };
 }
 
-// Setup-options picker — the list of what WakeRoute can install, with details.
+// Setup-options picker — the list of what Velinx can install, with details.
 // Recommended protocols (the suggested defaults) are surfaced first; the rest are
 // grouped under "Also available". A single self-signed-TLS caveat is shown once for
 // the group of protocols whose option data says they use a self-signed certificate.
@@ -3775,7 +3796,7 @@ function offerNextStep(sv) {
   const back = modal({
     title: "Server added",
     body: el("div", {}, el("div", {}, "“" + (sv.name || sv.host) + "” is saved."),
-      el("div", { class: "hint", style: "margin-top:8px" }, "If it's a fresh server, securing it first is recommended — WakeRoute installs an SSH key, lets you download it, then can disable password login so only the key works.")),
+      el("div", { class: "hint", style: "margin-top:8px" }, "If it's a fresh server, securing it first is recommended — Velinx installs an SSH key, lets you download it, then can disable password login so only the key works.")),
     footer: el("div", { style: "display:flex;gap:10px" }, later, setup, secure),
   });
   later.onclick = () => back.remove();
@@ -3944,7 +3965,7 @@ function renderVersionTable(box, result, sv, c, con) {
 
 async function updateBinary(sv, c, con, b, version) {
   const what = b.managed === "apt" ? (b.name + " via apt upgrade") : (b.name + " → " + version);
-  if (!confirm("Update " + what + " on " + (sv ? sv.host : "the server") + "?\n\nThe service will briefly restart. The old binary is backed up on the server as <path>.wakeroute.bak.")) return;
+  if (!confirm("Update " + what + " on " + (sv ? sv.host : "the server") + "?\n\nThe service will briefly restart. The old binary is backed up on the server as <path>.velinx.bak.")) return;
   const cr = c.get();
   if (!cr.host || !cr.user) return toast("Host and SSH user are required", "err");
   try {
@@ -4017,7 +4038,7 @@ async function renderSettings(view) {
   view.appendChild(el("div", { class: "block-head" },
     el("div", {},
       el("div", { class: "ttl" }, t("Settings")),
-      el("div", { class: "desc" }, t("Daemon configuration. Saving here stores these settings; the Apply button in the top bar regenerates routing — they are separate actions. Fields tagged ↻ take effect only after WakeRoute restarts."))),
+      el("div", { class: "desc" }, t("Daemon configuration. Saving here stores these settings; the Apply button in the top bar regenerates routing — they are separate actions. Fields tagged ↻ take effect only after Velinx restarts."))),
     el("div", { class: "side" })));
 
   // Appearance — client-side prefs (theme + language persist in localStorage, not server config).
@@ -4105,7 +4126,7 @@ async function renderSettings(view) {
   const listen = txt(cfg.listen, ":8088");
   // Proxy core
   const sbBin = txt(cfg.singbox && cfg.singbox.bin, "/opt/sbin/sing-box");
-  const sbCfg = txt(cfg.singbox && cfg.singbox.config, "/opt/etc/wakeroute/singbox.json");
+  const sbCfg = txt(cfg.singbox && cfg.singbox.config, "/opt/etc/velinx/singbox.json");
   const clashCtl = txt(cfg.clash && cfg.clash.controller, "127.0.0.1:9090");
   const clashSecF = secretInput(cfg.clash && cfg.clash.secret, t("optional"));
   const clashSec = clashSecF.input;
@@ -4130,8 +4151,8 @@ async function renderSettings(view) {
   allowedHosts.value = (cfg.allowed_hosts || []).join("\n");
   // Routing mode (applies on the next Apply, not a restart)
   const ROUTE_MODES = [
-    ["hybrid", t("Everything via WakeRoute (domain carve-outs work; general traffic slower / CPU-bound)")],
-    ["fast", t("Fast: general traffic bypasses WakeRoute (kernel fast-path) — IP carve-outs (calls/VoWiFi) still work; domain carve-outs OFF")],
+    ["hybrid", t("Everything via Velinx (domain carve-outs work; general traffic slower / CPU-bound)")],
+    ["fast", t("Fast: general traffic bypasses Velinx (kernel fast-path) — IP carve-outs (calls/VoWiFi) still work; domain carve-outs OFF")],
     ["tun", t("All traffic through sing-box (TUN)")],
     ["mixed", t("Local proxy only, no gateway (mixed)")],
     ["", t("Auto (derive from Gateway)")],
@@ -4143,8 +4164,8 @@ async function renderSettings(view) {
   // => the daemon auto-probes the WAN uplink + LAN bridge.
   const OFFLOAD_MODES = [
     ["", t("Off (default)")],
-    ["sw", t("Software flow-offload")],
-    ["hw", t("Hardware offload (NIC/PPE) — fastest where supported")],
+    ["sw", t("Software flow-offload (recommended)")],
+    ["hw", t("Hardware offload (PPE/WED) — can stall VPN tunnels; not faster on most routers")],
   ];
   const offloadSel = el("select", {}, ...OFFLOAD_MODES.map(m => el("option", { value: m[0] }, m[1])));
   offloadSel.value = cfg.offload || "";
@@ -4236,7 +4257,7 @@ async function renderSettings(view) {
       lastSavedRouteMode = next.routing_mode || "";
       lastSavedOffload = offloadNow;
       baseline = JSON.stringify(collectSettings()); _settingsDirty = false; dirtyBadge.style.display = "none";
-      toast(r.restart_needed ? t("Saved — restart WakeRoute for all changes to take effect.") : t("Saved."), "ok");
+      toast(r.restart_needed ? t("Saved — restart Velinx for all changes to take effect.") : t("Saved."), "ok");
       if (routeModeChanged) toast(t("Routing mode changed — press Apply (top bar) to activate it."), "info");
       else if (offloadChanged) toast(t("Flow offload changed — press Apply (top bar) to activate it."), "info");
     } catch (e) { status.textContent = ""; toast(e.message, "err"); }
@@ -4247,7 +4268,7 @@ async function renderSettings(view) {
     el("div", { class: "card-title", style: "margin-bottom:8px" }, t("Routing mode")),
     el("div", { class: "hint", style: "margin-bottom:10px" }, t("How LAN traffic is routed. «Fast» keeps your tunnels/carve-outs for IPs (calls, VoWiFi) but lets general traffic (downloads, games) take the kernel fast-path instead of the userspace proxy — much higher throughput. Takes effect on the next Apply.")),
     field(t("Mode"), routeMode),
-    el("div", { class: "hint", style: "margin:14px 0 10px" }, t("Flow offload accelerates general (non-tunnel) traffic via the kernel/hardware fast path in «Fast» mode. Your tunnel carve-outs (calls, VoWiFi, blocked sites) are mark-routed and automatically excluded from the flowtable, so they keep working. Enable «Hardware» only on routers whose NIC supports it. Leave devices blank to auto-detect the WAN + LAN interfaces. Takes effect on the next Apply.")),
+    el("div", { class: "hint", style: "margin:14px 0 10px" }, t("Flow offload accelerates general (non-tunnel) traffic via the kernel fast path in «Fast» mode. Your tunnel carve-outs (calls, VoWiFi, blocked sites) are mark-routed and automatically excluded, so they keep working. «Software» is recommended — it routes near line-rate on most routers without touching your tunnels. «Hardware» (PPE/WED) can be faster on some NICs, but on many routers it has a bug that stalls VPN tunnels (long-lived UDP) and is no faster than software — avoid it if you route any traffic through a tunnel. Leave devices blank to auto-detect the WAN + LAN interfaces. Takes effect on the next Apply.")),
     el("div", { style: "display:flex;gap:12px;flex-wrap:wrap" },
       el("div", { style: "flex:1;min-width:220px" }, field(t("Flow offload"), offloadSel)),
       el("div", { style: "flex:1;min-width:220px" }, field(t("Offload devices"), offloadDevs)))));
@@ -4283,7 +4304,7 @@ async function renderSettings(view) {
 
   view.appendChild(el("div", { class: "card" },
     el("div", { class: "card-title", style: "margin-bottom:8px" }, t("Fail-safe")),
-    el("div", { class: "hint", style: "margin-bottom:10px" }, t("After an Apply (not yet saved), WakeRoute pings this target to confirm the new config kept you online; if it can't be reached, the previous config is rolled back.")),
+    el("div", { class: "hint", style: "margin-bottom:10px" }, t("After an Apply (not yet saved), Velinx pings this target to confirm the new config kept you online; if it can't be reached, the previous config is rolled back.")),
     field(t("Connectivity-check target"), fsTarget),
     el("label", { class: "check", style: "display:inline-flex;margin-top:10px" }, fsReboot, el("span", {}, t("Allow auto-reboot as a last resort"))),
     el("div", { class: "hint", style: "margin-top:6px" }, t("Off by default. Only triggers if a rollback still can't restore connectivity — leave off unless you trust unattended reboots."))));
@@ -4302,7 +4323,7 @@ async function renderSettings(view) {
   const includeSecrets = el("input", { type: "checkbox" });
   const downloadBtn = el("button", { class: "btn", type: "button" }, t("Download backup"));
   downloadBtn.addEventListener("click", () => {
-    const a = el("a", { href: "/api/config/export" + (includeSecrets.checked ? "?secrets=1" : ""), download: "wakeroute-config.json" });
+    const a = el("a", { href: "/api/config/export" + (includeSecrets.checked ? "?secrets=1" : ""), download: "velinx-config.json" });
     document.body.appendChild(a); a.click(); a.remove();
   });
   const fileInput = el("input", { type: "file", accept: "application/json,.json", style: "display:none" });
@@ -4317,7 +4338,7 @@ async function renderSettings(view) {
     if (!confirm(t("Restore settings from this backup? It replaces your current settings (they are validated first)."))) { fileInput.value = ""; return; }
     try {
       const r = await api.post("/api/config/import", parsed);
-      toast(r.restart_needed ? t("Restored — restart WakeRoute to apply.") : t("Restored."), "ok");
+      toast(r.restart_needed ? t("Restored — restart Velinx to apply.") : t("Restored."), "ok");
       route();
     } catch (e) { toast(e.message, "err"); }
     finally { fileInput.value = ""; }
@@ -4327,7 +4348,7 @@ async function renderSettings(view) {
     if (!confirm(t("Reset settings to defaults? Your panel address, UI port, host allow-list and subscription token are kept; everything else returns to defaults."))) return;
     try {
       const r = await api.post("/api/config/reset", {});
-      toast(r.restart_needed ? t("Reset to defaults — restart WakeRoute to apply.") : t("Reset to defaults."), "ok");
+      toast(r.restart_needed ? t("Reset to defaults — restart Velinx to apply.") : t("Reset to defaults."), "ok");
       route();
     } catch (e) { toast(e.message, "err"); }
   });
@@ -4341,8 +4362,8 @@ async function renderSettings(view) {
 
   // Full backup (everything) — the whole setup (connections, failover groups,
   // routing lists, saved servers, routing mode) in one file, for saving before a
-  // firmware reflash or migrating to another WakeRoute instance.
-  const fullDownloadBtn = el("a", { class: "btn", href: "/api/backup", download: "wakeroute-backup.json" }, t("Download full backup"));
+  // firmware reflash or migrating to another Velinx instance.
+  const fullDownloadBtn = el("a", { class: "btn", href: "/api/backup", download: "velinx-backup.json" }, t("Download full backup"));
   const fullFileInput = el("input", { type: "file", accept: "application/json,.json", style: "display:none" });
   const fullRestoreBtn = el("button", { class: "btn", type: "button" }, t("Restore full backup…"));
   fullRestoreBtn.addEventListener("click", () => fullFileInput.click());
@@ -4352,7 +4373,7 @@ async function renderSettings(view) {
     let parsed;
     try { parsed = JSON.parse(await f.text()); }
     catch { fullFileInput.value = ""; return toast(t("That file is not valid JSON."), "err"); }
-    if (parsed.wakeroute_backup !== 1) { fullFileInput.value = ""; return toast(t("That is not a WakeRoute full backup."), "err"); }
+    if (parsed.velinx_backup !== 1) { fullFileInput.value = ""; return toast(t("That is not a Velinx full backup."), "err"); }
     if (!confirm(t("Restore your whole setup from this backup? It replaces all connections, groups and routing lists (validated first). Nothing is applied automatically — review it, then press Apply. Your panel address and access settings are NOT changed."))) { fullFileInput.value = ""; return; }
     try {
       const r = await api.post("/api/backup/restore", parsed);
@@ -4364,7 +4385,7 @@ async function renderSettings(view) {
   });
   view.appendChild(el("div", { class: "card" },
     el("div", { class: "card-title", style: "margin-bottom:8px" }, t("Full backup (everything)")),
-    el("div", { class: "hint", style: "margin-bottom:6px" }, t("Save your whole setup — connections, failover groups, routing lists, saved servers and routing mode — to one file. Ideal before a firmware reflash or when moving to another WakeRoute. Restoring validates everything first and never applies on its own; you review it and press Apply.")),
+    el("div", { class: "hint", style: "margin-bottom:6px" }, t("Save your whole setup — connections, failover groups, routing lists, saved servers and routing mode — to one file. Ideal before a firmware reflash or when moving to another Velinx. Restoring validates everything first and never applies on its own; you review it and press Apply.")),
     el("div", { class: "hint", style: "margin-bottom:12px" }, t("The backup file contains your connection secrets (keys, passwords) — keep it private. Daemon access settings (panel port and host allow-list) are NOT changed by a restore.")),
     el("div", { style: "display:flex;gap:10px;flex-wrap:wrap;align-items:center" },
       fullDownloadBtn, fullRestoreBtn, fullFileInput)));
@@ -4373,7 +4394,7 @@ async function renderSettings(view) {
   restartBtn.addEventListener("click", restartService);
   view.appendChild(el("div", { class: "card" },
     el("div", { class: "card-title", style: "margin-bottom:10px" }, t("Service")),
-    el("div", { class: "hint", style: "margin-bottom:12px" }, t("Restart the whole WakeRoute daemon (panel + proxy core). The web panel drops for a few seconds while the init system brings it back; this page reconnects automatically. (Not available in the demo.)")),
+    el("div", { class: "hint", style: "margin-bottom:12px" }, t("Restart the whole Velinx daemon (panel + proxy core). The web panel drops for a few seconds while the init system brings it back; this page reconnects automatically. (Not available in the demo.)")),
     restartBtn));
 
   view.appendChild(errBox);

@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"wakeroute/internal/importer"
-	"wakeroute/internal/model"
+	"velinx/internal/importer"
+	"velinx/internal/model"
 )
 
 func mustParse(t *testing.T, link string) model.Endpoint {

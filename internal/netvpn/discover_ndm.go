@@ -23,7 +23,7 @@ import (
 // Unlike `wg show all dump`, NDM does NOT expose per-peer endpoints, public keys, or
 // transfer counters here — only the interface's identity/state — so discovered NDM tunnels
 // carry no Peers and no PublicKey. This is purely a "which native tunnels exist" signal that
-// lets WakeRoute treat a Keenetic Wireguard/AmneziaWG interface as an egress.
+// lets Velinx treat a Keenetic Wireguard/AmneziaWG interface as an egress.
 
 // parseNDMInterfaces parses `ndmc -c "show interface"` output, returning one DiscoveredVPN
 // per interface whose NDM type is "Wireguard" (KeeneticOS labels both plain WireGuard and

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"net/netip"
 
-	"wakeroute/internal/generator"
-	"wakeroute/internal/model"
+	"velinx/internal/generator"
+	"velinx/internal/model"
 )
 
 // FallbackOptions tune the sing-box fallback (per-endpoint TUN device naming + addressing).
@@ -34,7 +34,7 @@ func (o *FallbackOptions) defaults() {
 	}
 }
 
-// FallbackPlan is the sing-box config WakeRoute runs on Entware for the NON-native endpoints,
+// FallbackPlan is the sing-box config Velinx runs on Entware for the NON-native endpoints,
 // plus the endpoint→TUN-device map the routing renderer uses (`ip route <cidr> <tun-iface>`).
 type FallbackPlan struct {
 	Config   map[string]any    // sing-box config (inbounds/outbounds/route) — written to /opt/etc/sing-box

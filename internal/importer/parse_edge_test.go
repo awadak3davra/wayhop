@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // This file exercises the edge and error paths of Parse() and

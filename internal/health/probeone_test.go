@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // TestProbeOneUnknownIDDoesNotRecord verifies Fix #5: probing an id that matches

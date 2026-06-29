@@ -53,7 +53,7 @@ func TestUpdateScriptFor(t *testing.T) {
 	if !ok || !strings.Contains(sb, "1.12.17") || !strings.Contains(sb, "SagerNet/sing-box") {
 		t.Error("singbox script should embed the version + the official repo URL")
 	}
-	if !strings.Contains(sb, ".wakeroute.bak") {
+	if !strings.Contains(sb, ".velinx.bak") {
 		t.Error("singbox update must back up the old binary")
 	}
 	awg, ok := UpdateScriptFor("awg", "")

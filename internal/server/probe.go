@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"wakeroute/internal/netdiag"
+	"velinx/internal/netdiag"
 )
 
 // handleProbeTLS probes a Reality dest/SNI from the router's vantage: is the

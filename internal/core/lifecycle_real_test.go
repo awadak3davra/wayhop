@@ -60,7 +60,7 @@ func corelifecycle_buildStub(t *testing.T) string {
 	if err := os.WriteFile(src, []byte(corelifecycle_stubSource), 0o600); err != nil {
 		t.Fatalf("write stub source: %v", err)
 	}
-	// A standalone module so `go build` doesn't try to attach the stub to the wakeroute
+	// A standalone module so `go build` doesn't try to attach the stub to the velinx
 	// module (the temp dir is outside the repo, but be explicit).
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module corelifecyclestub\n\ngo 1.22\n"), 0o600); err != nil {
 		t.Fatalf("write stub go.mod: %v", err)

@@ -2,7 +2,7 @@ package server
 
 import "net/http"
 
-// handleServiceRestart restarts the WHOLE WakeRoute service via the init system
+// handleServiceRestart restarts the WHOLE Velinx service via the init system
 // (procd on OpenWrt, busybox sysvinit on Entware). Restarting the daemon — not
 // just reloading the proxy core — means this process exits and the init system
 // brings up a fresh one, so the web panel briefly drops then returns. The actual

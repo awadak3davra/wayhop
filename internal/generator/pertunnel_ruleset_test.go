@@ -3,7 +3,7 @@ package generator
 import (
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // --- Feature (1): per-tunnel typed MTU / PersistentKeepalive on WG endpoints ---

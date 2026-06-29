@@ -8,16 +8,16 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/config"
-	"wakeroute/internal/core"
-	"wakeroute/internal/failsafe"
-	"wakeroute/internal/health"
-	"wakeroute/internal/initserver"
-	"wakeroute/internal/model"
-	"wakeroute/internal/plugin"
-	"wakeroute/internal/serverstore"
-	"wakeroute/internal/store"
-	"wakeroute/internal/watchdog"
+	"velinx/internal/config"
+	"velinx/internal/core"
+	"velinx/internal/failsafe"
+	"velinx/internal/health"
+	"velinx/internal/initserver"
+	"velinx/internal/model"
+	"velinx/internal/plugin"
+	"velinx/internal/serverstore"
+	"velinx/internal/store"
+	"velinx/internal/watchdog"
 )
 
 // servererrorpaths_server builds a *Server wired with the union of dependencies
@@ -267,8 +267,8 @@ func TestServererrorpaths_SubscriptionFetchOKParsesLinks(t *testing.T) {
 		"trojan://secretpass@example.com:443?security=tls&sni=example.com#T1\n" +
 		"ftp://garbage"
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("User-Agent"); got != "wakeroute" {
-			t.Errorf("upstream saw User-Agent %q, want wakeroute", got)
+		if got := r.Header.Get("User-Agent"); got != "velinx" {
+			t.Errorf("upstream saw User-Agent %q, want velinx", got)
 		}
 		_, _ = w.Write([]byte(payload))
 	}))

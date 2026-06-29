@@ -15,8 +15,8 @@ import (
 	"strconv"
 	"strings"
 
-	"wakeroute/internal/model"
-	"wakeroute/internal/util"
+	"velinx/internal/model"
+	"velinx/internal/util"
 )
 
 // looksLikeClash reports whether text is a Clash / Clash-Meta YAML config — i.e.

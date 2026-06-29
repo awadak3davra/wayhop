@@ -3,7 +3,7 @@ package pbr
 import (
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // TestCompile_AWGV6Posture (L3(B)): a v6 dest CIDR routed to an AmneziaWG egress is stripped from

@@ -16,13 +16,13 @@ import (
 	"syscall"
 	"time"
 
-	"wakeroute/internal/atomicfile"
-	"wakeroute/internal/config"
-	"wakeroute/internal/generator"
-	"wakeroute/internal/importer"
-	"wakeroute/internal/model"
-	"wakeroute/internal/pbr"
-	"wakeroute/internal/plugin"
+	"velinx/internal/atomicfile"
+	"velinx/internal/config"
+	"velinx/internal/generator"
+	"velinx/internal/importer"
+	"velinx/internal/model"
+	"velinx/internal/pbr"
+	"velinx/internal/plugin"
 )
 
 // handleImport parses a share link / conf into an endpoint WITHOUT saving it
@@ -51,7 +51,7 @@ func (s *Server) handleGetProfile(w http.ResponseWriter, r *http.Request) {
 // uploaded backup — the JSON that GET /api/profile returns. store.Replace validates it before it
 // lands (a bad backup is rejected, the current profile untouched), and persists atomically; the
 // change goes live on the next Apply (with the fail-safe net). The companion to handleConfigExport
-// for the daemon config — together they let a user back up + restore or migrate a full WakeRoute
+// for the daemon config — together they let a user back up + restore or migrate a full Velinx
 // setup. POST /api/profile.
 func (s *Server) handleRestoreProfile(w http.ResponseWriter, r *http.Request) {
 	var p model.Profile
@@ -203,7 +203,7 @@ func (s *Server) handleRoutingStatus(w http.ResponseWriter, r *http.Request) {
 				res[i] = cur
 				return
 			}
-			req.Header.Set("User-Agent", "wakeroute")
+			req.Header.Set("User-Agent", "velinx")
 			resp, err := client.Do(req)
 			if err != nil {
 				cur.Error = err.Error()
@@ -267,7 +267,7 @@ func (s *Server) SyncPlugins() {
 		// Boot path: a swallowed generate error here means the engine plugins + kernel PBR
 		// plane never come up after a reboot, with no trace of why. Log it (the watchdog /
 		// next Apply will retry); don't change the fail-soft behavior otherwise.
-		log.Printf("wakeroute: boot SyncPlugins skipped — config generation failed (tunnels/PBR not brought up): %v", err)
+		log.Printf("velinx: boot SyncPlugins skipped — config generation failed (tunnels/PBR not brought up): %v", err)
 		return
 	}
 	s.syncPluginsFor(res) // brings AmneziaWG/olcRTC interfaces UP first
@@ -290,10 +290,10 @@ func (s *Server) SyncPlugins() {
 			}
 		}
 	} else if s.pbrRunner != nil {
-		// Not hybrid/fast: clear any stale "wakeroute_pbr" table left by a prior hybrid era
+		// Not hybrid/fast: clear any stale "velinx_pbr" table left by a prior hybrid era
 		// (e.g. the user switched to tun via Settings and never Applied, then rebooted —
 		// the in-memory pbrPlan is nil so there's nothing else to tear down). Idempotent.
-		_ = (&pbr.Plan{Table: "wakeroute_pbr"}).Teardown(s.pbrRunner, pbr.Options{})
+		_ = (&pbr.Plan{Table: "velinx_pbr"}).Teardown(s.pbrRunner, pbr.Options{})
 	}
 }
 
@@ -609,7 +609,7 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "bad url: "+err.Error())
 			return
 		}
-		req.Header.Set("User-Agent", "wakeroute")
+		req.Header.Set("User-Agent", "velinx")
 		resp, err := s.subscriptionFetchClient().Do(req)
 		if err != nil {
 			writeErr(w, http.StatusBadGateway, "fetch failed: "+err.Error())
@@ -630,7 +630,7 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.Subscription.URL != body.URL {
 			s.cfg.Subscription.URL = body.URL
 			if err := s.cfg.Save(); err != nil {
-				log.Printf("wakeroute: could not persist subscription URL for auto-refresh: %v", err)
+				log.Printf("velinx: could not persist subscription URL for auto-refresh: %v", err)
 			}
 		}
 		s.cfgMu.Unlock()

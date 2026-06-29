@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/importer"
-	"wakeroute/internal/model"
+	"velinx/internal/importer"
+	"velinx/internal/model"
 )
 
 // TestClashSubscriptionGenerate exercises the clash-YAML import path (ParseClash, a custom

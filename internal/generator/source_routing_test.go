@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/importer"
-	"wakeroute/internal/model"
+	"velinx/internal/importer"
+	"velinx/internal/model"
 )
 
 // TestSourceRoutingGenerate covers the sing-box plane of source-based routing (Phase B):

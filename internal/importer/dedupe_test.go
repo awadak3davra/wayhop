@@ -3,7 +3,7 @@ package importer
 import (
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 func dedupe_ep(id, proto, server string, port int, uuid string) model.Endpoint {

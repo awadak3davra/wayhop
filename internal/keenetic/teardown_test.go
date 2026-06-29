@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 func TestTeardownCommands(t *testing.T) {

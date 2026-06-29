@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // storemodelconfig_newStore opens a fresh Store backed by a unique temp file.

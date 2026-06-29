@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"wakeroute/internal/atomicfile"
+	"velinx/internal/atomicfile"
 )
 
 // SingBox manages a sing-box process driven by a generated config file.

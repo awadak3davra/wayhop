@@ -1,4 +1,4 @@
-// Package updater manages the engine binaries wakeroute orchestrates (sing-box, xray,
+// Package updater manages the engine binaries velinx orchestrates (sing-box, xray,
 // mihomo, hysteria, dnscrypt-proxy, ...). It reports the installed version,
 // queries upstream GitHub releases *through configurable mirrors* (GitHub is
 // frequently blocked/throttled in censored regions), and installs a chosen
@@ -35,7 +35,7 @@ import (
 //	core         — the sing-box proxy core
 //	kernel-plugin— an engine driving a kernel iface (AmneziaWG)
 //	socks-plugin — a long-running chained-SOCKS engine (olcRTC)
-//	standalone   — a separate core wakeroute does NOT run here; sing-box covers the
+//	standalone   — a separate core velinx does NOT run here; sing-box covers the
 //	               protocol natively, so it's catalog-only (install only for a manual
 //	               setup). The UI files these under "Advanced".
 type Engine struct {
@@ -52,7 +52,7 @@ type Engine struct {
 // RouterUsed reports whether the router actually runs this engine (vs catalog-only).
 func (e Engine) RouterUsed() bool { return e.Role != "" && e.Role != "standalone" }
 
-// Engines is the registry of cores wakeroute can manage.
+// Engines is the registry of cores velinx can manage.
 var Engines = []Engine{
 	{ID: "sing-box", Name: "sing-box", Repo: "SagerNet/sing-box", BinName: "sing-box", Role: "core", VersionArgs: []string{"version"}},
 	{ID: "mihomo", Name: "Mihomo (Clash.Meta)", Repo: "MetaCubeX/mihomo", BinName: "mihomo", Role: "standalone", VersionArgs: []string{"-v"}},
@@ -78,13 +78,13 @@ func EngineByID(id string) *Engine {
 // Updater performs installed/latest/install operations.
 type Updater struct {
 	BinDir  string   // where binaries live, e.g. /opt/sbin
-	Arch    string   // wakeroute arch token: amd64|arm64|arm|mipsle|mips
+	Arch    string   // velinx arch token: amd64|arm64|arm|mipsle|mips
 	Mirrors []string // URL prefixes tried in order; "" = direct
 	hc      *http.Client
 }
 
 // New builds an Updater. An empty arch autodetects from the running binary
-// (wakeroute is built for the router's arch, so runtime.GOARCH is correct on-device).
+// (velinx is built for the router's arch, so runtime.GOARCH is correct on-device).
 func New(binDir, arch string, mirrors []string) *Updater {
 	if arch == "" {
 		arch = runtime.GOARCH // mipsle/mips/arm/arm64/amd64 line up with our tokens
@@ -183,7 +183,7 @@ func (u *Updater) apiGet(ctx context.Context, path string, v any) error {
 			continue
 		}
 		req.Header.Set("Accept", "application/vnd.github+json")
-		req.Header.Set("User-Agent", "wakeroute-updater")
+		req.Header.Set("User-Agent", "velinx-updater")
 		resp, err := u.hc.Do(req)
 		if err != nil {
 			lastErr = err
@@ -324,6 +324,29 @@ func enoughSpaceFor(avail uint64, known bool, binSize int, withBackup bool) bool
 	return avail >= uint64(binSize)*mult+(2<<20) // + 2 MiB margin
 }
 
+// peakInstallRAM estimates the worst-case RAM the in-memory install path holds at once for an
+// asset of assetSize COMPRESSED bytes: download() buffers the compressed archive in RAM, then
+// extractBinary() produces the decompressed binary from it while the compressed buffer is still
+// alive — so the peak is the compressed buffer PLUS the decompressed binary. A binary archive
+// inflates ~1.5-2.5x, so we bound the peak at ~3.5x the compressed size, plus an 8 MiB safety
+// margin for the daemon's own working set during the install.
+func peakInstallRAM(assetSize int64) uint64 {
+	return uint64(assetSize)*7/2 + (8 << 20) // ~3.5x compressed + 8 MiB
+}
+
+// enoughMemForDownload reports whether `avail` bytes of available RAM can hold the in-memory
+// install peak for an asset of assetSize compressed bytes. Unknown avail (known=false, e.g. the
+// off-Linux build) or unknown assetSize (older releases omit it) never blocks — we don't reject
+// on a number we couldn't measure. This stops a large engine install from OOM-killing a low-RAM
+// router (the panel downloads + unpacks the binary in RAM) BEFORE any bytes are fetched, turning
+// an OOM crash into a clear "free memory and retry / install over SSH" message.
+func enoughMemForDownload(avail uint64, known bool, assetSize int64) bool {
+	if !known || assetSize <= 0 {
+		return true
+	}
+	return avail >= peakInstallRAM(assetSize)
+}
+
 func (u *Updater) Install(ctx context.Context, e Engine, tag string) (string, error) {
 	if e.SourceOnly {
 		return "", fmt.Errorf("%s has no prebuilt releases: %s", e.ID, e.Note)
@@ -335,6 +358,12 @@ func (u *Updater) Install(ctx context.Context, e Engine, tag string) (string, er
 	asset := pickAsset(rel.Assets, u.Arch)
 	if asset == nil {
 		return "", fmt.Errorf("no %s asset for arch %q in %s %s", e.ID, u.Arch, e.ID, tag)
+	}
+	// Pre-flight RAM check BEFORE downloading: the install buffers the compressed asset AND the
+	// decompressed binary in RAM at once, so on a low-RAM router a large engine would OOM-kill
+	// the daemon (and other processes) mid-install. Refuse cleanly instead of crashing.
+	if avail, ok := availMemBytes(); !enoughMemForDownload(avail, ok, asset.Size) {
+		return "", fmt.Errorf("not enough free memory to install %s: needs ~%d MiB but only ~%d MiB is available (the panel downloads and unpacks the binary in RAM). Free memory and retry, or install it over SSH", e.ID, peakInstallRAM(asset.Size)>>20, avail>>20)
 	}
 
 	data, err := u.download(ctx, asset.URL, dlCap(asset.Size))
@@ -368,6 +397,27 @@ func (u *Updater) Install(ctx context.Context, e Engine, tag string) (string, er
 	return rel.Tag, nil
 }
 
+// Uninstall removes the engine binary this updater installed (BinDir/BinName). It refuses
+// SourceOnly engines (the panel installs no binary for those — they're built from source) and
+// is a no-op success when the binary is already absent. It only ever deletes inside BinDir,
+// never a PATH-resolved system binary, so it can't nuke an OS-provided tool.
+func (u *Updater) Uninstall(e Engine) error {
+	if e.SourceOnly {
+		return fmt.Errorf("%s is built from source — there is no panel-installed binary to remove", e.ID)
+	}
+	if e.BinName == "" {
+		return fmt.Errorf("%s has no installable binary name", e.ID)
+	}
+	dst := filepath.Join(u.BinDir, e.BinName)
+	if err := os.Remove(dst); err != nil {
+		if os.IsNotExist(err) {
+			return nil // already gone — treat as success
+		}
+		return fmt.Errorf("remove %s: %w", dst, err)
+	}
+	return nil
+}
+
 // dlCap bounds how many bytes download buffers in RAM: the asset's known size plus a small
 // margin, so a misbehaving or hostile mirror can't stream far more than the expected archive
 // into memory on a small-RAM router. Falls back to a flat ceiling when the size is unknown
@@ -391,7 +441,7 @@ func (u *Updater) download(ctx context.Context, rawURL string, maxBytes int64) (
 			lastErr = err
 			continue
 		}
-		req.Header.Set("User-Agent", "wakeroute-updater")
+		req.Header.Set("User-Agent", "velinx-updater")
 		resp, err := u.hc.Do(req)
 		if err != nil {
 			lastErr = err
@@ -597,7 +647,7 @@ func verifyDigest(data []byte, digest string) error {
 
 // verifyDigestRequired is the SELF-UPDATE variant: a non-empty, well-formed sha256 digest
 // is MANDATORY. Unlike verifyDigest (which skips when a release asset carries no digest, so
-// engine releases that lack one can still install best-effort), the WakeRoute binary runs as
+// engine releases that lack one can still install best-effort), the Velinx binary runs as
 // root after a swap, so we refuse to install one we couldn't verify. WR's own CI publishes
 // every tarball as a GitHub Release asset, which GitHub auto-populates with a sha256 digest,
 // so a real release always passes; an absent digest means the mirror channel is the only
@@ -610,19 +660,19 @@ func verifyDigestRequired(data []byte, digest string) error {
 	return verifyDigest(data, digest)
 }
 
-// --- WakeRoute self-update -------------------------------------------------
+// --- Velinx self-update -------------------------------------------------
 //
-// WakeRoute can update ITSELF (not just the engines it orchestrates) from its own
+// Velinx can update ITSELF (not just the engines it orchestrates) from its own
 // CI release builds. The build workflow publishes per-arch tarballs named
-// wakeroute-<ver>-<arch>.tar.gz and wakeroute-<ver>-<arch>-openwrt.tar.gz (the latter
-// carries the procd init), each containing a wakeroute-<arch> binary. Those names have
+// velinx-<ver>-<arch>.tar.gz and velinx-<ver>-<arch>-openwrt.tar.gz (the latter
+// carries the procd init), each containing a velinx-<arch> binary. Those names have
 // no "linux" token, so the engine asset matcher does not apply — selfAsset handles them.
 
-// DefaultSelfRepo is where WakeRoute fetches its OWN release builds when the config
+// DefaultSelfRepo is where Velinx fetches its OWN release builds when the config
 // leaves Updater.SelfRepo empty (the maintainer's fork, CI-built on every v* tag).
-const DefaultSelfRepo = "awadak3davra/wakeroute"
+const DefaultSelfRepo = "awadak3davra/velinx"
 
-// selfAsset picks the WakeRoute release tarball for arch, preferring the OpenWrt
+// selfAsset picks the Velinx release tarball for arch, preferring the OpenWrt
 // package over the generic one. The leading "-"+arch avoids "arm" matching "arm64".
 func selfAsset(assets []Asset, arch string) *Asset {
 	var generic *Asset
@@ -630,7 +680,7 @@ func selfAsset(assets []Asset, arch string) *Asset {
 	gen := "-" + arch + ".tar.gz"
 	for i := range assets {
 		n := strings.ToLower(assets[i].Name)
-		if !strings.HasPrefix(n, "wakeroute-") {
+		if !strings.HasPrefix(n, "velinx-") {
 			continue
 		}
 		if strings.HasSuffix(n, ow) {
@@ -643,7 +693,7 @@ func selfAsset(assets []Asset, arch string) *Asset {
 	return generic
 }
 
-// SelfLatest returns the newest WakeRoute release that carries a tarball for this
+// SelfLatest returns the newest Velinx release that carries a tarball for this
 // arch (newest first; includes prereleases). repo "" → DefaultSelfRepo.
 func (u *Updater) SelfLatest(ctx context.Context, repo string) (Release, error) {
 	if repo == "" {
@@ -658,10 +708,10 @@ func (u *Updater) SelfLatest(ctx context.Context, repo string) (Release, error) 
 			return r, nil
 		}
 	}
-	return Release{}, fmt.Errorf("no wakeroute %s asset in recent %s releases", u.Arch, repo)
+	return Release{}, fmt.Errorf("no velinx %s asset in recent %s releases", u.Arch, repo)
 }
 
-// SelfUpdate downloads WakeRoute release `tag` from repo, verifies it, SANITY-RUNS the
+// SelfUpdate downloads Velinx release `tag` from repo, verifies it, SANITY-RUNS the
 // new binary (`<bin> -version` must print a version), backs up the current executable
 // (exePath+".bak", reboot-safe rollback), then atomically swaps it in. The caller must
 // restart the service to run it (the running process keeps the old inode until then).
@@ -672,11 +722,16 @@ func (u *Updater) SelfUpdate(ctx context.Context, repo, tag, exePath string) (st
 	}
 	rel, err := u.release(ctx, Engine{Repo: repo}, tag)
 	if err != nil {
-		return "", fmt.Errorf("lookup wakeroute %s: %w", tag, err)
+		return "", fmt.Errorf("lookup velinx %s: %w", tag, err)
 	}
 	asset := selfAsset(rel.Assets, u.Arch)
 	if asset == nil {
-		return "", fmt.Errorf("no wakeroute %s asset in %s", u.Arch, tag)
+		return "", fmt.Errorf("no velinx %s asset in %s", u.Arch, tag)
+	}
+	// Pre-flight RAM check (see enoughMemForDownload): the self-update also buffers compressed +
+	// decompressed in RAM; refuse cleanly on a low-RAM router rather than risk an OOM mid-swap.
+	if avail, ok := availMemBytes(); !enoughMemForDownload(avail, ok, asset.Size) {
+		return "", fmt.Errorf("not enough free memory to self-update: needs ~%d MiB but only ~%d MiB is available (the binary is downloaded and unpacked in RAM). Free memory and retry, or update over SSH", peakInstallRAM(asset.Size)>>20, avail>>20)
 	}
 	data, err := u.download(ctx, asset.URL, dlCap(asset.Size))
 	if err != nil {
@@ -687,9 +742,9 @@ func (u *Updater) SelfUpdate(ctx context.Context, repo, tag, exePath string) (st
 	if err := verifyDigestRequired(data, asset.Digest); err != nil {
 		return "", err
 	}
-	bin, err := fromTarGz(data, "wakeroute-"+u.Arch)
+	bin, err := fromTarGz(data, "velinx-"+u.Arch)
 	if err != nil {
-		return "", fmt.Errorf("extract wakeroute-%s: %w", u.Arch, err)
+		return "", fmt.Errorf("extract velinx-%s: %w", u.Arch, err)
 	}
 	dir := filepath.Dir(exePath)
 	// Pre-flight: the staged binary AND the .bak backup both land on exePath's
@@ -698,16 +753,16 @@ func (u *Updater) SelfUpdate(ctx context.Context, repo, tag, exePath string) (st
 	if avail, ok := AvailBytes(dir); !enoughSpaceFor(avail, ok, len(bin), true) {
 		return "", fmt.Errorf("not enough free space to self-update safely on %s (~%d MiB free, need ~%d MiB for the new binary + backup) — free some space and retry", dir, avail>>20, (uint64(len(bin))*2+(2<<20))>>20)
 	}
-	staged := filepath.Join(dir, ".wakeroute.new")
+	staged := filepath.Join(dir, ".velinx.new")
 	if err := os.WriteFile(staged, bin, 0o755); err != nil {
-		_ = os.Remove(staged) // don't leave a partial .wakeroute.new wasting the overlay
+		_ = os.Remove(staged) // don't leave a partial .velinx.new wasting the overlay
 		return "", err
 	}
 	// Sanity-run BEFORE swapping — refuse a binary that won't execute on this arch.
 	out, runErr := exec.CommandContext(ctx, staged, "-version").CombinedOutput()
 	if runErr != nil || parseVersion(string(out)) == "" {
 		_ = os.Remove(staged)
-		return "", fmt.Errorf("staged wakeroute binary failed its sanity check (corrupt or wrong arch): %v", runErr)
+		return "", fmt.Errorf("staged velinx binary failed its sanity check (corrupt or wrong arch): %v", runErr)
 	}
 	// Back up the current binary on the same filesystem, then atomically swap. The .bak is
 	// the reboot-safe rollback, so it is MANDATORY: if we can't read the running binary or

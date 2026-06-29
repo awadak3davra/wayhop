@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // TestAWGConfigNormalizesKeys verifies a url-safe-encoded AmneziaWG key is rendered into

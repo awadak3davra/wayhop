@@ -1,5 +1,5 @@
-// Package plugin runs the non-sing-box "engine" binaries wakeroute orchestrates
-// (AmneziaWG, olcRTC). It renders each engine's native config from the wakeroute model
+// Package plugin runs the non-sing-box "engine" binaries velinx orchestrates
+// (AmneziaWG, olcRTC). It renders each engine's native config from the velinx model
 // and supervises the process. sing-box reaches these via a chained SOCKS (olcRTC)
 // or the awg interface (AmneziaWG — full routing is M7). Off-device (no binary)
 // it degrades to needs_binary instead of failing.
@@ -17,8 +17,8 @@ import (
 	"strings"
 	"sync"
 
-	"wakeroute/internal/model"
-	"wakeroute/internal/util"
+	"velinx/internal/model"
+	"velinx/internal/util"
 )
 
 // Spec is one plugin to run: the endpoint + the local SOCKS port sing-box chains.
@@ -434,7 +434,7 @@ func (m *Manager) awgUp(e model.Endpoint, cfgText string) (string, error) {
 		// a missing address means a dead tunnel. Log it instead of swallowing it silently;
 		// don't abort, since a dual-stack config may legitimately add only one family.
 		if out, err := exec.Command(ipBin, "addr", "add", addr, "dev", iface).CombinedOutput(); err != nil {
-			log.Printf("wakeroute: awg %s: ip addr add %s failed: %v: %s", iface, addr, err, strings.TrimSpace(string(out)))
+			log.Printf("velinx: awg %s: ip addr add %s failed: %v: %s", iface, addr, err, strings.TrimSpace(string(out)))
 		}
 	}
 	// MTU is stripped from the setconf input (awg setconf rejects it) but is a real
@@ -446,7 +446,7 @@ func (m *Manager) awgUp(e model.Endpoint, cfgText string) (string, error) {
 	// AmneziaWG encap+junk overhead); an explicit MTU still wins.
 	mtu := awgMTU(e)
 	if out, err := exec.Command(ipBin, "link", "set", iface, "mtu", mtu).CombinedOutput(); err != nil {
-		log.Printf("wakeroute: awg %s: set mtu %s failed: %v: %s", iface, mtu, err, strings.TrimSpace(string(out)))
+		log.Printf("velinx: awg %s: set mtu %s failed: %v: %s", iface, mtu, err, strings.TrimSpace(string(out)))
 	}
 	if out, err := exec.Command(ipBin, "link", "set", iface, "up").CombinedOutput(); err != nil {
 		_ = exec.Command(ipBin, "link", "del", iface).Run()
@@ -476,7 +476,7 @@ func (m *Manager) stop(_ string, p *proc) {
 		// reaped by the supervise goroutine) — that's the benign expected case, not
 		// a failure worth logging.
 		if err := p.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
-			log.Printf("wakeroute: plugin kill (engine=%s iface=%s): %v", p.engine, p.iface, err)
+			log.Printf("velinx: plugin kill (engine=%s iface=%s): %v", p.engine, p.iface, err)
 		}
 		if p.done != nil {
 			<-p.done // the exit-tracking goroutine owns Wait()
@@ -492,7 +492,7 @@ func (m *Manager) stop(_ string, p *proc) {
 	// add/remove cycles. Best-effort; ENOENT (one-shot already cleaned, or never written) is fine.
 	if p.cfgPath != "" {
 		if err := os.Remove(p.cfgPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			log.Printf("wakeroute: plugin cfg cleanup (engine=%s iface=%s): %v", p.engine, p.iface, err)
+			log.Printf("velinx: plugin cfg cleanup (engine=%s iface=%s): %v", p.engine, p.iface, err)
 		}
 	}
 	p.running = false

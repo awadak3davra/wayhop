@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/config"
-	"wakeroute/internal/model"
-	"wakeroute/internal/store"
+	"velinx/internal/config"
+	"velinx/internal/model"
+	"velinx/internal/store"
 )
 
 // sharehandlers_server builds a minimal *Server backed by a temp config.json and

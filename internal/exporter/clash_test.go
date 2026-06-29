@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/importer"
-	"wakeroute/internal/model"
+	"velinx/internal/importer"
+	"velinx/internal/model"
 )
 
 // TestClashConfigPerType checks each proxy type emits the right clash keys.
@@ -109,7 +109,7 @@ func TestClashConfigPerType(t *testing.T) {
 			}
 		}
 		// Every config has the group + ruleset scaffold.
-		if !strings.Contains(yaml, "name: WakeRoute") || !strings.Contains(yaml, "MATCH,WakeRoute") {
+		if !strings.Contains(yaml, "name: Velinx") || !strings.Contains(yaml, "MATCH,Velinx") {
 			t.Errorf("%s: missing proxy-group/rules scaffold:\n%s", c.name, yaml)
 		}
 	}
@@ -227,7 +227,7 @@ func TestClashOmittedNestedGroupNotReferenced(t *testing.T) {
 	}
 }
 
-// TestClashFailoverGroups checks that a WakeRoute failover group exports as a clash
+// TestClashFailoverGroups checks that a Velinx failover group exports as a clash
 // url-test proxy-group (so a clash client keeps the panel's auto-failover), the top-level
 // selector references the group instead of the now-grouped endpoints, the health params
 // carry over, and the YAML still parses back to the endpoints. With no groups the output

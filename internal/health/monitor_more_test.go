@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/clash"
-	"wakeroute/internal/model"
-	"wakeroute/internal/store"
+	"velinx/internal/clash"
+	"velinx/internal/model"
+	"velinx/internal/store"
 )
 
 // health_logs is a fake LogSource returning a fixed set of lines, newest last.

@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"wakeroute/internal/kb"
+	"velinx/internal/kb"
 )
 
 // maxDiagLines caps how many log lines the analyzer processes. Pasted text is bounded only

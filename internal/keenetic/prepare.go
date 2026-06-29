@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // prepare.go ties the whole cutover pipeline together: pre-flight device reads → a ready

@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // Regression for the Profile() slice-aliasing race: a caller iterating the

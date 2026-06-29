@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/model"
-	"wakeroute/internal/pbr"
+	"velinx/internal/model"
+	"velinx/internal/pbr"
 )
 
 // hybridProfile is the canonical hybrid-split fixture: a kernel AmneziaWG endpoint

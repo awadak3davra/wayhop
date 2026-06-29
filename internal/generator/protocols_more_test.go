@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // wgTestPrivKey and wgTestPubKey are valid 32-byte WireGuard base64 keys used
@@ -238,7 +238,7 @@ func TestOutboundTUIC(t *testing.T) {
 // TestOutboundTUICUDPMutualExclusion: sing-box FATALs on a TUIC outbound carrying BOTH
 // udp_over_stream and udp_relay_mode ("udp_over_stream is conflict with udp_relay_mode"),
 // which bricks the whole shared singbox.json on apply. The generator must emit exactly one —
-// udp_over_stream wins when set. (Real bug found via on-device `wakeroute gen | sing-box check`.)
+// udp_over_stream wins when set. (Real bug found via on-device `velinx gen | sing-box check`.)
 func TestOutboundTUICUDPMutualExclusion(t *testing.T) {
 	const tuicUUID = "11111111-2222-3333-4444-555555555555"
 	// Both set -> udp_over_stream wins, udp_relay_mode dropped (no conflict).

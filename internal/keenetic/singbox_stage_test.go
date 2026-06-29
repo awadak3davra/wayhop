@@ -37,7 +37,7 @@ func TestStageRestoreSingboxConfig(t *testing.T) {
 		t.Error("snapshot must not end in .json")
 	}
 
-	// Re-stage keeps the FIRST snapshot (never snapshots a WakeRoute config as "original").
+	// Re-stage keeps the FIRST snapshot (never snapshots a Velinx config as "original").
 	if err := StageSingboxConfig(map[string]any{"x": 1}, opt); err != nil {
 		t.Fatal(err)
 	}

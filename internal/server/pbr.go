@@ -3,7 +3,7 @@ package server
 import (
 	"net/http"
 
-	"wakeroute/internal/pbr"
+	"velinx/internal/pbr"
 )
 
 // handlePBRStatus reports whether the kernel PBR plan is currently installed and whether

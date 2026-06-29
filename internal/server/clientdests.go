@@ -8,7 +8,7 @@ import (
 	"sort"
 	"time"
 
-	"wakeroute/internal/clash"
+	"velinx/internal/clash"
 )
 
 // discoverDest is one external destination a LAN client has contacted (from conntrack), with the

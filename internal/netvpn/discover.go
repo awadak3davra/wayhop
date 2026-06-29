@@ -1,6 +1,6 @@
 // Package netvpn discovers VPN tunnels that are ALREADY configured on the router
-// (WireGuard / AmneziaWG) so WakeRoute can understand and route through them without
-// re-importing keys — the OS owns the tunnel, WakeRoute just uses it as an egress.
+// (WireGuard / AmneziaWG) so Velinx can understand and route through them without
+// re-importing keys — the OS owns the tunnel, Velinx just uses it as an egress.
 //
 // Discovery reads the runtime via the wg/awg CLIs (`wg show all dump`), which is the
 // authoritative view of live interfaces + peers. It captures only the non-secret fields

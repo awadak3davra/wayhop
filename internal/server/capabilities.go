@@ -3,7 +3,7 @@ package server
 import (
 	"net/http"
 
-	"wakeroute/internal/platform"
+	"velinx/internal/platform"
 )
 
 // handleNativeCapabilities reports what the host can route natively (kernel/firmware

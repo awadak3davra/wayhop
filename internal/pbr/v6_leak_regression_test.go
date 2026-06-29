@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // TestRenderIP_V6SourceScopedDatapath is the regression for the hasV6()/hasV6Zone() asymmetry

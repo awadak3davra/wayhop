@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // profilehandlers_vlessLink is a realistic VLESS-Reality share link that

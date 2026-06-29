@@ -3,7 +3,7 @@ package generator
 import (
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // TestGroupOutboundIntervalFloor pins the urltest interval floor: the 60s default and any

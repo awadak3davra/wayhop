@@ -1,6 +1,6 @@
 package keenetic
 
-import "wakeroute/internal/failsafe"
+import "velinx/internal/failsafe"
 
 // CutoverCheck builds the failsafe connectivity check. It proves LAN-through-TUN forwarding by
 // fetching the public exit IP and asserting it is NOT the raw WAN/ISP IP: a VPN exit means the

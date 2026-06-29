@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"wakeroute/internal/generator"
-	"wakeroute/internal/model"
+	"velinx/internal/generator"
+	"velinx/internal/model"
 )
 
 // assemble.go turns the reconciled model (BuildProfile) into the final sing-box routing
@@ -73,7 +73,7 @@ func InlineCIDRSources(p *model.Profile, fetch func(url string) ([]string, error
 // the REAL ones from the live sing-box config (verbatim — real server/password/uuid/tls/flow),
 // keyed by a live-tag → assembled-tag map (e.g. {"hy2-main":"hy2_main", "vless-main":
 // "vless_main"}). BuildProfile uses PLACEHOLDER Hy2/VLESS params (so the secrets never enter
-// WakeRoute's model/code); this swaps the working tunnels in at the JSON level right before
+// Velinx's model/code); this swaps the working tunnels in at the JSON level right before
 // apply. A live tag with no match is skipped (returns the tags it could not find).
 func SubstituteRealOutbounds(cfg map[string]any, liveSingboxConfig []byte, tagMap map[string]string) (missing []string, err error) {
 	var live struct {

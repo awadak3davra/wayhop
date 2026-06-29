@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // parseSingboxTags extracts the build-feature set from `sing-box version` output (the

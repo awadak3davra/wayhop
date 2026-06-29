@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"wakeroute/internal/model"
-	"wakeroute/internal/netdiag"
+	"velinx/internal/model"
+	"velinx/internal/netdiag"
 )
 
 // handleNetDiag runs a single network test against a target. For WAN egress

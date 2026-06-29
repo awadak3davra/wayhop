@@ -3,7 +3,7 @@ package generator
 import (
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // NATIVE P2 STEP 5 — generator confirmation tests (no production code change).

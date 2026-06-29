@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // TestApplyCatalogSRS_AndInlineSkip: big/common lists are rewritten to a catalog .srs (Format

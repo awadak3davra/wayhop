@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/config"
-	"wakeroute/internal/initserver"
-	"wakeroute/internal/serverstore"
-	"wakeroute/internal/store"
+	"velinx/internal/config"
+	"velinx/internal/initserver"
+	"velinx/internal/serverstore"
+	"velinx/internal/store"
 )
 
 // serverbins_newServer is a minimal *Server for the per-server binary version/update

@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // #14: deleting an endpoint that is the SOLE member of a group must be refused —

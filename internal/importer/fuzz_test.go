@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // This file fuzzes the untrusted-input surface of the importer: Parse() and

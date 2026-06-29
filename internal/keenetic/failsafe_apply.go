@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"wakeroute/internal/failsafe"
-	"wakeroute/internal/model"
+	"velinx/internal/failsafe"
+	"velinx/internal/model"
 )
 
 // Reboot reboots the router via RCI (`system reboot`). KeeneticOS boots the SAVED config, so

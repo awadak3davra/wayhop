@@ -3,7 +3,7 @@ package generator
 import (
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // TestAnyTLSOutbound: an AnyTLS endpoint generates a `type: anytls` outbound carrying its password

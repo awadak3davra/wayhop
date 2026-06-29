@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"wakeroute/internal/atomicfile"
+	"velinx/internal/atomicfile"
 )
 
 // Runner runs a shell command (injectable for tests). Same method shape as pbr.Runner so an

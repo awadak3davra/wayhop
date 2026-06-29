@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"wakeroute/internal/model"
-	"wakeroute/internal/pbr"
+	"velinx/internal/model"
+	"velinx/internal/pbr"
 )
 
 // Conn is one kernel connection-tracking entry, parsed from /proc/net/nf_conntrack. Unlike

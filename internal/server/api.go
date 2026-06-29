@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"time"
 
-	"wakeroute/internal/version"
+	"velinx/internal/version"
 )
 
 type healthResp struct {

@@ -13,7 +13,7 @@ const (
 	EngineXray      Engine = "xray"
 	EngineMihomo    Engine = "mihomo"
 	EngineOlcRTC    Engine = "olcrtc"
-	// EngineExternal routes through an existing OS interface that WakeRoute does
+	// EngineExternal routes through an existing OS interface that Velinx does
 	// NOT manage (e.g. a UCI/netifd-brought-up awg0/awg1). It becomes a sing-box
 	// `direct` outbound bound to params["interface"]; no tunnel is created.
 	EngineExternal Engine = "external"

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 func TestHandlePBRPreview(t *testing.T) {

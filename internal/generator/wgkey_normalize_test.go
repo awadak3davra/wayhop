@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 // TestNormalizeWGKey verifies a WireGuard key given in any base64 variant validWGKey

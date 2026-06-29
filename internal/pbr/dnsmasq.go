@@ -13,8 +13,8 @@ package pbr
 // into Apply/render.go/pbr.go — that integration is a deliberate follow-up.
 //
 // Intended deployment path of the rendered snippet (one of, depending on platform):
-//   - OpenWrt / generic Linux : /etc/dnsmasq.d/wakeroute-pbr.conf
-//   - Entware / Keenetic /opt : /opt/etc/dnsmasq.d/wakeroute-pbr.conf
+//   - OpenWrt / generic Linux : /etc/dnsmasq.d/velinx-pbr.conf
+//   - Entware / Keenetic /opt : /opt/etc/dnsmasq.d/velinx-pbr.conf
 //   - Keenetic stock dnsmasq  : included via the /opt overlay's dnsmasq conf-dir
 // After writing, dnsmasq must be reloaded (SIGHUP) so the directives take effect. The
 // kernel set named here must already exist (Compile/RenderNft declares the same
@@ -44,7 +44,7 @@ type DomainSet struct {
 // for the native-first kernel-PBR plane this package compiles.
 type DnsmasqOptions struct {
 	// Table is the nftables table the kernel sets live in (matches Plan.Table, e.g.
-	// "wakeroute_pbr"). Required for the nftset form; ignored by the legacy ipset form.
+	// "velinx_pbr"). Required for the nftset form; ignored by the legacy ipset form.
 	Table string
 
 	// Legacy, when true, emits the older `ipset=/dom/.../set4,set6` form instead of the
@@ -64,7 +64,7 @@ const nftFamily = "inet"
 
 // dnsmasqHeader marks the generated snippet so an operator (and any future apply layer)
 // can recognize + safely overwrite it.
-const dnsmasqHeader = "# WakeRoute dnsmasq domain-routing snippet (generated; do not edit by hand)"
+const dnsmasqHeader = "# Velinx dnsmasq domain-routing snippet (generated; do not edit by hand)"
 
 // PlanDomainSets returns the DomainSets this plan needs: one per zone that carries
 // domains (zones only carry Domains when Compile ran with Options.CollectDomainZones).
@@ -96,7 +96,7 @@ func (pl *Plan) RenderDnsmasq(opt DnsmasqOptions) string {
 // skipped. The whole snippet is empty (no header) when nothing remains.
 func RenderDnsmasqSets(sets []DomainSet, opt DnsmasqOptions) string {
 	if opt.Table == "" {
-		opt.Table = "wakeroute_pbr"
+		opt.Table = "velinx_pbr"
 	}
 
 	// Stable order, independent of caller order.

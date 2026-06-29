@@ -14,8 +14,8 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/generator"
-	"wakeroute/internal/model"
+	"velinx/internal/generator"
+	"velinx/internal/model"
 )
 
 // synthWGKey returns a valid 32-byte base64 WireGuard key derived from seed (so

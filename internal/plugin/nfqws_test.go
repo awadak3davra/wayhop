@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"wakeroute/internal/model"
+	"velinx/internal/model"
 )
 
 func nfqwsEndpoint(params map[string]any) model.Endpoint {

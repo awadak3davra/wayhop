@@ -1,13 +1,13 @@
 #!/bin/sh /etc/rc.common
-# OpenWrt procd init script for WakeRoute (wakeroute).
+# OpenWrt procd init script for Velinx (velinx).
 #
-# Install to /etc/init.d/wakeroute (chmod 0755), then:
-#   /etc/init.d/wakeroute enable    # create the rc.d S95 symlink (boot start)
-#   /etc/init.d/wakeroute start
+# Install to /etc/init.d/velinx (chmod 0755), then:
+#   /etc/init.d/velinx enable    # create the rc.d S95 symlink (boot start)
+#   /etc/init.d/velinx start
 #
 # Modelled on the standard OpenWrt procd service style (USE_PROCD=1,
 # procd_open_instance / procd_close_instance). Logs go to logd via
-# procd stdout/stderr, so view them with:  logread -e wakeroute
+# procd stdout/stderr, so view them with:  logread -e velinx
 #
 # Verified against OpenWrt 25.12.2 (procd, apk, nftables) on Xiaomi AX3000T.
 
@@ -21,14 +21,14 @@ STOP=01
 
 USE_PROCD=1
 
-PROG=/usr/sbin/wakeroute
-CONF=/etc/wakeroute/config.json
+PROG=/usr/sbin/velinx
+CONF=/etc/velinx/config.json
 
 start_service() {
 	# Don't try to start if the binary or config is missing; procd would just
 	# respawn-loop. Fail loudly into the log instead.
-	[ -x "$PROG" ] || { echo "wakeroute: $PROG not found or not executable" >&2; return 1; }
-	[ -f "$CONF" ] || { echo "wakeroute: config $CONF missing" >&2; return 1; }
+	[ -x "$PROG" ] || { echo "velinx: $PROG not found or not executable" >&2; return 1; }
+	[ -f "$CONF" ] || { echo "velinx: config $CONF missing" >&2; return 1; }
 
 	procd_open_instance
 	procd_set_param command "$PROG" --config "$CONF"
@@ -51,7 +51,7 @@ start_service() {
 	procd_close_instance
 }
 
-# `reload`/config-change handling. WakeRoute reloads its own config at runtime
+# `reload`/config-change handling. Velinx reloads its own config at runtime
 # via the web UI, so a service-level reload just restarts the instance to pick
 # up edits made to config.json by hand.
 service_triggers() {
