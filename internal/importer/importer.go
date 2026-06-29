@@ -27,21 +27,31 @@ func Parse(raw string) (*model.Endpoint, error) {
 	if raw == "" {
 		return nil, errors.New("empty link")
 	}
-	if strings.Contains(raw, "[Interface]") {
-		return finalize(parseConf(raw))
-	}
-	if looksLikeOlcRTC(raw) {
-		return finalize(parseOlcRTC(raw))
-	}
-
+	// Detect a URI scheme prefix (a single whitespace-free token before "://") FIRST. A pasted
+	// WireGuard .conf or an olcRTC YAML blob is NOT a URI — it has no such prefix — whereas a proxy
+	// share link always does. We then gate the .conf / olcRTC content-sniffs on the ABSENCE of a
+	// scheme, so a crafted #fragment in a share link (the node name, which is provider/attacker-
+	// controlled) can't be misread as "[Interface]" (→ .conf parser, import FAILS: #15) or as olcRTC
+	// keys like "provider:…crypto" (→ silent data loss, a dead olcRTC stub replacing the real proxy:
+	// #14). The whitespace guard means a "://" sitting inside a multi-line config blob (preceded by a
+	// newline, e.g. an olcRTC signaling URL) is NOT mistaken for a scheme.
 	scheme := ""
-	if i := strings.Index(raw, "://"); i > 0 {
+	if i := strings.Index(raw, "://"); i > 0 && !strings.ContainsAny(raw[:i], " \t\r\n") {
 		scheme = strings.ToLower(raw[:i])
 		// Normalize the scheme prefix to lowercase so the case-sensitive string parsers
 		// (vmess/ss strip "vmess://"/"ss://" via TrimPrefix) accept an upper/mixed-case scheme
 		// like VMESS:// or SS:// — which other clients (v2rayN, sing-box) treat case-insensitively.
 		// Only the scheme is touched; the body after "://" (incl. base64) is left byte-for-byte intact.
 		raw = scheme + raw[i:]
+	}
+	if scheme == "" {
+		// No URI scheme → a pasted config blob, not a share link: sniff its format.
+		if strings.Contains(raw, "[Interface]") {
+			return finalize(parseConf(raw))
+		}
+		if looksLikeOlcRTC(raw) {
+			return finalize(parseOlcRTC(raw))
+		}
 	}
 
 	// vmess/ss carry base64 bodies that are not always valid URLs.

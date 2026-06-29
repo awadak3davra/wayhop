@@ -4,7 +4,7 @@ package version
 // These defaults are overridden at build time via -ldflags
 // (see the Makefile's LDFLAGS).
 var (
-	Version = "0.3.5"
+	Version = "0.3.7"
 	Commit  = "unknown"
 	Date    = "unknown"
 )

@@ -16,7 +16,7 @@ import (
 )
 
 // Ports is the reserved port block wakeroute owns. Each is user-editable so the
-// daemon can dodge conflicts with the router OS, keen-pbr and https-dns-proxy
+// daemon can dodge conflicts with the router OS and other services
 // (see docs/CONFLICTS.md #1).
 type Ports struct {
 	UI    int `json:"ui"`    // web panel

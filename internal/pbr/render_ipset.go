@@ -388,6 +388,19 @@ func (pl *Plan) RenderIPScript(opt Options) string {
 			// the cron's elected live egress back to this static first member — doing so black-holed
 			// censored lists (Telegram) onto a possibly-dead primary until the next 1-min cron tick.
 			fmt.Fprintf(&b, "ip route add default dev %s table %d 2>/dev/null || true\n", e.Iface, e.Table)
+			if e.FailClosed {
+				// Kill switch — mirror render.go RenderIP (this was MISSING on the ipset/Keenetic plane,
+				// a WAN leak on tunnel-down): a fail-closed blackhole at a high metric in the SAME table.
+				// While the iface is up its metric-0 `default dev` route wins; when it drops the kernel
+				// flushes that route and this blackhole catches the fwmark'd traffic and DROPS it instead
+				// of the lookup falling through to the main table (= WAN). The cron's elected dev route is
+				// metric 0, so this distinct high-metric route never clobbers it (safe with the SEED idiom).
+				// `|| true`: this is a shell-script plane (unlike RenderIP's Runner cmds); a device whose
+				// iproute2 rejects the form must degrade to today's behavior (no enforcement), never break
+				// the whole apply. On KeeneticOS the daemon's fwmark tables may be inert (NDM owns routing),
+				// so this enforces on full-iproute2 Entware; the Keenetic-native kill-switch is separate.
+				fmt.Fprintf(&b, "ip route replace blackhole default metric %d table %d 2>/dev/null || true\n", failClosedMetric, e.Table)
+			}
 		case EgressBlackhole:
 			fmt.Fprintf(&b, "ip route replace blackhole default table %d\n", e.Table)
 		}
@@ -410,6 +423,10 @@ func (pl *Plan) RenderIPScript(opt Options) string {
 			switch e.Kind {
 			case EgressInterface:
 				fmt.Fprintf(&b, "ip -6 route add default dev %s table %d 2>/dev/null || true\n", e.Iface, e.Table)
+				if e.FailClosed {
+					// Kill switch (v6) — mirror the v4 fail-closed blackhole above + render.go (fail-safe).
+					fmt.Fprintf(&b, "ip -6 route replace blackhole default metric %d table %d 2>/dev/null || true\n", failClosedMetric, e.Table)
+				}
 			case EgressBlackhole:
 				fmt.Fprintf(&b, "ip -6 route replace blackhole default table %d\n", e.Table)
 			}
@@ -474,7 +491,7 @@ func (pl *Plan) RenderTeardownScript(opt Options, io IpsetOptions) string {
 
 // DnsmasqIpsetConfig returns the dnsmasq `ipset=` directives that make dnsmasq populate each
 // DNS zone's kernel set as it resolves the listed domains (and every subdomain). Domains are
-// batched so no line exceeds maxLine bytes (keen-pbr uses ~1024). The header comment marks the
+// batched so no line exceeds maxLine bytes (~1024 keeps the line safe). The header comment marks the
 // file as WakeRoute-owned. Returns "" if no zone has domains.
 func (pl *Plan) DnsmasqIpsetConfig(io IpsetOptions, maxLine int) string {
 	io.withDefaults()

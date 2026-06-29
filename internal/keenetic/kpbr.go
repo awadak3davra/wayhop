@@ -126,7 +126,15 @@ set_table() { # $1=table; rest=ordered members
   for m in "$@"; do
     case "$m" in
       WAN) n=$(cat "$ST" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$ST"
-           [ "$n" -ge 3 ] && [ "$cur" != "$WAN_IF" ] && ip route replace default via "$WAN_GW" dev "$WAN_IF" table "$T"; return;;
+           # #5: WAN_GW/WAN_IF can be empty if gateway discovery failed -- an empty "via"/"dev" arg is
+           # an iproute2 error, so the fallback would error every run and never install (black-holing
+           # all-tunnels-down traffic). Require WAN_IF; use via only when WAN_GW is set, else a dev-only
+           # default (correct for a point-to-point WAN like ppp0).
+           if [ "$n" -ge 3 ] && [ "$cur" != "$WAN_IF" ] && [ -n "$WAN_IF" ]; then
+             if [ -n "$WAN_GW" ]; then ip route replace default via "$WAN_GW" dev "$WAN_IF" table "$T"
+             else ip route replace default dev "$WAN_IF" table "$T"; fi
+           fi
+           return;;
       BLOCK) n=$(cat "$ST" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$ST"
              [ "$n" -ge 3 ] && ip route replace blackhole default table "$T"; return;;
       *) if probe "$m"; then [ "$m" != "$cur" ] && ip route replace default dev "$m" table "$T"; echo 0 > "$ST"; return; fi;;

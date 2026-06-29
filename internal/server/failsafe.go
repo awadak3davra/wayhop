@@ -72,7 +72,18 @@ func (s *Server) armFailSafe(nativeOnly bool) {
 		// auto-reverted — the key event for managing the router from away.
 		s.alert("⚠️ WakeRoute fail-safe: connectivity was lost after Apply — rolled back to the previous config.")
 		var sbErr error
-		if err := s.singbox.Restore(); err != nil {
+		if nativeOnly {
+			// #7: native-only baseline — the kernel PBR plane is the routing brain and sing-box was
+			// intentionally STOPPED. Do NOT resurrect a redundant TUN core on rollback: layering a
+			// capture-all TUN over the restored kernel plane is the exact black-hole the native-only
+			// design (and the watchdog TOCTOU fix) exists to prevent. Keep the core DOWN (Stop also
+			// clears Desired so the watchdog won't fight it); restorePBRBaseline below re-establishes
+			// the real datapath. (config+profile don't change across a non-saved Apply, so this
+			// window's nativeOnly verdict is the baseline's too.)
+			if s.singbox.Running() {
+				sbErr = s.singbox.Stop()
+			}
+		} else if err := s.singbox.Restore(); err != nil {
 			sbErr = err
 		} else if s.singbox.Running() {
 			sbErr = s.singbox.Reload()

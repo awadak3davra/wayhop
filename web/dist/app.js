@@ -588,11 +588,9 @@ async function renderDashboard(view) {
   // System-health strip (RAM gauge / CPU / uptime) — removes itself when procfs is absent.
   view.appendChild(systemStrip());
 
-  // Per-interface throughput: each tunnel + the WAN with its live ↓download/↑upload
-  // rate (painted by paintThroughput from the same /api/system byte counters).
-  view.appendChild(el("div", { class: "card", id: "if-card", style: "display:none" },
-    el("div", { class: "card-title", style: "margin-bottom:6px" }, "Interfaces"),
-    el("div", { id: "if-list" })));
+  // (The old standalone "Interfaces" card was removed — per-tunnel ↓/↑ throughput is now shown
+  // inline on each connection/failover row, and the WAN rate stays in the system strip's "WAN now"
+  // tile. See connRow + paintIfaceList.)
 
   // Graceful degradation: when the proxy core isn't running (and we're not in demo),
   // say so plainly at the top instead of leaving the dashboard silently empty — the
@@ -862,26 +860,23 @@ function paintThroughput(node, ifaces) {
   prevIfaces = cur;
 }
 
-// paintIfaceList fills the dashboard Interfaces card with each tunnel's + the WAN's
-// live ↓download / ↑upload rate (same /api/system byte counters as the throughput
-// tile). Hidden until there's data — the off-Linux dev box reports no interfaces.
+// paintIfaceList paints each tunnel's live ↓download / ↑upload rate INLINE on its connection row
+// (the .conn-rate slot keyed by the bound kernel iface), from the same /api/system byte counters
+// as the WAN throughput tile. Replaces the old standalone "Interfaces" card; the WAN's own rate
+// stays in the system strip's "WAN now" tile. A slot with no rate yet is left blank (it fills on
+// the next /api/system poll). Off-Linux dev boxes report no interfaces, so nothing paints there.
 function paintIfaceList(ifaces, rate, wanName) {
-  const card = document.getElementById("if-card"), box = document.getElementById("if-list");
-  if (!card || !box) return;
-  const rows = ifaces
-    .filter(f => f.name === wanName || /^(nwg|awg|wg|tun)/.test(f.name))
-    .map(f => ({ f, r: rate(f.name) })).filter(x => x.r);
-  if (!rows.length) { card.style.display = "none"; return; }
-  box.innerHTML = "";
-  rows.forEach(({ f, r }, i) => {
-    box.appendChild(el("div", { style: "display:flex;justify-content:space-between;align-items:center;padding:8px 0" + (i ? ";border-top:1px solid var(--divider)" : "") },
-      el("span", { style: "font-weight:500" }, f.name === wanName ? "WAN (direct)" : ifaceFriendly(f.name)),
-      el("span", { style: "font-variant-numeric:tabular-nums;font-size:12.5px" },
-        el("span", { style: "color:var(--rx)" }, "↓ " + fmtBytes(r.down) + "/s"),
-        el("span", { class: "hint", style: "margin:0 8px" }, "·"),
-        el("span", { style: "color:var(--tx)" }, "↑ " + fmtBytes(r.up) + "/s"))));
+  const slots = document.querySelectorAll(".conn-rate[data-iface]");
+  if (!slots.length) return;
+  slots.forEach(slot => {
+    const r = rate(slot.getAttribute("data-iface"));
+    slot.innerHTML = "";
+    if (!r) return;
+    slot.append(
+      el("span", { class: "rx" }, "↓ " + fmtBytes(r.down) + "/s"),
+      el("span", { class: "hint", style: "margin:0 7px" }, "·"),
+      el("span", { class: "tx" }, "↑ " + fmtBytes(r.up) + "/s"));
   });
-  card.style.display = "";
 }
 // ifaceFriendly maps a kernel iface (nwg1) to the name of the endpoint bound to it.
 function ifaceFriendly(name) {
@@ -977,11 +972,28 @@ function connGroupItem(g) {
     g.ports.size ? el("div", { class: "conn-ports" }, chips) : null);
 }
 function connectionsCard() {
-  const card = el("div", { class: "card" });
-  card.appendChild(el("div", { class: "card-head" },
-    el("div", { class: "card-title" }, "Live connections"),
-    el("div", { class: "hint", id: "conns-sum" }, "checking…")));
-  card.appendChild(el("div", { class: "conns-list", id: "conns-list" }));
+  // Collapsed by default — the connection table is long and secondary on the dashboard, so it
+  // shouldn't take up space until asked for. The header stays a live summary (count + per-exit
+  // split via #conns-sum, kept updated even while collapsed); a click on the header toggles the
+  // list open/closed and the choice persists per-browser (localStorage).
+  const card = el("div", { class: "card conns-card" });
+  const chev = el("span", { class: "chev" }, "▸");
+  const head = el("div", { class: "card-head conns-head", role: "button", tabindex: "0", title: t("Show / hide live connections") },
+    el("div", { class: "conns-head-l" }, chev, el("div", { class: "card-title" }, "Live connections")),
+    el("div", { class: "hint", id: "conns-sum" }, "checking…"));
+  const list = el("div", { class: "conns-list", id: "conns-list" });
+  const setOpen = (on) => {
+    card.classList.toggle("open", on);
+    chev.textContent = on ? "▾" : "▸";
+    head.setAttribute("aria-expanded", on ? "true" : "false");
+    try { localStorage.setItem("wr.conns.open", on ? "1" : "0"); } catch (_) {}
+  };
+  const toggle = () => setOpen(!card.classList.contains("open"));
+  head.addEventListener("click", toggle);
+  head.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); toggle(); } });
+  card.append(head, list);
+  let open = false; try { open = localStorage.getItem("wr.conns.open") === "1"; } catch (_) {}
+  setOpen(open); // default: collapsed
   return card;
 }
 function talkersCard() {
@@ -1142,9 +1154,16 @@ function connRow(e, showSpark) {
     spark = el("canvas", { class: "spark", "data-spark": e.id, width: "300", height: "40" });
     drawSpark(spark, sparkBuf[e.id]);
   }
+  const name = el("div", { class: "name" }, e.name || e.id, pillFor(e));
+  // Live ↓/↑ throughput shown INLINE on each tunnel row (external endpoints bind a kernel iface),
+  // painted by paintIfaceList from the same /api/system byte counters. This replaces the old
+  // standalone "Interfaces" card — the speed now lives on the Failover / connection it belongs to.
+  if (e.engine === "external" && e.params && e.params.interface) {
+    name.appendChild(el("span", { class: "conn-rate", "data-iface": e.params.interface, title: t("Live throughput on this interface") }));
+  }
   return el("div", { class: "conn" }, tog,
     el("div", { class: "body" },
-      el("div", { class: "name" }, e.name || e.id, pillFor(e)),
+      name,
       subMeta(e),
       statsLine(e),
       spark,
@@ -2477,7 +2496,10 @@ function paintStats(div, e) {
   const ping = h.avg_latency_ms || h.latency_ms;
   if (h.state === "alive" && ping) parts.push(part("ping", ping + " ms"));
   if (h.state !== "unknown") parts.push(part("uptime", h.success_rate + "%"));
-  if (h.rate_down_bps || h.rate_up_bps) parts.push(part("", "↓ " + fmtRate(h.rate_down_bps) + "  ↑ " + fmtRate(h.rate_up_bps)));
+  // External (kernel-iface) endpoints show their REAL iface throughput inline via .conn-rate
+  // (paintIfaceList from /api/system), so skip the Clash-attributed rate here — for an external it
+  // is ~0 anyway (Clash can't attribute kernel-iface traffic) and showing both reads as a duplicate.
+  if ((h.rate_down_bps || h.rate_up_bps) && e.engine !== "external") parts.push(part("", "↓ " + fmtRate(h.rate_down_bps) + "  ↑ " + fmtRate(h.rate_up_bps)));
   if (h.bytes_down || h.bytes_up) parts.push(part("", fmtBytes((h.bytes_down || 0) + (h.bytes_up || 0)) + " transferred"));
   if (h.reconnects) parts.push(part("", h.reconnects + " restart" + (h.reconnects > 1 ? "s" : "")));
   if (h.uptime_s) parts.push(part("up", fmtUptime(h.uptime_s)));

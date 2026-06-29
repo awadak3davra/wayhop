@@ -5,7 +5,7 @@
 **Run any modern VPN/proxy protocol on your router — from one clean web panel, with automatic failover.**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-22a06b?style=flat-square)](LICENSE)
-[![Release](https://img.shields.io/badge/release-v0.3.3-0097dc?style=flat-square)](../../releases/latest)
+[![Release](https://img.shields.io/badge/release-v0.3.7-0097dc?style=flat-square)](../../releases/latest)
 [![Go](https://img.shields.io/badge/go-1.22+-00ADD8?style=flat-square&logo=go&logoColor=white)](go.mod)
 [![Platforms](https://img.shields.io/badge/router-OpenWrt%20%C2%B7%20Keenetic%20%C2%B7%20Entware-151c28?style=flat-square)](#install)
 [![Arches](https://img.shields.io/badge/arch-mipsle%20%C2%B7%20mips%20%C2%B7%20arm%20%C2%B7%20arm64%20%C2%B7%20amd64-555?style=flat-square)](#install)
@@ -98,7 +98,7 @@ The installer is **interactive and safe to run on a live router**. It detects yo
 
 - ✅ **System & router status** — arch (incl. MIPS endianness), free flash space, RAM, uptime, internet reachability, and clock/NTP (Reality/TLS need an accurate clock).
 - ✅ **Dependencies** — `ip` / `ipset` / `iptables` / `opkg` / `sing-box`, with an offer to `opkg install` what's missing.
-- ✅ **Conflict detection + one-tap fixes** — it finds whatever already holds the UI port (**lighttpd** on stock Keenetic firmware is the usual culprit), **keen-pbr**, a stray sing-box, or a previous install, and **asks before disabling each one** (or just moves WakeRoute to a free port).
+- ✅ **Conflict detection + one-tap fixes** — it finds whatever already holds the UI port (**lighttpd** on stock Keenetic firmware is the usual culprit), an existing **selective-routing tool**, a stray sing-box, or a previous install, and **asks before disabling each one** (or just moves WakeRoute to a free port).
 - ✅ **Atomic install** — staged binary swap with a single rolling backup, then a health check on the UI.
 
 Useful flags: `--dry-run` (run every check, change nothing), `-y` (assume yes), `--port 8089` (use a different UI port), `--arch mipsle` (force arch), `--no-start`.
@@ -130,7 +130,7 @@ Single-arch, by hand:
 
 ```sh
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
-  -ldflags "-s -w -X wakeroute/internal/version.Version=0.3.3" \
+  -ldflags "-s -w -X wakeroute/internal/version.Version=0.3.7" \
   -o wakeroute-arm64 ./cmd/wakeroute
 ```
 
@@ -143,14 +143,13 @@ go run ./cmd/wakeroute --demo --listen 127.0.0.1:8088
 
 ---
 
-## 🆕 What's new in 0.3.3
+## 🆕 What's new in 0.3.7
 
-- **Subscription auto-refresh** — keep an imported subscription current: WakeRoute periodically re-fetches the URL and adds any servers your provider rotated in, with no manual re-import. The card shows when it last ran and how many connections it added.
-- **Your failover groups ride the Clash subscription** — a Clash / Clash-Meta client subscribed to WakeRoute now receives real `url-test` / `fallback` / `select` groups, so it keeps the same automatic best-server selection the panel does instead of a flat list.
-- **Flow-offload controls** *(0.3.2)* — turn on the kernel/hardware fast path (Off / Software / Hardware) for general traffic from the Routing-mode card; your tunnel carve-outs (calls, VoWiFi, blocked sites) are automatically excluded so they keep working while everything else gets the line-rate path.
-- **SSH host-key pinning** for the server provisioner — a remote VPS's host key is pinned (so a later changed key is caught) and its SHA-256 fingerprint printed, so you can verify it out-of-band against your provider's console.
-- **Sturdier diagnostics & start-up** — a larger plain-language error knowledgebase with per-cause ×N counts, recovery from a corrupt/empty config at boot instead of a bricked panel, and fewer Apply / watchdog races. Plus a refreshed design system and mobile polish *(0.3.2)*.
-- **Security** — self-update is **checksum-verified** (the binary is replaced only when the release asset's SHA-256 matches), and the subscription-fetch / reachability-probe SSRF guards now also block carrier-grade-NAT (`100.64.0.0/10`) targets.
+- **Faster, steadier tunnels** — TCP MSS is clamped to the path MTU on every tunnel egress (no more stalled / oversized-packet hangs over WireGuard/AmneziaWG), AmneziaWG interfaces get safe MTU + keepalive defaults, and an unchanged Apply no longer rebuilds the routing plane (no connectivity blip on a no-op save).
+- **Flows stay on their tunnel** — an established connection keeps its chosen exit even after its destination later leaves an auto-refreshing list, instead of falling back to the WAN mid-connection.
+- **Telegram calls preset** — a one-click IP rule-set for Telegram's voice servers (calls travel over raw UDP that the domain list can't catch).
+- **Routing correctness & hardening** — the kill-switch is now enforced on the iptables routing plane too; the fail-safe no longer layers a redundant sing-box core over the kernel datapath on rollback; the SSRF guards now also block NAT64 / 6to4 addresses that embed an internal IP; tighter anti-loop bypass; and a clearer per-egress IPv6 posture.
+- **Heads-up in fast mode** — Apply now warns when a domain-based rule won't match transparently-routed LAN traffic in fast mode (no TUN), so a rule never silently does nothing.
 
 See the [changelog](CHANGELOG.md) for the full 0.3.x release history.
 
@@ -215,7 +214,7 @@ Anything that runs **OpenWrt** (22.x–25.x, `procd`/`fw4`) or has **Entware** u
 <details>
 <summary><b>Will it break my stock VPN / firewall config?</b></summary>
 
-No. WakeRoute runs as its own service on `:8088` and routes only the traffic it explicitly marks (its own fwmark + routing table). It coexists with the stock firewall and with selective-routing systems like keen-pbr — the installer detects those and asks before changing anything.
+No. WakeRoute runs as its own service on `:8088` and routes only the traffic it explicitly marks (its own fwmark + routing table). It coexists with the stock firewall and with other selective-routing systems — the installer detects those and asks before changing anything.
 </details>
 
 <details>

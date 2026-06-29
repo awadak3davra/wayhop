@@ -1,7 +1,7 @@
 // Package pbr compiles the protocol-agnostic model into a kernel policy-based-routing
 // plan (nftables fwmark + `ip rule`/`ip route`) for the native-first "hybrid" routing
 // mode — see docs/ARCHITECTURE_NATIVE_FIRST.md. It is the kernel-routing brain that
-// keen-pbr provided externally before the TUN cutover, now as native WakeRoute code.
+// Native kernel-PBR routing code.
 //
 // Phase 1 (this file): a pure, testable compiler + nftables/ip renderers for IP-CIDR
 // routing (manual IP lists, geoip-by-IP, the VoWiFi/ePDG carve-out). Domain/GeoSite/
@@ -98,7 +98,7 @@ type Plan struct {
 	MasqIfaces []string   `json:"masq_ifaces,omitempty"` // kernel tunnel ifaces needing forwarded-LAN MASQUERADE (de-duped, stable order)
 }
 
-// Options tune the marking/table scheme (defaults mirror the keen-pbr layout).
+// Options tune the marking/table scheme (a conventional fwmark/table layout).
 type Options struct {
 	Table     string // default "wakeroute_pbr"
 	MarkMask  uint32 // default 0x00ff0000

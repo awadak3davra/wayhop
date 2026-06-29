@@ -48,9 +48,18 @@ func TestKillSwitchFailClosed(t *testing.T) {
 	if !strings.Contains(cmds, "blackhole default metric") {
 		t.Errorf("FailClosed egress must render a high-metric blackhole fallback:\n%s", cmds)
 	}
+	// The ipset/Keenetic plane (RenderIPScript) must ALSO render the kill-switch blackhole. This was
+	// bug #4: it was missing here, so on the Keenetic kill_switch silently leaked to WAN on tunnel-down.
+	ipset := plan.RenderIPScript(Options{})
+	if !strings.Contains(ipset, "ip route replace blackhole default metric") {
+		t.Errorf("ipset plane must render the kill-switch blackhole for a FailClosed egress:\n%s", ipset)
+	}
 
-	_, cmdsOff := build(false)
+	planOff, cmdsOff := build(false)
 	if strings.Contains(cmdsOff, "blackhole default metric") {
 		t.Errorf("a group without kill_switch must not render a blackhole fallback:\n%s", cmdsOff)
+	}
+	if strings.Contains(planOff.RenderIPScript(Options{}), "blackhole default metric") {
+		t.Errorf("ipset plane without kill_switch must not render a blackhole fallback")
 	}
 }

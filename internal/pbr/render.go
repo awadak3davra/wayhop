@@ -16,6 +16,33 @@ func (pl *Plan) markSet(mark uint32) string {
 	return fmt.Sprintf("meta mark set meta mark & %s | %s", hexMark(^pl.Mask), hexMark(mark))
 }
 
+// connmarkRestoreLines renders the L2 restore-first rules for the TOP of wr_mark: for each egress
+// mark, if an established connection's saved connmark (set by `ct mark set meta mark` at the chain's
+// end) carries that egress's owned bits, re-adopt it and `accept`. So a long-lived flow keeps its
+// chosen exit even after its destination later leaves an (e.g. DNS-populated, expiring) set, instead
+// of falling to the WAN default mid-connection — a censored-traffic leak / dropped call. This is the
+// nft mirror of the ipset/iptables plane's `CONNMARK --restore-mark --nfmask M --ctmask M`
+// (render_ipset.go). nft CANNOT express a single masked meta↔ct merge — real `nft -f` rejects
+// `meta mark set meta mark & ~M | ct mark & M` with "Right hand side of binary operation (|) must be
+// constant" (the exact form reverted from 0.3.5). So instead we compare `ct mark` to each egress's
+// CONSTANT mark and re-apply that constant via the proven markSet form — valid nft AND it preserves
+// non-owned (fw4) bits. Terminating (`accept`): a pinned flow short-circuits the per-zone
+// re-classification below, which is precisely the egress affinity L2 exists to provide. Marks are
+// de-duped; a 0 mark (no egress chosen) is skipped so unpinned flows fall through to normal matching.
+func (pl *Plan) connmarkRestoreLines() []string {
+	var out []string
+	seen := map[uint32]bool{}
+	for _, e := range pl.Egresses {
+		if e.Mark == 0 || seen[e.Mark] {
+			continue
+		}
+		seen[e.Mark] = true
+		out = append(out, fmt.Sprintf("ct mark & %s == %s %s accept",
+			hexMark(pl.Mask), hexMark(e.Mark), pl.markSet(e.Mark)))
+	}
+	return out
+}
+
 func nftElements(cidrs []string) string { return strings.Join(cidrs, ", ") }
 
 // nftStrSet renders an anonymous nft set of quoted strings (iface names). nft accepts trailing-*
@@ -115,13 +142,26 @@ func (pl *Plan) RenderNft() string {
 	// tests use a mock runner and never parsed the ruleset.)
 	b.WriteString("\tchain wr_mark {\n")
 	b.WriteString("\t\ttype filter hook prerouting priority mangle; policy accept;\n")
-	// Anti-loop bypass first: tunnel peer IPs egress via WAN (main table).
+	// Anti-loop bypass FIRST + TERMINATING (#12/#13): tunnel peer/server IPs must egress via WAN and
+	// STOP here — `accept` short-circuits both the L2 restore and the per-zone match below. Without the
+	// accept (and with the bypass below the restore, as before), a peer IP that happens to fall inside a
+	// routed CIDR (a broad geo/ASN list, or a /16 carve-out) got marked into the tunnel = the classic
+	// routing loop, and an established peer flow whose connmark carried a tunnel mark was re-pinned by
+	// the L2 restore. Bypass-first-terminating closes both, and mirrors the ipset plane's precedence.
 	wanMark := pl.markByKind(EgressWAN)
 	if len(pl.BypassV4) > 0 {
-		fmt.Fprintf(&b, "\t\tip daddr @bypass4 %s\n", pl.markSet(wanMark))
+		fmt.Fprintf(&b, "\t\tip daddr @bypass4 %s accept\n", pl.markSet(wanMark))
 	}
 	if len(pl.BypassV6) > 0 {
-		fmt.Fprintf(&b, "\t\tip6 daddr @bypass6 %s\n", pl.markSet(wanMark))
+		fmt.Fprintf(&b, "\t\tip6 daddr @bypass6 %s accept\n", pl.markSet(wanMark))
+	}
+	// L2 restore-first connmark: re-adopt an established flow's previously-chosen egress (saved into
+	// the connmark by `ct mark set meta mark` at the chain end) and accept, BEFORE re-classifying it
+	// below — so a flow stays on its tunnel even after its dest leaves an expiring set. Peer IPs were
+	// already accepted above, so the restore can't re-pin them. See connmarkRestoreLines for why this
+	// is per-egress (nft can't express a masked meta↔ct merge).
+	for _, line := range pl.connmarkRestoreLines() {
+		fmt.Fprintf(&b, "\t\t%s\n", line)
 	}
 	sourceOnly := false
 	for _, z := range pl.Zones {
@@ -301,20 +341,19 @@ func excludesFor(opt Options, cidrs []string) []ipRuleExclude {
 	return out
 }
 
-// hasV6 reports whether this plan marks any IPv6 traffic (a bypass peer or a v6 zone
-// CIDR). Used to gate the symmetric ip -6 rule / ip -6 route commands: a v4-only plan
-// must emit no `ip -6` at all (v4-only plan → v4-only ip-rule table, exact parity with
-// the nft wr_mark chain which only sets mark for ip/ip6 daddr respectively).
+// hasV6 reports whether this plan marks any IPv6 traffic — a bypass-v6 peer OR any zone that
+// marks v6 (a v6 dest CIDR, a v6 source CIDR, or a family-agnostic source-only zone whose only
+// matcher is iface/mac/port and so applies to BOTH families). Used to gate the symmetric
+// ip -6 rule / ip -6 route commands: a v4-only plan must emit no `ip -6` at all.
+//
+// It MUST stay in exact lockstep with the wr_mark chain (RenderNft): every construct there that
+// can set the tunnel mark on a v6 packet needs a matching `ip -6 rule fwmark`, else that marked
+// v6 packet finds no fwmark rule, falls through to the main v6 table, and LEAKS to WAN unencrypted.
+// The zone half of that test is exactly hasV6Zone() (the Keenetic ipset plane already got it
+// right) — reuse it so the nft and ipset planes can never diverge again. (Earlier this checked
+// only BypassV6/z.V6, so the SrcV6 and family-agnostic source-only cases leaked v6.)
 func (pl *Plan) hasV6() bool {
-	if len(pl.BypassV6) > 0 {
-		return true
-	}
-	for _, z := range pl.Zones {
-		if len(z.V6) > 0 {
-			return true
-		}
-	}
-	return false
+	return len(pl.BypassV6) > 0 || pl.hasV6Zone()
 }
 
 // failClosedMetric is the route metric for a kill-switched egress's blackhole fallback. It must be
@@ -367,7 +406,9 @@ func (pl *Plan) RenderIP(opt Options) []string {
 		case EgressBlackhole:
 			cmds = append(cmds, fmt.Sprintf("ip route replace blackhole default table %d", e.Table))
 			if v6 {
-				cmds = append(cmds, fmt.Sprintf("ip -6 route add blackhole default table %d", e.Table))
+				// `replace` (not `add`) for idempotency, matching every sibling route line — `add`
+				// errors `RTNETLINK: File exists` on a re-assert that skips the preceding flush.
+				cmds = append(cmds, fmt.Sprintf("ip -6 route replace blackhole default table %d", e.Table))
 			}
 		}
 	}

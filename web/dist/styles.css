@@ -145,6 +145,13 @@ button { font-family:inherit; }
 .cause-fix { color:var(--ink-2); font-size:var(--fs-small); margin-top:3px; line-height:1.45; word-break:break-word; }
 /* per-row traffic sparkline (failover-group members) */
 .spark { display:block; width:100%; max-width:340px; height:30px; margin-top:8px; }
+/* live per-tunnel ↓/↑ throughput shown inline on the row, right-aligned in the name line —
+   replaces the old standalone "Interfaces" card. Painted by paintIfaceList from /api/system. */
+.conn .conn-rate { margin-left:auto; flex:none; padding-left:10px; font-size:12px;
+  font-weight:500; font-variant-numeric:tabular-nums; white-space:nowrap; color:var(--ink-2); }
+.conn .conn-rate:empty { display:none; }
+.conn .conn-rate .rx { color:var(--rx); }
+.conn .conn-rate .tx { color:var(--tx); }
 /* live-connections table (host · chain · rule · up/down · age) */
 .conns-list { display:flex; flex-direction:column; }
 .conn-item { display:flex; align-items:baseline; justify-content:space-between; gap:12px; padding:10px 0; border-top:1px solid var(--divider); }
@@ -159,6 +166,15 @@ button { font-family:inherit; }
 .conn-group .conn-item { border-top:none; padding:9px 0 0; }
 .conn-ports { display:flex; flex-wrap:wrap; gap:5px; padding:6px 0 0 2px; }
 .conn-port { font-size:var(--fs-caption); padding:1px 7px; border-radius:5px; background:var(--divider); color:var(--ink-2); font-variant-numeric:tabular-nums; white-space:nowrap; }
+/* collapsible Live-connections card: collapsed by default, the header stays a live summary
+   (count + per-exit split) and a click toggles the list. */
+.conns-head { cursor:pointer; margin-bottom:0; user-select:none; }
+.conns-head-l { display:flex; align-items:center; gap:8px; min-width:0; }
+.conns-head .chev { color:var(--ink-3); font-size:11px; width:11px; flex:none; display:inline-block; }
+.conns-card .conns-list { display:none; }
+.conns-card.open .conns-list { display:flex; }
+.conns-card.open .conns-head { margin-bottom:var(--sp-4); }
+.conns-head:focus-visible { outline:2px solid var(--accent); outline-offset:3px; border-radius:var(--radius-sm); }
 /* top talkers: ranked hosts by total bytes with a proportional bar */
 .talkers-list { display:flex; flex-direction:column; gap:11px; }
 .talker-row { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }

@@ -370,6 +370,11 @@ func pickPublic(ips []net.IP) (string, error) {
 // otherwise read as "external" and be probed. Parsed once at init.
 var cgnatNet = mustCIDR("100.64.0.0/10")
 
+// nat64Net / sixToFourNet: IPv6 forms that embed an IPv4 To4() doesn't decode (#11). Mirrors
+// server.isInternalDialIP so the probe guard and the SSRF dial guard can't diverge.
+var nat64Net = mustCIDR("64:ff9b::/96")
+var sixToFourNet = mustCIDR("2002::/16")
+
 func mustCIDR(s string) *net.IPNet {
 	_, n, err := net.ParseCIDR(s)
 	if err != nil {
@@ -391,6 +396,15 @@ func isInternalAddr(ip net.IP) bool {
 	// consistently with the IsPrivate family above (which already handles the mapped form).
 	if v4 := ip.To4(); v4 != nil {
 		return cgnatNet.Contains(v4)
+	}
+	// #11: NAT64 / 6to4 embed an IPv4 To4() doesn't extract — decode + re-check.
+	if ip16 := ip.To16(); ip16 != nil {
+		if nat64Net.Contains(ip16) {
+			return isInternalAddr(net.IPv4(ip16[12], ip16[13], ip16[14], ip16[15]))
+		}
+		if sixToFourNet.Contains(ip16) {
+			return isInternalAddr(net.IPv4(ip16[2], ip16[3], ip16[4], ip16[5]))
+		}
 	}
 	return false
 }

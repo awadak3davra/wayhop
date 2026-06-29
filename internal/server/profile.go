@@ -673,6 +673,12 @@ var errInternalHost = fmt.Errorf("refusing to reach an internal address")
 // probe reach a carrier-side or on-link CGNAT service. Parsed once at init.
 var cgnatNet = mustCIDR("100.64.0.0/10")
 
+// #11: IPv6 forms that EMBED an IPv4 address the To4()/IsPrivate family does NOT decode — NAT64
+// (well-known prefix 64:ff9b::/96) and 6to4 (2002::/16). The SSRF guards must extract + re-check the
+// embedded v4 so a hostname resolving to e.g. 64:ff9b::7f00:1 (127.0.0.1) can't reach an internal host.
+var nat64Net = mustCIDR("64:ff9b::/96")
+var sixToFourNet = mustCIDR("2002::/16")
+
 func mustCIDR(s string) *net.IPNet {
 	_, n, err := net.ParseCIDR(s)
 	if err != nil {
@@ -695,6 +701,16 @@ func isInternalDialIP(ip net.IP) bool {
 	// consistently with the IsPrivate family above (which already handles the mapped form).
 	if v4 := ip.To4(); v4 != nil {
 		return cgnatNet.Contains(v4)
+	}
+	// #11: NAT64 / 6to4 embed an IPv4 that To4() above does NOT extract — decode it and re-check, so a
+	// host like 64:ff9b::7f00:1 (127.0.0.1) or 2002:7f00:1:: can't slip an internal target past the guard.
+	if ip16 := ip.To16(); ip16 != nil {
+		if nat64Net.Contains(ip16) {
+			return isInternalDialIP(net.IPv4(ip16[12], ip16[13], ip16[14], ip16[15]))
+		}
+		if sixToFourNet.Contains(ip16) {
+			return isInternalDialIP(net.IPv4(ip16[2], ip16[3], ip16[4], ip16[5]))
+		}
 	}
 	return false
 }

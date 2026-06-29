@@ -77,8 +77,29 @@ func (s *Server) handlePBRPreview(w http.ResponseWriter, r *http.Request) {
 // (nftables + ip rules/routes) without touching the sing-box config. Use when only
 // routing lists changed, or after fw4 reload flushed the nft table.
 func (s *Server) handlePBRApply(w http.ResponseWriter, r *http.Request) {
+	c := s.config()
 	p := s.store.Profile()
-	plan, warns, err := pbr.Compile(&p, pbr.Options{})
+	mode := s.routingMode(c)
+	if c.Demo {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "zones": 0, "warnings": []pbr.Warning{}, "demo": true})
+		return
+	}
+	// #1: mode-gate exactly like handleApply (genOptionsWithPlan). The kernel plane exists ONLY in
+	// hybrid/fast; in tun/mixed the capture-all sing-box TUN owns all traffic, so installing a kernel
+	// plane here would desync the two datapaths (the TUN config never route_excluded these CIDRs).
+	// Tear any stale plane down instead of installing one.
+	if mode != "hybrid" && mode != "fast" {
+		if err := s.applyPBR(nil); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "zones": 0, "warnings": []pbr.Warning{}, "mode": mode})
+		return
+	}
+	// #2/#8: compile with pbrCompileOptions (NOT bare Options{}) so the plan carries the flow-offload
+	// flowtable in fast mode — otherwise this endpoint silently replaced the offload-bearing plan
+	// installed by handleApply with an offload-less one (DeepEqual differs → teardown+reapply).
+	plan, warns, err := pbr.Compile(&p, s.pbrCompileOptions(c))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

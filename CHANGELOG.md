@@ -3,7 +3,7 @@
 All notable changes to WakeRoute are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.7] — 2026-06-28
 
 ### Added
 - **Source-based routing** — route by *who's asking*, not just where to. A routing rule can now
@@ -59,6 +59,26 @@ All notable changes to WakeRoute are documented here. This project adheres to
   instead of leaving it running as a redundant path — less memory and CPU for the same result.
 
 ### Fixed
+- **Kill switch enforced on the iptables routing plane too** — a fail-closed group on a Keenetic / Entware
+  (iptables) router could still leak to the WAN when its tunnel dropped; the fail-closed drop is now
+  rendered on that plane as well, matching the nftables path.
+- **Fail-safe rollback no longer double-starts sing-box** — on a fully kernel-routed (native) profile, an
+  automatic rollback no longer brings a redundant sing-box core up over the kernel datapath.
+- **TCP MSS clamped on tunnel egresses** — SYN packets leaving any tunnel get their MSS clamped to the path
+  MTU, fixing stalls / hangs from oversized packets over WireGuard/AmneziaWG.
+- **Established flows keep their tunnel** — a connection re-adopts its chosen exit from the connmark, so it
+  no longer falls back to the WAN mid-connection when its destination later leaves an auto-refreshing list.
+- **No routing loop for a peer IP inside a routed range** — the anti-loop bypass is now applied first and is
+  terminating, so a tunnel's own server IP can't be marked back into the tunnel.
+- **SSRF guards cover NAT64 / 6to4** — the subscription-fetch and reachability-probe guards now decode the
+  IPv4 embedded in NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) addresses and refuse internal targets.
+- **Share links import despite odd node names** — a link whose name contains `[Interface]` or olcRTC-like
+  text is no longer misclassified as a `.conf` / olcRTC config and dropped.
+- **Source-routed IPv6 no longer leaks to the WAN (OpenWrt)** — a rule matched only by source (a LAN
+  interface, MAC address, or source port) or by a source IPv6 range marked IPv6 packets for the tunnel,
+  but the OpenWrt nftables path didn't install the matching IPv6 policy rule — so those packets fell
+  through to your normal internet connection instead of the tunnel. The IPv6 datapath is now emitted
+  whenever the rules mark IPv6 (matching the Keenetic path), closing the leak.
 - **A group's chosen exit now survives a reboot** — when a profile had failover/selector groups but
   no list-based routing, the selected member reset to the first one on every restart or config apply.
   The selection is now remembered across reboots.

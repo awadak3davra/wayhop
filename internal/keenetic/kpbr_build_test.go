@@ -78,6 +78,10 @@ func TestBuildKernelPlan_FullArtifacts(t *testing.T) {
 	// instead of preemptively failing back (the zero-debounce up-switch that dropped live calls).
 	has(t, "cron", art.FailoverCron, "ip route show default table")
 	has(t, "cron", art.FailoverCron, `if probe "$cur"; then`)
+	// #5: the WAN fallback must guard against an empty WAN_GW/WAN_IF (else `via ""`/`dev ""` errors
+	// every run and the fallback never installs) — needs WAN_IF, uses `via` only when WAN_GW is set.
+	has(t, "cron", art.FailoverCron, `[ -n "$WAN_GW" ]`)
+	has(t, "cron", art.FailoverCron, `ip route replace default dev "$WAN_IF" table "$T"`)
 	// The generated failover cron must be valid POSIX shell.
 	if sh, err := exec.LookPath("sh"); err == nil {
 		cmd := exec.Command(sh, "-n")
