@@ -61,8 +61,8 @@ var Engines = []Engine{
 	{ID: "dnscrypt-proxy", Name: "dnscrypt-proxy", Repo: "DNSCrypt/dnscrypt-proxy", BinName: "dnscrypt-proxy", Role: "standalone", VersionArgs: []string{"-version"}},
 	{ID: "amneziawg-go", Name: "AmneziaWG (userspace)", Repo: "amnezia-vpn/amneziawg-go", BinName: "amneziawg-go", Role: "kernel-plugin", SourceOnly: true,
 		Note: "No prebuilt releases; build from source on-device (the PPA is blocked in RU)."},
-	{ID: "olcrtc", Name: "olcRTC (WebRTC tunnel)", Repo: "alexsvl/olcrtc", BinName: "olcrtc", Role: "socks-plugin", VersionArgs: []string{"version"},
-		Note: "Anti-whitelist WebRTC-over-meet tunnel (Jitsi/Telemost/WbStream). Pulled from the alexsvl/olcrtc fork, which daily auto-syncs upstream openlibrecommunity/olcrtc and publishes prebuilt `olcrtc-linux-<arch>` binaries (upstream ships none; the WebRTC stack is too heavy to build on the router)."},
+	{ID: "olcrtc", Name: "olcRTC (WebRTC tunnel)", Repo: "awadak3davra/olcrtc", BinName: "olcrtc", Role: "socks-plugin", VersionArgs: []string{"version"},
+		Note: "Anti-whitelist WebRTC-over-meet tunnel (Jitsi/Telemost/WbStream). Pulled from the awadak3davra/olcrtc fork, which daily auto-syncs upstream openlibrecommunity/olcrtc and publishes prebuilt `olcrtc-linux-<arch>` binaries (upstream ships none; the WebRTC stack is too heavy to build on the router)."},
 }
 
 // EngineByID returns the engine with the given id, or nil.
@@ -620,7 +620,7 @@ func verifyDigestRequired(data []byte, digest string) error {
 
 // DefaultSelfRepo is where WakeRoute fetches its OWN release builds when the config
 // leaves Updater.SelfRepo empty (the maintainer's fork, CI-built on every v* tag).
-const DefaultSelfRepo = "alexsvl/wakeroute"
+const DefaultSelfRepo = "awadak3davra/wakeroute"
 
 // selfAsset picks the WakeRoute release tarball for arch, preferring the OpenWrt
 // package over the generic one. The leading "-"+arch avoids "arm" matching "arm64".

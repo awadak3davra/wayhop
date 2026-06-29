@@ -52,7 +52,7 @@ func TestSelfUpdate_PresentDigestVerifiesAndInstalls(t *testing.T) {
 	tgz := updaterinstall_tarGz(t, "wakeroute-0.2.0-amd64", "wakeroute-"+arch, bin)
 
 	assetName := "wakeroute-0.2.0-" + arch + ".tar.gz"
-	assetURL := "https://github.com/alexsvl/wakeroute/releases/download/" + tag + "/" + assetName
+	assetURL := "https://github.com/awadak3davra/wakeroute/releases/download/" + tag + "/" + assetName
 	assetPathSuffix := "/" + assetName
 	rel := updaterinstall_releaseJSON(t, tag, []Asset{
 		{Name: assetName, URL: assetURL, Digest: updaterinstall_sha256(tgz), Size: int64(len(tgz))},
@@ -72,7 +72,7 @@ func TestSelfUpdate_PresentDigestVerifiesAndInstalls(t *testing.T) {
 	u := New(dir, arch, nil)
 	u.hc = &http.Client{Transport: rt}
 
-	got, err := u.SelfUpdate(context.Background(), "alexsvl/wakeroute", tag, exePath)
+	got, err := u.SelfUpdate(context.Background(), "awadak3davra/wakeroute", tag, exePath)
 	if err != nil {
 		t.Fatalf("SelfUpdate (present digest): %v", err)
 	}
@@ -110,7 +110,7 @@ func TestSelfUpdate_EmptyDigestRefused(t *testing.T) {
 	tgz := updaterinstall_tarGz(t, "wakeroute-0.2.0-amd64", "wakeroute-"+arch, bin)
 
 	assetName := "wakeroute-0.2.0-" + arch + ".tar.gz"
-	assetURL := "https://github.com/alexsvl/wakeroute/releases/download/" + tag + "/" + assetName
+	assetURL := "https://github.com/awadak3davra/wakeroute/releases/download/" + tag + "/" + assetName
 	assetPathSuffix := "/" + assetName
 	// Digest intentionally empty -> mirror channel is the only trust root -> refuse.
 	rel := updaterinstall_releaseJSON(t, tag, []Asset{
@@ -131,7 +131,7 @@ func TestSelfUpdate_EmptyDigestRefused(t *testing.T) {
 	u := New(dir, arch, nil)
 	u.hc = &http.Client{Transport: rt}
 
-	_, err := u.SelfUpdate(context.Background(), "alexsvl/wakeroute", tag, exePath)
+	_, err := u.SelfUpdate(context.Background(), "awadak3davra/wakeroute", tag, exePath)
 	if err == nil {
 		t.Fatal("SelfUpdate accepted an asset with no digest; want refusal")
 	}
