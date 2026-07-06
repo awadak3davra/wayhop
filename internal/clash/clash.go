@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"velinx/internal/traffic"
+	"wayhop/internal/traffic"
 )
 
 const (

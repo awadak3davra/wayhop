@@ -3,7 +3,7 @@ package generator
 import (
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // #2: a rule outbound in non-canonical case ("Block"/"Direct") must still produce

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/importer"
-	"velinx/internal/model"
+	"wayhop/internal/importer"
+	"wayhop/internal/model"
 )
 
 // TestClashSubscriptionGenerate exercises the clash-YAML import path (ParseClash, a custom

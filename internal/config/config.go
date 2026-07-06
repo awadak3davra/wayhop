@@ -1,4 +1,4 @@
-// Package config loads and persists the velinx daemon configuration.
+// Package config loads and persists the wayhop daemon configuration.
 package config
 
 import (
@@ -12,10 +12,10 @@ import (
 	"strconv"
 	"strings"
 
-	"velinx/internal/atomicfile"
+	"wayhop/internal/atomicfile"
 )
 
-// Ports is the reserved port block velinx owns. Each is user-editable so the
+// Ports is the reserved port block wayhop owns. Each is user-editable so the
 // daemon can dodge conflicts with the router OS and other services
 // (see docs/CONFLICTS.md #1).
 type Ports struct {
@@ -41,10 +41,10 @@ type SingBox struct {
 type Updater struct {
 	Arch    string   `json:"arch"`    // override; empty = autodetect from the running binary
 	Mirrors []string `json:"mirrors"` // GitHub URL prefixes tried in order; "" = direct
-	// SelfRepo is the GitHub "owner/name" Velinx updates ITSELF from (its own
+	// SelfRepo is the GitHub "owner/name" WayHop updates ITSELF from (its own
 	// CI release builds). Empty → the built-in default (updater.DefaultSelfRepo).
 	SelfRepo string `json:"self_repo,omitempty"`
-	// AutoUpdate, when true, lets Velinx auto-install a newer release of ITSELF
+	// AutoUpdate, when true, lets WayHop auto-install a newer release of ITSELF
 	// (checked daily in the background) and restart. Default off — opt-in.
 	AutoUpdate bool `json:"auto_update,omitempty"`
 }
@@ -73,6 +73,14 @@ type Subscription struct {
 	// RefreshHours controls auto-refresh of URL: 0 = OFF (opt-in default); >0 =
 	// re-fetch every N hours and add new endpoints (never deletes).
 	RefreshHours int `json:"refresh_hours,omitempty"`
+}
+
+// FeatureConfig is the per-plugin state in Config.Features: whether the optional module is
+// installed (Enabled) + an opaque per-module Settings blob the module owns (so the config package
+// stays decoupled from each module's schema). Enabled is toggled via PUT /api/features/{id}.
+type FeatureConfig struct {
+	Enabled  bool            `json:"enabled"`
+	Settings json.RawMessage `json:"settings,omitempty"`
 }
 
 // Config is the full daemon configuration, persisted as JSON.
@@ -120,6 +128,10 @@ type Config struct {
 	// to reach the panel, e.g. ["192.168.2.1","10.0.0.30","router.lan"]. Misconfig
 	// locks out the UI (recoverable: clear it in config.json + restart).
 	AllowedHosts []string `json:"allowed_hosts,omitempty"`
+	// Features holds per-plugin (optional-module) state: whether each module is installed (enabled)
+	// + an opaque per-module settings blob it owns. Toggled via PUT /api/features/{id} — a HOT field
+	// (no restart) — so, like Subscription, it is NOT copied by applyConfigFields.
+	Features map[string]FeatureConfig `json:"features,omitempty"`
 
 	path string // source file, used by Save()
 }
@@ -128,11 +140,11 @@ type Config struct {
 func Default() *Config {
 	return &Config{
 		Listen:   ":8088",
-		DataDir:  "/opt/var/velinx",
+		DataDir:  "/opt/var/wayhop",
 		Demo:     false,
 		Ports:    Ports{UI: 8088, Clash: 9090, DNS: 5353, Mixed: 7890},
 		Clash:    Clash{Controller: "127.0.0.1:9090", Secret: ""},
-		SingBox:  SingBox{Bin: "/opt/sbin/sing-box", Config: "/opt/etc/velinx/singbox.json"},
+		SingBox:  SingBox{Bin: "/opt/sbin/sing-box", Config: "/opt/etc/wayhop/singbox.json"},
 		Updater:  Updater{Arch: "", Mirrors: []string{"", "https://ghproxy.net/", "https://mirror.ghproxy.com/"}},
 		FailSafe: FailSafe{Target: "1.1.1.1", AutoReboot: false},
 	}
@@ -152,7 +164,7 @@ func Load(path string) (*Config, error) {
 	// A genuinely-corrupt NON-empty file still falls through to the parse error below.
 	if errors.Is(err, os.ErrNotExist) || (err == nil && len(bytes.TrimSpace(data)) == 0) {
 		if err == nil {
-			log.Printf("velinx: config %s is empty; recreating with defaults", path)
+			log.Printf("wayhop: config %s is empty; recreating with defaults", path)
 		}
 		if err := c.Save(); err != nil {
 			return nil, fmt.Errorf("write default config: %w", err)
@@ -170,7 +182,7 @@ func Load(path string) (*Config, error) {
 	// file must never brick boot, but surfacing the problem in the log lets the
 	// operator fix it in Settings instead of debugging a silent failure later.
 	if verr := c.Validate(); verr != nil {
-		log.Printf("velinx: config %s has problems (using it anyway; fix in Settings): %v", path, verr)
+		log.Printf("wayhop: config %s has problems (using it anyway; fix in Settings): %v", path, verr)
 	}
 	return c, nil
 }

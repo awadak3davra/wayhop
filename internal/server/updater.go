@@ -3,30 +3,35 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
 	"time"
 
-	"velinx/internal/updater"
-	"velinx/internal/version"
+	"wayhop/internal/updater"
+	"wayhop/internal/version"
 )
 
 // handleUpdaterEngines lists managed engines with their installed status (no network).
 func (s *Server) handleUpdaterEngines(w http.ResponseWriter, r *http.Request) {
 	type item struct {
 		updater.Engine
-		Installed updater.Installed `json:"installed"`
-		LastError string            `json:"last_error,omitempty"`
+		Installed     updater.Installed `json:"installed"`
+		LastError     string            `json:"last_error,omitempty"`
+		NativeManaged bool              `json:"native_managed,omitempty"` // owned by opkg/apk at its path -> update via the PM, not the panel
+		NativeOwner   string            `json:"native_owner,omitempty"`   // the owning package, for the UI hint ("apk upgrade <pkg>")
 	}
 	out := make([]item, 0, len(updater.Engines))
 	for _, e := range updater.Engines {
-		out = append(out, item{Engine: e, Installed: s.updater.Installed(e), LastError: s.updErr(e.ID)})
+		owner, managed := s.updater.NativeManagedInfo(e)
+		out = append(out, item{Engine: e, Installed: s.updater.Installed(e), LastError: s.updErr(e.ID), NativeManaged: managed, NativeOwner: owner})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"arch":    s.updater.Arch,
-		"mirrors": s.updater.Mirrors,
-		"engines": out,
+		"arch":            s.updater.Arch,
+		"mirrors":         s.updater.Mirrors,
+		"package_manager": string(s.updater.PMKind()),
+		"engines":         out,
 	})
 }
 
@@ -93,6 +98,14 @@ func (s *Server) handleUpdaterInstall(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	tag, err := s.updater.Install(ctx, *e, body.Version)
 	if err != nil {
+		// A native-PM policy refusal is a 409 (permanent state: "use opkg/apk"), NOT an install
+		// failure — don't persist it as last_error, which nothing could ever clear for a PM-owned
+		// engine (both clearing paths, a successful install or uninstall, are refused forever).
+		var nm *updater.NativeManagedError
+		if errors.As(err, &nm) {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
 		s.setUpdErr(e.ID, err.Error())
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
@@ -118,24 +131,64 @@ func (s *Server) handleUpdaterInstall(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"installed": tag, "engine": e.ID, "reloaded": reloaded})
 }
 
-// handleUpdaterUninstall deletes an installed engine binary from BinDir. It refuses to remove
-// the running primary core (sing-box) out from under the daemon — stop the VPN first.
+// handleUpdaterUninstall deletes an installed engine binary from BinDir. A RUNNING engine's binary
+// can't be cleanly removed — the deleted inode keeps running as an unmanageable orphan (holding
+// ports/locks) — so we stop the process FIRST. For the core (sing-box) that stops the VPN datapath,
+// so it needs an explicit stop:true; core.Stop() also clears Desired() so the watchdog leaves it
+// down instead of respawning onto a now-missing binary. Plugin engines are stopped via
+// plugins.StopByBin with no stop:true gate (removing a plugin implies stopping it; the gate is
+// core-only by design). ORDER MATTERS: every reason Uninstall could refuse (PM-owned binary,
+// source-only, nothing panel-installed) is prechecked BEFORE any process is stopped — otherwise a
+// refusal would leave the core down (watchdog disarmed) with nothing removed: routing dead on a
+// router whose sing-box belongs to opkg/apk.
 func (s *Server) handleUpdaterUninstall(w http.ResponseWriter, r *http.Request) {
 	e := updater.EngineByID(r.PathValue("id"))
 	if e == nil {
 		writeErr(w, http.StatusNotFound, "unknown engine")
 		return
 	}
-	if e.ID == "sing-box" && s.singbox != nil && s.singbox.Running() {
-		writeErr(w, http.StatusConflict, "sing-box is running; stop the VPN before removing the core")
+	if err := s.updater.UninstallPrecheck(*e); err != nil {
+		var nm *updater.NativeManagedError
+		if errors.As(err, &nm) {
+			writeErr(w, http.StatusConflict, err.Error()) // policy conflict: defer to opkg/apk
+			return
+		}
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	var body struct {
+		Stop bool `json:"stop"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	stopped := false
+	if e.ID == "sing-box" && s.singbox != nil && s.singbox.Running() {
+		if !body.Stop {
+			writeErr(w, http.StatusConflict, "sing-box is running — resend with stop:true to stop the core and remove it (this stops the VPN datapath)")
+			return
+		}
+		s.applyMu.Lock()
+		err := s.singbox.Stop() // clears Desired() → watchdog won't respawn it
+		s.applyMu.Unlock()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "could not stop sing-box before removal: "+err.Error())
+			return
+		}
+		stopped = true
+	}
+	if e.ID != "sing-box" && s.plugins != nil {
+		// Plugin engines (olcRTC etc.): stop the running plugin proc before removal so the removed
+		// binary can't leave an orphan (no stop:true gate — removing a plugin implies stopping it;
+		// the gate is only for the routing core). No-op if it isn't a running plugin.
+		if n := s.plugins.StopByBin(e.BinName); n > 0 {
+			stopped = true
+		}
 	}
 	if err := s.updater.Uninstall(*e); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	s.setUpdErr(e.ID, "") // a removed engine carries no stale failure reason
-	writeJSON(w, http.StatusOK, map[string]any{"removed": e.ID})
+	writeJSON(w, http.StatusOK, map[string]any{"removed": e.ID, "stopped": stopped})
 }
 
 // setUpdErr records (msg != "") or clears (msg == "") an engine's last install-failure reason
@@ -160,9 +213,9 @@ func (s *Server) updErr(id string) string {
 	return s.updErrs[id]
 }
 
-// --- Velinx self-update ---------------------------------------------------
+// --- WayHop self-update ---------------------------------------------------
 
-// handleSelfStatus reports Velinx's own version and whether a newer release exists.
+// handleSelfStatus reports WayHop's own version and whether a newer release exists.
 func (s *Server) handleSelfStatus(w http.ResponseWriter, r *http.Request) {
 	c := s.config()
 	repo := c.Updater.SelfRepo
@@ -175,6 +228,10 @@ func (s *Server) handleSelfStatus(w http.ResponseWriter, r *http.Request) {
 		"arch":        s.updater.Arch,
 		"auto_update": c.Updater.AutoUpdate,
 	}
+	if exe, err := os.Executable(); err == nil {
+		out["native_managed"] = s.updater.SelfManaged(exe) // opkg/apk owns the wayhop binary -> upgrade via the PM, not the panel
+	}
+	out["package_manager"] = string(s.updater.PMKind())
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 	rel, err := s.updater.SelfLatest(ctx, repo)
@@ -187,7 +244,7 @@ func (s *Server) handleSelfStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handleSelfUpdate downloads + swaps the Velinx binary for the latest (or a given)
+// handleSelfUpdate downloads + swaps the WayHop binary for the latest (or a given)
 // release, then restarts the service so the new binary takes over. The swap is guarded
 // by a sanity-run of the new binary (see updater.SelfUpdate); the old binary is kept at
 // <exe>.bak for manual rollback.
@@ -219,6 +276,11 @@ func (s *Server) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	installed, err := s.updater.SelfUpdate(ctx, repo, tag, exe)
 	if err != nil {
+		var nm *updater.NativeManagedError
+		if errors.As(err, &nm) {
+			writeErr(w, http.StatusConflict, err.Error()) // policy: wayhop is PM-owned — upgrade via opkg/apk
+			return
+		}
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
@@ -235,7 +297,7 @@ func (s *Server) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"installed": installed, "restarting": true})
 }
 
-// handleSelfAuto toggles background auto-update of Velinx itself.
+// handleSelfAuto toggles background auto-update of WayHop itself.
 func (s *Server) handleSelfAuto(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Enabled bool `json:"enabled"`
@@ -255,7 +317,7 @@ func (s *Server) handleSelfAuto(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"auto_update": body.Enabled})
 }
 
-// AutoUpdateLoop periodically (daily) checks for a newer Velinx release and, when
+// AutoUpdateLoop periodically (daily) checks for a newer WayHop release and, when
 // Updater.AutoUpdate is enabled, installs it and restarts. Off by default; the first
 // check is delayed so a crash-looping bad release can't hammer updates on boot.
 func (s *Server) AutoUpdateLoop(ctx context.Context) {
@@ -293,7 +355,7 @@ func (s *Server) AutoUpdateLoop(ctx context.Context) {
 			log.Printf("auto-update: %v", err)
 			continue
 		}
-		log.Printf("auto-update: installed velinx %s, restarting", installed)
+		log.Printf("auto-update: installed wayhop %s, restarting", installed)
 		if cmd := restartCommand(); cmd != nil {
 			_ = cmd.Start()
 		}

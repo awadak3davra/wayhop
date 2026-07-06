@@ -8,7 +8,7 @@ import (
 
 // HardenKeysScript generates a fresh ed25519 SSH keypair ON THE SERVER, installs
 // the public key into the target user's authorized_keys, and prints the private
-// key (base64) so velinx can hand it back for the user to download. It does NOT touch
+// key (base64) so wayhop can hand it back for the user to download. It does NOT touch
 // password auth — that is a separate, gated step (HardenLockdownScript) run only
 // after the user has saved the key and key-auth is confirmed working.
 func HardenKeysScript(user string) string {
@@ -17,7 +17,7 @@ func HardenKeysScript(user string) string {
 	}
 	return fmt.Sprintf(`#!/bin/sh
 set -e
-log() { echo "[velinx-harden] $*"; }
+log() { echo "[wayhop-harden] $*"; }
 TARGET_USER=%q
 HOME_DIR=$(getent passwd "$TARGET_USER" 2>/dev/null | cut -d: -f6)
 [ -n "$HOME_DIR" ] || HOME_DIR="$HOME"
@@ -25,7 +25,7 @@ log "installing key for $TARGET_USER ($HOME_DIR)"
 mkdir -p "$HOME_DIR/.ssh"; chmod 700 "$HOME_DIR/.ssh"
 TMPD=$(mktemp -d); trap 'rm -rf "$TMPD"' EXIT INT TERM
 KF="$TMPD/key"
-ssh-keygen -t ed25519 -N '' -C 'velinx-managed' -f "$KF" >/dev/null
+ssh-keygen -t ed25519 -N '' -C 'wayhop-managed' -f "$KF" >/dev/null
 touch "$HOME_DIR/.ssh/authorized_keys"
 cat "$KF.pub" >> "$HOME_DIR/.ssh/authorized_keys"
 sort -u "$HOME_DIR/.ssh/authorized_keys" -o "$HOME_DIR/.ssh/authorized_keys"
@@ -43,16 +43,16 @@ log "key installed into authorized_keys"
 // don't silently re-enable passwords.
 const HardenLockdownScript = `#!/bin/sh
 set -e
-log() { echo "[velinx-harden] $*"; }
+log() { echo "[wayhop-harden] $*"; }
 SSHD=/etc/ssh/sshd_config
 [ -f "$SSHD" ] || { echo "WR_HARDEN_ERR=no sshd_config"; exit 1; }
-cp "$SSHD" "$SSHD.velinx.bak" 2>/dev/null || true
+cp "$SSHD" "$SSHD.wayhop.bak" 2>/dev/null || true
 sed -i 's/^[#[:space:]]*PasswordAuthentication.*/PasswordAuthentication no/' "$SSHD"
 grep -q '^PasswordAuthentication no' "$SSHD" || echo 'PasswordAuthentication no' >> "$SSHD"
 sed -i 's/^[#[:space:]]*PubkeyAuthentication.*/PubkeyAuthentication yes/' "$SSHD"
 grep -q '^PubkeyAuthentication yes' "$SSHD" || echo 'PubkeyAuthentication yes' >> "$SSHD"
 if [ -d /etc/ssh/sshd_config.d ]; then
-  printf 'PasswordAuthentication no\nPubkeyAuthentication yes\n' > /etc/ssh/sshd_config.d/00-velinx-hardening.conf
+  printf 'PasswordAuthentication no\nPubkeyAuthentication yes\n' > /etc/ssh/sshd_config.d/00-wayhop-hardening.conf
 fi
 if command -v sshd >/dev/null 2>&1; then sshd -t || { echo "WR_HARDEN_ERR=sshd config test failed"; exit 1; }; fi
 ( systemctl reload sshd || systemctl reload ssh || service ssh reload || service sshd reload ) 2>/dev/null || true

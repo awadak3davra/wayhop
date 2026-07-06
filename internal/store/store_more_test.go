@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // storemodelconfig_newStore opens a fresh Store backed by a unique temp file.

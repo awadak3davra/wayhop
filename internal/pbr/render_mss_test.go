@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // mssProfile builds a minimal profile with one kernel tunnel egress (awg0) routing a CIDR list.

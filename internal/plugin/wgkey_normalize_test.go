@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestAWGConfigNormalizesKeys verifies a url-safe-encoded AmneziaWG key is rendered into

@@ -3,7 +3,7 @@ package generator
 import (
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestCacheFileForGroups: a profile with a selector/urltest group enables cache_file even when there

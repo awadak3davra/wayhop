@@ -3,7 +3,7 @@ package generator
 import (
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestAnyTLSOutbound: an AnyTLS endpoint generates a `type: anytls` outbound carrying its password

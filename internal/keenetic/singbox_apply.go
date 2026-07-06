@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"velinx/internal/atomicfile"
+	"wayhop/internal/atomicfile"
 )
 
 // Runner runs a shell command (injectable for tests). Same method shape as pbr.Runner so an

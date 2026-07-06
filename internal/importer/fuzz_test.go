@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // This file fuzzes the untrusted-input surface of the importer: Parse() and

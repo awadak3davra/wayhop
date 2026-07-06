@@ -3,7 +3,7 @@ package keenetic
 import (
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 func TestSingboxFallback(t *testing.T) {

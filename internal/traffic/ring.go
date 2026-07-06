@@ -11,12 +11,18 @@ type Sample struct {
 	Down int64 `json:"down"` // bytes/s downloaded
 }
 
-// Hub stores recent samples and broadcasts new ones to subscribers.
+// Hub stores recent samples in a fixed-size ring and broadcasts new ones to subscribers.
+// The ring makes Push O(1): buf has a constant length == size, start indexes the oldest
+// retained sample, and count is how many are valid (0..size). The write position is
+// (start+count)%size until full, after which each Push overwrites the oldest and advances
+// start. (The previous slice-shift Push was O(size) — a 300-element memmove every second.)
 type Hub struct {
-	mu   sync.Mutex
-	buf  []Sample
-	size int
-	subs map[chan Sample]struct{}
+	mu    sync.Mutex
+	buf   []Sample // fixed length == size
+	size  int
+	start int // index of the oldest retained sample
+	count int // number of valid samples (0..size)
+	subs  map[chan Sample]struct{}
 }
 
 // NewHub returns a Hub retaining up to size recent samples.
@@ -26,7 +32,7 @@ func NewHub(size int) *Hub {
 	}
 	return &Hub{
 		size: size,
-		buf:  make([]Sample, 0, size),
+		buf:  make([]Sample, size),
 		subs: make(map[chan Sample]struct{}),
 	}
 }
@@ -36,11 +42,14 @@ func NewHub(size int) *Hub {
 func (h *Hub) Push(s Sample) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if len(h.buf) >= h.size {
-		copy(h.buf, h.buf[1:])
-		h.buf = h.buf[:h.size-1]
+	if h.count < h.size {
+		h.buf[(h.start+h.count)%h.size] = s
+		h.count++
+	} else {
+		// Full ring: overwrite the oldest and advance the window — no shift.
+		h.buf[h.start] = s
+		h.start = (h.start + 1) % h.size
 	}
-	h.buf = append(h.buf, s)
 	// Broadcast under the lock. The sends are non-blocking (buffered channel +
 	// select default), so holding the lock can't deadlock — and it prevents a
 	// subscriber's cancel() from closing a channel between our snapshot and the
@@ -62,12 +71,17 @@ func (h *Hub) Recent() []Sample { return h.RecentN(0) }
 func (h *Hub) RecentN(n int) []Sample {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	start := 0
-	if n > 0 && len(h.buf) > n {
-		start = len(h.buf) - n
+	c := h.count
+	if n > 0 && c > n {
+		c = n
 	}
-	out := make([]Sample, len(h.buf)-start)
-	copy(out, h.buf[start:])
+	out := make([]Sample, c)
+	// The last c samples end at (start+count-1); begin c back from there and walk
+	// forward, wrapping around the ring, so the result is oldest-first.
+	begin := h.start + h.count - c
+	for i := 0; i < c; i++ {
+		out[i] = h.buf[(begin+i)%h.size]
+	}
 	return out
 }
 

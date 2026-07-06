@@ -1,4 +1,4 @@
-# Velinx feed arch map — one line per Go build:  <goname>  <openwrt tokens...>  |  <entware token>
+# WayHop feed arch map — one line per Go build:  <goname>  <openwrt tokens...>  |  <entware token>
 #
 # A portable static Go binary is re-stamped into one package per OpenWrt CPU-FAMILY token: a device
 # only ACCEPTS a package whose Architecture is in its own list (`opkg print-architecture` / the apk

@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"velinx/internal/failsafe"
-	"velinx/internal/model"
+	"wayhop/internal/failsafe"
+	"wayhop/internal/model"
 )
 
 // Reboot reboots the router via RCI (`system reboot`). KeeneticOS boots the SAVED config, so

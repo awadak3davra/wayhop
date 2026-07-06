@@ -96,6 +96,24 @@ button { font-family:inherit; }
 .btn-danger:hover { background:var(--err-tint); }
 .btn-sm { padding:5px 10px; font-size:var(--fs-small); }
 .btn:disabled { opacity:.5; cursor:not-allowed; }
+/* Pending-Apply attention: the topbar Apply buttons get an amber cue while the staged profile has
+   unsaved changes (reflectDirty()). A leading dot + amber outline points the user at the action
+   their edit needs to go live. A brief pulse on first appearance, then static (respects reduced-motion). */
+.btn.dirty { border-color:var(--warn); box-shadow:0 0 0 1px var(--warn) inset; animation:dirtyPulse 2s ease-in-out 2; }
+.btn.dirty::before { content:"● "; color:var(--warn); }
+.btn-primary.dirty { box-shadow:0 0 0 2px var(--warn-tint); }
+@keyframes dirtyPulse { 0%,100% { box-shadow:0 0 0 1px var(--warn) inset; } 50% { box-shadow:0 0 0 3px var(--warn-tint), 0 0 0 1px var(--warn) inset; } }
+@media (prefers-reduced-motion: reduce) { .btn.dirty { animation:none; } }
+/* First-paint skeleton (route() inserts it while a page awaits its data) — fills the blank pane on
+   a slow router link with a shimmering placeholder instead of the 'is it broken?' void. rgba so it
+   reads on both themes without theme-specific vars. */
+.skeleton-page { padding:4px 0; }
+.skel { border-radius:8px; margin:0 0 14px; background:linear-gradient(90deg, rgba(140,140,150,.09) 25%, rgba(140,140,150,.20) 37%, rgba(140,140,150,.09) 63%); background-size:400% 100%; animation:skelShimmer 1.4s ease infinite; }
+.skel-title { height:22px; width:190px; margin-bottom:20px; }
+.skel-line { height:12px; } .skel-line.short { width:55%; }
+.skel-card { height:74px; margin-bottom:12px; }
+@keyframes skelShimmer { 0% { background-position:100% 0; } 100% { background-position:0 0; } }
+@media (prefers-reduced-motion: reduce) { .skel { animation:none; } }
 /* a11y: visible keyboard focus on all interactive controls. Mouse clicks don't
    trigger :focus-visible, so this never shows on pointer use; the existing
    input/select/textarea border+ring in the forms section stays intact.
@@ -394,6 +412,31 @@ input:disabled, select:disabled, textarea:disabled { opacity:.6; cursor:not-allo
 .rl-sel { width:100%; min-width:0; max-width:100%; font-size:var(--fs-small); padding:5px 8px; }
 .rlrow .acts { display:flex; gap:6px; align-items:center; justify-content:flex-end; }
 .rl-ta { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:var(--fs-small); }
+/* ---------- DNS section (dedicated layout: tidy, column-aligned, no inline-style hacks) ---------- */
+.dns-tog { padding:11px 0; border-bottom:1px solid var(--divider); }
+.dns-tog:last-child { border-bottom:none; }
+.dns-tog .top { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+.dns-tog .top label { margin:0; font-size:var(--fs-body); color:var(--ink); }
+.dns-tog .hint { margin-top:5px; max-width:64ch; }
+.dns-row { display:grid; grid-template-columns:64px minmax(0,1fr) auto; gap:14px; align-items:center; padding:13px 0; border-bottom:1px solid var(--divider); }
+.dns-row:last-child { border-bottom:none; }
+.dns-row .badge { justify-self:start; white-space:nowrap; }
+.dns-row .main { min-width:0; }
+.dns-row .name { font-size:var(--fs-lg); font-weight:600; display:flex; align-items:center; gap:9px; min-width:0; }
+.dns-row .name .tag { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dns-row .sub { font-size:var(--fs-small); color:var(--ink-2); margin-top:4px; display:flex; align-items:center; flex-wrap:wrap; gap:4px 8px; overflow-wrap:anywhere; }
+.dns-row .acts, .dns-rule .acts { display:flex; gap:6px; align-items:center; justify-content:flex-end; }
+.dns-rule { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:14px; align-items:center; padding:12px 0; border-bottom:1px solid var(--divider); }
+.dns-rule:last-child { border-bottom:none; }
+.dns-rule .match { min-width:0; }
+.dns-rule .match .m { font-size:var(--fs-small); color:var(--ink-2); overflow-wrap:anywhere; }
+.dns-rule .match .via { margin-top:5px; display:flex; align-items:center; gap:8px; }
+@media (max-width:640px) {
+  .dns-row { grid-template-columns:64px minmax(0,1fr); }
+  .dns-row .acts { grid-column:1 / -1; justify-content:flex-start; margin-top:2px; }
+  .dns-rule { grid-template-columns:1fr; }
+  .dns-rule .acts { justify-content:flex-start; margin-top:2px; }
+}
 /* Diagnostics streamed output — terminal-like, scrolls, wraps long lines live. */
 .diag-out { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:var(--fs-small); line-height:1.5; background:var(--card-2); border-radius:7px; padding:10px 12px; max-height:360px; overflow:auto; white-space:pre-wrap; word-break:break-word; }
 .diag-line { min-height:1.15em; }
@@ -404,6 +447,9 @@ input:disabled, select:disabled, textarea:disabled { opacity:.6; cursor:not-allo
 .health-row .res { color:var(--ink-2); font-variant-numeric:tabular-nums; text-align:right; font-size:var(--fs-control); }
 .spin { width:10px; height:10px; border-radius:50%; border:2px solid var(--ink-3); border-top-color:var(--accent); display:inline-block; vertical-align:middle; animation:wr-spin .7s linear infinite; }
 @keyframes wr-spin { to { transform:rotate(360deg); } }
+/* Apply button mid-flight: fixed width so the rotating phase label doesn't jitter the toolbar. */
+.btn.working { min-width:12.5em; text-align:center; cursor:progress; }
+@media (prefers-reduced-motion: reduce) { .spin { animation-duration:1.6s; } }
 /* per-row re-check button */
 .btn-icon { background:none; border:1px solid var(--divider); color:var(--ink-2); width:26px; height:26px; flex:none; padding:0; border-radius:7px; cursor:pointer; font-size:14px; line-height:1; transition:color .15s, border-color .15s; }
 .btn-icon:hover:not(:disabled) { color:var(--accent); border-color:var(--accent); }
@@ -527,6 +573,7 @@ input:disabled, select:disabled, textarea:disabled { opacity:.6; cursor:not-allo
   /* content fills width; bottom space clears the fixed action bar */
   .content { padding:16px 14px 84px; }
   #failsafe-banner { padding:12px 14px 0; }
+  #apply-error { padding:12px 14px 0; }
 
   /* drawer nav items: bigger tap targets */
   .nav-item { padding:13px 14px; font-size:15px; }

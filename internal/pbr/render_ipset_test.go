@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // keeneticProfile: a domain list + an IP-CIDR list both routed to a failover group whose first

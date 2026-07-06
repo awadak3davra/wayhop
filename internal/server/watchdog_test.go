@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"velinx/internal/watchdog"
+	"wayhop/internal/watchdog"
 )
 
 // stoppedSup is a Supervisor that is never running (demo-like).

@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // Write atomically and durably replaces path with data (mode perm). It is the
@@ -18,7 +19,15 @@ func Write(path string, data []byte, perm os.FileMode) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
+	// UNIQUE temp name (not a fixed path+".tmp"): two goroutines writing the SAME target concurrently
+	// (e.g. a manual "refresh now" racing the scheduled refresh of one IPTV list) must not share one
+	// temp file — a shared O_TRUNC temp would interleave their bytes into a torn file before rename.
+	tf, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := tf.Name()
+	_ = tf.Close() // WriteSynced re-opens it (O_TRUNC) and fsyncs the contents
 	if err := WriteSynced(tmp, data, perm); err != nil {
 		os.Remove(tmp)
 		return err
@@ -61,7 +70,10 @@ func SyncDir(dir string) {
 		log.Printf("atomicfile: open dir %q for fsync: %v", dir, err)
 		return
 	}
-	if err := d.Sync(); err != nil {
+	if err := d.Sync(); err != nil && runtime.GOOS != "windows" {
+		// Directory fsync is unsupported on Windows (Sync on a dir handle returns
+		// "Access is denied") — that's expected, not an error, so don't scare a
+		// Windows dev running the demo. On the real (Linux) router it's meaningful.
 		log.Printf("atomicfile: fsync dir %q: %v", dir, err)
 	}
 	_ = d.Close()

@@ -8,16 +8,16 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/config"
-	"velinx/internal/core"
-	"velinx/internal/failsafe"
-	"velinx/internal/health"
-	"velinx/internal/initserver"
-	"velinx/internal/model"
-	"velinx/internal/plugin"
-	"velinx/internal/serverstore"
-	"velinx/internal/store"
-	"velinx/internal/watchdog"
+	"wayhop/internal/config"
+	"wayhop/internal/core"
+	"wayhop/internal/failsafe"
+	"wayhop/internal/health"
+	"wayhop/internal/initserver"
+	"wayhop/internal/model"
+	"wayhop/internal/plugin"
+	"wayhop/internal/serverstore"
+	"wayhop/internal/store"
+	"wayhop/internal/watchdog"
 )
 
 // servererrorpaths_server builds a *Server wired with the union of dependencies
@@ -267,8 +267,8 @@ func TestServererrorpaths_SubscriptionFetchOKParsesLinks(t *testing.T) {
 		"trojan://secretpass@example.com:443?security=tls&sni=example.com#T1\n" +
 		"ftp://garbage"
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("User-Agent"); got != "velinx" {
-			t.Errorf("upstream saw User-Agent %q, want velinx", got)
+		if got := r.Header.Get("User-Agent"); got != "wayhop" {
+			t.Errorf("upstream saw User-Agent %q, want wayhop", got)
 		}
 		_, _ = w.Write([]byte(payload))
 	}))

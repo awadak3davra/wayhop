@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/importer"
-	"velinx/internal/model"
+	"wayhop/internal/importer"
+	"wayhop/internal/model"
 )
 
 // TestWireGuardConfGenerate sweeps diverse plain-WireGuard wg-quick `.conf` imports (the one

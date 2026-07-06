@@ -10,16 +10,16 @@ import (
 	"strings"
 	"time"
 
-	"velinx/internal/importer"
-	"velinx/internal/initserver"
-	"velinx/internal/model"
-	"velinx/internal/netdiag"
-	"velinx/internal/serverstore"
-	"velinx/internal/updater"
-	"velinx/internal/util"
+	"wayhop/internal/importer"
+	"wayhop/internal/initserver"
+	"wayhop/internal/model"
+	"wayhop/internal/netdiag"
+	"wayhop/internal/serverstore"
+	"wayhop/internal/updater"
+	"wayhop/internal/util"
 )
 
-// sshKnownHostsPath is the persistent, Velinx-owned known_hosts file used to pin
+// sshKnownHostsPath is the persistent, WayHop-owned known_hosts file used to pin
 // provisioned-server SSH host keys. It lives next to the sing-box config (a writable,
 // persistent WR-owned directory) so the pin survives reboots — unlike a router's default
 // known_hosts, which may be non-persistent (re-TOFU each reboot) or unreadable. Set as
@@ -340,7 +340,7 @@ func (s *Server) provisionDemo(job *initserver.Job, b provisionReq) string {
 		case initserver.ProtoReality:
 			sb.WriteString("WR_PROTO=vless-reality\n")
 			sb.WriteString("WR_CLIENT_CONFIG=vless://11111111-2222-3333-4444-555555555555@" + host +
-				":443?security=reality&sni=www.microsoft.com&fp=chrome&pbk=DemoPublicKey0000000000000000000000000000000&sid=abcd1234&flow=xtls-rprx-vision&type=tcp#velinx-server\n")
+				":443?security=reality&sni=www.microsoft.com&fp=chrome&pbk=DemoPublicKey0000000000000000000000000000000&sid=abcd1234&flow=xtls-rprx-vision&type=tcp#wayhop-server\n")
 		case initserver.ProtoAmneziaWG:
 			conf := "[Interface]\nPrivateKey = DEMOclientPrivateKey00000000000000000000000=\nAddress = 10.13.13.2/32\nDNS = 1.1.1.1\nJc = 4\nJmin = 40\nJmax = 70\nS1 = 0\nS2 = 0\nH1 = 1\nH2 = 2\nH3 = 3\nH4 = 4\n[Peer]\nPublicKey = DEMOserverPublicKey00000000000000000000000=\nEndpoint = " + host + ":51820\nAllowedIPs = 0.0.0.0/0"
 			sb.WriteString("WR_PROTO=amneziawg\n")
@@ -420,7 +420,7 @@ func (s *Server) runHardenKeys(job *initserver.Job, b hardenReq) {
 		time.Sleep(400 * time.Millisecond)
 		priv := "-----BEGIN OPENSSH PRIVATE KEY-----\n(demo key — not usable)\n-----END OPENSSH PRIVATE KEY-----\n"
 		job.OK("key installed into authorized_keys (simulated)")
-		job.Finish(true, map[string]any{"private_key": priv, "public_key": "ssh-ed25519 AAAA...demo velinx-managed", "filename": keyFilename(b)})
+		job.Finish(true, map[string]any{"private_key": priv, "public_key": "ssh-ed25519 AAAA...demo wayhop-managed", "filename": keyFilename(b)})
 		return
 	}
 	creds := initserver.Creds{Host: b.Host, Port: b.Port, User: b.User, Password: b.Password, Key: b.Key, KnownHostsFile: s.sshKnownHostsPath()}
@@ -456,7 +456,7 @@ func (s *Server) handleServerLockdown(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if b.Key == "" && !s.config().Demo {
-		writeErr(w, http.StatusBadRequest, "lockdown requires the new SSH key (so velinx can verify key-auth works first)")
+		writeErr(w, http.StatusBadRequest, "lockdown requires the new SSH key (so wayhop can verify key-auth works first)")
 		return
 	}
 	job := s.jobs.New("lockdown", b.ServerID)
@@ -660,7 +660,7 @@ func (s *Server) runUpdateServerBinary(job *initserver.Job, b serverBinUpdateReq
 	}
 	script, _ := initserver.UpdateScriptFor(b.Binary, b.Version, s.config().Updater.Mirrors...)
 	creds := initserver.Creds{Host: b.Host, Port: b.Port, User: b.User, Password: b.Password, Key: b.Key, KnownHostsFile: s.sshKnownHostsPath()}
-	job.Logf("the current binary is backed up as <path>.velinx.bak on the server before the swap")
+	job.Logf("the current binary is backed up as <path>.wayhop.bak on the server before the swap")
 	out, ran, err := initserver.Provision(ctx, creds, script)
 	if !ran {
 		job.Fail("update needs the ssh client on the router", "Install ssh, or update the binary on the server manually.")
@@ -670,7 +670,7 @@ func (s *Server) runUpdateServerBinary(job *initserver.Job, b serverBinUpdateReq
 	okUp, newVer := initserver.UpdateConfirmed(out)
 	if err != nil || !okUp {
 		job.Output(tail(redactSecrets(out), 1200))
-		job.Fail("the update did not confirm success", "The service may not have restarted; a .velinx.bak of the old binary is on the server. Review the output.")
+		job.Fail("the update did not confirm success", "The service may not have restarted; a .wayhop.bak of the old binary is on the server. Review the output.")
 		job.Finish(false, nil)
 		return
 	}
@@ -745,7 +745,7 @@ func serverIDFor(b provisionReq) string {
 }
 
 func keyFilename(b hardenReq) string {
-	return "velinx-" + slug(b.Host) + "-ed25519"
+	return "wayhop-" + slug(b.Host) + "-ed25519"
 }
 
 func slug(s string) string {

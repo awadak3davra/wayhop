@@ -15,8 +15,8 @@ import (
 	"strconv"
 	"strings"
 
-	"velinx/internal/model"
-	"velinx/internal/util"
+	"wayhop/internal/model"
+	"wayhop/internal/util"
 )
 
 // looksLikeClash reports whether text is a Clash / Clash-Meta YAML config — i.e.

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestNormalizeWGKey verifies a WireGuard key given in any base64 variant validWGKey

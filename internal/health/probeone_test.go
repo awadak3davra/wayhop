@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestProbeOneUnknownIDDoesNotRecord verifies Fix #5: probing an id that matches

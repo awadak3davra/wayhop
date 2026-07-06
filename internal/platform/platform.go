@@ -1,4 +1,4 @@
-// Package platform identifies the router OS Velinx is running on, so a single universal
+// Package platform identifies the router OS WayHop is running on, so a single universal
 // binary picks the right apply backend at runtime (D-PLAT-2: one binary + Detect(), not
 // per-platform builds). The OpenWrt backend is today's nft/fw4 + awg-quick path; the
 // Keenetic backend (internal/keenetic) drives KeeneticOS-native AmneziaWG/WireGuard + NDM

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // pluginsup_awgEndpoint builds an AmneziaWG endpoint mirroring the shape used in

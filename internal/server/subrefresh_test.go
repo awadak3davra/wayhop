@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/config"
+	"wayhop/internal/config"
 )
 
 // subrefresh_link1 / subrefresh_link2 / subrefresh_link3 are three distinct,

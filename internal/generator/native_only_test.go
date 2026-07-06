@@ -3,8 +3,8 @@ package generator
 import (
 	"testing"
 
-	"velinx/internal/model"
-	"velinx/internal/platform"
+	"wayhop/internal/model"
+	"wayhop/internal/platform"
 )
 
 // ep builds a synthetic endpoint with the given engine/protocol/enabled flag. Params are

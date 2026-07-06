@@ -3,7 +3,7 @@ package health
 import (
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestGroupHealthFromMembers: a group's health is derived from its members — alive if any member is

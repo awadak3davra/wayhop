@@ -4,8 +4,8 @@ import (
 	"reflect"
 	"testing"
 
-	"velinx/internal/model"
-	"velinx/internal/pbr"
+	"wayhop/internal/model"
+	"wayhop/internal/pbr"
 )
 
 // TestGenOptionsHybrid verifies the RoutingMode wiring: "hybrid" compiles the profile

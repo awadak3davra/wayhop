@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // profilehandlers_vlessLink is a realistic VLESS-Reality share link that

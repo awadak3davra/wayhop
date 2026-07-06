@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // This file exercises the edge and error paths of Parse() and

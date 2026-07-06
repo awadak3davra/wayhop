@@ -8,13 +8,13 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/config"
-	"velinx/internal/core"
-	"velinx/internal/health"
-	"velinx/internal/model"
-	"velinx/internal/store"
-	"velinx/internal/traffic"
-	"velinx/internal/version"
+	"wayhop/internal/config"
+	"wayhop/internal/core"
+	"wayhop/internal/health"
+	"wayhop/internal/model"
+	"wayhop/internal/store"
+	"wayhop/internal/traffic"
+	"wayhop/internal/version"
 )
 
 // metrics_server builds a *Server with a store + hub, mirroring the construction
@@ -100,16 +100,16 @@ func TestMetrics_StaticAndPerEndpoint(t *testing.T) {
 
 	// Static metrics with HELP/TYPE preamble.
 	for _, want := range []string{
-		"# HELP velinx_build_info",
-		"# TYPE velinx_build_info gauge",
-		`velinx_build_info{version="0.2.0-test"} 1`,
-		"# HELP velinx_up",
-		"velinx_up 1",
-		"# TYPE velinx_singbox_running gauge",
-		"velinx_singbox_running 0",
-		"velinx_singbox_available 0",
-		"velinx_traffic_rx_bytes_per_second 8192",
-		"velinx_traffic_tx_bytes_per_second 4096",
+		"# HELP wayhop_build_info",
+		"# TYPE wayhop_build_info gauge",
+		`wayhop_build_info{version="0.2.0-test"} 1`,
+		"# HELP wayhop_up",
+		"wayhop_up 1",
+		"# TYPE wayhop_singbox_running gauge",
+		"wayhop_singbox_running 0",
+		"wayhop_singbox_available 0",
+		"wayhop_traffic_rx_bytes_per_second 8192",
+		"wayhop_traffic_tx_bytes_per_second 4096",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing %q in:\n%s", want, body)
@@ -117,7 +117,7 @@ func TestMetrics_StaticAndPerEndpoint(t *testing.T) {
 	}
 
 	// Per-endpoint series with id/name/protocol labels.
-	if !strings.Contains(body, `velinx_endpoint_up{id="e1",name="Reality",protocol="vless"} `) {
+	if !strings.Contains(body, `wayhop_endpoint_up{id="e1",name="Reality",protocol="vless"} `) {
 		t.Errorf("missing e1 endpoint_up series in:\n%s", body)
 	}
 
@@ -165,11 +165,11 @@ func TestMetrics_NilMonitorAndHubStillServeStatic(t *testing.T) {
 	}
 	body := w.Body.String()
 	for _, want := range []string{
-		`velinx_build_info{version="0.2.0-nil"} 1`,
-		"velinx_up 1",
-		"velinx_singbox_running 0",
-		"velinx_traffic_rx_bytes_per_second 0",
-		"velinx_traffic_tx_bytes_per_second 0",
+		`wayhop_build_info{version="0.2.0-nil"} 1`,
+		"wayhop_up 1",
+		"wayhop_singbox_running 0",
+		"wayhop_traffic_rx_bytes_per_second 0",
+		"wayhop_traffic_tx_bytes_per_second 0",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing %q in:\n%s", want, body)

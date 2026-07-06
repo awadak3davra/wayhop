@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // nfqws.go renders the argv for the DPI-desync engine (nfqws2). nfqws2 is a long-running process
@@ -13,7 +13,7 @@ import (
 // the traffic stays on the DIRECT path (no egress). The NFQUEUE divert that feeds it is the
 // `desync` routing target (kernel-PBR), NOT this engine. See docs/ARCHITECTURE_DESYNC.md.
 
-// defaultNfqwsQueue is the NFQUEUE number Velinx's nfqws2 listens on — deliberately distinct
+// defaultNfqwsQueue is the NFQUEUE number WayHop's nfqws2 listens on — deliberately distinct
 // from the user's standalone nfqws install so the two never share a queue.
 const defaultNfqwsQueue = 200
 

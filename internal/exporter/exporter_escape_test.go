@@ -3,8 +3,8 @@ package exporter
 import (
 	"testing"
 
-	"velinx/internal/importer"
-	"velinx/internal/model"
+	"wayhop/internal/importer"
+	"wayhop/internal/model"
 )
 
 // TestShareLinkEscapesSpecialCredsAndName guards the userinfo + fragment encoding fixes:

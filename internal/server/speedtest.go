@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"velinx/internal/model"
-	"velinx/internal/speedtest"
+	"wayhop/internal/model"
+	"wayhop/internal/speedtest"
 )
 
 // handleSpeedtest runs a throughput test. Body: {via, bytes, id}. When id is

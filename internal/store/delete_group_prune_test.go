@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestDeleteGroupPrunesNestedMembers: deleting a group must remove its id from

@@ -13,10 +13,10 @@
 //
 // Usage:
 //
-//	usigntool genkey -comment "Velinx feed" -pub velinx.pub -sec velinx.sec
-//	usigntool fingerprint -pub velinx.pub                 # prints the 16-hex key id (feed key filename)
-//	usigntool sign   -sec velinx.sec -m Packages -out Packages.sig
-//	usigntool verify -pub velinx.pub -m Packages -sig Packages.sig
+//	usigntool genkey -comment "WayHop feed" -pub wayhop.pub -sec wayhop.sec
+//	usigntool fingerprint -pub wayhop.pub                 # prints the 16-hex key id (feed key filename)
+//	usigntool sign   -sec wayhop.sec -m Packages -out Packages.sig
+//	usigntool verify -pub wayhop.pub -m Packages -sig Packages.sig
 package main
 
 import (
@@ -63,7 +63,7 @@ func readB64File(path string) ([]byte, error) {
 
 func genkey(args []string) {
 	fs := flag.NewFlagSet("genkey", flag.ExitOnError)
-	comment := fs.String("comment", "velinx feed", "comment line written into both files")
+	comment := fs.String("comment", "wayhop feed", "comment line written into both files")
 	pubPath := fs.String("pub", "", "output public key path")
 	secPath := fs.String("sec", "", "output secret key path")
 	_ = fs.Parse(args)
@@ -156,7 +156,7 @@ func sign(args []string) {
 	out = append(out, pkalg...)
 	out = append(out, keynum...)
 	out = append(out, sig...)
-	if err := writeB64File(*outPath, "signed by velinx feed key "+hex.EncodeToString(keynum), out); err != nil {
+	if err := writeB64File(*outPath, "signed by wayhop feed key "+hex.EncodeToString(keynum), out); err != nil {
 		die("write sig: %v", err)
 	}
 }

@@ -1,4 +1,4 @@
-// Package web embeds the built front-end assets so velinx ships as a single binary.
+// Package web embeds the built front-end assets so wayhop ships as a single binary.
 package web
 
 import (

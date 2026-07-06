@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/config"
+	"wayhop/internal/config"
 )
 
 func TestValidatePorts(t *testing.T) {

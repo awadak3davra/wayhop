@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestAwgConfig_KeyNewlineNoInjection guards confLine: a key param carrying an embedded

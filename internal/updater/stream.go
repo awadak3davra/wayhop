@@ -122,16 +122,37 @@ func verifyDigestSum(sum, digest string, mandatory bool) error {
 // --- streaming download + install -----------------------------------------
 
 // peakInstallDisk estimates the worst-case bytes the streaming install writes to the TARGET
-// filesystem for an asset of assetSize COMPRESSED bytes: the decompressed binary (a router core
-// inflates ~2-3x from its gzip) plus a margin. withBackup doubles it (self-update keeps a .bak on
-// the same filesystem). A zip additionally stages the archive, but that temp is bounded by the same
-// assetSize and freed immediately, so the binary estimate dominates.
-func peakInstallDisk(assetSize int64, withBackup bool) uint64 {
-	bin := uint64(assetSize) * 3
+// filesystem for an asset of assetSize bytes. A COMPRESSED archive (.tar.gz/.gz/.zip) decompresses
+// ~2-3x on the way to disk, so it's sized 3x; a BARE binary asset (e.g. olcrtc-linux-arm64, which
+// the release ships uncompressed) writes ~its own size, so a flat 3x would wrongly refuse installs
+// that actually fit — it's sized 1x. Plus a margin. withBackup doubles it (self-update keeps a .bak
+// on the same fs). A zip additionally stages the archive, but that temp is bounded by assetSize and
+// freed immediately, so the binary estimate dominates.
+func peakInstallDisk(assetSize int64, assetName string, withBackup bool) uint64 {
+	bin := unpackedBytes(assetSize, assetName)
 	if withBackup {
 		bin *= 2
 	}
 	return bin + (4 << 20)
+}
+
+// unpackedBytes is the size of the final on-disk binary for an asset of assetSize bytes: a bare
+// binary is already unpacked (1x); a compressed archive (.tar.gz/.gz/.zip) inflates ~2-3x on the
+// way out, bounded at 3x. Shared by the disk pre-flight and the update memory-lock.
+func unpackedBytes(assetSize int64, assetName string) uint64 {
+	if isBareBinaryAsset(assetName) {
+		return uint64(assetSize)
+	}
+	return uint64(assetSize) * 3
+}
+
+// isBareBinaryAsset reports whether an asset is a raw (already-unpacked) binary rather than a
+// compressed archive — mirroring extractStreamTo's dispatch, whose default (non-archive) case
+// copies the asset through verbatim.
+func isBareBinaryAsset(name string) bool {
+	n := strings.ToLower(name)
+	return !(strings.HasSuffix(n, ".tar.gz") || strings.HasSuffix(n, ".tgz") ||
+		strings.HasSuffix(n, ".gz") || strings.HasSuffix(n, ".zip"))
 }
 
 // enoughFlashFor reports whether `avail` free bytes on the target filesystem can hold the streamed
@@ -139,11 +160,11 @@ func peakInstallDisk(assetSize int64, withBackup bool) uint64 {
 // Once the download streams straight to disk this is the BINDING constraint: a ~38 MB core cannot
 // fit a ~20 MB overlay no matter the install method, so we refuse early with an actionable message
 // (free space / mount external storage / install over SSH) instead of failing mid-write.
-func enoughFlashFor(avail uint64, known bool, assetSize int64, withBackup bool) bool {
+func enoughFlashFor(avail uint64, known bool, assetSize int64, assetName string, withBackup bool) bool {
 	if !known || assetSize <= 0 {
 		return true
 	}
-	return avail >= peakInstallDisk(assetSize, withBackup)
+	return avail >= peakInstallDisk(assetSize, assetName, withBackup)
 }
 
 // streamAssetToFile downloads `asset` (trying each mirror in turn), extracts `binName`, and writes
@@ -177,7 +198,7 @@ func (u *Updater) streamOne(ctx context.Context, url string, asset Asset, binNam
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", "velinx-updater")
+	req.Header.Set("User-Agent", "wayhop-updater")
 	resp, err := u.hc.Do(req)
 	if err != nil {
 		return err

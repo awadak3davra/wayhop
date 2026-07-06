@@ -50,7 +50,7 @@ var exitIPEchos = []string{
 }
 
 // handleExitIP returns the public IP the active proxy egresses from. It works
-// both when Velinx MANAGES sing-box (probe through the local mixed proxy) and
+// both when WayHop MANAGES sing-box (probe through the local mixed proxy) and
 // in MONITOR mode over an EXTERNALLY-managed core (Keenetic: the daemon's own
 // sing-box isn't running, but a live core answers the Clash API and the device's
 // default route IS the exit — so a DIRECT probe yields the real exit IP). Degrades
@@ -100,7 +100,7 @@ func (s *Server) handleExitIP(w http.ResponseWriter, r *http.Request) {
 
 // coreUp reports whether a proxy core is live: the daemon's OWN sing-box, or an
 // EXTERNALLY-managed one answering the Clash API (monitor mode, e.g. on Keenetic
-// where sing-box is run by the OS init, not Velinx). A 2s probe of the Clash
+// where sing-box is run by the OS init, not WayHop). A 2s probe of the Clash
 // controller's /version is the cheapest liveness signal that an external core is up.
 func (s *Server) coreUp() bool {
 	if s.singbox != nil && s.singbox.Running() {
@@ -196,15 +196,17 @@ func parseExitIP(body string) string {
 // the router's WAN. Returns an empty exitGeo (never an error) on total failure —
 // the caller treats missing geo as "unknown", not a fault.
 func lookupExitGeo(ctx context.Context, mixedPort int, ip string) exitGeo {
-	// Primary: explicit-IP lookup over the default route (correct regardless of route).
-	plain := &http.Client{Timeout: 5 * time.Second}
-	defer plain.CloseIdleConnections()
-	u := "http://ip-api.com/json/" + url.PathEscape(ip) + "?fields=status,countryCode,country,isp,as,hosting"
-	if req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil); err == nil {
-		if resp, err := plain.Do(req); err == nil {
+	tls := &http.Client{Timeout: 5 * time.Second}
+	defer tls.CloseIdleConnections()
+	// Primary: explicit-IP lookup over HTTPS (ipwho.is is free, keyless, and route-independent).
+	// This keeps the exit IP OFF the cleartext wire — the earlier ip-api.com primary was the one
+	// non-localhost plaintext outbound in the daemon, sending the exit IP over the real WAN.
+	whoURL := "https://ipwho.is/" + url.PathEscape(ip) + "?fields=success,country_code,country,connection"
+	if req, err := http.NewRequestWithContext(ctx, http.MethodGet, whoURL, nil); err == nil {
+		if resp, err := tls.Do(req); err == nil {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			_ = resp.Body.Close()
-			if g, ok := parseIPAPI(body); ok {
+			if g, ok := parseIPWho(body); ok {
 				return g
 			}
 		}
@@ -225,7 +227,51 @@ func lookupExitGeo(ctx context.Context, mixedPort int, ip string) exitGeo {
 			}
 		}
 	}
+	// Last resort: ip-api.com over HTTP (its free tier is http-only). Only reached when both HTTPS
+	// providers failed; the exit IP is a VPN's public egress, so this residual best-effort cleartext
+	// lookup is acceptable as a fallback rather than the default path.
+	uPlain := "http://ip-api.com/json/" + url.PathEscape(ip) + "?fields=status,countryCode,country,isp,as,hosting"
+	if req, err := http.NewRequestWithContext(ctx, http.MethodGet, uPlain, nil); err == nil {
+		if resp, err := tls.Do(req); err == nil {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			_ = resp.Body.Close()
+			if g, ok := parseIPAPI(body); ok {
+				return g
+			}
+		}
+	}
 	return exitGeo{}
+}
+
+// parseIPWho maps an ipwho.is response into exitGeo. ok=false when the provider signalled failure
+// (success:false) or the body was unparseable.
+func parseIPWho(body []byte) (exitGeo, bool) {
+	var v struct {
+		Success     bool   `json:"success"`
+		CountryCode string `json:"country_code"`
+		Country     string `json:"country"`
+		Connection  struct {
+			ASN int    `json:"asn"`
+			Org string `json:"org"`
+			ISP string `json:"isp"`
+		} `json:"connection"`
+	}
+	if err := json.Unmarshal(body, &v); err != nil || !v.Success {
+		return exitGeo{}, false
+	}
+	as := ""
+	if v.Connection.ASN > 0 {
+		as = fmt.Sprintf("AS%d %s", v.Connection.ASN, v.Connection.Org)
+	}
+	isp := v.Connection.ISP
+	if isp == "" {
+		isp = v.Connection.Org
+	}
+	g := exitGeo{CC: strings.ToUpper(v.CountryCode), Country: v.Country, ISP: strings.TrimSpace(isp), ASN: strings.TrimSpace(as)}
+	if g.empty() {
+		return exitGeo{}, false
+	}
+	return g, true
 }
 
 // parseIPAPI maps an ip-api.com/json response into exitGeo. ok=false when the

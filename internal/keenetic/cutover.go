@@ -5,23 +5,23 @@ import (
 	"strings"
 )
 
-// cutover.go is the device-mutating cutover from the keen-pbr + S89 stack to Velinx. It is
+// cutover.go is the device-mutating cutover from the keen-pbr + S89 stack to WayHop. It is
 // BUILT but the research loop NEVER runs it — only a user-gated, failsafe-wrapped deploy does
 // (see SafeApply). This file holds the reversible retire/restore of the old stack (the
 // rollback foundation); pre-flight + profile assembly + kernel-plane apply come in later
 // pieces.
 
-// oldStackServices are the keen-pbr + failover init.d services Velinx replaces, in boot/
+// oldStackServices are the keen-pbr + failover init.d services WayHop replaces, in boot/
 // dependency order. Disable = stop + `chmod -x` (rc.unslung boots only executable S* scripts:
 // `find … -perm -u+x -name 'S*'`); restore = `chmod +x` + start. Validated read-only on the
 // Hopper SE.
 //
 // NOT retired (kept, coexists): S86ru_routing — RU-direct via ipset ru_cidrs + fwmark 0x250 →
 // table 250 → WAN (so RU banks see mom's local ISP IP). Its fwmark rule is checked BEFORE the
-// main-table default, so it keeps working alongside Velinx's default→wr-tun; it is re-
-// applied by 60-wgbot-policy.sh (which Velinx also keeps), NOT the keen-pbr netfilter hook.
+// main-table default, so it keeps working alongside WayHop's default→wr-tun; it is re-
+// applied by 60-wgbot-policy.sh (which WayHop also keeps), NOT the keen-pbr netfilter hook.
 // Replicating its 8589-CIDR ipset/table would be needless risk. Also kept: sockd, DNS chain,
-// nfqws, cams_isolate. Velinx's kernel plane takes over S87's bypasses/mgmt-reverse/default.
+// nfqws, cams_isolate. WayHop's kernel plane takes over S87's bypasses/mgmt-reverse/default.
 var oldStackServices = []string{
 	"S80keen-pbr",       // list policy routing (fwmark + ipset) → replaced by sing-box
 	"S87default_via_nl", // default route + mgmt-reverse + endpoint bypasses → replaced by the kernel plane
@@ -29,7 +29,7 @@ var oldStackServices = []string{
 }
 
 // oldStackCron is the per-minute driver that re-probes S89; disable it so the failover loop
-// can't fight Velinx's routing.
+// can't fight WayHop's routing.
 const oldStackCron = "/opt/etc/cron.1min/hy-failover"
 
 // oldStackNetfilterHooks re-apply keen-pbr's firewall on EVERY NDM netfilter rebuild
@@ -111,7 +111,7 @@ func (o *CutoverOptions) defaults() {
 	}
 }
 
-// Cutover performs the device-mutating cutover from the keen-pbr + S89 stack to Velinx,
+// Cutover performs the device-mutating cutover from the keen-pbr + S89 stack to WayHop,
 // in order: retire the old stack → install the netfilter re-apply hook → stage the new
 // sing-box config → CHECK the staged config (`sing-box check`) → restart sing-box → apply the
 // kernel-pbr plane. The check gate is critical: `S99sing-box restart` returns 0 even if sing-box

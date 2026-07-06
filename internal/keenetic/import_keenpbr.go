@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // The subset of a keen-pbr config.json we convert.
@@ -43,7 +43,7 @@ func isCIDRFeedURL(u string) bool {
 		strings.Contains(l, "discord_ips") || strings.Contains(l, "_ips.")
 }
 
-// ImportKeenPBR converts a keen-pbr config.json into Velinx RoutingLists, preserving the
+// ImportKeenPBR converts a keen-pbr config.json into WayHop RoutingLists, preserving the
 // IP-feed-vs-domain plane split:
 //   - a URL CIDR feed → CIDRSource (kernel plane);
 //   - a URL domain rule-set → Source (sing-box plane);
@@ -52,7 +52,7 @@ func isCIDRFeedURL(u string) bool {
 //     `<id>_ip` CIDRs) so each lands in the right plane.
 //
 // Each list's Outbound comes from the keen-pbr rule referencing it, mapped through outboundMap
-// (keen-pbr outbound tag → Velinx group/endpoint id). `files` supplies the lines of any
+// (keen-pbr outbound tag → WayHop group/endpoint id). `files` supplies the lines of any
 // `file:` list (read by the caller — the converter stays pure / does no I/O). A list not
 // referenced by any rule is emitted disabled. Generic: works on any keen-pbr config.
 func ImportKeenPBR(configJSON []byte, files map[string][]string, outboundMap map[string]string) ([]model.RoutingList, error) {

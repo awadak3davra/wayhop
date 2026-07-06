@@ -25,7 +25,7 @@ func TestParseNDMInterfaces(t *testing.T) {
 				"    connected: yes\n" +
 				"    state: up\n",
 			want: []DiscoveredVPN{
-				{Iface: "nwg0", Type: "amneziawg", Name: "ND_VPS"},
+				{Iface: "nwg0", NDMName: "Wireguard0", Type: "amneziawg", Name: "ND_VPS"},
 			},
 		},
 		{
@@ -46,15 +46,15 @@ func TestParseNDMInterfaces(t *testing.T) {
 				"    type: Wireguard\n" +
 				"    state: up\n",
 			want: []DiscoveredVPN{
-				{Iface: "nwg0", Type: "amneziawg", Name: "ND_NL"},
-				{Iface: "nwg1", Type: "amneziawg", Name: "ND_RU"},
+				{Iface: "nwg0", NDMName: "Wireguard0", Type: "amneziawg", Name: "ND_NL"},
+				{Iface: "nwg1", NDMName: "Wireguard1", Type: "amneziawg", Name: "ND_RU"},
 			},
 		},
 		{
 			name: "case-insensitive type + CRLF line endings, no description ⇒ empty Name",
 			in:   "interface-name: Wireguard2\r\n    type: WIREGUARD\r\n    link: up\r\n",
 			want: []DiscoveredVPN{
-				{Iface: "nwg2", Type: "amneziawg", Name: ""},
+				{Iface: "nwg2", NDMName: "Wireguard2", Type: "amneziawg", Name: ""},
 			},
 		},
 		{
@@ -71,7 +71,7 @@ func TestParseNDMInterfaces(t *testing.T) {
 				"    type: Wireguard\n" +
 				"another garbage line\n",
 			want: []DiscoveredVPN{
-				{Iface: "nwg0", Type: "amneziawg"},
+				{Iface: "nwg0", NDMName: "Wireguard0", Type: "amneziawg"},
 			},
 		},
 	}

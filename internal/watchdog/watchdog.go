@@ -7,6 +7,7 @@ package watchdog
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"sync"
 	"time"
 )
@@ -60,6 +61,10 @@ type Watchdog struct {
 	notify  func(string) // optional alert hook (e.g. WGBot); nil = off
 	plugins func()       // optional per-tick plugin supervision; nil = off
 	now     func() time.Time
+	// rng returns a random int in [0,n) — injected so the backoff can be JITTERED (de-synchronise
+	// co-crashing procs' retries). nil ⇒ no jitter (deterministic backoff = full window), which the
+	// timing tests rely on; New() installs a real source for production.
+	rng func(n int64) int64
 
 	mu          sync.Mutex
 	restarts    int
@@ -79,7 +84,25 @@ func New(name string, sup Supervisor) *Watchdog {
 		maxBackoff: 60 * time.Second,
 		stable:     30 * time.Second,
 		now:        time.Now,
+		rng: func(n int64) int64 {
+			if n <= 0 {
+				return 0
+			}
+			return rand.Int63n(n)
+		},
 	}
+}
+
+// jittered applies AWS "equal jitter" to a backoff window: keep half the window (so a crash loop
+// always waits meaningfully) and randomise the other half. Two procs that co-crash on a shared
+// upstream blip then retry at different times instead of hammering a weak router CPU/uplink in
+// lockstep. With rng==nil (tests) it returns the full window, so the backoff stays deterministic.
+func (w *Watchdog) jittered(d time.Duration) time.Duration {
+	if w.rng == nil || d <= 0 {
+		return d
+	}
+	half := d / 2
+	return half + time.Duration(w.rng(int64(half)+1))
 }
 
 // SetNotify installs an optional alert hook, fired on each crash-restart. Off by
@@ -143,7 +166,7 @@ func (w *Watchdog) tick() {
 			w.backoff = w.maxBackoff
 		}
 	}
-	w.nextAttempt = now.Add(w.backoff)
+	w.nextAttempt = now.Add(w.jittered(w.backoff))
 	w.mu.Unlock()
 
 	// Make the restart DECISION atomic when the supervisor supports it: spawn only

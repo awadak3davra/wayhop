@@ -1,4 +1,4 @@
-// Package updater manages the engine binaries velinx orchestrates (sing-box, xray,
+// Package updater manages the engine binaries wayhop orchestrates (sing-box, xray,
 // mihomo, hysteria, dnscrypt-proxy, ...). It reports the installed version,
 // queries upstream GitHub releases *through configurable mirrors* (GitHub is
 // frequently blocked/throttled in censored regions), and installs a chosen
@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -23,6 +24,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"wayhop/internal/pm"
 )
 
 // Engine describes a managed core binary and where to get it. Role tells the UI how
@@ -32,7 +35,7 @@ import (
 //	core         — the sing-box proxy core
 //	kernel-plugin— an engine driving a kernel iface (AmneziaWG)
 //	socks-plugin — a long-running chained-SOCKS engine (olcRTC)
-//	standalone   — a separate core velinx does NOT run here; sing-box covers the
+//	standalone   — a separate core wayhop does NOT run here; sing-box covers the
 //	               protocol natively, so it's catalog-only (install only for a manual
 //	               setup). The UI files these under "Advanced".
 type Engine struct {
@@ -49,7 +52,7 @@ type Engine struct {
 // RouterUsed reports whether the router actually runs this engine (vs catalog-only).
 func (e Engine) RouterUsed() bool { return e.Role != "" && e.Role != "standalone" }
 
-// Engines is the registry of cores velinx can manage.
+// Engines is the registry of cores wayhop can manage.
 var Engines = []Engine{
 	{ID: "sing-box", Name: "sing-box", Repo: "SagerNet/sing-box", BinName: "sing-box", Role: "core", VersionArgs: []string{"version"}},
 	{ID: "mihomo", Name: "Mihomo (Clash.Meta)", Repo: "MetaCubeX/mihomo", BinName: "mihomo", Role: "standalone", VersionArgs: []string{"-v"}},
@@ -75,13 +78,14 @@ func EngineByID(id string) *Engine {
 // Updater performs installed/latest/install operations.
 type Updater struct {
 	BinDir  string   // where binaries live, e.g. /opt/sbin
-	Arch    string   // velinx arch token: amd64|arm64|arm|mipsle|mips
+	Arch    string   // wayhop arch token: amd64|arm64|arm|mipsle|mips
 	Mirrors []string // URL prefixes tried in order; "" = direct
 	hc      *http.Client
+	pm      pm.Manager // native package manager (opkg/apk); zero value None = no recognition
 }
 
 // New builds an Updater. An empty arch autodetects from the running binary
-// (velinx is built for the router's arch, so runtime.GOARCH is correct on-device).
+// (wayhop is built for the router's arch, so runtime.GOARCH is correct on-device).
 func New(binDir, arch string, mirrors []string) *Updater {
 	if arch == "" {
 		arch = runtime.GOARCH // mipsle/mips/arm/arm64/amd64 line up with our tokens
@@ -90,8 +94,112 @@ func New(binDir, arch string, mirrors []string) *Updater {
 	if len(mirrors) == 0 {
 		mirrors = []string{""}
 	}
-	return &Updater{BinDir: binDir, Arch: arch, Mirrors: mirrors, hc: &http.Client{Timeout: 30 * time.Second}}
+	return &Updater{BinDir: binDir, Arch: arch, Mirrors: mirrors, hc: &http.Client{Timeout: 30 * time.Second}, pm: pm.Detect()}
 }
+
+// WithPM overrides the detected package manager (tests inject a mock; production uses Detect()).
+func (u *Updater) WithPM(m pm.Manager) *Updater { u.pm = m; return u }
+
+// PMKind is the detected package manager ("opkg"|"apk"|"") for UI display.
+func (u *Updater) PMKind() pm.Kind { return u.pm.Kind }
+
+// NativeManagedError is the typed refusal for a mutating operation on a PM-owned binary (or when
+// ownership could not be verified). Handlers match it with errors.As to return 409 (a policy
+// conflict, not a server failure) and to keep it OUT of the persisted last_error — the refusal is
+// permanent state, not an install failure.
+type NativeManagedError struct{ Msg string }
+
+func (e *NativeManagedError) Error() string { return e.Msg }
+
+// nativeManaged reports whether e's binary is a file OWNED by the native package manager. When
+// true, wayhop must NOT direct-download over it (that clobbers the packaged binary — the
+// /opt/bin/sing-box hazard) nor os.Remove it (that orphans the package DB); it defers to opkg/apk.
+// The probe follows the SAME resolution the UI's Installed() uses: BinDir/BinName first, then a
+// PATH lookup — so recognition can never disagree with the binary the panel is displaying. A
+// non-nil err means the PM couldn't answer (db locked by a concurrent opkg/apk run, timeout):
+// mutating callers fail CLOSED on it. No-op wherever no PM is present (dev/CI).
+func (u *Updater) nativeManaged(e Engine) (owner string, yes bool, err error) {
+	if !u.pm.Available() || e.BinName == "" {
+		return "", false, nil
+	}
+	path := filepath.Join(u.BinDir, e.BinName)
+	if _, serr := os.Stat(path); serr != nil {
+		p, lerr := exec.LookPath(e.BinName)
+		if lerr != nil {
+			return "", false, nil // nothing here and nothing on PATH -> nothing to clobber/orphan
+		}
+		path = p // mirror Installed()'s fallback: probe the binary the UI actually shows
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return u.pm.Owner(ctx, path)
+}
+
+// NativeManaged is the exported form for the server/UI ("is this engine opkg/apk-owned here").
+// A PM query failure reads as false here — the UI badge is advisory; the mutating paths do their
+// own fail-closed check.
+func (u *Updater) NativeManaged(e Engine) bool { _, yes, _ := u.nativeManaged(e); return yes }
+
+// NativeManagedInfo is NativeManaged plus the owning package name, so the UI can say
+// "managed by apk (package sing-box) — update it there" up front instead of after a failed click.
+func (u *Updater) NativeManagedInfo(e Engine) (owner string, yes bool) {
+	owner, yes, _ = u.nativeManaged(e)
+	return owner, yes
+}
+
+// engineManagedErr converts a nativeManaged probe into the refusal error for a mutating verb
+// ("install"/"remove"), nil when the mutation may proceed. Fail-closed: an unanswerable probe
+// refuses too, instead of proceeding on a guess.
+func (u *Updater) engineManagedErr(e Engine, verb string) error {
+	owner, yes, err := u.nativeManaged(e)
+	if err != nil {
+		return &NativeManagedError{Msg: fmt.Sprintf("could not verify whether %s belongs to %s (package manager busy?) — retry in a moment: %v", e.ID, u.pm.Kind, err)}
+	}
+	if yes {
+		return &NativeManagedError{Msg: fmt.Sprintf("%s is managed by %s here (package %q) — %s it with %s, not the panel: a panel %s would desync the package manager", e.ID, u.pm.Kind, owner, verb, u.pm.Kind, verb)}
+	}
+	return nil
+}
+
+// UninstallPrecheck reports (as an error) why e cannot be uninstalled from the panel, WITHOUT
+// touching anything. The HTTP handler runs this BEFORE stopping the core/plugins, so a refusal can
+// never leave a process stopped with nothing removed (the stop-then-refuse inversion).
+func (u *Updater) UninstallPrecheck(e Engine) error {
+	if e.SourceOnly {
+		return fmt.Errorf("%s is built from source — there is no panel-installed binary to remove", e.ID)
+	}
+	if e.BinName == "" {
+		return fmt.Errorf("%s has no removable binary", e.ID)
+	}
+	if err := u.engineManagedErr(e, "remove"); err != nil {
+		return err
+	}
+	if _, err := os.Stat(filepath.Join(u.BinDir, e.BinName)); err != nil {
+		if os.IsNotExist(err) {
+			// Installed() may have resolved the binary via PATH (outside BinDir) — that copy was
+			// not installed by the panel, so silently reporting "removed" would be a lie.
+			return fmt.Errorf("%s has no panel-installed binary at %s — it is installed outside the panel (system package or manual copy); remove it there", e.ID, filepath.Join(u.BinDir, e.BinName))
+		}
+		return err
+	}
+	return nil
+}
+
+// selfManaged reports whether the running wayhop binary (exePath) is OWNED by the native package
+// manager — i.e. installed from the wayhop-feed. When true, wayhop must not self-swap the binary
+// (that fights opkg/apk's DB + sysupgrade keep-list); the user upgrades via the package manager.
+// err = the PM couldn't answer; SelfUpdate fails closed on it.
+func (u *Updater) selfManaged(exePath string) (owner string, yes bool, err error) {
+	if !u.pm.Available() || exePath == "" {
+		return "", false, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return u.pm.Owner(ctx, exePath)
+}
+
+// SelfManaged is the exported form for the server/UI ("is wayhop itself opkg/apk-owned here").
+func (u *Updater) SelfManaged(exePath string) bool { _, yes, _ := u.selfManaged(exePath); return yes }
 
 // sanitizeMirrors keeps only usable mirror prefixes: the "" sentinel (direct, no
 // mirror) and absolute http:// or https:// prefixes. A user-set mirror that isn't a
@@ -149,6 +257,28 @@ func (u *Updater) Installed(e Engine) Installed {
 	return in
 }
 
+// binaryRunnable runs path's version command to confirm it EXECUTES on this arch, returning the
+// parsed version. err is non-nil ONLY when the binary could not be executed at all (wrong arch /
+// corrupt / missing loader): an ExitError (it ran but exited non-zero) and an empty/unparsed version
+// are NOT errors, since some engines print their version to stderr or exit non-zero. Empty
+// versionArgs is a no-op — nothing to probe.
+func binaryRunnable(path string, versionArgs []string) (version string, err error) {
+	if len(versionArgs) == 0 {
+		return "", nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, runErr := exec.CommandContext(ctx, path, versionArgs...).CombinedOutput()
+	v := parseVersion(string(out))
+	if runErr != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(runErr, &exitErr) {
+			return v, fmt.Errorf("does not execute: %v", runErr)
+		}
+	}
+	return v, nil
+}
+
 // --- GitHub releases (mirror-aware) ---------------------------------------
 
 type Release struct {
@@ -180,7 +310,7 @@ func (u *Updater) apiGet(ctx context.Context, path string, v any) error {
 			continue
 		}
 		req.Header.Set("Accept", "application/vnd.github+json")
-		req.Header.Set("User-Agent", "velinx-updater")
+		req.Header.Set("User-Agent", "wayhop-updater")
 		resp, err := u.hc.Do(req)
 		if err != nil {
 			lastErr = err
@@ -321,32 +451,38 @@ func enoughSpaceFor(avail uint64, known bool, binSize int, withBackup bool) bool
 	return avail >= uint64(binSize)*mult+(2<<20) // + 2 MiB margin
 }
 
-// peakInstallRAM estimates the worst-case RAM the in-memory install path holds at once for an
-// asset of assetSize COMPRESSED bytes: download() buffers the compressed archive in RAM, then
-// extractBinary() produces the decompressed binary from it while the compressed buffer is still
-// alive — so the peak is the compressed buffer PLUS the decompressed binary. A binary archive
-// inflates ~1.5-2.5x, so we bound the peak at ~3.5x the compressed size, plus an 8 MiB safety
-// margin for the daemon's own working set during the install.
-func peakInstallRAM(assetSize int64) uint64 {
-	return uint64(assetSize)*7/2 + (8 << 20) // ~3.5x compressed + 8 MiB
+// updateMemNeed estimates the MemAvailable an install + engine restart needs to avoid OOM-killing
+// the daemon or the running proxy core (which would drop the family's routing). The streaming
+// install itself is light on RAM — the real risk is the RESTART, where the new process faults in
+// ~the unpacked binary while the old one may still be resident — so we size the unpacked binary
+// (unpackedBytes: 1x bare, 3x compressed) plus a floor that keeps the daemon + core + routing alive
+// across the swap. Conservative by design: on a tight router it is far safer to refuse (free RAM /
+// install over SSH) than to OOM mid-update and drop routing.
+func updateMemNeed(assetSize int64, assetName string) uint64 {
+	const restartFloor = 16 << 20
+	return unpackedBytes(assetSize, assetName) + restartFloor
 }
 
-// enoughMemForDownload reports whether `avail` bytes of available RAM can hold the in-memory
-// install peak for an asset of assetSize compressed bytes. Unknown avail (known=false, e.g. the
-// off-Linux build) or unknown assetSize (older releases omit it) never blocks — we don't reject
-// on a number we couldn't measure. This stops a large engine install from OOM-killing a low-RAM
-// router (the panel downloads + unpacks the binary in RAM) BEFORE any bytes are fetched, turning
-// an OOM crash into a clear "free memory and retry / install over SSH" message.
-func enoughMemForDownload(avail uint64, known bool, assetSize int64) bool {
+// enoughMemForUpdate reports whether `avail` bytes of MemAvailable can safely absorb the install +
+// restart. Unknown avail (known=false, e.g. the off-Linux build) or unknown assetSize (older
+// releases omit it) never blocks — we don't reject on a number we couldn't measure.
+func enoughMemForUpdate(avail uint64, known bool, assetSize int64, assetName string) bool {
 	if !known || assetSize <= 0 {
 		return true
 	}
-	return avail >= peakInstallRAM(assetSize)
+	return avail >= updateMemNeed(assetSize, assetName)
 }
 
 func (u *Updater) Install(ctx context.Context, e Engine, tag string) (string, error) {
 	if e.SourceOnly {
 		return "", fmt.Errorf("%s has no prebuilt releases: %s", e.ID, e.Note)
+	}
+	// If this engine's binary is OWNED by the native package manager, do NOT direct-download over it
+	// — that clobbers the packaged binary and desyncs the package DB (the /opt/bin/sing-box hazard).
+	// Defer to opkg/apk. Path-based (no name map trusted); a no-op wherever no PM is present.
+	// FAIL-CLOSED: if the PM can't answer (db locked by a concurrent opkg/apk run), refuse + retry.
+	if err := u.engineManagedErr(e, "update"); err != nil {
+		return "", err
 	}
 	rel, err := u.release(ctx, e, tag)
 	if err != nil {
@@ -363,37 +499,57 @@ func (u *Updater) Install(ctx context.Context, e Engine, tag string) (string, er
 	// BinDir as it downloads. On a tiny router overlay a large core simply cannot fit, so refuse
 	// early with an actionable message instead of failing mid-write. (Streaming retired the old
 	// in-RAM compressed+decompressed peak, so RAM is no longer the binding constraint here.)
-	if avail, ok := AvailBytes(u.BinDir); !enoughFlashFor(avail, ok, asset.Size, false) {
-		return "", fmt.Errorf("not enough free space to install %s in %s (~%d MiB free, need ~%d MiB for the unpacked binary) — free space, mount external storage, or install over SSH", e.ID, u.BinDir, avail>>20, peakInstallDisk(asset.Size, false)>>20)
+	if avail, ok := AvailBytes(u.BinDir); !enoughFlashFor(avail, ok, asset.Size, asset.Name, false) {
+		return "", fmt.Errorf("not enough free space to install %s in %s (~%d MiB free, need ~%d MiB for the unpacked binary) — free space, mount external storage, or install over SSH", e.ID, u.BinDir, avail>>20, peakInstallDisk(asset.Size, asset.Name, false)>>20)
+	}
+	// Memory pre-flight (the lock): streaming to disk is cheap, but the engine RESTART faults the new
+	// binary in while the old may still be resident — on a tight router that OOM-kills the daemon or
+	// sing-box and drops routing. Refuse early. No-op off Linux / when MemAvailable is unknown.
+	if avail, ok := availMemBytes(); !enoughMemForUpdate(avail, ok, asset.Size, asset.Name) {
+		return "", fmt.Errorf("not enough free memory to install %s safely (~%d MiB free, need ~%d MiB) — free RAM or install over SSH", e.ID, avail>>20, updateMemNeed(asset.Size, asset.Name)>>20)
 	}
 	dst := filepath.Join(u.BinDir, e.BinName)
 	tmp := dst + ".new"
 	if err := u.streamAssetToFile(ctx, *asset, e.BinName, tmp, false); err != nil {
 		return "", fmt.Errorf("download %s: %w", asset.Name, err)
 	}
+	// Re-verify BEFORE swapping: probe the STAGED binary's version command to confirm it executes on
+	// this arch. A wrong-arch/corrupt asset can pass the digest yet fail to run (the "installed but
+	// crash-loops on start" class). If it won't run, drop the staged file and keep the existing binary
+	// untouched — no rollback needed because we never overwrote it. Skipped when e has no VersionArgs.
+	v, verr := binaryRunnable(tmp, e.VersionArgs)
+	if verr != nil {
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("downloaded %s but it %v — wrong arch or corrupt asset; the existing binary was left untouched, retry or install over SSH", e.ID, verr)
+	}
+	// TOCTOU re-check: the ownership gate above ran BEFORE a download that can take minutes on a
+	// mirrored/censored link. If an admin ran `opkg install`/`apk add` for this engine meanwhile,
+	// the rename below would clobber the freshly packaged binary — re-probe right before the swap.
+	if err := u.engineManagedErr(e, "update"); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
 	if err := os.Rename(tmp, dst); err != nil {
 		_ = os.Remove(tmp)
 		return "", err
 	}
+	if v != "" {
+		return v, nil // report the REAL running version, not just the release tag
+	}
 	return rel.Tag, nil
 }
 
-// Uninstall removes the engine binary this updater installed (BinDir/BinName). It refuses
-// SourceOnly engines (the panel installs no binary for those — they're built from source) and
-// is a no-op success when the binary is already absent. It only ever deletes inside BinDir,
-// never a PATH-resolved system binary, so it can't nuke an OS-provided tool.
+// Uninstall removes the engine binary this updater installed (BinDir/BinName). All preconditions
+// live in UninstallPrecheck (SourceOnly, PM-owned refuse, absent-binary refuse — a binary the
+// panel never installed must not report "removed"), which the HTTP handler ALSO runs before
+// stopping any process. It only ever deletes inside BinDir, never a PATH-resolved system binary,
+// so it can't nuke an OS-provided tool.
 func (u *Updater) Uninstall(e Engine) error {
-	if e.SourceOnly {
-		return fmt.Errorf("%s is built from source — there is no panel-installed binary to remove", e.ID)
-	}
-	if e.BinName == "" {
-		return fmt.Errorf("%s has no installable binary name", e.ID)
+	if err := u.UninstallPrecheck(e); err != nil {
+		return err
 	}
 	dst := filepath.Join(u.BinDir, e.BinName)
-	if err := os.Remove(dst); err != nil {
-		if os.IsNotExist(err) {
-			return nil // already gone — treat as success
-		}
+	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) { // IsNotExist: precheck raced a concurrent remove — gone is gone
 		return fmt.Errorf("remove %s: %w", dst, err)
 	}
 	return nil
@@ -422,7 +578,7 @@ func (u *Updater) download(ctx context.Context, rawURL string, maxBytes int64) (
 			lastErr = err
 			continue
 		}
-		req.Header.Set("User-Agent", "velinx-updater")
+		req.Header.Set("User-Agent", "wayhop-updater")
 		resp, err := u.hc.Do(req)
 		if err != nil {
 			lastErr = err
@@ -597,7 +753,7 @@ func verifyDigest(data []byte, digest string) error {
 }
 
 // verifyDigestRequired is the SELF-UPDATE variant: a present, matching sha256 is MANDATORY because
-// the Velinx binary runs as root after a swap, so we refuse to install one we couldn't verify. WR's
+// the WayHop binary runs as root after a swap, so we refuse to install one we couldn't verify. WR's
 // own CI publishes every tarball as a GitHub Release asset, which GitHub auto-populates with a
 // sha256 digest, so a real release always passes; an absent digest means the mirror channel is the
 // only trust root and we decline.
@@ -606,19 +762,19 @@ func verifyDigestRequired(data []byte, digest string) error {
 	return verifyDigestSum("sha256:"+hex.EncodeToString(sum[:]), digest, true)
 }
 
-// --- Velinx self-update -------------------------------------------------
+// --- WayHop self-update -------------------------------------------------
 //
-// Velinx can update ITSELF (not just the engines it orchestrates) from its own
+// WayHop can update ITSELF (not just the engines it orchestrates) from its own
 // CI release builds. The build workflow publishes per-arch tarballs named
-// velinx-<ver>-<arch>.tar.gz and velinx-<ver>-<arch>-openwrt.tar.gz (the latter
-// carries the procd init), each containing a velinx-<arch> binary. Those names have
+// wayhop-<ver>-<arch>.tar.gz and wayhop-<ver>-<arch>-openwrt.tar.gz (the latter
+// carries the procd init), each containing a wayhop-<arch> binary. Those names have
 // no "linux" token, so the engine asset matcher does not apply — selfAsset handles them.
 
-// DefaultSelfRepo is where Velinx fetches its OWN release builds when the config
+// DefaultSelfRepo is where WayHop fetches its OWN release builds when the config
 // leaves Updater.SelfRepo empty (the maintainer's fork, CI-built on every v* tag).
-const DefaultSelfRepo = "awadak3davra/velinx"
+const DefaultSelfRepo = "awadak3davra/wayhop"
 
-// selfAsset picks the Velinx release tarball for arch, preferring the OpenWrt
+// selfAsset picks the WayHop release tarball for arch, preferring the OpenWrt
 // package over the generic one. The leading "-"+arch avoids "arm" matching "arm64".
 func selfAsset(assets []Asset, arch string) *Asset {
 	var generic *Asset
@@ -626,7 +782,7 @@ func selfAsset(assets []Asset, arch string) *Asset {
 	gen := "-" + arch + ".tar.gz"
 	for i := range assets {
 		n := strings.ToLower(assets[i].Name)
-		if !strings.HasPrefix(n, "velinx-") {
+		if !strings.HasPrefix(n, "wayhop-") {
 			continue
 		}
 		if strings.HasSuffix(n, ow) {
@@ -639,8 +795,12 @@ func selfAsset(assets []Asset, arch string) *Asset {
 	return generic
 }
 
-// SelfLatest returns the newest Velinx release that carries a tarball for this
-// arch (newest first; includes prereleases). repo "" → DefaultSelfRepo.
+// SelfLatest returns the newest STABLE WayHop release carrying a tarball for this arch.
+// Prereleases are SKIPPED — self-update runs as root and AutoUpdateLoop can install it
+// unattended, so it must never auto-jump onto an -rc/-alpha (the engine path guards the same
+// way via LatestStable) — and are used only as a fallback when no stable build exists yet. A
+// specific prerelease can still be pinned via the explicit version in handleSelfUpdate.
+// repo "" → DefaultSelfRepo.
 func (u *Updater) SelfLatest(ctx context.Context, repo string) (Release, error) {
 	if repo == "" {
 		repo = DefaultSelfRepo
@@ -649,49 +809,85 @@ func (u *Updater) SelfLatest(ctx context.Context, repo string) (Release, error) 
 	if err != nil {
 		return Release{}, err
 	}
-	for _, r := range rels {
-		if selfAsset(r.Assets, u.Arch) != nil {
-			return r, nil
-		}
+	if r, ok := pickSelfRelease(rels, u.Arch); ok {
+		return r, nil
 	}
-	return Release{}, fmt.Errorf("no velinx %s asset in recent %s releases", u.Arch, repo)
+	return Release{}, fmt.Errorf("no wayhop %s asset in recent %s releases", u.Arch, repo)
 }
 
-// SelfUpdate downloads Velinx release `tag` from repo, verifies it, SANITY-RUNS the
+// pickSelfRelease chooses the self-update target from a newest-first release list: the newest
+// STABLE release that has an asset for arch, falling back to the newest prerelease with one only
+// if no stable does. ok=false when no release carries an asset for arch. Pure (unit-tested).
+func pickSelfRelease(rels []Release, arch string) (Release, bool) {
+	var fallback *Release
+	for i := range rels {
+		if selfAsset(rels[i].Assets, arch) == nil {
+			continue
+		}
+		if !rels[i].Prerelease {
+			return rels[i], true
+		}
+		if fallback == nil {
+			fallback = &rels[i]
+		}
+	}
+	if fallback != nil {
+		return *fallback, true
+	}
+	return Release{}, false
+}
+
+// SelfUpdate downloads WayHop release `tag` from repo, verifies it, SANITY-RUNS the
 // new binary (`<bin> -version` must print a version), backs up the current executable
 // (exePath+".bak", reboot-safe rollback), then atomically swaps it in. The caller must
 // restart the service to run it (the running process keeps the old inode until then).
 // The sanity-run guarantees a corrupt/wrong-arch download never replaces a working daemon.
 func (u *Updater) SelfUpdate(ctx context.Context, repo, tag, exePath string) (string, error) {
+	// If wayhop itself was installed from the wayhop-feed (opkg/apk owns exePath), do NOT self-swap
+	// the binary: that fights the package DB + sysupgrade keep-list and races the package's own
+	// postinst restart (red-team R5). Defer to the PM. No-op on the normal GitHub-installed path.
+	// FAIL-CLOSED on an unanswerable probe (PM db locked) — never self-swap on a guess.
+	owner, yes, perr := u.selfManaged(exePath)
+	if perr != nil {
+		return "", &NativeManagedError{Msg: fmt.Sprintf("could not verify whether wayhop belongs to %s (package manager busy?) — retry in a moment: %v", u.pm.Kind, perr)}
+	}
+	if yes {
+		return "", &NativeManagedError{Msg: fmt.Sprintf("wayhop is managed by %s here (package %q owns %s) — upgrade it with %s, not the panel: a self-swap would fight the package manager", u.pm.Kind, owner, exePath, u.pm.Kind)}
+	}
 	if repo == "" {
 		repo = DefaultSelfRepo
 	}
 	rel, err := u.release(ctx, Engine{Repo: repo}, tag)
 	if err != nil {
-		return "", fmt.Errorf("lookup velinx %s: %w", tag, err)
+		return "", fmt.Errorf("lookup wayhop %s: %w", tag, err)
 	}
 	asset := selfAsset(rel.Assets, u.Arch)
 	if asset == nil {
-		return "", fmt.Errorf("no velinx %s asset in %s", u.Arch, tag)
+		return "", fmt.Errorf("no wayhop %s asset in %s", u.Arch, tag)
 	}
 	dir := filepath.Dir(exePath)
 	// Flash pre-flight: the staged binary AND the .bak backup both land on exePath's filesystem.
 	// On the tiny router overlay a swap that won't fit would otherwise fail mid-write — abort
 	// cleanly, untouched. (Streaming retired the in-RAM peak, so flash is the binding constraint.)
-	if avail, ok := AvailBytes(dir); !enoughFlashFor(avail, ok, asset.Size, true) {
-		return "", fmt.Errorf("not enough free space to self-update safely on %s (~%d MiB free, need ~%d MiB for the new binary + backup) — free space, mount external storage, or update over SSH", dir, avail>>20, peakInstallDisk(asset.Size, true)>>20)
+	if avail, ok := AvailBytes(dir); !enoughFlashFor(avail, ok, asset.Size, asset.Name, true) {
+		return "", fmt.Errorf("not enough free space to self-update safely on %s (~%d MiB free, need ~%d MiB for the new binary + backup) — free space, mount external storage, or update over SSH", dir, avail>>20, peakInstallDisk(asset.Size, asset.Name, true)>>20)
 	}
-	staged := filepath.Join(dir, ".velinx.new")
+	// Memory pre-flight (the lock): self-update restarts the daemon, briefly holding old+new resident
+	// alongside sing-box + routing — refuse on a tight router rather than risk an OOM that drops it.
+	if avail, ok := availMemBytes(); !enoughMemForUpdate(avail, ok, asset.Size, asset.Name) {
+		return "", fmt.Errorf("not enough free memory to self-update safely (~%d MiB free, need ~%d MiB) — free RAM or update over SSH", avail>>20, updateMemNeed(asset.Size, asset.Name)>>20)
+	}
+	staged := filepath.Join(dir, ".wayhop.new")
 	// Stream the asset straight to the staged file (digest MANDATORY — the new binary runs as root):
 	// no compressed/decompressed RAM buffer, so a self-update can't OOM the router mid-swap.
-	if err := u.streamAssetToFile(ctx, *asset, "velinx-"+u.Arch, staged, true); err != nil {
-		return "", fmt.Errorf("download velinx-%s: %w", u.Arch, err)
+	if err := u.streamAssetToFile(ctx, *asset, "wayhop-"+u.Arch, staged, true); err != nil {
+		return "", fmt.Errorf("download wayhop-%s: %w", u.Arch, err)
 	}
 	// Sanity-run BEFORE swapping — refuse a binary that won't execute on this arch.
 	out, runErr := exec.CommandContext(ctx, staged, "-version").CombinedOutput()
 	if runErr != nil || parseVersion(string(out)) == "" {
 		_ = os.Remove(staged)
-		return "", fmt.Errorf("staged velinx binary failed its sanity check (corrupt or wrong arch): %v", runErr)
+		return "", fmt.Errorf("staged wayhop binary failed its sanity check (corrupt or wrong arch): %v", runErr)
 	}
 	// Back up the current binary on the same filesystem, then atomically swap. The .bak is
 	// the reboot-safe rollback, so it is MANDATORY: if we can't read the running binary or

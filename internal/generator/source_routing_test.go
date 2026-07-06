@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/importer"
-	"velinx/internal/model"
+	"wayhop/internal/importer"
+	"wayhop/internal/model"
 )
 
 // TestSourceRoutingGenerate covers the sing-box plane of source-based routing (Phase B):

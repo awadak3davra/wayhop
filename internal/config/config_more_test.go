@@ -20,8 +20,8 @@ func TestStoremodelconfigDefaultSaneValues(t *testing.T) {
 	if c.Listen != ":8088" {
 		t.Errorf("Listen: want :8088, got %q", c.Listen)
 	}
-	if c.DataDir != "/opt/var/velinx" {
-		t.Errorf("DataDir: want /opt/var/velinx, got %q", c.DataDir)
+	if c.DataDir != "/opt/var/wayhop" {
+		t.Errorf("DataDir: want /opt/var/wayhop, got %q", c.DataDir)
 	}
 	if c.Demo {
 		t.Error("Demo should default to false")

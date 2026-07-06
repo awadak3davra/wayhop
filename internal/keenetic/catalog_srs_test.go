@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestApplyCatalogSRS_AndInlineSkip: big/common lists are rewritten to a catalog .srs (Format

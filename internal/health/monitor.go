@@ -11,12 +11,13 @@ import (
 	"sync"
 	"time"
 
-	"velinx/internal/clash"
-	"velinx/internal/kb"
-	"velinx/internal/model"
-	"velinx/internal/netdiag"
-	"velinx/internal/store"
-	"velinx/internal/util"
+	"wayhop/internal/clash"
+	"wayhop/internal/failover"
+	"wayhop/internal/kb"
+	"wayhop/internal/model"
+	"wayhop/internal/netdiag"
+	"wayhop/internal/store"
+	"wayhop/internal/util"
 )
 
 type State string
@@ -39,7 +40,8 @@ type stat struct {
 	lastLatency                      int
 	state                            State
 	reconnects                       int
-	consecFail                       int   // consecutive Down probes not yet promoted to a flip (hysteresis)
+	consecFail                       int   // consecutive Down probes not yet promoted to a flip (fast-out hysteresis)
+	consecOK                         int   // consecutive Alive probes while still marked Down (slow-in recovery hysteresis)
 	firstSeen, lastChange, lastProbe int64 // unix ms
 
 	// traffic (from Clash /connections, best-effort)
@@ -70,8 +72,17 @@ const healthWindow = 30
 // flapThreshold is how many CONSECUTIVE Down probes must be seen before the monitor flips
 // an endpoint's state to Down. It debounces a single transient probe failure (which would
 // otherwise zero uptime + inflate the reconnect counter) on a lossy path. Demo mode uses 1
-// (instant showcase). Recovery (Alive) and Unknown always commit immediately.
+// (instant showcase). Unknown always commits immediately.
 const flapThreshold = 2
+
+// aliveThreshold is how many CONSECUTIVE Alive probes must be seen before the monitor promotes
+// a target OUT of Down back to Alive. It is the symmetric counterpart to flapThreshold: every
+// robust load balancer uses fast-out / slow-in (HAProxy rise 2 / fall 3, AWS ALB healthy 5 vs
+// unhealthy 2), so a dead exit that answers ONE lucky probe doesn't instantly flip Alive,
+// count a reconnect, and (once a health-driven selector loop exists) re-attract traffic. Only
+// the Down→Alive recovery is gated; Unknown→Alive (initial bring-up) still commits immediately.
+// Demo mode uses 1 (instant showcase).
+const aliveThreshold = 2
 
 func (s *stat) pushSample(p probeSample) {
 	s.recent[s.recentPos] = p
@@ -104,15 +115,16 @@ type View struct {
 
 // Monitor probes targets and accumulates their stats.
 type Monitor struct {
-	mu        sync.Mutex
-	stats     map[string]*stat
-	clash     *clash.Client
-	store     *store.Store
-	logs      LogSource
-	demo      bool
-	testURL   string
-	interval  time.Duration
-	timeoutMS int
+	mu         sync.Mutex
+	stats      map[string]*stat
+	localFault bool // last tick saw EVERY endpoint down at once ⇒ likely local uplink, not N exits
+	clash      *clash.Client
+	store      *store.Store
+	logs       LogSource
+	demo       bool
+	testURL    string
+	interval   time.Duration
+	timeoutMS  int
 	// ifaceBytesFn reads a kernel iface's cumulative rx/tx byte counters (injectable for tests;
 	// defaults to ifaceBytes/sysfs). Kernel-routed endpoints bypass sing-box and never appear in
 	// Clash /connections, so their throughput is read from the tunnel iface here instead.
@@ -171,21 +183,29 @@ func (m *Monitor) record(id, name, kind string, state State, latency int, now in
 		s.sumLatency += int64(latency)
 		s.lastLatency = latency
 		s.consecFail = 0
+		s.consecOK++
 		s.pushSample(probeSample{ok: true, latency: latency})
 	case Down:
 		s.fail++
 		s.consecFail++
+		s.consecOK = 0
 		s.pushSample(probeSample{ok: false})
 	}
-	// Hysteresis: hold the current state until flapThreshold consecutive Down probes confirm
-	// a real outage, so one dropped probe on a lossy path doesn't flip Down→Alive (zeroing
-	// uptime + counting a bogus reconnect). Alive/Unknown commit immediately; demo is instant.
-	threshold := flapThreshold
+	// Hysteresis (fast-out / slow-in): hold the current state until enough consecutive probes
+	// confirm the transition. flapThreshold consecutive Down probes confirm a real outage (so one
+	// dropped probe on a lossy path doesn't flip Alive→Down, zeroing uptime); aliveThreshold
+	// consecutive Alive probes confirm a real recovery (so a dead exit answering one lucky probe
+	// doesn't flip Down→Alive, count a reconnect, and re-attract traffic). Unknown commits
+	// immediately, and so does Unknown→Alive initial bring-up; demo is instant both ways.
+	downThreshold, upThreshold := flapThreshold, aliveThreshold
 	if m.demo {
-		threshold = 1
+		downThreshold, upThreshold = 1, 1
 	}
 	commit := state
-	if state == Down && s.consecFail < threshold {
+	switch {
+	case state == Down && s.consecFail < downThreshold:
+		commit = s.state
+	case state == Alive && s.state == Down && s.consecOK < upThreshold:
 		commit = s.state
 	}
 	if commit != s.state {
@@ -291,23 +311,120 @@ func (m *Monitor) tick(ctx context.Context) {
 	defer cancel()
 	tgs := m.targets()
 	now := nowMS()
+	// Probe concurrently into per-index result slots (distinct indices → no data race; wg.Wait
+	// establishes the happens-before before we read them). Recording is deferred until after the
+	// whole tick's results are in, so a tick-global decision (the local-fault gate) can be made
+	// BEFORE any single Down flip is committed.
+	states := make([]State, len(tgs))
+	lats := make([]int, len(tgs))
 	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
-	for _, tg := range tgs {
+	for i, tg := range tgs {
 		wg.Add(1)
-		go func(tg target) {
+		go func(i int, tg target) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			st, lat := m.probe(tctx, tg.id, tg.testURL, tg.iface)
-			m.record(tg.id, tg.name, tg.kind, st, lat, now)
-		}(tg)
+			states[i], lats[i] = m.probe(tctx, tg.id, tg.testURL, tg.iface)
+		}(i, tg)
 	}
 	wg.Wait()
 	if tctx.Err() != nil {
 		return
 	}
+	m.applyResults(tgs, states, lats, now)
 	m.sampleTraffic(tctx, tgs, now)
+	m.pruneStats(tgs)
+}
+
+// applyResults commits one tick's probe results, applying the local-fault (Envoy "panic
+// threshold") gate first: if EVERY endpoint that returned a definite result this tick is Down (≥2
+// of them, none Alive), the local uplink or a shared upstream is the likely cause — not N
+// independent exits failing at once. Those endpoints' Down probes are then SUPPRESSED (state held
+// instead of flipped, so uptime isn't zeroed, reconnects aren't inflated, and failover isn't
+// thrashed) and the localFault flag is raised so the UI can show one honest "local network
+// problem" banner rather than a wall of red exits. Split out from tick() so it is unit-testable
+// without the probe machinery.
+func (m *Monitor) applyResults(tgs []target, states []State, lats []int, now int64) {
+	localFault := allEndpointsDown(tgs, states)
+	m.mu.Lock()
+	m.localFault = localFault
+	m.mu.Unlock()
+	for i, tg := range tgs {
+		if localFault && tg.kind == "endpoint" && states[i] == Down {
+			continue // suppress: don't advance this endpoint toward Down during a local fault
+		}
+		m.record(tg.id, tg.name, tg.kind, states[i], lats[i], now)
+	}
+}
+
+// allEndpointsDown reports whether EVERY endpoint that returned a definite Alive/Down result this
+// tick is Down (with at least two such endpoints) — the "the local side is down, not the exits"
+// signal. Any Alive endpoint disproves it; Unknown results (e.g. Clash unreachable) are ignored.
+func allEndpointsDown(tgs []target, states []State) bool {
+	definite := 0
+	for i, tg := range tgs {
+		if tg.kind != "endpoint" {
+			continue
+		}
+		switch states[i] {
+		case Alive:
+			return false
+		case Down:
+			definite++
+		}
+	}
+	return definite >= 2
+}
+
+// LocalFault reports whether the last tick looked like a local-uplink/shared-upstream outage
+// (every endpoint down at once) rather than individual exit failures. Surfaced so the UI can show
+// one honest "local network problem" banner instead of a wall of red exits.
+func (m *Monitor) LocalFault() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.localFault
+}
+
+// MemberHealth returns the given member ids' current health as the failover control loop sees them:
+// Alive iff the monitor's hysteresis-committed state is Alive (so F1's fast-out/slow-in already
+// applies), with the last measured latency. The builtin "direct" member (WAN) is always alive.
+// An unknown/never-probed member reports Alive=false so the controller treats it as not-yet-selectable
+// rather than guessing. Reads under the lock; ids are typically a managed group's members, in order.
+func (m *Monitor) MemberHealth(ids []string) []failover.MemberHealth {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]failover.MemberHealth, 0, len(ids))
+	for _, id := range ids {
+		mh := failover.MemberHealth{ID: id}
+		if id == "direct" {
+			mh.Alive = true // WAN/direct is always reachable (mirrors Snapshot's group derivation)
+		} else if s := m.stats[id]; s != nil {
+			mh.Alive = s.state == Alive
+			mh.LatencyMs = s.lastLatency
+		}
+		out = append(out, mh)
+	}
+	return out
+}
+
+// pruneStats drops stats for targets that no longer exist. genID rotates a target's id whenever an
+// endpoint/group is added, deleted, renamed, reordered or disabled, so without this m.stats grows
+// without bound over the life of a long-running daemon — a real (if slow) memory leak on a
+// 128–256MB router. Only the current live target set is kept; each holds a fixed-size [30]sample
+// ring, so the map's footprint stays bounded by the profile size, not by history. Locks m.mu.
+func (m *Monitor) pruneStats(tgs []target) {
+	live := make(map[string]struct{}, len(tgs))
+	for _, tg := range tgs {
+		live[tg.id] = struct{}{}
+	}
+	m.mu.Lock()
+	for id := range m.stats {
+		if _, ok := live[id]; !ok {
+			delete(m.stats, id)
+		}
+	}
+	m.mu.Unlock()
 }
 
 // addCumulativeTraffic updates a stat from a new pair of CUMULATIVE byte counters (the active-

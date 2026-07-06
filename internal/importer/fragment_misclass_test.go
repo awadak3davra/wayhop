@@ -3,7 +3,7 @@ package importer
 import (
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestParse_FragmentNotMisclassified (#14/#15): a proxy share link whose #fragment (node name) contains

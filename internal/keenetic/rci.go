@@ -1,5 +1,5 @@
 // Package keenetic drives a KeeneticOS router via RCI (the REST mirror of the NDM command
-// tree) — the foundation of Velinx's native-first Keenetic backend. The backend uses
+// tree) — the foundation of WayHop's native-first Keenetic backend. The backend uses
 // native AmneziaWG/WireGuard interfaces + NDM metric-ordered routing instead of userspace
 // tunnels; RCI is how it reads state and applies config over HTTP. See memory
 // keenetic-backend.md + docs/ARCHITECTURE_NATIVE_FIRST.md (Phase 3).
@@ -101,7 +101,7 @@ func (c *RCIClient) Show(ctx context.Context, path string) ([]byte, error) {
 
 // Parse executes an NDM CLI command via POST /rci/parse — this is how the backend APPLIES
 // native config (e.g. `interface Wireguard0`, `wireguard asc …`, `ip route …`, `up`).
-// CALLER OWNS SAFETY: only Velinx-managed config should be passed; never run with the
+// CALLER OWNS SAFETY: only WayHop-managed config should be passed; never run with the
 // live family router without the user's explicit OK (the loop is read-only by default).
 func (c *RCIClient) Parse(ctx context.Context, command string) ([]byte, error) {
 	body, _ := json.Marshal(map[string]string{"parse": command})

@@ -1,4 +1,4 @@
-// Package server exposes the velinx HTTP API and serves the embedded web UI.
+// Package server exposes the wayhop HTTP API and serves the embedded web UI.
 package server
 
 import (
@@ -7,19 +7,20 @@ import (
 	"path/filepath"
 	"sync"
 
-	"velinx/internal/clash"
-	"velinx/internal/config"
-	"velinx/internal/core"
-	"velinx/internal/failsafe"
-	"velinx/internal/health"
-	"velinx/internal/initserver"
-	"velinx/internal/pbr"
-	"velinx/internal/plugin"
-	"velinx/internal/serverstore"
-	"velinx/internal/store"
-	"velinx/internal/traffic"
-	"velinx/internal/updater"
-	"velinx/internal/watchdog"
+	"wayhop/internal/clash"
+	"wayhop/internal/config"
+	"wayhop/internal/core"
+	"wayhop/internal/failsafe"
+	"wayhop/internal/featurestore"
+	"wayhop/internal/health"
+	"wayhop/internal/initserver"
+	"wayhop/internal/pbr"
+	"wayhop/internal/plugin"
+	"wayhop/internal/serverstore"
+	"wayhop/internal/store"
+	"wayhop/internal/traffic"
+	"wayhop/internal/updater"
+	"wayhop/internal/watchdog"
 )
 
 // Server wires the HTTP handlers to the daemon's components.
@@ -36,12 +37,16 @@ type Server struct {
 	watchdog *watchdog.Watchdog
 	servers  *serverstore.Store
 	jobs     *initserver.JobManager
-	cfgMu    sync.Mutex // serializes all s.cfg field writes + Save() + reads
-	applyMu  sync.Mutex // serializes Apply so concurrent applies don't race singbox.json.tmp / Backup
+	// Plugin (optional-module) state: the atomic per-module store + the dir modules write files to.
+	// Wired via SetFeatures after New() (nil in tests that don't use plugins). See features.go.
+	features       *featurestore.Store
+	featureDataDir string
+	cfgMu          sync.Mutex // serializes all s.cfg field writes + Save() + reads
+	applyMu        sync.Mutex // serializes Apply so concurrent applies don't race singbox.json.tmp / Backup
 
 	// Kernel policy-based-routing plane (RoutingMode=="hybrid"). pbrMu is the SINGLE
 	// authority for pbrPlan+pbrBaseline AND for the whole nft/ip command stream against
-	// the shared "velinx_pbr" table — DISTINCT from applyMu. The rollback closure and
+	// the shared "wayhop_pbr" table — DISTINCT from applyMu. The rollback closure and
 	// boot sync take ONLY pbrMu (never applyMu, which handleApply holds end-to-end), so
 	// there is no lock-ordering cycle. pbrRunner is injectable (a RecordRunner) for tests.
 	pbrRunner   pbr.Runner
@@ -64,6 +69,16 @@ type Server struct {
 	exitResolverMu  sync.Mutex
 	exitResolver    func(uint32) string
 	exitResolverExp int64 // unix-ms; recompute the mark→exit resolver after this
+
+	// nativeOnly datapath verdict cache: DatapathNativeOnly walks a full Profile() clone on
+	// EVERY /api/health poll (~5s) even though it only changes when the profile or routing
+	// mode does. Cache it keyed on (store gen, routing mode) — a hit skips both the clone and
+	// the walk. Not a TTL cache: gen makes it exact, so there is no staleness window.
+	nativeOnlyMu   sync.Mutex
+	nativeOnlyGen  uint64
+	nativeOnlyMode string
+	nativeOnlyVal  bool
+	nativeOnlyOK   bool
 
 	subStatus subRefreshStatus // last subscription auto-refresh outcome (for the Settings card)
 
@@ -103,6 +118,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("GET /api/health/endpoints", s.handleHealthEndpoints)
+	mux.HandleFunc("GET /api/failover/state", s.handleFailoverState)
 	mux.HandleFunc("POST /api/health/test/{id}", s.handleHealthTest)
 	mux.HandleFunc("/api/traffic/recent", s.handleTrafficRecent)
 	mux.HandleFunc("/api/traffic/stream", s.handleTrafficStream)
@@ -126,6 +142,21 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/routing/catalog", s.handleRoutingCatalog)
 	mux.HandleFunc("GET /api/routing/status", s.handleRoutingStatus)
 	mux.HandleFunc("POST /api/routing/refresh", s.handleRoutingRefresh)
+	// DNS section: DNS-plane CRUD + provider presets (dns.go). /api/dns/doh-resolvers stays below.
+	mux.HandleFunc("GET /api/dns", s.handleGetDNS)
+	mux.HandleFunc("PUT /api/dns", s.handleSetDNS)
+	mux.HandleFunc("GET /api/dns/catalog", s.handleDNSCatalog)
+	mux.HandleFunc("GET /api/dns/native", s.handleGetDNSNative)
+	mux.HandleFunc("POST /api/dns/native/plan", s.handleDNSNativePlan)
+
+	// Plugins (optional feature modules): management routes + each compiled-in module's own routes,
+	// mounted UNCONDITIONALLY (the module gates on the enabled flag inside its handlers, so a toggle
+	// needs no restart).
+	mux.HandleFunc("GET /api/features", s.handleFeaturesList)
+	mux.HandleFunc("PUT /api/features/{id}", s.handleFeatureToggle)
+	mux.HandleFunc("GET /api/features/{id}/settings", s.handleFeatureSettingsGet)
+	mux.HandleFunc("PUT /api/features/{id}/settings", s.handleFeatureSettingsPut)
+	s.registerFeatureRoutes(mux)
 	mux.HandleFunc("POST /api/generate", s.handleGenerate)
 	mux.HandleFunc("POST /api/apply", s.handleApply)
 	// Share / QR / subscription (export connections to client apps).
@@ -197,7 +228,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/backup/restore", s.handleBackupRestore)
 	mux.HandleFunc("POST /api/service/restart", s.handleServiceRestart)
 
-	// Engine version manager (Updater) + Velinx self-update.
+	// Engine version manager (Updater) + WayHop self-update.
 	mux.HandleFunc("GET /api/updater/engines", s.handleUpdaterEngines)
 	mux.HandleFunc("GET /api/updater/self", s.handleSelfStatus)
 	mux.HandleFunc("POST /api/updater/self/install", s.handleSelfUpdate)

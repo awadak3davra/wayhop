@@ -214,19 +214,23 @@ func TestEnoughFlashFor(t *testing.T) {
 		avail  uint64
 		known  bool
 		size   int64
+		name   string
 		backup bool
 		want   bool
 	}{
-		{0, false, 100 * MiB, false, true},       // unknown avail -> never block
-		{50 * MiB, true, 0, false, true},         // unknown size -> never block
-		{50 * MiB, true, 10 * MiB, false, true},  // need 10*3+4=34 MiB <= 50 -> ok
-		{20 * MiB, true, 10 * MiB, false, false}, // 34 MiB > 20 -> block (tight overlay)
-		{50 * MiB, true, 10 * MiB, true, false},  // backup doubles: 10*3*2+4=64 > 50 -> block
-		{70 * MiB, true, 10 * MiB, true, true},   // 64 <= 70 -> ok
+		{0, false, 100 * MiB, "core.tar.gz", false, true},       // unknown avail -> never block
+		{50 * MiB, true, 0, "core.tar.gz", false, true},         // unknown size -> never block
+		{50 * MiB, true, 10 * MiB, "core.tar.gz", false, true},  // compressed: 10*3+4=34 <= 50 -> ok
+		{20 * MiB, true, 10 * MiB, "core.tar.gz", false, false}, // 34 > 20 -> block (tight overlay)
+		{50 * MiB, true, 10 * MiB, "core.tar.gz", true, false},  // backup doubles: 10*3*2+4=64 > 50 -> block
+		{70 * MiB, true, 10 * MiB, "core.tar.gz", true, true},   // 64 <= 70 -> ok
+		// BARE binary (no archive ext) is NOT inflated 3x: a 27 MiB olcrtc needs ~27+4, not ~85.
+		{40 * MiB, true, 27 * MiB, "olcrtc-linux-arm64", false, true},  // 27+4=31 <= 40 -> ok (3x would wrongly block: 85 > 40)
+		{20 * MiB, true, 27 * MiB, "olcrtc-linux-arm64", false, false}, // 31 > 20 -> still block (genuinely too big, e.g. AX3000T overlay)
 	}
 	for i, c := range cases {
-		if got := enoughFlashFor(c.avail, c.known, c.size, c.backup); got != c.want {
-			t.Errorf("case %d: enoughFlashFor(%d,%v,%d,%v) = %v, want %v", i, c.avail, c.known, c.size, c.backup, got, c.want)
+		if got := enoughFlashFor(c.avail, c.known, c.size, c.name, c.backup); got != c.want {
+			t.Errorf("case %d: enoughFlashFor(%d,%v,%d,%q,%v) = %v, want %v", i, c.avail, c.known, c.size, c.name, c.backup, got, c.want)
 		}
 	}
 }

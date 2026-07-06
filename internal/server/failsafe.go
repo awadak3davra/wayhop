@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"velinx/internal/netdiag"
+	"wayhop/internal/netdiag"
 )
 
 // armFailSafe starts the rollback window after a non-saved Apply: it pings the
@@ -70,7 +70,7 @@ func (s *Server) armFailSafe(nativeOnly bool) {
 		log.Printf("fail-safe: connectivity lost — rolling back to the previous config")
 		// Notify (fire-and-forget, async) so a remote operator learns their Apply was
 		// auto-reverted — the key event for managing the router from away.
-		s.alert("⚠️ Velinx fail-safe: connectivity was lost after Apply — rolled back to the previous config.")
+		s.alert("⚠️ WayHop fail-safe: connectivity was lost after Apply — rolled back to the previous config.")
 		var sbErr error
 		if nativeOnly {
 			// #7: native-only baseline — the kernel PBR plane is the routing brain and sing-box was
@@ -108,7 +108,7 @@ func (s *Server) armFailSafe(nativeOnly bool) {
 			return // a newer Apply superseded this window — don't reboot on its behalf
 		}
 		log.Printf("fail-safe: still no connectivity after rollback — rebooting router")
-		s.alert("⚠️ Velinx fail-safe: no connectivity even after rollback — rebooting the router.")
+		s.alert("⚠️ WayHop fail-safe: no connectivity even after rollback — rebooting the router.")
 		_ = exec.Command("reboot").Start()
 	}
 	allowReboot := !c.Demo && c.FailSafe.AutoReboot

@@ -6,9 +6,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
+	"time"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 func feedServer(t *testing.T, body string) *httptest.Server {
@@ -50,7 +52,7 @@ func TestRefreshOne(t *testing.T) {
 	if err != nil || !changed {
 		t.Fatalf("first refresh: changed=%v err=%v, want true/nil", changed, err)
 	}
-	if c := cacheOf(t, s, "ru"); !equalStrings(c, []string{"1.1.1.0/24", "2.2.2.0/24"}) {
+	if c := cacheOf(t, s, "ru"); !slices.Equal(c, []string{"1.1.1.0/24", "2.2.2.0/24"}) {
 		t.Fatalf("cache = %v, want sorted [1.1.1.0/24 2.2.2.0/24]", c)
 	}
 
@@ -59,15 +61,30 @@ func TestRefreshOne(t *testing.T) {
 		t.Errorf("second refresh: changed=%v err=%v, want false/nil", changed, err)
 	}
 
-	// a different result → cache updates.
+	// a different result → cache updates. The write is source-guarded, so the new source must be
+	// PERSISTED first (a fetch against a source the store no longer has is a stale write — dropped).
 	b := feedServer(t, "3.3.3.0/24\n")
 	rl3 := getList(t, s, "ru")
 	rl3.CIDRSource = b.URL
-	if changed, err := s.refreshOne(context.Background(), rl3); err != nil || !changed {
+	if err := s.store.UpsertRoutingList(rl3); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := s.refreshOne(context.Background(), getList(t, s, "ru")); err != nil || !changed {
 		t.Fatalf("changed-result refresh: changed=%v err=%v", changed, err)
 	}
-	if c := cacheOf(t, s, "ru"); !equalStrings(c, []string{"3.3.3.0/24"}) {
+	if c := cacheOf(t, s, "ru"); !slices.Equal(c, []string{"3.3.3.0/24"}) {
 		t.Errorf("cache after change = %v, want [3.3.3.0/24]", c)
+	}
+
+	// The guard itself: a fetch performed against a source the store has since moved away from
+	// must NOT write (no resurrecting the old feed's CIDRs).
+	stale := getList(t, s, "ru")
+	stale.CIDRSource = a.URL // pretend the fetch ran against the old source
+	if changed, err := s.refreshOne(context.Background(), stale); err != nil || changed {
+		t.Errorf("stale-source refresh must be dropped: changed=%v err=%v", changed, err)
+	}
+	if c := cacheOf(t, s, "ru"); !slices.Equal(c, []string{"3.3.3.0/24"}) {
+		t.Errorf("cache must survive a stale-source refresh: %v", c)
 	}
 }
 
@@ -84,7 +101,7 @@ func TestRefreshOne_KeepsLastGoodOnFailure(t *testing.T) {
 	if _, err := s.refreshOne(context.Background(), getList(t, s, "ru")); err != nil {
 		t.Fatal(err)
 	}
-	if c := cacheOf(t, s, "ru"); !equalStrings(c, []string{"9.9.9.0/24"}) {
+	if c := cacheOf(t, s, "ru"); !slices.Equal(c, []string{"9.9.9.0/24"}) {
 		t.Fatalf("seed cache = %v", c)
 	}
 
@@ -100,7 +117,7 @@ func TestRefreshOne_KeepsLastGoodOnFailure(t *testing.T) {
 		if _, err := s.refreshOne(context.Background(), rlf); err == nil {
 			t.Errorf("source %q should error", src)
 		}
-		if c := cacheOf(t, s, "ru"); !equalStrings(c, []string{"9.9.9.0/24"}) {
+		if c := cacheOf(t, s, "ru"); !slices.Equal(c, []string{"9.9.9.0/24"}) {
 			t.Errorf("cache must survive a failed refresh from %q: %v", src, c)
 		}
 	}
@@ -138,7 +155,7 @@ func TestRefreshAll(t *testing.T) {
 	if len(errs) != 1 {
 		t.Errorf("want exactly 1 error (l2 failed), got %d: %v", len(errs), errs)
 	}
-	if c := cacheOf(t, s, "l1"); !equalStrings(c, []string{"1.1.1.0/24"}) {
+	if c := cacheOf(t, s, "l1"); !slices.Equal(c, []string{"1.1.1.0/24"}) {
 		t.Errorf("l1 cache = %v, want [1.1.1.0/24]", c)
 	}
 	if c := cacheOf(t, s, "l2"); len(c) != 0 {
@@ -186,8 +203,149 @@ func TestHandleRoutingRefresh(t *testing.T) {
 	if len(resp.Lists) != 1 || resp.Lists[0].ID != "ru" || resp.Lists[0].CIDRs != 2 {
 		t.Errorf("lists=%+v, want one ru list with 2 cidrs", resp.Lists)
 	}
-	if c := cacheOf(t, s, "ru"); !equalStrings(c, []string{"1.1.1.0/24", "2.2.2.0/24"}) {
+	if c := cacheOf(t, s, "ru"); !slices.Equal(c, []string{"1.1.1.0/24", "2.2.2.0/24"}) {
 		t.Errorf("cache not persisted: %v", c)
+	}
+}
+
+// TestCIDRIntervalHours: 0 → 24h default; sub-floor clamps up to 6; above the ceiling clamps to 720.
+func TestCIDRIntervalHours(t *testing.T) {
+	for _, c := range []struct{ in, want int }{
+		{0, 24}, {1, 6}, {5, 6}, {6, 6}, {12, 12}, {24, 24}, {168, 168}, {720, 720}, {1000, 720},
+	} {
+		if got := cidrIntervalHours(model.RoutingList{RefreshHours: c.in}); got != c.want {
+			t.Errorf("cidrIntervalHours(%d) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+// TestCIDRRefreshTick_NeverRefreshedIsDueNow: a list with no CIDRRefreshed history fetches on the
+// FIRST tick (sorted persist + timestamp recorded); after that it isn't due again until its
+// interval elapses, and a due re-fetch of an UNCHANGED feed writes nothing (dedup).
+func TestCIDRRefreshTick_NeverRefreshedIsDueNow(t *testing.T) {
+	s, _ := sharehandlers_server(t)
+	s.allowInternalFetch = true
+	feed := feedServer(t, "2.2.2.0/24\n1.1.1.0/24\n") // unsorted on purpose
+	if err := s.store.UpsertRoutingList(model.RoutingList{ID: "ru", Name: "RU", CIDRSource: feed.URL, Outbound: "direct", Enabled: true, RefreshHours: 6}); err != nil {
+		t.Fatal(err)
+	}
+	due := map[string]time.Time{}
+	base := time.Now()
+
+	s.cidrRefreshTick(context.Background(), due, base)
+	if c := cacheOf(t, s, "ru"); !slices.Equal(c, []string{"1.1.1.0/24", "2.2.2.0/24"}) {
+		t.Fatalf("never-refreshed list must fetch on the first tick (sorted); cache=%v", c)
+	}
+	if ts := getList(t, s, "ru").CIDRRefreshed; ts == 0 {
+		t.Error("a successful cache write must record CIDRRefreshed")
+	}
+
+	// Not due again within the interval; due (and deduped — no content change) after it.
+	s.cidrRefreshTick(context.Background(), due, base.Add(1*time.Hour))
+	if nd := due["ru"]; !nd.After(base.Add(5 * time.Hour)) {
+		t.Errorf("next attempt must be a full interval out, got %v", nd.Sub(base))
+	}
+	s.cidrRefreshTick(context.Background(), due, base.Add(7*time.Hour))
+	if c := cacheOf(t, s, "ru"); !slices.Equal(c, []string{"1.1.1.0/24", "2.2.2.0/24"}) {
+		t.Errorf("unchanged feed re-fetch must keep the cache; cache=%v", c)
+	}
+}
+
+// TestCIDRRefreshTick_SeedsFromPersistedTimestamp: across a daemon restart (fresh due map) the
+// schedule comes from CIDRRefreshed — a recently-refreshed list is NOT due, an overdue one is.
+// This is the fix for "a router restarted more often than the interval never auto-refreshes".
+func TestCIDRRefreshTick_SeedsFromPersistedTimestamp(t *testing.T) {
+	s, _ := sharehandlers_server(t)
+	s.allowInternalFetch = true
+	fresh := feedServer(t, "1.1.1.0/24\n")
+	stale := feedServer(t, "2.2.2.0/24\n")
+	base := time.Now()
+	for _, rl := range []model.RoutingList{
+		{ID: "fresh", Name: "f", CIDRSource: fresh.URL, Outbound: "direct", Enabled: true, RefreshHours: 6,
+			CIDRCache: []string{"9.9.9.0/24"}, CIDRRefreshed: base.Add(-2 * time.Hour).Unix()},
+		{ID: "stale", Name: "s", CIDRSource: stale.URL, Outbound: "direct", Enabled: true, RefreshHours: 6,
+			CIDRCache: []string{"8.8.8.0/24"}, CIDRRefreshed: base.Add(-7 * time.Hour).Unix()},
+	} {
+		if err := s.store.UpsertRoutingList(rl); err != nil {
+			t.Fatal(err)
+		}
+	}
+	due := map[string]time.Time{} // fresh map = daemon restart
+	s.cidrRefreshTick(context.Background(), due, base)
+	if c := cacheOf(t, s, "fresh"); !slices.Equal(c, []string{"9.9.9.0/24"}) {
+		t.Errorf("refreshed 2h ago on a 6h interval must NOT refetch after restart; cache=%v", c)
+	}
+	if c := cacheOf(t, s, "stale"); !slices.Equal(c, []string{"2.2.2.0/24"}) {
+		t.Errorf("overdue list must refetch right after restart; cache=%v", c)
+	}
+}
+
+// TestCIDRRefreshTick_BatchesAndSkipsDisabled: two due lists that both change persist in one tick; a
+// disabled list is never fetched; its schedule entry is dropped.
+func TestCIDRRefreshTick_BatchesAndSkipsDisabled(t *testing.T) {
+	s, _ := sharehandlers_server(t)
+	s.allowInternalFetch = true
+	f1, f2, f3 := feedServer(t, "1.1.1.0/24\n"), feedServer(t, "2.2.2.0/24\n"), feedServer(t, "3.3.3.0/24\n")
+	for _, rl := range []model.RoutingList{
+		{ID: "a", Name: "a", CIDRSource: f1.URL, Outbound: "direct", Enabled: true},
+		{ID: "b", Name: "b", CIDRSource: f2.URL, Outbound: "direct", Enabled: true},
+		{ID: "c", Name: "c", CIDRSource: f3.URL, Outbound: "direct", Enabled: false},
+	} {
+		if err := s.store.UpsertRoutingList(rl); err != nil {
+			t.Fatal(err)
+		}
+	}
+	due := map[string]time.Time{"c": time.Now().Add(-time.Hour)} // stale entry for the disabled list
+	s.cidrRefreshTick(context.Background(), due, time.Now())
+
+	if c := cacheOf(t, s, "a"); !slices.Equal(c, []string{"1.1.1.0/24"}) {
+		t.Errorf("a cache=%v", c)
+	}
+	if c := cacheOf(t, s, "b"); !slices.Equal(c, []string{"2.2.2.0/24"}) {
+		t.Errorf("b cache=%v", c)
+	}
+	if c := cacheOf(t, s, "c"); len(c) != 0 {
+		t.Errorf("disabled c must not be refreshed: %v", c)
+	}
+	if _, ok := due["c"]; ok {
+		t.Error("a disabled list's schedule entry must be dropped")
+	}
+}
+
+// TestCIDRRefreshTick_FloorClampsDue: a hand-edited refresh_hours=1 (below the flash floor) is
+// scheduled at the 6h floor by the ticker itself: after the first fetch, +2h is not due; +7h is.
+func TestCIDRRefreshTick_FloorClampsDue(t *testing.T) {
+	s, _ := sharehandlers_server(t)
+	s.allowInternalFetch = true
+	feed := feedServer(t, "1.1.1.0/24\n")
+	if err := s.store.UpsertRoutingList(model.RoutingList{ID: "ru", Name: "RU", CIDRSource: feed.URL, Outbound: "direct", Enabled: true, RefreshHours: 1}); err != nil {
+		t.Fatal(err)
+	}
+	due := map[string]time.Time{}
+	base := time.Now()
+	s.cidrRefreshTick(context.Background(), due, base) // never-refreshed -> fetches now
+	if c := cacheOf(t, s, "ru"); !slices.Equal(c, []string{"1.1.1.0/24"}) {
+		t.Fatalf("first fetch expected; cache=%v", c)
+	}
+	if nd := due["ru"]; nd.Before(base.Add(5 * time.Hour)) {
+		t.Errorf("sub-floor refresh_hours must reschedule at the 6h floor, got +%v", nd.Sub(base))
+	}
+}
+
+// TestCIDRRefreshTick_ShortenedIntervalTakesEffect: a list mid-way through a long schedule whose
+// RefreshHours is edited down must not sit out the old schedule (the due time is clamped).
+func TestCIDRRefreshTick_ShortenedIntervalTakesEffect(t *testing.T) {
+	s, _ := sharehandlers_server(t)
+	s.allowInternalFetch = true
+	feed := feedServer(t, "1.1.1.0/24\n")
+	if err := s.store.UpsertRoutingList(model.RoutingList{ID: "ru", Name: "RU", CIDRSource: feed.URL, Outbound: "direct", Enabled: true, RefreshHours: 6}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now()
+	due := map[string]time.Time{"ru": base.Add(500 * time.Hour)} // leftover from a former 720h setting
+	s.cidrRefreshTick(context.Background(), due, base)
+	if nd := due["ru"]; nd.After(base.Add(6*time.Hour + time.Minute)) {
+		t.Errorf("shortened interval must clamp the due time to <= now+6h, got +%v", nd.Sub(base))
 	}
 }
 
@@ -205,7 +363,7 @@ func TestUpsertPreservesCIDRCache(t *testing.T) {
 	if err := s.store.UpsertRoutingList(model.RoutingList{ID: "ru", Name: "RU renamed", CIDRSource: "asn:13238", Outbound: "direct", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
-	if c := cacheOf(t, s, "ru"); !equalStrings(c, []string{"5.45.192.0/18"}) {
+	if c := cacheOf(t, s, "ru"); !slices.Equal(c, []string{"5.45.192.0/18"}) {
 		t.Errorf("cache should be preserved on same-source edit: %v", c)
 	}
 	// edit changing the source → stale cache dropped.

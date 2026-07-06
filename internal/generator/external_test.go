@@ -3,11 +3,11 @@ package generator
 import (
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestExternalInterfaceOutbound: an EngineExternal endpoint becomes a direct
-// outbound bound to its interface, and creates NO plugin (Velinx must not try
+// outbound bound to its interface, and creates NO plugin (WayHop must not try
 // to bring up or tear down a UCI/netifd-managed interface).
 func TestExternalInterfaceOutbound(t *testing.T) {
 	p := &model.Profile{

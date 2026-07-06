@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"velinx/internal/clash"
-	"velinx/internal/model"
-	"velinx/internal/pbr"
+	"wayhop/internal/clash"
+	"wayhop/internal/model"
+	"wayhop/internal/pbr"
 )
 
 // traceConn is one live connection to a traced domain's IP, with the egress it actually took.

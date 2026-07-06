@@ -13,7 +13,7 @@ const (
 	EngineXray      Engine = "xray"
 	EngineMihomo    Engine = "mihomo"
 	EngineOlcRTC    Engine = "olcrtc"
-	// EngineExternal routes through an existing OS interface that Velinx does
+	// EngineExternal routes through an existing OS interface that WayHop does
 	// NOT manage (e.g. a UCI/netifd-brought-up awg0/awg1). It becomes a sing-box
 	// `direct` outbound bound to params["interface"]; no tunnel is created.
 	EngineExternal Engine = "external"
@@ -139,6 +139,15 @@ type Group struct {
 	// long-lived transfers, but ones stuck on a just-failed exit hang until the app times out and
 	// retries). Opt-in, so an unset/zero value is a byte-identical no-op for existing profiles.
 	InterruptOnSwitch bool `json:"interrupt_on_switch,omitempty"`
+	// Managed, when true, hands this group's member selection to the WAYHOP DAEMON control loop
+	// (internal/failover) instead of sing-box's own urltest prober — unlocking rise/fall hysteresis,
+	// honest strict-order fallback, failback dampening, and passive ejection that sing-box 1.12.x
+	// can't do natively. A managed group is emitted as a sing-box `selector` (so the two don't fight)
+	// and the daemon drives it via clash.Select. Default false keeps today's exact behavior; a
+	// managed group does NOTHING useful until the daemon runner (F4b) is wired — emitting a selector
+	// without the runner is a static pick. Opt-in, so an unset/zero value is byte-identical for
+	// existing profiles. See docs/FAILOVER_CONTROL_LOOP.md.
+	Managed bool `json:"managed,omitempty"`
 }
 
 // Rule routes matching traffic to a target outbound.
@@ -198,6 +207,11 @@ type RoutingList struct {
 	// so a fetch failure or restart keeps the carve-out). The kernel zone = Manual ∪
 	// CIDRCache. Not user-edited; the refresh loop maintains it.
 	CIDRCache []string `json:"cidr_cache,omitempty"`
+	// CIDRRefreshed is when CIDRCache was last successfully written (unix seconds; system-managed,
+	// piggybacking on the cache write so it costs no extra flash). The auto-refresh ticker seeds
+	// its schedule from it across daemon restarts — without it a router restarted more often than
+	// a list's interval would NEVER auto-refresh. 0 = never refreshed.
+	CIDRRefreshed int64 `json:"cidr_refreshed,omitempty"`
 }
 
 // Profile is the whole user configuration.
@@ -206,6 +220,10 @@ type Profile struct {
 	Groups       []Group       `json:"groups"`
 	Rules        []Rule        `json:"rules"`
 	RoutingLists []RoutingList `json:"routing_lists,omitempty"`
+	// DNS is the optional DNS plane (the "DNS" panel section). POINTER + omitempty is the
+	// backward-compat lever: nil ⇒ marshals to nothing ⇒ existing profiles byte-identical ⇒ the
+	// generator emits no dns block (today's behaviour). See dns.go.
+	DNS *DNSSettings `json:"dns,omitempty"`
 }
 
 // Builtin outbound tags that are always available.

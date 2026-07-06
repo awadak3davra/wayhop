@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestRenderNft_ConnmarkRestoreFirst (L2): the nft wr_mark chain must RESTORE an established

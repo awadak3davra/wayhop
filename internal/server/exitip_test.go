@@ -22,6 +22,30 @@ func TestParseExitIP(t *testing.T) {
 	}
 }
 
+func TestParseIPWho(t *testing.T) {
+	ok := []byte(`{"success":true,"country_code":"nl","country":"Netherlands","connection":{"asn":9009,"org":"M247 Europe SRL","isp":"M247"}}`)
+	g, good := parseIPWho(ok)
+	if !good {
+		t.Fatal("expected a successful parse")
+	}
+	if g.CC != "NL" || g.Country != "Netherlands" || g.ISP != "M247" || g.ASN != "AS9009 M247 Europe SRL" {
+		t.Errorf("unexpected geo: %+v", g)
+	}
+	// isp falls back to org when the isp field is absent.
+	if g2, _ := parseIPWho([]byte(`{"success":true,"country_code":"US","country":"USA","connection":{"asn":13335,"org":"Cloudflare"}}`)); g2.ISP != "Cloudflare" {
+		t.Errorf("isp should fall back to org, got %q", g2.ISP)
+	}
+	if _, good := parseIPWho([]byte(`{"success":false,"message":"reserved range"}`)); good {
+		t.Error("success:false must not parse ok")
+	}
+	if _, good := parseIPWho([]byte(`not json`)); good {
+		t.Error("garbage must not parse ok")
+	}
+	if _, good := parseIPWho([]byte(`{"success":true}`)); good {
+		t.Error("success with no geo fields must be empty/not-ok")
+	}
+}
+
 func TestParseIPAPI(t *testing.T) {
 	ok := []byte(`{"status":"success","countryCode":"nl","country":"Netherlands","isp":"M247","as":"AS9009 M247 Europe SRL","hosting":true}`)
 	g, good := parseIPAPI(ok)

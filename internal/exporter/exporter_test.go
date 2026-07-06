@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/importer"
-	"velinx/internal/model"
+	"wayhop/internal/importer"
+	"wayhop/internal/model"
 )
 
 func TestRoundTripShareLinks(t *testing.T) {

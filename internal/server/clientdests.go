@@ -8,7 +8,7 @@ import (
 	"sort"
 	"time"
 
-	"velinx/internal/clash"
+	"wayhop/internal/clash"
 )
 
 // discoverDest is one external destination a LAN client has contacted (from conntrack), with the

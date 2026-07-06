@@ -21,9 +21,11 @@ func TestUninstall(t *testing.T) {
 	if _, err := os.Stat(bin); !os.IsNotExist(err) {
 		t.Errorf("binary still present after Uninstall: %v", err)
 	}
-	// Already-absent is a no-op success (idempotent).
-	if err := u.Uninstall(e); err != nil {
-		t.Errorf("Uninstall of an absent binary should succeed, got %v", err)
+	// Already-absent is now REFUSED (0.4.1): reporting "removed" for a binary the panel never
+	// installed misled the operator — the engine may exist elsewhere on PATH, possibly PM-owned
+	// (see TestUninstallPrecheck_AbsentIsRefusedNotSuccess for the full contract).
+	if err := u.Uninstall(e); err == nil {
+		t.Error("Uninstall of an absent binary must refuse, not report success")
 	}
 	// SourceOnly engines have no panel-installed binary -> refused (don't pretend to remove one).
 	if err := u.Uninstall(Engine{ID: "amneziawg-go", BinName: "amneziawg-go", SourceOnly: true}); err == nil {

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestPlanApply drives the full write path against the httptest RCI mock (NOT a real

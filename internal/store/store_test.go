@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestProfileMigrationCompat locks the deploy/rollback compat for the user's endpoint DATA —

@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // #14: deleting an endpoint that is the SOLE member of a group must be refused —

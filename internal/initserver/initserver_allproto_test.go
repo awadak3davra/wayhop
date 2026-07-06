@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/importer"
-	"velinx/internal/model"
+	"wayhop/internal/importer"
+	"wayhop/internal/model"
 )
 
 // allProtoNew is the set of protocols this lane added (AmneziaWG + Reality are
@@ -146,7 +146,7 @@ func TestNewProtosMarkerPrecedesConfig(t *testing.T) {
 func TestNewProtosClientLinkParses(t *testing.T) {
 	for _, p := range allProtoNew {
 		link := sampleLink(p.id)
-		out := "[velinx-init] installing\n" + p.marker + "\nWR_CLIENT_CONFIG=" + link + "\n[velinx-init] done\n"
+		out := "[wayhop-init] installing\n" + p.marker + "\nWR_CLIENT_CONFIG=" + link + "\n[wayhop-init] done\n"
 
 		tagged := ExtractTagged(out)
 		if len(tagged) != 1 {
@@ -232,16 +232,16 @@ func sampleLink(id string) string {
 	switch id {
 	case ProtoVMess:
 		// base64 of the JSON the fragment prints (with PUBLIC_IP/uuid/sni filled in).
-		j := `{"v":"2","ps":"velinx-vmess","add":"203.0.113.9","port":"8443","id":"11111111-2222-3333-4444-555555555555","aid":"0","scy":"auto","net":"ws","type":"none","host":"velinx.local","path":"/velinx","tls":"tls","sni":"velinx.local","allowInsecure":"1"}`
+		j := `{"v":"2","ps":"wayhop-vmess","add":"203.0.113.9","port":"8443","id":"11111111-2222-3333-4444-555555555555","aid":"0","scy":"auto","net":"ws","type":"none","host":"wayhop.local","path":"/wayhop","tls":"tls","sni":"wayhop.local","allowInsecure":"1"}`
 		return "vmess://" + kbinitserver_b64(j)
 	case ProtoTrojan:
-		return "trojan://Pa%2Bss%2Fword%3D@203.0.113.9:8444?security=tls&sni=velinx.local&insecure=1&type=tcp#velinx-trojan"
+		return "trojan://Pa%2Bss%2Fword%3D@203.0.113.9:8444?security=tls&sni=wayhop.local&insecure=1&type=tcp#wayhop-trojan"
 	case ProtoShadowsocks:
-		return "ss://" + kbinitserver_b64("2022-blake3-aes-256-gcm:c29tZS0zMi1ieXRlLWtleS1iYXNlNjQtcGFkZGVkPT0=") + "@203.0.113.9:8388#velinx-ss"
+		return "ss://" + kbinitserver_b64("2022-blake3-aes-256-gcm:c29tZS0zMi1ieXRlLWtleS1iYXNlNjQtcGFkZGVkPT0=") + "@203.0.113.9:8388#wayhop-ss"
 	case ProtoHysteria2:
-		return "hysteria2://Pa%2Bss%2Fword%3D@203.0.113.9:8445?sni=velinx.local&insecure=1#velinx-hy2"
+		return "hysteria2://Pa%2Bss%2Fword%3D@203.0.113.9:8445?sni=wayhop.local&insecure=1#wayhop-hy2"
 	case ProtoTUIC:
-		return "tuic://11111111-2222-3333-4444-555555555555:Pa%2Bss%2Fword%3D@203.0.113.9:8446?sni=velinx.local&insecure=1&congestion_control=bbr&alpn=h3#velinx-tuic"
+		return "tuic://11111111-2222-3333-4444-555555555555:Pa%2Bss%2Fword%3D@203.0.113.9:8446?sni=wayhop.local&insecure=1&congestion_control=bbr&alpn=h3#wayhop-tuic"
 	}
 	return ""
 }

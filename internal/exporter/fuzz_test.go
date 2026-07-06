@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/importer"
-	"velinx/internal/model"
+	"wayhop/internal/importer"
+	"wayhop/internal/model"
 )
 
 // fuzzexporter_protocols is the set of link-form protocols the fuzzer cycles

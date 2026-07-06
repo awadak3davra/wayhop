@@ -1,0 +1,10 @@
+#!/bin/sh
+# apk post-upgrade: restart the service so the NEW binary takes over. apk replaces the file via
+# rename, so the old deleted-inode process keeps serving the previous version until restarted —
+# an upgrade that doesn't restart looks like it "didn't work" (the panel still reports the old
+# version). procd `restart` is a stop+start, so a not-running service simply starts.
+if [ -x /etc/init.d/wayhop ]; then
+  /etc/init.d/wayhop enable 2>/dev/null
+  /etc/init.d/wayhop restart 2>/dev/null
+fi
+exit 0

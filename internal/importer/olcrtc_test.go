@@ -3,7 +3,7 @@ package importer
 import (
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 func TestParseOlcRTC(t *testing.T) {

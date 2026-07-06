@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // awgEndpoint mirrors the live Wireguard0 (ND_VPS) on the Hopper SE: AmneziaWG 1.x params.

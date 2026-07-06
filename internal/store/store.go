@@ -1,6 +1,6 @@
 // Package store persists the user Profile (endpoints/groups/rules) to a JSON
 // file and offers thread-safe CRUD. It is intentionally tiny: no database, a
-// single atomically-written file under /opt/etc/velinx/ (see docs/ARCHITECTURE.md).
+// single atomically-written file under /opt/etc/wayhop/ (see docs/ARCHITECTURE.md).
 package store
 
 import (
@@ -11,16 +11,31 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
+	"time"
 
-	"velinx/internal/atomicfile"
-	"velinx/internal/model"
+	"wayhop/internal/atomicfile"
+	"wayhop/internal/model"
 )
 
-// Store guards a Profile persisted at path.
+// Store guards a Profile persisted at path using copy-on-write. The published profile is
+// IMMUTABLE once installed: a writer clones it, mutates the clone, persists it, and only
+// then atomically swaps the clone in — so a reader loads the current profile with no lock
+// and no per-read clone, and keeps a consistent snapshot even as a writer proceeds.
 type Store struct {
 	path string
-	mu   sync.RWMutex
-	prof model.Profile
+	// wmu serializes writers so the load-clone-mutate-persist-publish sequence is atomic
+	// with respect to other writers (two concurrent writers can't lose each other's update).
+	// Readers take NO lock — they atomically load cur.
+	wmu sync.Mutex
+	// cur is the currently-published profile. It is never mutated after being Store()d:
+	// writers publish a freshly-built copy, so a lock-free reader that loaded an earlier
+	// pointer holds a stable, unchanging view.
+	cur atomic.Pointer[model.Profile]
+	// gen bumps on every durably-published mutation. Lock-free readers that memoize a
+	// profile-derived result (e.g. the native-only datapath verdict) key their cache on
+	// it: same gen ⇒ the profile is byte-identical, so the cached value is still valid.
+	gen atomic.Uint64
 }
 
 // Open loads the profile at path, creating an empty one if it does not exist.
@@ -35,60 +50,73 @@ func Open(path string) (*Store, error) {
 	// still falls through to the parse error below.
 	if errors.Is(err, os.ErrNotExist) || (err == nil && len(bytes.TrimSpace(data)) == 0) {
 		if err == nil {
-			log.Printf("velinx: profile %s is empty; recreating empty profile", path)
+			log.Printf("wayhop: profile %s is empty; recreating empty profile", path)
 		}
-		return s, s.saveLocked()
+		empty := model.Profile{}
+		s.cur.Store(&empty)
+		return s, s.persist(&empty)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read profile %s: %w", path, err)
 	}
-	if err := json.Unmarshal(data, &s.prof); err != nil {
+	var p model.Profile
+	if err := json.Unmarshal(data, &p); err != nil {
 		return nil, fmt.Errorf("parse profile %s: %w", path, err)
 	}
+	s.cur.Store(&p)
 	return s, nil
 }
 
-// Profile returns a copy of the current profile with its three slices cloned, so
-// a caller can iterate them after the lock is released while a concurrent writer
-// mutates (replaces/compacts) the store's backing arrays. A plain value copy
-// would alias those arrays — a data race. Endpoint/Group/Rule values are
-// immutable once stored (writers replace whole elements, never mutate in place),
-// so cloning the top-level slices is sufficient.
+// Profile returns the current profile as a value whose top-level slices share the
+// published, immutable backing arrays — copy-on-write, so there is no per-read deep clone.
+// The returned top-level slice headers are capped to their length (s[:n:n]) so a caller's
+// append REALLOCATES instead of scribbling the shared backing that other readers alias.
 //
-// INVARIANT (per-field): the INNER slices/maps of each element — Endpoint.Params (map),
-// TLS/Transport, RoutingList.Manual/CIDRCache, Rule.Domain/IPCIDR/Port — are deliberately
-// SHARED BY REFERENCE with the stored copy (a deep clone on every poll would be wasteful on
-// a router). This is race-safe ONLY because every writer replaces a whole element ([i]=e) or
-// a whole field header ([i].CIDRCache=…) under the write lock and NEVER appends-in-place to
-// or writes into a shared inner slice/map. A future writer that mutates an inner field in
-// place would silently race every lock-free reader (generator/monitor) holding a prior copy.
+// CONTRACT: the returned profile is a READ-ONLY snapshot. Callers must not mutate its
+// elements or nested fields in place — no `p.Endpoints[i] = x`, no writing into
+// Endpoint.Params / Group.Members / Rule.Domain / RoutingList.CIDRCache. Every writer
+// REPLACES whole elements/fields on a private clone (cloneProfile) and publishes atomically,
+// so a reader holding an older snapshot sees a consistent, unchanging view. (Verified: no
+// production caller mutates the returned profile.) A writer's own in-place slice compaction
+// (removeString, kept[:0]) is safe because it runs on the clone, never on a published copy.
 func (s *Store) Profile() model.Profile {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.cloneLocked()
+	cur := s.cur.Load()
+	if cur == nil { // defensive: a Store built without Open() has no published profile yet
+		return model.Profile{}
+	}
+	p := *cur
+	p.Endpoints = p.Endpoints[:len(p.Endpoints):len(p.Endpoints)]
+	p.Groups = p.Groups[:len(p.Groups):len(p.Groups)]
+	p.Rules = p.Rules[:len(p.Rules):len(p.Rules)]
+	p.RoutingLists = p.RoutingLists[:len(p.RoutingLists):len(p.RoutingLists)]
+	return p
 }
 
-// cloneLocked returns a copy of the profile with its top-level slices (and each
-// Group.Members) cloned, sharing inner element fields by reference per Profile()'s
-// invariant above. Callers must hold s.mu (read OR write). Profile() uses it for
-// race-safe reads; the mutators use it to snapshot pre-mutation state so commitLocked
-// can roll back a failed durable write (persist-then-commit).
-func (s *Store) cloneLocked() model.Profile {
-	p := s.prof
-	p.Endpoints = append([]model.Endpoint{}, s.prof.Endpoints...)
-	p.Groups = append([]model.Group{}, s.prof.Groups...)
+// cloneProfile returns a mutable working copy of src: the top-level slices (and each
+// Group.Members, which the delete paths compact in place) are cloned so a writer can
+// mutate/compact/append them without touching src's — hence a published profile's — backing
+// arrays. Deeper element fields (Endpoint.Params map, Rule.Domain/IPCIDR/Port, RoutingList.
+// Manual/CIDRCache) are shared by reference: the mutators only ever REPLACE them wholesale
+// (never write into them in place), so the shared originals stay immutable for readers.
+func cloneProfile(src *model.Profile) model.Profile {
+	p := *src
+	p.Endpoints = append([]model.Endpoint{}, src.Endpoints...)
+	p.Groups = append([]model.Group{}, src.Groups...)
 	// Group.Members is compacted IN PLACE by removeString (DeleteEndpoint/DeleteGroup
-	// pruning), so it must be cloned too — a shallow Group copy still aliases the
-	// members backing array, which a lock-free reader (generator/monitor) would race.
+	// pruning), so it must be cloned too — otherwise the writer would scribble a slice a
+	// lock-free reader (generator/monitor) still aliases.
 	for i := range p.Groups {
-		p.Groups[i].Members = append([]string{}, s.prof.Groups[i].Members...)
+		p.Groups[i].Members = append([]string{}, src.Groups[i].Members...)
 	}
-	p.Rules = append([]model.Rule{}, s.prof.Rules...)
-	// RoutingLists is compacted IN PLACE by DeleteRoutingList (kept[:0]) and may be
-	// appended to by UpsertRoutingList, so a shallow copy would alias the backing
-	// array a lock-free reader (generator) races on — clone it like the others.
-	p.RoutingLists = append([]model.RoutingList{}, s.prof.RoutingLists...)
+	p.Rules = append([]model.Rule{}, src.Rules...)
+	p.RoutingLists = append([]model.RoutingList{}, src.RoutingLists...)
 	return p
+}
+
+// snapshot builds a mutable working copy of the currently-published profile. Callers hold
+// s.wmu, so cur can't be swapped between this load and the eventual publish().
+func (s *Store) snapshot() model.Profile {
+	return cloneProfile(s.cur.Load())
 }
 
 // Replace swaps the whole profile (used by bulk import / subscription sync / backup
@@ -99,11 +127,12 @@ func (s *Store) Replace(p model.Profile) error {
 	if err := p.Validate(); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	prev := s.cloneLocked()
-	s.prof = p
-	return s.commitLocked(prev)
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	// Clone before publishing: the caller may retain aliases to p's slices, and a published
+	// profile must be immutable, so no external writer may hold our backing arrays.
+	cp := cloneProfile(&p)
+	return s.publish(&cp)
 }
 
 // UpsertEndpoint inserts or replaces an endpoint by ID.
@@ -111,47 +140,47 @@ func (s *Store) UpsertEndpoint(e model.Endpoint) error {
 	if e.ID == "" {
 		return errors.New("endpoint id is required")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	prev := s.cloneLocked()
-	for i := range s.prof.Endpoints {
-		if s.prof.Endpoints[i].ID == e.ID {
-			s.prof.Endpoints[i] = e
-			return s.commitLocked(prev)
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	p := s.snapshot()
+	for i := range p.Endpoints {
+		if p.Endpoints[i].ID == e.ID {
+			p.Endpoints[i] = e
+			return s.publish(&p)
 		}
 	}
-	s.prof.Endpoints = append(s.prof.Endpoints, e)
-	return s.commitLocked(prev)
+	p.Endpoints = append(p.Endpoints, e)
+	return s.publish(&p)
 }
 
 // DeleteEndpoint removes an endpoint, pruning it from group members. It refuses
 // if a rule still targets the endpoint (the caller should repoint the rule first).
 func (s *Store) DeleteEndpoint(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, r := range s.prof.Rules {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	p := s.snapshot()
+	for _, r := range p.Rules {
 		if r.Outbound == id {
 			return fmt.Errorf("endpoint %q is used by rule %q; repoint it first", id, r.ID)
 		}
 	}
 	// Refuse if this endpoint is the sole member of a group — pruning it would
 	// leave a zero-member group, which fails Validate() and blocks every Apply.
-	for _, g := range s.prof.Groups {
+	for _, g := range p.Groups {
 		if onlyMember(g.Members, id) {
 			return fmt.Errorf("endpoint %q is the only member of group %q; remove or repoint that group first", id, g.ID)
 		}
 	}
 	// Refuse if a routing list routes (or downloads) via this endpoint — a dangling
 	// outbound fails Validate() and blocks every Apply (same intent as the rule guard).
-	for _, rl := range s.prof.RoutingLists {
+	for _, rl := range p.RoutingLists {
 		if rl.Outbound == id || rl.DownloadVia == id {
 			return fmt.Errorf("endpoint %q is used by routing list %q (route/download via); repoint it first", id, rl.ID)
 		}
 	}
-	prev := s.cloneLocked()
-	kept := s.prof.Endpoints[:0]
+	kept := p.Endpoints[:0]
 	found := false
-	for _, e := range s.prof.Endpoints {
+	for _, e := range p.Endpoints {
 		if e.ID == id {
 			found = true
 			continue
@@ -161,11 +190,11 @@ func (s *Store) DeleteEndpoint(id string) error {
 	if !found {
 		return fmt.Errorf("endpoint %q not found", id)
 	}
-	s.prof.Endpoints = kept
-	for gi := range s.prof.Groups {
-		s.prof.Groups[gi].Members = removeString(s.prof.Groups[gi].Members, id)
+	p.Endpoints = kept
+	for gi := range p.Groups {
+		p.Groups[gi].Members = removeString(p.Groups[gi].Members, id)
 	}
-	return s.commitLocked(prev)
+	return s.publish(&p)
 }
 
 // UpsertGroup inserts or replaces a group by ID.
@@ -173,45 +202,45 @@ func (s *Store) UpsertGroup(g model.Group) error {
 	if g.ID == "" {
 		return errors.New("group id is required")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	prev := s.cloneLocked()
-	for i := range s.prof.Groups {
-		if s.prof.Groups[i].ID == g.ID {
-			s.prof.Groups[i] = g
-			return s.commitLocked(prev)
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	p := s.snapshot()
+	for i := range p.Groups {
+		if p.Groups[i].ID == g.ID {
+			p.Groups[i] = g
+			return s.publish(&p)
 		}
 	}
-	s.prof.Groups = append(s.prof.Groups, g)
-	return s.commitLocked(prev)
+	p.Groups = append(p.Groups, g)
+	return s.publish(&p)
 }
 
 // DeleteGroup removes a group; refuses if a rule targets it.
 func (s *Store) DeleteGroup(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, r := range s.prof.Rules {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	p := s.snapshot()
+	for _, r := range p.Rules {
 		if r.Outbound == id {
 			return fmt.Errorf("group %q is used by rule %q; repoint it first", id, r.ID)
 		}
 	}
 	// Refuse if this group is the sole member of another group (nested groups) —
 	// pruning it would leave that parent empty and fail Validate().
-	for _, g := range s.prof.Groups {
+	for _, g := range p.Groups {
 		if g.ID != id && onlyMember(g.Members, id) {
 			return fmt.Errorf("group %q is the only member of group %q; remove or repoint that group first", id, g.ID)
 		}
 	}
 	// Refuse if a routing list routes (or downloads) via this group — see DeleteEndpoint.
-	for _, rl := range s.prof.RoutingLists {
+	for _, rl := range p.RoutingLists {
 		if rl.Outbound == id || rl.DownloadVia == id {
 			return fmt.Errorf("group %q is used by routing list %q (route/download via); repoint it first", id, rl.ID)
 		}
 	}
-	prev := s.cloneLocked()
-	kept := s.prof.Groups[:0]
+	kept := p.Groups[:0]
 	found := false
-	for _, g := range s.prof.Groups {
+	for _, g := range p.Groups {
 		if g.ID == id {
 			found = true
 			continue
@@ -221,13 +250,13 @@ func (s *Store) DeleteGroup(id string) error {
 	if !found {
 		return fmt.Errorf("group %q not found", id)
 	}
-	s.prof.Groups = kept
+	p.Groups = kept
 	// Mirror DeleteEndpoint: prune the deleted group's id from any group that
 	// listed it as a nested member, so the profile stays Validate-clean.
-	for gi := range s.prof.Groups {
-		s.prof.Groups[gi].Members = removeString(s.prof.Groups[gi].Members, id)
+	for gi := range p.Groups {
+		p.Groups[gi].Members = removeString(p.Groups[gi].Members, id)
 	}
-	return s.commitLocked(prev)
+	return s.publish(&p)
 }
 
 // onlyMember reports whether id is in members and every member equals id, so
@@ -249,27 +278,27 @@ func (s *Store) UpsertRule(r model.Rule) error {
 	if r.ID == "" {
 		return errors.New("rule id is required")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	prev := s.cloneLocked()
-	for i := range s.prof.Rules {
-		if s.prof.Rules[i].ID == r.ID {
-			s.prof.Rules[i] = r
-			return s.commitLocked(prev)
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	p := s.snapshot()
+	for i := range p.Rules {
+		if p.Rules[i].ID == r.ID {
+			p.Rules[i] = r
+			return s.publish(&p)
 		}
 	}
-	s.prof.Rules = append(s.prof.Rules, r)
-	return s.commitLocked(prev)
+	p.Rules = append(p.Rules, r)
+	return s.publish(&p)
 }
 
 // DeleteRule removes a rule by ID.
 func (s *Store) DeleteRule(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	prev := s.cloneLocked()
-	kept := s.prof.Rules[:0]
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	p := s.snapshot()
+	kept := p.Rules[:0]
 	found := false
-	for _, r := range s.prof.Rules {
+	for _, r := range p.Rules {
 		if r.ID == id {
 			found = true
 			continue
@@ -279,8 +308,8 @@ func (s *Store) DeleteRule(id string) error {
 	if !found {
 		return fmt.Errorf("rule %q not found", id)
 	}
-	s.prof.Rules = kept
-	return s.commitLocked(prev)
+	p.Rules = kept
+	return s.publish(&p)
 }
 
 // UpsertRoutingList inserts or replaces a routing list by ID.
@@ -288,11 +317,11 @@ func (s *Store) UpsertRoutingList(rl model.RoutingList) error {
 	if rl.ID == "" {
 		return errors.New("routing list id is required")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	prev := s.cloneLocked()
-	for i := range s.prof.RoutingLists {
-		if s.prof.RoutingLists[i].ID == rl.ID {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	p := s.snapshot()
+	for i := range p.RoutingLists {
+		if p.RoutingLists[i].ID == rl.ID {
 			// Keep the system-managed CIDRCache consistent with CIDRSource across a user
 			// edit:
 			//   • source CHANGED → the old cache is stale → drop it unconditionally (even
@@ -301,42 +330,83 @@ func (s *Store) UpsertRoutingList(rl model.RoutingList) error {
 			//   • source UNCHANGED but the edit omitted the cache → preserve the existing
 			//     value the UI didn't send back.
 			switch {
-			case rl.CIDRSource != s.prof.RoutingLists[i].CIDRSource:
+			case rl.CIDRSource != p.RoutingLists[i].CIDRSource:
 				rl.CIDRCache = nil
+				rl.CIDRRefreshed = 0 // stale freshness would delay the new source's first fetch
 			case len(rl.CIDRCache) == 0:
-				rl.CIDRCache = s.prof.RoutingLists[i].CIDRCache
+				rl.CIDRCache = p.RoutingLists[i].CIDRCache
+				if rl.CIDRRefreshed == 0 {
+					rl.CIDRRefreshed = p.RoutingLists[i].CIDRRefreshed // system-managed, UI doesn't echo it
+				}
 			}
-			s.prof.RoutingLists[i] = rl
-			return s.commitLocked(prev)
+			p.RoutingLists[i] = rl
+			return s.publish(&p)
 		}
 	}
-	s.prof.RoutingLists = append(s.prof.RoutingLists, rl)
-	return s.commitLocked(prev)
+	p.RoutingLists = append(p.RoutingLists, rl)
+	return s.publish(&p)
 }
 
 // SetRoutingListCache replaces a routing list's system-managed CIDRCache (the last-good
 // result of fetching its CIDRSource — see the auto-refresh loop). Atomic + persisted.
 func (s *Store) SetRoutingListCache(id string, cidrs []string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	prev := s.cloneLocked()
-	for i := range s.prof.RoutingLists {
-		if s.prof.RoutingLists[i].ID == id {
-			s.prof.RoutingLists[i].CIDRCache = cidrs
-			return s.commitLocked(prev)
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	p := s.snapshot()
+	for i := range p.RoutingLists {
+		if p.RoutingLists[i].ID == id {
+			p.RoutingLists[i].CIDRCache = cidrs
+			p.RoutingLists[i].CIDRRefreshed = time.Now().Unix()
+			return s.publish(&p)
 		}
 	}
 	return fmt.Errorf("routing list %q not found", id)
 }
 
+// CacheUpdate is one refreshed feed result for SetRoutingListCaches. Source is the CIDRSource the
+// fetch was performed AGAINST: the write is skipped when the list's source has changed since (a
+// user re-pointed the list mid-fetch — writing would resurrect the OLD feed's CIDRs into the
+// re-sourced list, which UpsertRoutingList deliberately cleared).
+type CacheUpdate struct {
+	Source string
+	CIDRs  []string
+}
+
+// SetRoutingListCaches replaces the CIDRCache of MANY routing lists in ONE atomic profile write. The
+// auto-refresh ticker coalesces a whole tick's changed lists here so K changed lists cost ONE
+// whole-profile rewrite/fsync, not K — the flash-wear protection for the router overlay. Entries
+// whose id no longer exists or whose CIDRSource no longer matches are skipped; returns how many
+// lists were actually updated, and does NOT touch flash when that is zero.
+func (s *Store) SetRoutingListCaches(caches map[string]CacheUpdate) (int, error) {
+	if len(caches) == 0 {
+		return 0, nil
+	}
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	p := s.snapshot()
+	matched := 0
+	now := time.Now().Unix()
+	for i := range p.RoutingLists {
+		if up, ok := caches[p.RoutingLists[i].ID]; ok && p.RoutingLists[i].CIDRSource == up.Source {
+			p.RoutingLists[i].CIDRCache = up.CIDRs
+			p.RoutingLists[i].CIDRRefreshed = now
+			matched++
+		}
+	}
+	if matched == 0 {
+		return 0, nil // every entry raced a delete/re-source — nothing changed, spend no flash write
+	}
+	return matched, s.publish(&p)
+}
+
 // DeleteRoutingList removes a routing list by ID.
 func (s *Store) DeleteRoutingList(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	prev := s.cloneLocked()
-	kept := s.prof.RoutingLists[:0]
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	p := s.snapshot()
+	kept := p.RoutingLists[:0]
 	found := false
-	for _, rl := range s.prof.RoutingLists {
+	for _, rl := range p.RoutingLists {
 		if rl.ID == id {
 			found = true
 			continue
@@ -346,30 +416,50 @@ func (s *Store) DeleteRoutingList(id string) error {
 	if !found {
 		return fmt.Errorf("routing list %q not found", id)
 	}
-	s.prof.RoutingLists = kept
-	return s.commitLocked(prev)
+	p.RoutingLists = kept
+	return s.publish(&p)
 }
 
-// saveLocked atomically + durably writes the profile. Callers must hold s.mu (write).
-func (s *Store) saveLocked() error {
-	data, err := json.MarshalIndent(s.prof, "", "  ")
+// SetDNS replaces the profile's DNS plane (the "DNS" section) atomically. A nil settings clears it
+// (back to the no-dns-block default). Copy-on-write like the other CRUD methods; the returned live
+// profile stays read-only.
+func (s *Store) SetDNS(dns *model.DNSSettings) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	p := s.snapshot()
+	p.DNS = dns
+	return s.publish(&p)
+}
+
+// persist atomically + durably writes p to disk.
+func (s *Store) persist(p *model.Profile) error {
+	data, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return err
 	}
 	return atomicfile.Write(s.path, data, 0o600)
 }
 
-// commitLocked persists the already-mutated profile; if the durable write fails it
-// restores prev so the in-memory profile never diverges from disk. The router overlay
-// can ENOSPC mid-edit, and a phantom in-RAM change that feeds an Apply yet vanishes on
-// reboot is worse than a surfaced error. prev must be a pre-mutation cloneLocked()
-// snapshot. Callers must hold s.mu (write).
-func (s *Store) commitLocked(prev model.Profile) error {
-	if err := s.saveLocked(); err != nil {
-		s.prof = prev
+// publish persists the mutated working copy and, ONLY if the durable write succeeds,
+// atomically installs it as the new profile and bumps gen. On failure nothing is published:
+// the previous profile stays live, so the in-memory state never diverges from disk — the
+// router overlay can ENOSPC mid-edit, and a phantom in-RAM change that feeds an Apply yet
+// vanishes on reboot is worse than a surfaced error. Callers must hold s.wmu, so the
+// snapshot()..Store() window is atomic with respect to other writers.
+func (s *Store) publish(p *model.Profile) error {
+	if err := s.persist(p); err != nil {
 		return err
 	}
+	s.cur.Store(p)
+	s.gen.Add(1)
 	return nil
+}
+
+// Gen returns the current profile generation: it increments on every durably-committed
+// mutation and never resets while the process lives. A reader that caches a value derived
+// purely from the profile can compare Gen() to skip recomputing when nothing has changed.
+func (s *Store) Gen() uint64 {
+	return s.gen.Load()
 }
 
 func removeString(ss []string, target string) []string {

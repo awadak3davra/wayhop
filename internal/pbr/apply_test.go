@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 func vowifiPlan(t *testing.T) *Plan {
@@ -44,7 +44,7 @@ func TestApply(t *testing.T) {
 	if len(r.Calls) == 0 || r.Calls[0] != "nft -f -" {
 		t.Fatalf("first call = %v, want 'nft -f -'", r.Calls)
 	}
-	if !strings.Contains(r.Stdin[0], "198.51.100.0/24") || !strings.Contains(r.Stdin[0], "delete table inet velinx_pbr") {
+	if !strings.Contains(r.Stdin[0], "198.51.100.0/24") || !strings.Contains(r.Stdin[0], "delete table inet wayhop_pbr") {
 		t.Errorf("nft stdin missing zone or self-flush:\n%s", r.Stdin[0])
 	}
 	// ip rules must be removed before being added (idempotent re-apply).
@@ -80,7 +80,7 @@ func TestTeardown(t *testing.T) {
 	if err := pl.Teardown(r, Options{}); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
-	if indexOfContains(r.Calls, "nft delete table inet velinx_pbr") < 0 {
+	if indexOfContains(r.Calls, "nft delete table inet wayhop_pbr") < 0 {
 		t.Errorf("missing nft delete: %v", r.Calls)
 	}
 	if indexOfContains(r.Calls, "ip rule del fwmark 0x00020000") < 0 {
@@ -94,7 +94,7 @@ func TestTeardown(t *testing.T) {
 func TestDryRun(t *testing.T) {
 	pl := vowifiPlan(t)
 	d := pl.DryRun(Options{})
-	if len(d) == 0 || !strings.Contains(d[0], "table inet velinx_pbr") {
+	if len(d) == 0 || !strings.Contains(d[0], "table inet wayhop_pbr") {
 		t.Fatalf("DryRun[0] should be the nft ruleset: %v", d)
 	}
 	if indexOfContains(d, "ip route replace default dev awg1 table 151") < 0 {

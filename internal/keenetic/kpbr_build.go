@@ -5,8 +5,8 @@ import (
 	"net/netip"
 	"strings"
 
-	"velinx/internal/model"
-	"velinx/internal/pbr"
+	"wayhop/internal/model"
+	"wayhop/internal/pbr"
 )
 
 // kpbr_build.go orchestrates the FULL Keenetic kernel-PBR cutover that replaces keen-pbr's LIST
@@ -50,11 +50,11 @@ type KernelArtifacts struct {
 	Plan           *pbr.Plan
 	Profile        *model.Profile
 	IpsetRestore   string // `ipset restore -!` stream
-	DnsmasqConfig  string // /opt/etc/dnsmasq.d/30-velinx.conf
+	DnsmasqConfig  string // /opt/etc/dnsmasq.d/30-wayhop.conf
 	IptablesScript string // mangle MARK chain + nat MASQUERADE (idempotent shell)
 	IPScript       string // ip rule/route (idempotent shell)
 	FailoverCron   string // /opt/etc/cron.1min/wr-failover
-	NetfilterHook  string // /opt/etc/ndm/netfilter.d/40-velinx.sh
+	NetfilterHook  string // /opt/etc/ndm/netfilter.d/40-wayhop.sh
 	Teardown       string // rollback: remove the whole plane
 	Warnings       []string
 }
@@ -205,8 +205,8 @@ func kernelNetfilterHook(art *KernelArtifacts, io pbr.IpsetOptions) string {
 	names := art.Plan.IpsetNames(io)
 	var b strings.Builder
 	b.WriteString("#!/opt/bin/sh\n")
-	b.WriteString("# Velinx kernel-PBR — re-assert ipset/iptables/ip after NDM netfilter rebuild.\n")
-	b.WriteString("# Auto-generated; do not edit. Removed on Velinx teardown.\n")
+	b.WriteString("# WayHop kernel-PBR — re-assert ipset/iptables/ip after NDM netfilter rebuild.\n")
+	b.WriteString("# Auto-generated; do not edit. Removed on WayHop teardown.\n")
 	// HW-NAT fastnat OFF + rp_filter loose, re-asserted every event (NDM/boot may re-enable
 	// fastnat, which bypasses the mangle marking the whole plane depends on).
 	b.WriteString("echo 0 > /proc/sys/net/netfilter/nf_conntrack_fastnat 2>/dev/null\n")

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestRenderIP_V6Datapath: when a plan has v6 zones (AWG carrying IPv6 CIDRs), RenderIP

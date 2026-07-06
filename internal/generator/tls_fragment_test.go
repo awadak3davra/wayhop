@@ -4,7 +4,7 @@ import (
 	"encoding/base64"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestTLSFragment: the opt-in TLS-fragmentation flags emit on a plain-TLS outbound, are absent by

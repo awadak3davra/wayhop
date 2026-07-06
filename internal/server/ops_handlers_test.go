@@ -10,12 +10,12 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/config"
-	"velinx/internal/core"
-	"velinx/internal/failsafe"
-	"velinx/internal/model"
-	"velinx/internal/plugin"
-	"velinx/internal/store"
+	"wayhop/internal/config"
+	"wayhop/internal/core"
+	"wayhop/internal/failsafe"
+	"wayhop/internal/model"
+	"wayhop/internal/plugin"
+	"wayhop/internal/store"
 )
 
 // opshandlers_server builds a *Server with exactly the deps the ops handlers

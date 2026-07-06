@@ -3,7 +3,7 @@ package plugin
 import (
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 func specs_awg(id string) Spec {

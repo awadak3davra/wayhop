@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestRenderNft_NftCheck runs the rendered ruleset through a REAL `nft -c` (check-only,
@@ -451,7 +451,7 @@ func TestRender(t *testing.T) {
 
 	nft := plan.RenderNft()
 	for _, want := range []string{
-		"table inet velinx_pbr {", "delete table inet velinx_pbr", "list_carrier_carveout_4", "198.51.100.0/24",
+		"table inet wayhop_pbr {", "delete table inet wayhop_pbr", "list_carrier_carveout_4", "198.51.100.0/24",
 		"bypass4", "198.51.100.20/32", "meta mark set meta mark & 0xff00ffff | 0x00020000",
 		"type filter hook prerouting priority mangle", "chain wr_mark {",
 		"ct mark set meta mark", // connmark-save → conntrack shows the egress (Dashboard attribution)
@@ -475,7 +475,7 @@ func TestRender(t *testing.T) {
 	}
 
 	down := plan.RenderTeardown(Options{})
-	if !contains(down, "nft delete table inet velinx_pbr") {
+	if !contains(down, "nft delete table inet wayhop_pbr") {
 		t.Errorf("RenderTeardown = %v", down)
 	}
 }

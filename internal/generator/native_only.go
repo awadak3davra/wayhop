@@ -33,7 +33,7 @@ package generator
 import (
 	"strings"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // singboxRequiredProtos is the set of proxy protocols that have NO kernel/firmware data

@@ -1,0 +1,18 @@
+#!/bin/sh
+# Entware init script for WayHop (wayhop).
+# Install to /opt/etc/init.d/S99wayhop (chmod +x). Starts after networking (S99).
+# Uses Entware's standard rc.func helper, so it understands:
+#   S99wayhop start | stop | restart | check
+
+# ENABLED/PROCS/ARGS/PREARGS/DESC are consumed by Entware's sourced rc.func, not
+# this file, so shellcheck's SC2034 "appears unused" is a false positive; SC1091
+# is the rc.func source path that only exists on the device at runtime.
+# shellcheck disable=SC2034,SC1091
+ENABLED=yes
+PROCS=wayhop
+ARGS="--config /opt/etc/wayhop/config.json"
+PREARGS=""
+DESC="WayHop"
+PATH=/opt/sbin:/opt/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+. /opt/etc/init.d/rc.func

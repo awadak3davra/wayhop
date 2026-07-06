@@ -15,8 +15,8 @@ import (
 	"strconv"
 	"strings"
 
-	"velinx/internal/model"
-	"velinx/internal/util"
+	"wayhop/internal/model"
+	"wayhop/internal/util"
 )
 
 const defaultHealthURL = "http://cp.cloudflare.com/generate_204"

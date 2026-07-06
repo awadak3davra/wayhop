@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"velinx/internal/importer"
-	"velinx/internal/model"
+	"wayhop/internal/importer"
+	"wayhop/internal/model"
 )
 
 func mustParse(t *testing.T, link string) model.Endpoint {

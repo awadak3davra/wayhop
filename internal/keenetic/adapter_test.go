@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
-	"velinx/internal/platform"
+	"wayhop/internal/model"
+	"wayhop/internal/platform"
 )
 
 func awgProfile() *model.Profile {

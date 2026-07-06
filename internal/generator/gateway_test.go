@@ -3,7 +3,7 @@ package generator
 import (
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 func gen_tunInbound(res *Result) map[string]any {

@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"velinx/internal/config"
+	"wayhop/internal/config"
 )
 
 // config returns a value snapshot of the live config taken under cfgMu. ALL
@@ -146,7 +146,8 @@ func applyConfigFields(dst, in *config.Config) {
 	dst.FailSafe = in.FailSafe
 	dst.Watchdog = in.Watchdog
 	dst.AllowedHosts = in.AllowedHosts
-	// NOT copied: Subscription (token protection — rotated via its own path).
+	// NOT copied: Subscription (token rotated via its own path) + Features (per-plugin
+	// toggles/settings persisted via PUT /api/features/{id}, never the bulk Settings PUT).
 }
 
 // restartNeeded reports whether moving old->nw requires a daemon restart to take
@@ -181,7 +182,7 @@ func (s *Server) handleConfigExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Disposition", `attachment; filename="velinx-config.json"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="wayhop-config.json"`)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
 }

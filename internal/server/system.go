@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"velinx/internal/version"
+	"wayhop/internal/version"
 )
 
 // systemInfo is the host-resource snapshot surfaced on the Dashboard's system strip.
@@ -52,8 +52,7 @@ func readSystemInfo() systemInfo {
 // parseSystem is the pure (file-I/O-free) parser, so it is unit-testable with samples.
 func parseSystem(meminfo, loadavg, uptime string) systemInfo {
 	si := systemInfo{}
-	si.MemTotalKB = parseMeminfoKB(meminfo, "MemTotal:")
-	si.MemAvailKB = parseMeminfoKB(meminfo, "MemAvailable:")
+	si.MemTotalKB, si.MemAvailKB = parseMeminfo(meminfo)
 	if si.MemTotalKB > 0 {
 		used := si.MemTotalKB - si.MemAvailKB
 		if used < 0 {
@@ -73,16 +72,30 @@ func parseSystem(meminfo, loadavg, uptime string) systemInfo {
 	return si
 }
 
-// parseMeminfoKB extracts the kB value for a /proc/meminfo line like "MemTotal:  N kB".
-func parseMeminfoKB(meminfo, key string) int64 {
+// parseMeminfo extracts MemTotal and MemAvailable (both kB) from /proc/meminfo in a
+// single pass, so the 1 Hz Dashboard poll on a slow A53 doesn't scan the file once per
+// key. Returns 0 for a field that's absent; early-exits once both are found.
+func parseMeminfo(meminfo string) (total, avail int64) {
 	for _, line := range strings.Split(meminfo, "\n") {
-		if strings.HasPrefix(line, key) {
-			f := strings.Fields(line) // e.g. ["MemTotal:", "80000", "kB"]
-			if len(f) >= 2 {
-				v, _ := strconv.ParseInt(f[1], 10, 64)
-				return v
-			}
+		switch {
+		case strings.HasPrefix(line, "MemTotal:"):
+			total = meminfoValue(line)
+		case strings.HasPrefix(line, "MemAvailable:"):
+			avail = meminfoValue(line)
 		}
+		if total > 0 && avail > 0 {
+			break
+		}
+	}
+	return total, avail
+}
+
+// meminfoValue parses the kB number out of a "Key:  N kB" /proc/meminfo line.
+func meminfoValue(line string) int64 {
+	f := strings.Fields(line) // e.g. ["MemTotal:", "80000", "kB"]
+	if len(f) >= 2 {
+		v, _ := strconv.ParseInt(f[1], 10, 64)
+		return v
 	}
 	return 0
 }

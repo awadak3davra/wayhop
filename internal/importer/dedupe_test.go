@@ -3,7 +3,7 @@ package importer
 import (
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 func dedupe_ep(id, proto, server string, port int, uuid string) model.Endpoint {

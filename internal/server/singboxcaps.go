@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // parseSingboxTags extracts the build-feature set from `sing-box version` output (the

@@ -12,9 +12,9 @@ import (
 	"strconv"
 	"strings"
 
-	"velinx/internal/model"
-	"velinx/internal/plugin"
-	"velinx/internal/util"
+	"wayhop/internal/model"
+	"wayhop/internal/plugin"
+	"wayhop/internal/util"
 )
 
 // Result is an exported endpoint.

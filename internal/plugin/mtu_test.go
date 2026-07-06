@@ -3,7 +3,7 @@ package plugin
 import (
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestAWGMTU (QW2): an AmneziaWG iface gets a safe 1280 MTU floor at bring-up when the config

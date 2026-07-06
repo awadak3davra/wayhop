@@ -1,11 +1,11 @@
 <div align="center">
 
-<img src=".github/assets/banner.png" alt="Velinx" width="760">
+<img src=".github/assets/banner.png" alt="WayHop" width="760">
 
 **Run any modern VPN/proxy protocol on your router — from one clean web panel, with automatic failover.**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-22a06b?style=flat-square)](LICENSE)
-[![Release](https://img.shields.io/badge/release-v0.4.0-0097dc?style=flat-square)](../../releases/latest)
+[![Release](https://img.shields.io/badge/release-v0.5.0-0097dc?style=flat-square)](../../releases/latest)
 [![Go](https://img.shields.io/badge/go-1.22+-00ADD8?style=flat-square&logo=go&logoColor=white)](go.mod)
 [![Platforms](https://img.shields.io/badge/router-OpenWrt%20%C2%B7%20Keenetic%20%C2%B7%20Entware-151c28?style=flat-square)](#install)
 [![Arches](https://img.shields.io/badge/arch-mipsle%20%C2%B7%20mips%20%C2%B7%20arm%20%C2%B7%20arm64%20%C2%B7%20amd64-555?style=flat-square)](#install)
@@ -14,11 +14,11 @@
 
 <div align="center">
 
-<img src=".github/assets/velinx-demo.gif" alt="Velinx web UI walkthrough" width="820">
+<img src=".github/assets/wayhop-demo.gif" alt="WayHop web UI walkthrough" width="820">
 
 </div>
 
-Velinx is a **single static Go binary** (the web UI is embedded) that turns [sing-box](https://github.com/SagerNet/sing-box) into a router admin panel. Stock firmware gives you WireGuard and OpenVPN — Velinx adds the modern censorship-resistant stack (**VLESS-Reality, Hysteria2, TUIC, AmneziaWG**), one-click **failover groups**, list-based **selective routing**, live **traffic graphs**, and a one-click **diagnostics battery** — all on its own port, without touching your router's native VPN config.
+WayHop is a **single static Go binary** (the web UI is embedded) that turns [sing-box](https://github.com/SagerNet/sing-box) into a router admin panel. Stock firmware gives you WireGuard and OpenVPN — WayHop adds the modern censorship-resistant stack (**VLESS-Reality, Hysteria2, TUIC, AmneziaWG**), one-click **failover groups**, list-based **selective routing**, live **traffic graphs**, and a one-click **diagnostics battery** — all on its own port, without touching your router's native VPN config.
 
 > **No more hand-edited sing-box JSON, policy-routing scripts, and SSH.** Paste a share link, pick a failover order, hit Apply — and if anything breaks connectivity, it rolls back on its own.
 
@@ -32,13 +32,13 @@ Velinx is a **single static Go binary** (the web UI is embedded) that turns [sin
 | 🔁 **Smart failover & health** | Auto-select the fastest working endpoint (`urltest`), manual selector, or strict ordered fallback — with live latency, success-rate, uptime, and **probable failure cause** read from the engine logs. |
 | 🧭 **Selective routing, 20+ presets** | Route per destination by domain / IP / geo / port. One-click curated rule-sets (unblock RU sites, route Discord/Telegram/YouTube, block ads), or your own lists — with **auto-refreshing IP carve-outs** from CIDR/ASN feeds. |
 | ⚡ **Native-first kernel routing** | Let the kernel route WireGuard/AmneziaWG and IP carve-outs at full speed; sing-box handles only the obfuscation protocols. *(new in 0.3.0: a kernel-PBR backend for **Keenetic**, which ships no nftables.)* |
-| 🛟 **Fail-safe Apply** | Changes go live **until reboot** unless you Save. Lose connectivity and Velinx auto-reverts the previous config; optional guarded auto-reboot as a last resort. |
+| 🛟 **Fail-safe Apply** | Changes go live **until reboot** unless you Save. Lose connectivity and WayHop auto-reverts the previous config; optional guarded auto-reboot as a last resort. |
 | 🩺 **One-click diagnostics** | Ping, traceroute, DNS-leak, IPv6-leak, DoH reachability, clock-skew, config validation, and live engine-log tailing — with fixes suggested from a built-in knowledgebase. |
 | 📈 **Live dashboard** | Real-time traffic graph, per-tunnel latency sparklines, top-talkers, grouped connections by destination IP, RAM/CPU/uptime, and your public exit IP. |
 | 🔒 **Hardened by default** | SSRF-guarded subscription fetches, same-origin (CSRF) guard, CSP `script-src 'self'`, clickjacking/`nosniff`/referrer headers, a 16 MiB body cap, and an optional Host allow-list. |
 
 <div align="center">
-<img src=".github/assets/dashboard.png" alt="Velinx dashboard" width="820">
+<img src=".github/assets/dashboard.png" alt="WayHop dashboard" width="820">
 </div>
 
 <details align="center">
@@ -75,22 +75,22 @@ Subscriptions auto-detect base64 vs. plain text, import each link independently 
 
 ## 🚀 Install
 
-Velinx runs on **OpenWrt** (native `procd`) and on **Keenetic / generic Entware** (busybox `/opt`). Grab the prebuilt tarball for your router from the [**Releases**](../../releases/latest) page — each CPU arch ships in two flavours:
+WayHop runs on **OpenWrt** (native `procd`) and on **Keenetic / generic Entware** (busybox `/opt`). Grab the prebuilt tarball for your router from the [**Releases**](../../releases/latest) page — each CPU arch ships in two flavours:
 
 | Your router's `uname -m` | Arch | Entware / Keenetic | OpenWrt |
 |---|---|---|---|
-| `mips` (little-endian, most MT7621) | `mipsle` | `velinx-<ver>-mipsle.tar.gz` | `…-mipsle-openwrt.tar.gz` |
-| `mips` (big-endian) | `mips` | `velinx-<ver>-mips.tar.gz` | `…-mips-openwrt.tar.gz` |
-| `armv7l` | `arm` | `velinx-<ver>-arm.tar.gz` | `…-arm-openwrt.tar.gz` |
-| `aarch64` | `arm64` | `velinx-<ver>-arm64.tar.gz` | `…-arm64-openwrt.tar.gz` |
-| `x86_64` | `amd64` | `velinx-<ver>-amd64.tar.gz` | `…-amd64-openwrt.tar.gz` |
+| `mips` (little-endian, most MT7621) | `mipsle` | `wayhop-<ver>-mipsle.tar.gz` | `…-mipsle-openwrt.tar.gz` |
+| `mips` (big-endian) | `mips` | `wayhop-<ver>-mips.tar.gz` | `…-mips-openwrt.tar.gz` |
+| `armv7l` | `arm` | `wayhop-<ver>-arm.tar.gz` | `…-arm-openwrt.tar.gz` |
+| `aarch64` | `arm64` | `wayhop-<ver>-arm64.tar.gz` | `…-arm64-openwrt.tar.gz` |
+| `x86_64` | `amd64` | `wayhop-<ver>-amd64.tar.gz` | `…-amd64-openwrt.tar.gz` |
 
 ### Keenetic / Entware (`/opt`, SSH)
 
 ```sh
 cd /tmp
-curl -fsSLO <release-url>/velinx-<ver>-<arch>.tar.gz      # e.g. -arm64.tar.gz
-mkdir wr && tar -xzf velinx-*.tar.gz -C wr && cd wr
+curl -fsSLO <release-url>/wayhop-<ver>-<arch>.tar.gz      # e.g. -arm64.tar.gz
+mkdir wr && tar -xzf wayhop-*.tar.gz -C wr && cd wr
 sh ./install.sh
 ```
 
@@ -98,7 +98,7 @@ The installer is **interactive and safe to run on a live router**. It detects yo
 
 - ✅ **System & router status** — arch (incl. MIPS endianness), free flash space, RAM, uptime, internet reachability, and clock/NTP (Reality/TLS need an accurate clock).
 - ✅ **Dependencies** — `ip` / `ipset` / `iptables` / `opkg` / `sing-box`, with an offer to `opkg install` what's missing.
-- ✅ **Conflict detection + one-tap fixes** — it finds whatever already holds the UI port (**lighttpd** on stock Keenetic firmware is the usual culprit), an existing **selective-routing tool**, a stray sing-box, or a previous install, and **asks before disabling each one** (or just moves Velinx to a free port).
+- ✅ **Conflict detection + one-tap fixes** — it finds whatever already holds the UI port (**lighttpd** on stock Keenetic firmware is the usual culprit), an existing **selective-routing tool**, a stray sing-box, or a previous install, and **asks before disabling each one** (or just moves WayHop to a free port).
 - ✅ **Atomic install** — staged binary swap with a single rolling backup, then a health check on the UI.
 
 Useful flags: `--dry-run` (run every check, change nothing), `-y` (assume yes), `--port 8089` (use a different UI port), `--arch mipsle` (force arch), `--no-start`.
@@ -108,7 +108,7 @@ Useful flags: `--dry-run` (run every check, change nothing), `-y` (assume yes), 
 busybox has no `scp`, so stream the `-openwrt` tarball in over SSH:
 
 ```sh
-ssh root@192.168.1.1 "cat > /tmp/wr.tgz" < velinx-<ver>-<arch>-openwrt.tar.gz
+ssh root@192.168.1.1 "cat > /tmp/wr.tgz" < wayhop-<ver>-<arch>-openwrt.tar.gz
 ssh root@192.168.1.1 "mkdir -p /tmp/wr && tar -xzf /tmp/wr.tgz -C /tmp/wr && cd /tmp/wr && sh ./install.sh"
 ```
 
@@ -130,30 +130,27 @@ Single-arch, by hand:
 
 ```sh
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
-  -ldflags "-s -w -X velinx/internal/version.Version=0.4.0" \
-  -o velinx-arm64 ./cmd/velinx
+  -ldflags "-s -w -X wayhop/internal/version.Version=0.5.0" \
+  -o wayhop-arm64 ./cmd/wayhop
 ```
 
 Run the demo UI locally (synthetic data, no sing-box needed):
 
 ```sh
-go run ./cmd/velinx --demo --listen 127.0.0.1:8088
+go run ./cmd/wayhop --demo --listen 127.0.0.1:8088
 ```
 </details>
 
 ---
 
-## 🆕 What's new in 0.4.0
+## 🆕 What's new in 0.5.0
 
-- **New name: Velinx** — the project formerly known as WakeRoute is now **Velinx**. Same tool, clearer brand. On upgrade the installer migrates your existing config and runtime state automatically.
-- **Safer self-update** — a pre-download RAM check refuses a low-memory engine/self install cleanly instead of risking an out-of-memory kill on tight routers, and engines can now be uninstalled from the Updater.
-- **Faster, steadier tunnels** — TCP MSS is clamped to the path MTU on every tunnel egress (no more stalled / oversized-packet hangs over WireGuard/AmneziaWG), AmneziaWG interfaces get safe MTU + keepalive defaults, and an unchanged Apply no longer rebuilds the routing plane (no connectivity blip on a no-op save).
-- **Flows stay on their tunnel** — an established connection keeps its chosen exit even after its destination later leaves an auto-refreshing list, instead of falling back to the WAN mid-connection.
-- **Telegram calls preset** — a one-click IP rule-set for Telegram's voice servers (calls travel over raw UDP that the domain list can't catch).
-- **Routing correctness & hardening** — the kill-switch is now enforced on the iptables routing plane too; the fail-safe no longer layers a redundant sing-box core over the kernel datapath on rollback; the SSRF guards now also block NAT64 / 6to4 addresses that embed an internal IP; tighter anti-loop bypass; and a clearer per-egress IPv6 posture.
-- **Heads-up in fast mode** — Apply now warns when a domain-based rule won't match transparently-routed LAN traffic in fast mode (no TUN), so a rule never silently does nothing.
+- **New name: WayHop** — the project formerly known as Velinx is now **WayHop**. Same tool, clearer brand. On upgrade the installer migrates your existing config and runtime state automatically (older WakeRoute installs migrate too).
+- **IPTV plugin** — build a filtered, de-duplicated M3U playlist from public country / language / category catalogs, your own list URLs, or Xtream Codes accounts, served at a private token URL. A catalog picker — the same browse-and-add UX as the routing-list catalog — makes public sources one click; pin and keep categories, optionally probe streams for liveness, and merge EPG guide data. Credentials in Xtream / list URLs never reach logs or the UI.
+- **Every language, fully translated** — the panel *and* the new IPTV plugin ship complete translations across all 13 supported languages, with a CI guard that blocks a missing key or a dropped placeholder from ever shipping.
+- **Lighter on RAM** — the daemon caps its own heap so it stays small on tight routers.
 
-See the [changelog](CHANGELOG.md) for the full 0.3.x release history.
+See the [changelog](CHANGELOG.md) for the full 0.4.x / 0.3.x release history.
 
 ---
 
@@ -161,7 +158,7 @@ See the [changelog](CHANGELOG.md) for the full 0.3.x release history.
 
 ```
                        ┌─────────────────────────────────────────────┐
-   browser ──:8088──▶  │  velinx daemon  (one Go binary, UI baked in) │
+   browser ──:8088──▶  │  wayhop daemon  (one Go binary, UI baked in) │
                        │   • model → config   • health probes            │
                        │   • fail-safe Apply   • REST + Clash API client │
                        └───────┬───────────────────────┬─────────────────┘
@@ -188,7 +185,7 @@ See the [changelog](CHANGELOG.md) for the full 0.3.x release history.
 
 ## 🔒 Security model
 
-**Velinx is a router LAN admin panel.** It binds `:8088` without a login, treating any LAN-connected user as a trusted operator — the same assumption stock router UIs (LuCI, the Keenetic UI) make.
+**WayHop is a router LAN admin panel.** It binds `:8088` without a login, treating any LAN-connected user as a trusted operator — the same assumption stock router UIs (LuCI, the Keenetic UI) make.
 
 > [!IMPORTANT]
 > **Do not expose `:8088` to the internet.** It has no auth and returns secrets (keys, credentials) to its own UI for editing. For remote access, reach the router over a VPN, or front the panel with TLS + authentication (e.g. a reverse proxy).
@@ -216,7 +213,7 @@ Anything that runs **OpenWrt** (22.x–25.x, `procd`/`fw4`) or has **Entware** u
 <details>
 <summary><b>Will it break my stock VPN / firewall config?</b></summary>
 
-No. Velinx runs as its own service on `:8088` and routes only the traffic it explicitly marks (its own fwmark + routing table). It coexists with the stock firewall and with other selective-routing systems — the installer detects those and asks before changing anything.
+No. WayHop runs as its own service on `:8088` and routes only the traffic it explicitly marks (its own fwmark + routing table). It coexists with the stock firewall and with other selective-routing systems — the installer detects those and asks before changing anything.
 </details>
 
 <details>
@@ -228,7 +225,7 @@ The UI runs without it, but you need `sing-box` present to **Apply** a proxy con
 <details>
 <summary><b>What if an Apply breaks my connection?</b></summary>
 
-Apply is **live-until-reboot** unless you explicitly Save. If connectivity drops, Velinx automatically rolls back to the previous config. As a last resort it can auto-reboot — but only if you opt in.
+Apply is **live-until-reboot** unless you explicitly Save. If connectivity drops, WayHop automatically rolls back to the previous config. As a last resort it can auto-reboot — but only if you opt in.
 </details>
 
 ---

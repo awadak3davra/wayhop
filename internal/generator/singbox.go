@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"velinx/internal/model"
-	"velinx/internal/pbr"
-	"velinx/internal/util"
+	"wayhop/internal/model"
+	"wayhop/internal/pbr"
+	"wayhop/internal/util"
 )
 
 // isBlock reports whether a rule outbound names the builtin block target,
@@ -243,7 +243,7 @@ func Generate(p *model.Profile, opts Options) (*Result, error) {
 			continue
 		}
 		if e.Engine == model.EngineExternal {
-			// Route through an existing OS interface Velinx does NOT manage
+			// Route through an existing OS interface WayHop does NOT manage
 			// (UCI/netifd owns it) — a direct outbound bound to it. No Plugin entry:
 			// the daemon must not try to bring this interface up or tear it down.
 			// Hybrid: same as AmneziaWG above, but there's no Plugin (netifd owns the
@@ -353,6 +353,21 @@ func Generate(p *model.Profile, opts Options) (*Result, error) {
 	// Prepend the rule-sets synthesised from geosite/geoip rule matchers (empty for a
 	// profile without such rules, so the rule_set / cache_file below are unchanged).
 	sets = append(geoSets, sets...)
+	// DNS plane (the "DNS" section): emit the dns{} block, plus any geosite rule_sets its rules add
+	// (deduped against the tags already collected). Only when the user configured DNS — a nil DNS
+	// plane leaves dnsBlock nil, so the output (and the cache_file gate below) is byte-identical.
+	var dnsBlock map[string]any
+	if p.DNS != nil && p.DNS.Enabled {
+		seen := map[string]bool{}
+		for _, s := range sets {
+			if t, _ := s["tag"].(string); t != "" {
+				seen[t] = true
+			}
+		}
+		var dnsSets []map[string]any
+		dnsBlock, dnsSets = dnsFrom(p, opts, seen)
+		sets = append(sets, dnsSets...)
+	}
 	if len(sets) > 0 {
 		route["rule_set"] = sets
 	}
@@ -376,7 +391,21 @@ func Generate(p *model.Profile, opts Options) (*Result, error) {
 	if len(rules) > 0 {
 		route["rules"] = rules
 	}
+	if dnsBlock != nil {
+		// sing-box ≥1.12 wants route.default_domain_resolver once a DNS system is present — it's how an
+		// outbound SERVER's hostname is resolved at dial time. Missing it is a deprecation WARN on 1.12.x
+		// but a startup FATAL on 1.13.x ("set ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER=true"), i.e. the
+		// whole config (not just DNS) fails to load. Point it at a resolver that dials DIRECT (a `local`
+		// server, else a detour-less one) so an outbound's own hostname never needs its tunnel already up
+		// — no bootstrap cycle. Verified via `sing-box check` on real 1.12.17 AND 1.13.3 binaries.
+		if rtag := dnsDefaultResolverTag(dnsBlock); rtag != "" {
+			route["default_domain_resolver"] = map[string]any{"server": rtag}
+		}
+	}
 	res.Config["route"] = route
+	if dnsBlock != nil {
+		res.Config["dns"] = dnsBlock
+	}
 
 	// `warn`, not `info`: on a router sing-box stdout is piped into the system log
 	// (logread); info-level logs every connection and bloats it (a known incident
@@ -395,7 +424,10 @@ func Generate(p *model.Profile, opts Options) (*Result, error) {
 	// removed and is REJECTED by 1.12.x ("unknown field"), which would take ALL routing down on
 	// apply — so it must NOT be emitted (verified on-device). Enabled when there are rule-sets OR
 	// groups.
-	if len(sets) > 0 || groupsEmitted {
+	// Also enable it when a DNS plane is present so its cache — and especially FakeIP's
+	// synthetic-IP↔domain mappings — survive a reboot (a lost fakeip map breaks in-flight domain
+	// routing). nil DNS ⇒ dnsBlock nil ⇒ this OR-term is false ⇒ byte-identical to before.
+	if len(sets) > 0 || groupsEmitted || dnsBlock != nil {
 		cf := map[string]any{"enabled": true}
 		if opts.CacheFile != "" {
 			cf["path"] = opts.CacheFile
@@ -482,6 +514,195 @@ func routingFrom(p *model.Profile, hybrid bool) (sets []map[string]any, rules []
 		}
 	}
 	return sets, append(rejects, routes...)
+}
+
+// dnsFrom builds the sing-box 1.12.x dns{} block from the profile's DNS plane, returning it plus any
+// geosite rule_sets its rules reference (deduped via seen, merged into route.rule_set by Generate so
+// DNS and traffic routing share tags). Called only when p.DNS != nil && p.DNS.Enabled.
+//
+// FAILOVER-AWARE by construction: a server's detour may be a failover GROUP ending in `direct`, so
+// DNS rides the tunnel while a VPN tier is up (ISP blind) and falls to direct-DoH (still encrypted)
+// when every tier is down — DNS never goes dark. FakeIP is DROPPED when the TUN plane is absent
+// (opts.TunEnabled false): a synthetic fakeip answer would blackhole in the kernel-PBR/mixed plane,
+// so its server AND every rule that targets it are dropped, degrading to DoH-only. Fields are limited
+// to those valid on the deployed sing-box 1.12.17 (this generalizes the orphaned keenetic/dns.go);
+// TLS SNI is intentionally not emitted yet — the secure-default pins provider IPs, whose certs carry
+// the IP in a SAN, so no SNI is needed.
+func dnsFrom(p *model.Profile, opts Options, seen map[string]bool) (map[string]any, []map[string]any) {
+	d := p.DNS
+	var extra []map[string]any
+	dropped := map[string]bool{} // fakeip servers dropped this build (no TUN plane); their rules drop too
+	fakeipUsed := false
+	var servers []map[string]any
+	for i := range d.Servers {
+		s := &d.Servers[i]
+		if !s.Enabled {
+			continue
+		}
+		if s.Type == "fakeip" && !opts.TunEnabled {
+			dropped[s.Tag] = true
+			continue
+		}
+		sv := map[string]any{"tag": s.Tag, "type": s.Type}
+		switch s.Type {
+		case "local":
+			// device resolver (127.0.0.1 https-dns-proxy behind the existing :53 hijack); no address
+		case "fakeip":
+			fakeipUsed = true
+			if r := strings.TrimSpace(s.Inet4Range); r != "" {
+				sv["inet4_range"] = r
+			}
+			if r := strings.TrimSpace(s.Inet6Range); r != "" {
+				sv["inet6_range"] = r
+			}
+		default: // network resolver: https/tls/quic/h3/udp/tcp
+			sv["server"] = s.Server
+			if s.ServerPort > 0 {
+				sv["server_port"] = s.ServerPort
+			}
+			if s.Type == "https" && strings.TrimSpace(s.Path) != "" {
+				sv["path"] = s.Path
+			}
+			if s.Detour != "" {
+				sv["detour"] = canonicalOutbound(s.Detour)
+			}
+			if strings.TrimSpace(s.DomainResolver) != "" {
+				sv["domain_resolver"] = s.DomainResolver // bootstrap for a hostname upstream (no cleartext A-lookup)
+			}
+		}
+		servers = append(servers, sv)
+	}
+
+	addGeoSet := func(tag, url string) {
+		if !seen[tag] {
+			seen[tag] = true
+			extra = append(extra, map[string]any{
+				"tag": tag, "type": "remote", "format": "binary",
+				"url": url, "download_detour": model.OutboundDirect, "update_interval": "1d",
+			})
+		}
+	}
+	var rules []map[string]any
+	for i := range d.Rules {
+		r := &d.Rules[i]
+		if r.Disabled {
+			continue
+		}
+		if r.Server != "reject" && dropped[r.Server] {
+			continue // targets a dropped fakeip server → drop with it
+		}
+		m := map[string]any{}
+		var tags []string
+		for _, listID := range r.RuleSets {
+			tags = append(tags, dnsListTags(p, listID)...)
+		}
+		for _, g := range r.GeoSite {
+			if g = strings.TrimSpace(g); g != "" {
+				tag := "geosite-" + g
+				addGeoSet(tag, geositeSRSBase+g+".srs")
+				tags = append(tags, tag)
+			}
+		}
+		if len(tags) > 0 {
+			m["rule_set"] = tags
+		}
+		addIf(m, "domain_suffix", r.DomainSuffix)
+		addIf(m, "domain", r.Domain)
+		addIf(m, "query_type", r.QueryType)
+		if len(m) == 0 {
+			continue // every matcher degraded away (e.g. all rule_sets dropped) — never emit a catch-all
+		}
+		if r.Server == "reject" {
+			m["action"] = "reject"
+		} else {
+			m["server"] = r.Server
+		}
+		rules = append(rules, m)
+	}
+
+	block := map[string]any{}
+	if len(servers) > 0 {
+		block["servers"] = servers
+	}
+	if len(rules) > 0 {
+		block["rules"] = rules
+	}
+	if d.Final != "" && !dropped[d.Final] {
+		block["final"] = d.Final
+	}
+	if d.Strategy != "" {
+		block["strategy"] = d.Strategy
+	}
+	if d.IndependentCache || fakeipUsed {
+		block["independent_cache"] = true // FakeIP mappings must not share a cache namespace
+	}
+	if d.DisableCache {
+		block["disable_cache"] = true
+	}
+	if strings.TrimSpace(d.ClientSubnet) != "" {
+		block["client_subnet"] = d.ClientSubnet
+	}
+	return block, extra
+}
+
+// dnsDefaultResolverTag picks the dns server tag for route.default_domain_resolver (required since
+// sing-box 1.12, FATAL-if-missing on 1.13 once a dns plane exists). It prefers a resolver that dials
+// DIRECT so an outbound server's hostname resolves without needing that tunnel already up (no bootstrap
+// cycle): a `local` server first, then any detour-less network server, then the plane's `final`, then
+// the first real server. fakeip servers are skipped (they synthesize, they don't resolve). "" when the
+// plane emitted no usable server (then no field is added).
+func dnsDefaultResolverTag(block map[string]any) string {
+	servers, _ := block["servers"].([]map[string]any)
+	if len(servers) == 0 {
+		return ""
+	}
+	tagOf := func(m map[string]any) string { t, _ := m["tag"].(string); return t }
+	typeOf := func(m map[string]any) string { t, _ := m["type"].(string); return t }
+	// 1: a local (device) resolver — direct, always reachable.
+	for _, s := range servers {
+		if typeOf(s) == "local" && tagOf(s) != "" {
+			return tagOf(s)
+		}
+	}
+	// 2: a detour-less network resolver (dials direct).
+	for _, s := range servers {
+		if _, hasDetour := s["detour"]; !hasDetour && typeOf(s) != "fakeip" && tagOf(s) != "" {
+			return tagOf(s)
+		}
+	}
+	// 3: the configured final.
+	if f, _ := block["final"].(string); f != "" {
+		return f
+	}
+	// 4: first real (non-fakeip) server, else the very first.
+	for _, s := range servers {
+		if typeOf(s) != "fakeip" && tagOf(s) != "" {
+			return tagOf(s)
+		}
+	}
+	return tagOf(servers[0])
+}
+
+// dnsListTags returns the route.rule_set tags an ENABLED RoutingList produces — "rs-<id>" for a
+// remote source, "rsm-<id>" for manual entries — the SAME tags routingFrom emits, so a DNS rule
+// referencing a list resolves via that list's already-emitted set. A disabled/absent list yields
+// nothing (the reference silently drops), never a dangling tag that would fail `sing-box check`.
+func dnsListTags(p *model.Profile, listID string) []string {
+	for i := range p.RoutingLists {
+		rl := &p.RoutingLists[i]
+		if rl.ID != listID || !rl.Enabled {
+			continue
+		}
+		var tags []string
+		if rl.Source != "" {
+			tags = append(tags, "rs-"+rl.ID)
+		}
+		if dom, ips := splitDomainsIPs(rl.Manual); len(dom) > 0 || len(ips) > 0 {
+			tags = append(tags, "rsm-"+rl.ID)
+		}
+		return tags
+	}
+	return nil
 }
 
 // ruleSetFormat picks the rule-set format: explicit Format, else inferred from
@@ -574,10 +795,24 @@ func endpointBypass(p *model.Profile) []string {
 
 func groupOutbound(g *model.Group) map[string]any {
 	ob := map[string]any{"tag": g.ID, "outbounds": g.Members}
+	// A MANAGED group is driven by the WayHop daemon control loop (internal/failover) via
+	// clash.Select, so it is emitted as a plain `selector` — sing-box must NOT run its own urltest
+	// prober on it, or the two would fight over the selection. The daemon supplies the policy
+	// (urltest/fallback/selector semantics) the group's Type still records. Default (unmanaged)
+	// groups keep their exact type mapping below.
+	if g.Managed {
+		// A managed group does NOT emit the static interrupt_exist_connections flag: the daemon
+		// control loop interrupts DECISION-AWARE (F11 — hard-cut on an emergency switch off a dead
+		// member, drain on a graceful failback), which a static "interrupt on every switch" flag
+		// would break by killing connections on a graceful failback too.
+		ob["type"] = "selector"
+		return ob
+	}
 	switch g.Type {
 	case model.GroupURLTest, model.GroupFallback:
 		ob["type"] = "urltest"
 		url, interval, tol := defaultHealthURL, "1m", 50
+		ivSec := 60 // effective interval in seconds, for the idle_timeout invariant below
 		if g.Test != nil {
 			if g.Test.URL != "" {
 				url = g.Test.URL
@@ -591,6 +826,7 @@ func groupOutbound(g *model.Group) map[string]any {
 				if iv < 5 {
 					iv = 5
 				}
+				ivSec = iv
 				interval = fmt.Sprintf("%ds", iv)
 			}
 			if g.Test.Tolerance > 0 {
@@ -598,6 +834,17 @@ func groupOutbound(g *model.Group) map[string]any {
 			}
 		}
 		ob["url"], ob["interval"], ob["tolerance"] = url, interval, tol
+		// Emit idle_timeout explicitly. sing-box 1.12.x enforces interval <= idle_timeout (default
+		// 30m) at LOAD and rejects the WHOLE shared singbox.json if violated — so a single group with
+		// a pathological interval > 30m (reachable via a hand-edited profile or a subscription, since
+		// the interval is only floored, never capped) would take the entire datapath down. Pinning
+		// idle_timeout >= interval makes that impossible; for every normal group this equals the
+		// sing-box default, so the datapath is byte-behaviour-identical.
+		idleSec := 1800
+		if ivSec > idleSec {
+			idleSec = ivSec
+		}
+		ob["idle_timeout"] = fmt.Sprintf("%ds", idleSec)
 	default:
 		ob["type"] = "selector"
 	}

@@ -8,14 +8,14 @@ import (
 	"path/filepath"
 	"testing"
 
-	"velinx/internal/config"
-	"velinx/internal/core"
-	"velinx/internal/failsafe"
-	"velinx/internal/health"
-	"velinx/internal/model"
-	"velinx/internal/store"
-	"velinx/internal/traffic"
-	"velinx/internal/version"
+	"wayhop/internal/config"
+	"wayhop/internal/core"
+	"wayhop/internal/failsafe"
+	"wayhop/internal/health"
+	"wayhop/internal/model"
+	"wayhop/internal/store"
+	"wayhop/internal/traffic"
+	"wayhop/internal/version"
 )
 
 // applyhealth_server builds a *Server with exactly the deps the apply/health/
@@ -335,6 +335,34 @@ func TestApplyHealth_HealthEndpointsNilMonitorReturnsEmptyArray(t *testing.T) {
 	}
 	if len(arr) != 0 {
 		t.Errorf("expected empty array with nil monitor, got %d entries: %s", len(arr), w.Body.String())
+	}
+}
+
+// TestFailoverState_NilDepsReturnsEmpty covers GET /api/failover/state with no Clash and no
+// monitor: it must not panic and returns an empty elected map + local_fault false (the UI then
+// falls back to its client-side latency guess).
+func TestFailoverState_NilDepsReturnsEmpty(t *testing.T) {
+	s := applyhealth_server(t) // monitor + clash both nil
+
+	req := httptest.NewRequest(http.MethodGet, "/api/failover/state", nil)
+	w := httptest.NewRecorder()
+	s.handleFailoverState(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("failover/state (nil deps): got %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Elected    map[string]string `json:"elected"`
+		LocalFault bool              `json:"local_fault"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v (%s)", err, w.Body.String())
+	}
+	if len(resp.Elected) != 0 {
+		t.Errorf("nil clash: elected should be empty, got %v", resp.Elected)
+	}
+	if resp.LocalFault {
+		t.Errorf("nil monitor: local_fault should be false")
 	}
 }
 

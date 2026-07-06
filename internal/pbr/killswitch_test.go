@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestKillSwitchFailClosed: a kernel-routed group with kill_switch makes its tunnel egress

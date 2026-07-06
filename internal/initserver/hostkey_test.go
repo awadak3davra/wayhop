@@ -101,7 +101,7 @@ func TestHostKeyFingerprint(t *testing.T) {
 }
 
 func TestProvisionSSHArgs(t *testing.T) {
-	const kh = "/opt/etc/velinx/ssh_known_hosts"
+	const kh = "/opt/etc/wayhop/ssh_known_hosts"
 
 	// With KnownHostsFile set: the pinning options must be present.
 	withKH := provisionSSHArgs(Creds{Host: "1.2.3.4", Port: 22, User: "root", KnownHostsFile: kh})

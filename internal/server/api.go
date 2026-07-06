@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"time"
 
-	"velinx/internal/version"
+	"wayhop/internal/version"
 )
 
 type healthResp struct {
@@ -48,8 +48,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// mode + all egresses kernel-native), so an absent core is BY DESIGN. The UI reads this
 	// to show "native-only mode" instead of a false "core down". Conservative by construction.
 	if s.store != nil {
-		p := s.store.Profile()
-		resp.SingBox.NativeOnly = s.datapathNativeOnly(s.config(), &p)
+		resp.SingBox.NativeOnly = s.nativeOnlyCached()
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

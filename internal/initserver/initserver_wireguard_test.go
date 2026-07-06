@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/importer"
-	"velinx/internal/model"
+	"wayhop/internal/importer"
+	"wayhop/internal/model"
 )
 
 // A representative plain-WireGuard client .conf in the exact shape scriptWireGuard
@@ -142,10 +142,10 @@ func TestWireGuardMarkerPrecedesConfig(t *testing.T) {
 // real, importable standard-WireGuard client.
 func TestWireGuardClientConfRoundTrips(t *testing.T) {
 	b64 := base64.StdEncoding.EncodeToString([]byte(wgSampleConf))
-	out := "[velinx-init] installing WireGuard...\n" +
+	out := "[wayhop-init] installing WireGuard...\n" +
 		"WR_PROTO=wireguard\n" +
 		"WR_CLIENT_CONFIG_B64=" + b64 + "\n" +
-		"[velinx-init] done\n"
+		"[wayhop-init] done\n"
 
 	tagged := ExtractTagged(out)
 	if len(tagged) != 1 {

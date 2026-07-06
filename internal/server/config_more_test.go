@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/config"
+	"wayhop/internal/config"
 )
 
 // cfgFileServer builds a *Server whose config is backed by a fresh file (so
@@ -48,6 +48,7 @@ func TestApplyConfigFields_CopiesEveryExportedField(t *testing.T) {
 		Watchdog:     config.Watchdog{NotifyURL: "https://x"},
 		Subscription: config.Subscription{Token: "tok"},
 		AllowedHosts: []string{"router.lan"},
+		Features:     map[string]config.FeatureConfig{"iptv": {Enabled: true}},
 	}
 	dst := &config.Config{}
 	applyConfigFields(dst, in)
@@ -64,6 +65,13 @@ func TestApplyConfigFields_CopiesEveryExportedField(t *testing.T) {
 		if f.Name == "Subscription" {
 			if !reflect.DeepEqual(gotDst, config.Subscription{}) {
 				t.Errorf("Subscription must NOT be copied (token protection), got %+v", gotDst)
+			}
+			continue
+		}
+		if f.Name == "Features" {
+			// Features must NOT be copied by the bulk PUT — toggled via /api/features/{id}.
+			if dst.Features != nil {
+				t.Errorf("Features must NOT be copied (per-plugin toggles via /api/features), got %+v", dst.Features)
 			}
 			continue
 		}

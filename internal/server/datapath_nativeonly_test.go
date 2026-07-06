@@ -3,8 +3,8 @@ package server
 import (
 	"testing"
 
-	"velinx/internal/config"
-	"velinx/internal/model"
+	"wayhop/internal/config"
+	"wayhop/internal/model"
 )
 
 // TestServerDatapathNativeOnly exercises the SERVER gate that decides whether the apply path skips

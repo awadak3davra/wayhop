@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"velinx/internal/failsafe"
+	"wayhop/internal/failsafe"
 )
 
 func TestCutoverCheck(t *testing.T) {
@@ -57,7 +57,7 @@ func TestRunCutover_BadConfigCheckRollsBack(t *testing.T) {
 		WanGateway:        "172.20.0.1",
 		Fetch:             func(string) ([]string, error) { return []string{"149.154.160.0/20"}, nil },
 		Stage:             SingboxStageOptions{ConfigPath: cfgPath},
-		Netfilter:         NetfilterHookOptions{Path: filepath.Join(dir, "40-velinx.sh")},
+		Netfilter:         NetfilterHookOptions{Path: filepath.Join(dir, "40-wayhop.sh")},
 	}
 	mgr := failsafe.New(failsafe.Durations{Grace: time.Hour, Interval: time.Hour, RollbackAfter: time.Hour, RebootAfter: time.Hour, KeepWindow: time.Hour})
 
@@ -94,7 +94,7 @@ func TestRunCutover_AppliesAndArms(t *testing.T) {
 		WanGateway:        "172.20.0.1",
 		Fetch:             func(string) ([]string, error) { return []string{"149.154.160.0/20"}, nil },
 		Stage:             SingboxStageOptions{ConfigPath: cfgPath},
-		Netfilter:         NetfilterHookOptions{Path: filepath.Join(dir, "40-velinx.sh")},
+		Netfilter:         NetfilterHookOptions{Path: filepath.Join(dir, "40-wayhop.sh")},
 	}
 	mgr := failsafe.New(failsafe.Durations{Grace: time.Hour, Interval: time.Hour, RollbackAfter: time.Hour, RebootAfter: time.Hour, KeepWindow: time.Hour})
 

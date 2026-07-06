@@ -3,7 +3,7 @@ package generator
 import (
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestRuleSetFormat: the format is inferred from the URL extension, but a ?query /

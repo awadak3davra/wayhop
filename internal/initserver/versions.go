@@ -14,7 +14,7 @@ import (
 // digits-and-dots match cannot contain a shell-special character.
 var sbVerRe = regexp.MustCompile(`\d+\.\d+\.\d+`)
 
-// ServerBinary identifies a binary velinx can version-check (and update) on a
+// ServerBinary identifies a binary wayhop can version-check (and update) on a
 // PROVISIONED server over SSH. Unlike the router's local engine Updater, these run on
 // the remote VPS: sing-box is the VLESS-Reality endpoint core (GitHub-managed, so a
 // latest-release comparison is meaningful), while AmneziaWG is an apt package (managed
@@ -94,7 +94,7 @@ func UpdateSingBoxScript(version string, mirrors ...string) string {
 	clean := sbVerRe.FindString(version)
 	return fmt.Sprintf(`#!/bin/sh
 set -e
-log(){ echo "[velinx-update] $*"; }
+log(){ echo "[wayhop-update] $*"; }
 %s
 VER=%q
 [ -n "$VER" ] || { echo "WR_UPDATE_ERR=no version"; exit 1; }
@@ -113,7 +113,7 @@ tar -xzf sb.tgz
 BIN=$(find . -type f -name sing-box | head -n1)
 [ -n "$BIN" ] || { echo "WR_UPDATE_ERR=binary not in archive"; exit 1; }
 DST=$(command -v sing-box || echo /usr/local/bin/sing-box)
-cp -f "$DST" "$DST.velinx.bak" 2>/dev/null || true
+cp -f "$DST" "$DST.wayhop.bak" 2>/dev/null || true
 install -m 0755 "$BIN" "$DST"
 ( systemctl restart sing-box 2>/dev/null || service sing-box restart 2>/dev/null ) || true
 sleep 2
@@ -125,7 +125,7 @@ if systemctl is-active --quiet sing-box 2>/dev/null || pgrep -x sing-box >/dev/n
   echo "WR_UPDATE_OK=$("$DST" version 2>/dev/null | head -n1)"
 else
   log "sing-box did not come back up after update — rolling back"
-  if [ -f "$DST.velinx.bak" ]; then install -m 0755 "$DST.velinx.bak" "$DST" || true; fi
+  if [ -f "$DST.wayhop.bak" ]; then install -m 0755 "$DST.wayhop.bak" "$DST" || true; fi
   ( systemctl restart sing-box 2>/dev/null || service sing-box restart 2>/dev/null ) || true
   echo "WR_UPDATE_ERR=sing-box did not restart after update; rolled back to the previous binary"
   exit 1

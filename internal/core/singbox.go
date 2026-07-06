@@ -7,14 +7,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"velinx/internal/atomicfile"
+	"wayhop/internal/atomicfile"
 )
 
 // SingBox manages a sing-box process driven by a generated config file.
@@ -38,6 +41,52 @@ func New(bin, config string) *SingBox {
 
 // LogLines returns the captured sing-box output (oldest first).
 func (s *SingBox) LogLines() []string { return s.log.Lines() }
+
+// isStraySingbox reports whether a /proc cmdline (NUL-separated argv) is a sing-box running
+// our config — the stray-reap match. Pure, so it is unit-tested without spawning processes.
+func isStraySingbox(cmdline []byte, binBase, config string) bool {
+	if len(cmdline) == 0 || config == "" {
+		return false
+	}
+	argv0 := cmdline
+	if i := bytes.IndexByte(cmdline, 0); i >= 0 {
+		argv0 = cmdline[:i]
+	}
+	return filepath.Base(string(argv0)) == binBase && bytes.Contains(cmdline, []byte(config))
+}
+
+// ReapStrays SIGKILLs any sing-box left over from a PREVIOUS daemon instance — one orphaned
+// when the old daemon was OOM-killed, crashed, or self-updated/restarted. Such an orphan keeps
+// the cache.db flock (and the clash/TUN bindings), so when this daemon starts its own core
+// sing-box loops on "initialize cache-file: timeout" until the orphan happens to die. Run ONCE
+// at startup, BEFORE the daemon starts its own core — nothing it manages is up yet, so any
+// sing-box running THIS config is necessarily a stray. Best-effort + Linux-only (scans /proc);
+// a no-op where /proc is absent (dev host / demo) or the config path is unset.
+func (s *SingBox) ReapStrays() {
+	if s.config == "" {
+		return
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return // no procfs — not a Linux router; nothing to reap
+	}
+	base := filepath.Base(s.bin)
+	self := os.Getpid()
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid == self {
+			continue
+		}
+		data, err := os.ReadFile("/proc/" + e.Name() + "/cmdline")
+		if err != nil || !isStraySingbox(data, base, s.config) {
+			continue
+		}
+		if p, err := os.FindProcess(pid); err == nil {
+			_ = p.Signal(syscall.SIGKILL)
+			log.Printf("core: reaped orphaned sing-box (pid %d) holding the cache-file lock", pid)
+		}
+	}
+}
 
 // ringLog keeps the last N lines written to it (sing-box stdout+stderr).
 type ringLog struct {

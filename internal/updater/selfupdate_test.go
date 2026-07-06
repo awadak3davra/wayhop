@@ -4,18 +4,18 @@ import "testing"
 
 func TestSelfAsset(t *testing.T) {
 	assets := []Asset{
-		{Name: "velinx-0.1.0-arm64.tar.gz"},
-		{Name: "velinx-0.1.0-arm64-openwrt.tar.gz"},
-		{Name: "velinx-0.1.0-amd64.tar.gz"},
-		{Name: "velinx-0.1.0-arm.tar.gz"},
-		{Name: "velinx-0.1.0-mipsle-openwrt.tar.gz"},
+		{Name: "wayhop-0.1.0-arm64.tar.gz"},
+		{Name: "wayhop-0.1.0-arm64-openwrt.tar.gz"},
+		{Name: "wayhop-0.1.0-amd64.tar.gz"},
+		{Name: "wayhop-0.1.0-arm.tar.gz"},
+		{Name: "wayhop-0.1.0-mipsle-openwrt.tar.gz"},
 		{Name: "SHA256SUMS"},
 	}
 	cases := map[string]string{
-		"arm64":  "velinx-0.1.0-arm64-openwrt.tar.gz", // openwrt package preferred
-		"amd64":  "velinx-0.1.0-amd64.tar.gz",
-		"arm":    "velinx-0.1.0-arm.tar.gz", // must NOT match arm64
-		"mipsle": "velinx-0.1.0-mipsle-openwrt.tar.gz",
+		"arm64":  "wayhop-0.1.0-arm64-openwrt.tar.gz", // openwrt package preferred
+		"amd64":  "wayhop-0.1.0-amd64.tar.gz",
+		"arm":    "wayhop-0.1.0-arm.tar.gz", // must NOT match arm64
+		"mipsle": "wayhop-0.1.0-mipsle-openwrt.tar.gz",
 		"mips":   "", // none present (must NOT grab mipsle)
 	}
 	for arch, want := range cases {

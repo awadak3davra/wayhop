@@ -5,9 +5,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"velinx/internal/clash"
-	"velinx/internal/model"
-	"velinx/internal/pbr"
+	"wayhop/internal/clash"
+	"wayhop/internal/model"
+	"wayhop/internal/pbr"
 )
 
 // TestClashTraceMatches: sniffed connections to the domain (exact or subdomain Host) at IPs the

@@ -1,9 +1,9 @@
 #!/bin/sh
-# Velinx (velinx) uninstaller for OpenWrt (procd).
+# WayHop (wayhop) uninstaller for OpenWrt (procd).
 #
 # Stops + disables the procd service (removes the boot symlink) BEFORE removing
 # the binary, init script and the single rolling backup. By DEFAULT it KEEPS
-# your config + runtime state (/etc/velinx, /var/lib/velinx); pass --purge
+# your config + runtime state (/etc/wayhop, /var/lib/wayhop); pass --purge
 # to delete those too.
 #
 #   sh ./uninstall.sh              # stop+disable service, remove binary, keep config
@@ -11,17 +11,17 @@
 #   sh ./uninstall.sh --keep-config  # explicitly keep config (the default)
 #
 # Idempotent + safe to re-run (every removal is guarded; never errors if a path
-# is already gone). Only Velinx's own paths are touched -- shared deps
+# is already gone). Only WayHop's own paths are touched -- shared deps
 # (ip/ipset/iptables/nft/sing-box) are NEVER removed. POSIX sh / busybox-safe.
 
 # --- native OpenWrt paths --------------------------------------------------
 SBIN=/usr/sbin
 INITD=/etc/init.d
-ETC=/etc/velinx
-VAR=/var/lib/velinx
-INIT="$INITD/velinx"
-BINARY="$SBIN/velinx"
-BACKUP="$SBIN/velinx.bak"
+ETC=/etc/wayhop
+VAR=/var/lib/wayhop
+INIT="$INITD/wayhop"
+BINARY="$SBIN/wayhop"
+BACKUP="$SBIN/wayhop.bak"
 
 # --- output helpers (colour only on a TTY) ---------------------------------
 if [ -t 1 ]; then
@@ -29,22 +29,22 @@ if [ -t 1 ]; then
 else
   C_R=''; C_G=''; C_Y=''; C_B=''; C_D=''; C_0=''
 fi
-say()  { printf '%b[velinx]%b %s\n' "$C_B" "$C_0" "$*"; }
+say()  { printf '%b[wayhop]%b %s\n' "$C_B" "$C_0" "$*"; }
 ok()   { printf '  %b+%b %s\n' "$C_G" "$C_0" "$*"; }
 info() { printf '  %b·%b %s\n' "$C_D" "$C_0" "$*"; }
 warn() { printf '  %b!%b %s\n' "$C_Y" "$C_0" "$*"; }
 hdr()  { printf '\n%b== %s ==%b\n' "$C_B" "$*" "$C_0"; }
-die()  { printf '%b[velinx] ERROR:%b %s\n' "$C_R" "$C_0" "$*" >&2; exit 1; }
+die()  { printf '%b[wayhop] ERROR:%b %s\n' "$C_R" "$C_0" "$*" >&2; exit 1; }
 
 usage() {
   cat <<'USAGE'
-Velinx uninstaller for OpenWrt (procd).
+WayHop uninstaller for OpenWrt (procd).
 
 Usage: sh ./uninstall.sh [options]
 
 Options:
-      --purge        also delete config + runtime state (/etc/velinx,
-                     /var/lib/velinx) -- this removes your saved connections
+      --purge        also delete config + runtime state (/etc/wayhop,
+                     /var/lib/wayhop) -- this removes your saved connections
       --keep-config  keep config + runtime state (this is the default)
   -y, --yes          assume "yes" to the purge confirmation (non-interactive)
   -h, --help         show this help and exit
@@ -78,7 +78,7 @@ confirm() {
   case "$a" in [Yy]*) return 0 ;; *) return 1 ;; esac
 }
 
-say "Velinx uninstaller (OpenWrt / procd)"
+say "WayHop uninstaller (OpenWrt / procd)"
 
 # When purging interactively, confirm first so the run is predictable.
 if [ "$PURGE" = 1 ]; then
@@ -122,13 +122,13 @@ for f in "$INIT" "$BINARY" "$BACKUP"; do
   fi
 done
 # stray staging artifacts from an interrupted install
-for f in "$SBIN/velinx.new" "$INITD/velinx.new"; do
+for f in "$SBIN/wayhop.new" "$INITD/wayhop.new"; do
   if [ -e "$f" ]; then
     if rm -f "$f"; then ok "removed $f (stale staging file)"
     else warn "could not remove $f (stale staging file)"; fi
   fi
 done
-[ -z "$REMOVED" ] && info "nothing to remove (Velinx binary/service not present)"
+[ -z "$REMOVED" ] && info "nothing to remove (WayHop binary/service not present)"
 
 # ===========================================================================
 # 3. CONFIG + DATA: purge on request, otherwise keep
@@ -156,8 +156,8 @@ fi
 # ===========================================================================
 hdr "Done"
 if [ "$PURGE" = 1 ]; then
-  say "Velinx fully removed (binary, service, config + data)."
+  say "WayHop fully removed (binary, service, config + data)."
 else
-  say "Velinx binary + service removed; config kept (use --purge to delete it)."
+  say "WayHop binary + service removed; config kept (use --purge to delete it)."
 fi
 info "shared dependencies (ip/ipset/iptables/nft/sing-box) were left untouched."

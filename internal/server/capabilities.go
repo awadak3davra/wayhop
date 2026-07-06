@@ -3,7 +3,7 @@ package server
 import (
 	"net/http"
 
-	"velinx/internal/platform"
+	"wayhop/internal/platform"
 )
 
 // handleNativeCapabilities reports what the host can route natively (kernel/firmware

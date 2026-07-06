@@ -7,7 +7,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // ParseSubscription parses a subscription blob into endpoints, returning a

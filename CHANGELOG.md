@@ -1,7 +1,29 @@
 # Changelog
 
-All notable changes to Velinx are documented here. This project adheres to
+All notable changes to WayHop are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
+
+## [0.5.0] — 2026-07-06
+
+### Changed
+- **Renamed Velinx → WayHop.** Same project, new name. The Go module, binary, service, config paths
+  (`/opt/etc/wayhop`, `/etc/wayhop`, …), and self-update repository are all `wayhop` now. The installer
+  **migrates an existing Velinx (or older WakeRoute) install in place** — it moves your saved config and
+  runtime state to the new paths, removes the old service, and treats a running `velinx` on the UI port
+  as an upgrade — so your connections, groups, and routing rules carry over untouched. (One-time note:
+  because the self-update download source is renamed too, a device on the old name needs a single manual
+  reinstall to pick up the new update channel; after that, self-update tracks WayHop releases as usual.)
+
+### Added
+- **IPTV plugin** — assemble a filtered, de-duplicated M3U playlist from public country / language /
+  category catalogs, your own list URLs, or Xtream Codes accounts, and serve it at a private token URL.
+  A catalog picker (the same browse-and-add UX as the routing-list catalog) makes public sources one
+  click; pin and keep categories, optionally probe streams for liveness, and merge EPG guide data.
+  Credentials embedded in Xtream / list URLs never reach logs, error messages, or the UI.
+- **Complete translations for all 13 languages** — the panel *and* the new IPTV plugin are fully
+  localized (ru, zh, fa, ar, tr, vi, es, fr, de, pt, hi, ja, ko), and a CI guard now blocks a missing
+  key or a dropped `{0}`/`{1}` placeholder from ever shipping.
+- **Memory ceiling** — the daemon caps its own heap so it stays light on RAM-constrained routers.
 
 ## [0.4.0] — 2026-06-29
 
@@ -43,7 +65,7 @@ All notable changes to Velinx are documented here. This project adheres to
   the live connections to them and the exit each took (the observed truth, from the connection
   table), plus the configured rules / lists / kernel carve-outs that reference it. Answers "why
   isn't *this* site going through the VPN" without nslookup + manual CIDR tests.
-- **Correct install commands in recommendations** — when Velinx suggests installing a package
+- **Correct install commands in recommendations** — when WayHop suggests installing a package
   for native routing, it now shows the command for *your* router's package manager (`apk add …` on
   newer OpenWrt, `opkg install …` elsewhere) instead of a hardcoded one.
 - **Restore a routing-profile backup** — the whole routing config (endpoints, groups, rules, lists)
@@ -63,14 +85,14 @@ All notable changes to Velinx are documented here. This project adheres to
   which already hides the server name.)
 - **AnyTLS protocol** — import an `anytls://` link (or add one by hand) and route through AnyTLS, a
   newer TLS-based protocol designed to resist traffic-analysis fingerprinting of proxied TLS.
-- **Detects your router's native VPN support** — Velinx now checks which protocols your router can
+- **Detects your router's native VPN support** — WayHop now checks which protocols your router can
   run directly in its kernel (WireGuard, AmneziaWG) versus which need sing-box, and tailors its
   install recommendations to that.
 - **Route through a VPN tunnel your router already has** — if WireGuard / AmneziaWG tunnels are
-  already configured on the router, Velinx can detect them and route through one directly without
+  already configured on the router, WayHop can detect them and route through one directly without
   re-entering its keys. It never modifies or tears down a tunnel the system owns.
 - **Runs without sing-box when your setup is fully native** — a fast-mode profile that uses only
-  kernel-native tunnels now runs entirely on the router's own routing, and Velinx stops sing-box
+  kernel-native tunnels now runs entirely on the router's own routing, and WayHop stops sing-box
   instead of leaving it running as a redundant path — less memory and CPU for the same result.
 
 ### Fixed
@@ -133,11 +155,11 @@ All notable changes to Velinx are documented here. This project adheres to
 
 ### Added
 - **Subscription auto-refresh** — keep an imported subscription current automatically. Turn it
-  on in Settings (pick an interval, or hit *Refresh now*) and Velinx periodically re-fetches
+  on in Settings (pick an interval, or hit *Refresh now*) and WayHop periodically re-fetches
   the URL and adds any servers the provider has rotated in, with no manual re-import. The card
   shows when it last ran and how many connections it added.
 - **Failover groups in the Clash subscription** — a Clash / Clash-Meta client subscribed to
-  Velinx now receives your failover groups as real `url-test` / `fallback` / `select` groups,
+  WayHop now receives your failover groups as real `url-test` / `fallback` / `select` groups,
   so it keeps the same automatic best-server selection the panel does instead of a flat list.
 - **SSH host-key pinning for the server provisioner** — provisioning a remote VPS now pins its
   SSH host key to a persistent file (so a later changed key is caught) and prints the key's
@@ -174,7 +196,7 @@ All notable changes to Velinx are documented here. This project adheres to
 - More accurate per-interface ping latency and per-connection speed tests.
 
 ### Security
-- **Self-update is checksum-verified** — the Velinx binary is replaced only when its release
+- **Self-update is checksum-verified** — the WayHop binary is replaced only when its release
   asset's SHA-256 digest is present and matches; the update tag and release metadata are now
   validated and size-capped.
 - The subscription-fetch and reachability-probe guards also block carrier-grade-NAT
@@ -285,7 +307,7 @@ All notable changes to Velinx are documented here. This project adheres to
   the public exit IP.
 - **Kernel-native policy routing** — an optional `hybrid` mode that programs per-destination
   carve-outs directly with `nft` + `ip rule` fwmark tables, alongside the sing-box TUN gateway.
-- **Self-update** — Velinx can check for and install its own releases, with opt-in auto-update.
+- **Self-update** — WayHop can check for and install its own releases, with opt-in auto-update.
 - **Mobile-responsive panel** and additional UI translations.
 
 ### Changed
@@ -317,7 +339,7 @@ All notable changes to Velinx are documented here. This project adheres to
 
 ## [0.1.0] — Initial public release
 
-First public release of Velinx: a self-hosted web panel for configuring any VPN/proxy
+First public release of WayHop: a self-hosted web panel for configuring any VPN/proxy
 protocol on Entware/OpenWrt routers, with failover, health checks and live traffic graphs.
 
 ### Added

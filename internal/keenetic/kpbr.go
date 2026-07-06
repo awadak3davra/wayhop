@@ -5,8 +5,8 @@ import (
 	"sort"
 	"strings"
 
-	"velinx/internal/model"
-	"velinx/internal/pbr"
+	"wayhop/internal/model"
+	"wayhop/internal/pbr"
 )
 
 // kpbr.go is the Keenetic kernel-PBR ORCHESTRATION: it turns a compiled pbr.Plan + the profile
@@ -65,7 +65,7 @@ func ResolveEgressMembers(p *model.Profile, tag string) []string {
 func FailoverCronScript(plan *pbr.Plan, p *model.Profile, wanGw, wanIf string) string {
 	var b strings.Builder
 	b.WriteString("#!/opt/bin/sh\n")
-	b.WriteString("# Velinx list-routing failover (keen-pbr urltest equivalent). Auto-generated.\n")
+	b.WriteString("# WayHop list-routing failover (keen-pbr urltest equivalent). Auto-generated.\n")
 	b.WriteString("# Elects each routing table's live egress in order; falls through to WAN last.\n")
 	fmt.Fprintf(&b, "WAN_GW=%q; WAN_IF=%q; PROBE=1.1.1.1; TMO=5; HS_MAX=180\n", wanGw, wanIf)
 	// Single-flight lock (PID-based, self-clearing if stale): under heavy load a probe can take

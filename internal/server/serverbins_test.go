@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/config"
-	"velinx/internal/initserver"
-	"velinx/internal/serverstore"
-	"velinx/internal/store"
+	"wayhop/internal/config"
+	"wayhop/internal/initserver"
+	"wayhop/internal/serverstore"
+	"wayhop/internal/store"
 )
 
 // serverbins_newServer is a minimal *Server for the per-server binary version/update

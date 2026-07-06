@@ -10,15 +10,15 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/clash"
-	"velinx/internal/config"
-	"velinx/internal/core"
-	"velinx/internal/health"
-	"velinx/internal/model"
-	"velinx/internal/serverstore"
-	"velinx/internal/store"
-	"velinx/internal/traffic"
-	"velinx/web"
+	"wayhop/internal/clash"
+	"wayhop/internal/config"
+	"wayhop/internal/core"
+	"wayhop/internal/health"
+	"wayhop/internal/model"
+	"wayhop/internal/serverstore"
+	"wayhop/internal/store"
+	"wayhop/internal/traffic"
+	"wayhop/web"
 )
 
 // backup_newServer builds a full *Server rooted in t.TempDir(), like
@@ -121,7 +121,7 @@ func TestBackupExport(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("GET /api/backup: got %d, want 200 (%s)", code, body)
 	}
-	if cd := hdr.Get("Content-Disposition"); !strings.Contains(cd, `filename="velinx-backup.json"`) {
+	if cd := hdr.Get("Content-Disposition"); !strings.Contains(cd, `filename="wayhop-backup.json"`) {
 		t.Errorf("Content-Disposition = %q, want attachment filename", cd)
 	}
 	if ct := hdr.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
@@ -133,7 +133,7 @@ func TestBackupExport(t *testing.T) {
 		t.Fatalf("invalid bundle JSON: %v (%s)", err, body)
 	}
 	if b.Schema != backupSchemaVersion {
-		t.Errorf("velinx_backup = %d, want %d", b.Schema, backupSchemaVersion)
+		t.Errorf("wayhop_backup = %d, want %d", b.Schema, backupSchemaVersion)
 	}
 	if b.Version == "" {
 		t.Errorf("version is empty, want the build version")

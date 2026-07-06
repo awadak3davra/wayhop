@@ -735,7 +735,7 @@ func TestUpdater_InstalledPresentRunsVersion(t *testing.T) {
 func TestUpdater_InstalledAbsent(t *testing.T) {
 	dir := t.TempDir() // empty
 	// A binary name that won't be on PATH either.
-	e := Engine{ID: "nope", Name: "nope", Repo: "x/y", BinName: "velinx-nonexistent-engine-xyz", VersionArgs: []string{"version"}}
+	e := Engine{ID: "nope", Name: "nope", Repo: "x/y", BinName: "wayhop-nonexistent-engine-xyz", VersionArgs: []string{"version"}}
 	u := New(dir, "amd64", nil)
 	in := u.Installed(e)
 	if in.Present {

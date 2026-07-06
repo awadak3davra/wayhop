@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// kernel.go is Velinx's Keenetic KERNEL routing plane (raw `ip route`, run via the Runner),
+// kernel.go is WayHop's Keenetic KERNEL routing plane (raw `ip route`, run via the Runner),
 // replacing S87default_via_nl (endpoint bypasses + local-DNR-direct + mgmt-reverse) and S89's
 // default tier. The default route points at wr-tun, so sing-box owns the Hy2/AWG/VLESS failover
 // (its default_3tier group); the NDM-managed WAN default (metric 1000) is the kernel backstop

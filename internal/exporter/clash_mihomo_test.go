@@ -7,14 +7,14 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/importer"
-	"velinx/internal/model"
+	"wayhop/internal/importer"
+	"wayhop/internal/model"
 )
 
 // TestClashExportMihomo validates the clash SUBSCRIPTION export against the REAL mihomo
 // (clash-meta) client via `mihomo -t` — the export analog of the generator's sing-box check.
-// Until now the clash export was only round-trip tested (export → re-import into Velinx),
-// which proves Velinx can re-read its own output but NOT that a mihomo client accepts it.
+// Until now the clash export was only round-trip tested (export → re-import into WayHop),
+// which proves WayHop can re-read its own output but NOT that a mihomo client accepts it.
 // The clash subscription — including the failover proxy-groups (url-test / fallback / select,
 // with a nested group reference) — is a primary user-facing path, so a field mihomo rejects
 // would break every subscribed client. Runs the real check only when WR_MIHOMO points at a

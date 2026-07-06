@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"html"
+	"log"
 	"mime"
 	"net/http"
 	"net/url"
@@ -15,9 +16,9 @@ import (
 
 	qrcode "github.com/skip2/go-qrcode"
 
-	"velinx/internal/exporter"
-	"velinx/internal/importer"
-	"velinx/internal/model"
+	"wayhop/internal/exporter"
+	"wayhop/internal/importer"
+	"wayhop/internal/model"
 )
 
 // handleEndpointExport returns one endpoint's share link or .conf so the UI can
@@ -241,18 +242,14 @@ func (s *Server) serveSubLandingPage(w http.ResponseWriter, r *http.Request, ena
 		qrTag = `<img class="qr" width="240" height="240" alt="Subscription QR code" src="data:image/png;base64,` + data + `">`
 	}
 
-	// Escape every dynamic value before embedding.
+	// Escape every dynamic value before embedding. The copy button's handler is the STATIC
+	// /subcopy.js (web/dist) which reads the URL from the visible <code id="u"> — no inline
+	// <script>, so the page works under the panel's CSP (script-src 'self') and no JS-literal
+	// escaping of the URL is needed at all.
 	subURLHTML := html.EscapeString(subURL) // for visible text / attribute
-	// JS string literal for the inline copy handler. strconv.Quote produces a valid
-	// Go/JS double-quoted literal (escapes quotes/backslashes/control chars); we then
-	// rewrite every "<" to its JS unicode escape so the value can never terminate the
-	// surrounding <script> block (e.g. a "</script>" substring). We do NOT HTML-escape
-	// here — script content isn't HTML-decoded, so html.EscapeString would corrupt it.
-	subURLJS := strconv.Quote(subURL)
-	subURLJS = strings.ReplaceAll(subURLJS, "<", "\\u003c")
-	subURLQuery := url.QueryEscape(subURL) // for the deep-link import helpers
+	subURLQuery := url.QueryEscape(subURL)  // for the deep-link import helpers
 	clashHref := html.EscapeString("clash://install-config?url=" + subURLQuery)
-	singboxHref := html.EscapeString("sing-box://import-remote-profile?url=" + subURLQuery + "&name=Velinx")
+	singboxHref := html.EscapeString("sing-box://import-remote-profile?url=" + subURLQuery + "&name=WayHop")
 
 	count := len(enabled)
 	connLabel := strconv.Itoa(count) + " connection"
@@ -266,7 +263,7 @@ func (s *Server) serveSubLandingPage(w http.ResponseWriter, r *http.Request, ena
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>Velinx subscription</title>
+<title>WayHop subscription</title>
 <style>
 :root{--bg:#0e1116;--card:#161b22;--border:#262d36;--fg:#e6edf3;--muted:#9aa7b4;--accent:#3fb950;--accent-d:#2ea043;}
 *{box-sizing:border-box}
@@ -295,7 +292,7 @@ button,.btn{cursor:pointer;border:1px solid var(--border);border-radius:8px;padd
 </head>
 <body>
 <div class="card">
-  <h1>Velinx subscription</h1>
+  <h1>WayHop subscription</h1>
   <p class="sub">Import this into your VPN client</p>
   <div class="count">` + html.EscapeString(connLabel) + `</div>
   ` + qrTag + `
@@ -309,22 +306,7 @@ button,.btn{cursor:pointer;border:1px solid var(--border);border-radius:8px;padd
   </div>
   <p class="works">Works with: sing-box, v2rayN/NG, Clash Meta / Mihomo, Hiddify, Streisand</p>
 </div>
-<script>
-(function(){
-  var url=` + subURLJS + `;
-  var btn=document.getElementById("copy"),code=document.getElementById("u");
-  btn.addEventListener("click",function(){
-    function done(){var t=btn.textContent;btn.textContent="Copied";setTimeout(function(){btn.textContent=t;},1500);}
-    if(navigator.clipboard&&navigator.clipboard.writeText){
-      navigator.clipboard.writeText(url).then(done,select);
-    }else{select();}
-    function select(){
-      try{var rng=document.createRange();rng.selectNodeContents(code);
-        var sel=window.getSelection();sel.removeAllRanges();sel.addRange(rng);}catch(e){}
-    }
-  });
-})();
-</script>
+<script src="/subcopy.js" defer></script>
 </body>
 </html>`
 
@@ -352,7 +334,12 @@ func (s *Server) subToken() string {
 			return "" // never happens on a healthy host
 		}
 		s.cfg.Subscription.Token = tok
-		_ = s.cfg.Save()
+		if err := s.cfg.Save(); err != nil {
+			// Non-fatal: the token is live in memory for this session. Log it (siblings do) so a
+			// read-only overlay / ENOSPC that would silently regenerate the token every restart is
+			// visible instead of a mystery "my subscription URL keeps changing".
+			log.Printf("subscription: could not persist the first-use token: %v", err)
+		}
 	}
 	return s.cfg.Subscription.Token
 }

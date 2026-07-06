@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
-	"velinx/internal/pbr"
+	"wayhop/internal/model"
+	"wayhop/internal/pbr"
 )
 
 // hybridProfile is the canonical hybrid-split fixture: a kernel AmneziaWG endpoint

@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"velinx/internal/config"
-	"velinx/internal/initserver"
-	"velinx/internal/plugin"
-	"velinx/internal/serverstore"
-	"velinx/internal/store"
+	"wayhop/internal/config"
+	"wayhop/internal/initserver"
+	"wayhop/internal/plugin"
+	"wayhop/internal/serverstore"
+	"wayhop/internal/store"
 )
 
 // serverjobs_newServer builds a fully-wired DEMO *Server for exercising the
@@ -510,8 +510,8 @@ func TestServerjobs_HardenKeysFlow(t *testing.T) {
 	if _, ok := v.Result["public_key"].(string); !ok {
 		t.Error("harden-keys result missing public_key")
 	}
-	if fn, _ := v.Result["filename"].(string); fn != "velinx-192-0-2-40-ed25519" {
-		t.Errorf("filename = %q, want velinx-192-0-2-40-ed25519", fn)
+	if fn, _ := v.Result["filename"].(string); fn != "wayhop-192-0-2-40-ed25519" {
+		t.Errorf("filename = %q, want wayhop-192-0-2-40-ed25519", fn)
 	}
 }
 

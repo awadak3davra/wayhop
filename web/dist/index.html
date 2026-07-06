@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Velinx</title>
+<title>WayHop</title>
 <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -14,9 +14,9 @@
 <div class="app">
   <aside class="sidebar">
     <div class="brand">
-      <div class="logo">vx</div>
+      <div class="logo">WH</div>
       <div>
-        <div class="bt">Velinx</div>
+        <div class="bt">WayHop</div>
         <div class="bs">proxy control</div>
       </div>
     </div>
@@ -25,11 +25,13 @@
     <div class="nav-item" data-page="connections"><span class="ico">⇄</span> Connections</div>
     <div class="nav-item" data-page="failover"><span class="ico">⛃</span> Failover</div>
     <div class="nav-item" data-page="routing"><span class="ico">⋔</span> Routing</div>
+    <div class="nav-item" data-page="dns"><span class="ico">⚇</span> DNS</div>
     <div class="nav-item" data-page="updater"><span class="ico">⭳</span> Updater</div>
     <div class="nav-item" data-page="diagnostics"><span class="ico">⚠</span> Diagnostics</div>
+    <div class="nav-item" data-page="plugins"><span class="ico">⧉</span> Plugins</div>
     <div class="nav-item" data-page="settings"><span class="ico">⚙</span> Settings</div>
     <div class="grow"></div>
-    <div class="foot" id="foot">velinx —</div>
+    <div class="foot" id="foot">wayhop —</div>
   </aside>
 
   <main class="main">
@@ -42,12 +44,14 @@
       <button class="btn btn-primary" id="applysavebtn" title="Apply and persist as the saved baseline">Apply &amp; Save</button>
     </header>
     <div id="failsafe-banner" style="display:none;padding:14px 24px 0"></div>
+    <div id="apply-error" style="display:none"></div>
     <div class="content" id="view"></div>
   </main>
 </div>
 
-<div class="toasts" id="toasts"></div>
+<div class="toasts" id="toasts" role="status" aria-live="polite" aria-atomic="false"></div>
 <script src="i18n.js"></script>
+<script src="iptv-i18n.js"></script>
 <script src="nav.js"></script>
 <script src="app.js"></script>
 </body>

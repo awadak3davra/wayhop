@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -36,19 +37,31 @@ func (s *Server) staticHandler() http.Handler {
 // uiETag is a content hash of the embedded UI assets, computed once. Weak ETag
 // (W/) because gzip changes the on-the-wire bytes per representation.
 func (s *Server) uiETag() string {
-	s.etagOnce.Do(func() {
-		h := fnv.New64a()
-		// All bundled assets the browser caches — every file that can change the
-		// served UI must be hashed, else a revalidation returns 304 and the browser
-		// keeps a stale copy (this previously bit i18n.js: edits didn't bust cache).
-		for _, name := range []string{"index.html", "app.js", "styles.css", "i18n.js", "nav.js"} {
-			if b, err := fs.ReadFile(s.ui, name); err == nil {
-				_, _ = h.Write(b)
-			}
-		}
-		s.etag = fmt.Sprintf(`W/"wr-%x"`, h.Sum64())
-	})
+	s.etagOnce.Do(func() { s.etag = computeUIETag(s.ui) })
 	return s.etag
+}
+
+// computeUIETag hashes EVERY embedded UI asset (walked + sorted for determinism, each file's NAME and
+// CONTENT folded in so add/remove/rename/edit all change the hash). A hardcoded file list was used
+// before and kept omitting new assets — first i18n.js, then iptv-i18n.js/subcopy.js — so their edits
+// returned a 304 and browsers kept a stale UI. Walking the tree eliminates that recurring omission.
+func computeUIETag(ui fs.FS) string {
+	h := fnv.New64a()
+	var names []string
+	_ = fs.WalkDir(ui, ".", func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			names = append(names, p)
+		}
+		return nil
+	})
+	sort.Strings(names)
+	for _, name := range names {
+		if b, err := fs.ReadFile(ui, name); err == nil {
+			_, _ = h.Write([]byte(name + "\x00"))
+			_, _ = h.Write(b)
+		}
+	}
+	return fmt.Sprintf(`W/"wr-%x"`, h.Sum64())
 }
 
 // logRequests logs only mutating requests and errors — never the high-frequency

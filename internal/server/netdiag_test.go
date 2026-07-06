@@ -3,7 +3,7 @@ package server
 import (
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // egressIfaceIn resolves an exit tag to the kernel interface an iface-bound

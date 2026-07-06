@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"velinx/internal/generator"
-	"velinx/internal/netdiag"
+	"wayhop/internal/generator"
+	"wayhop/internal/netdiag"
 )
 
 // healthRow is one server-side diagnostic result, shaped for the Diagnostics
@@ -163,7 +163,7 @@ func ipv6HasGlobal(ifInet6 string) bool {
 // flowOffloadCheck reports whether the kernel flow-offload fast path is enabled. On capable
 // hardware (e.g. the MediaTek PPE on MT7981) hardware offload can multiply routed throughput
 // and cut CPU; with it off, forwarding is bounded by the CPU. This is advisory only and reads
-// the fw4 (uci) firewall config — it never changes it. IMPORTANT: Velinx routes tunnel
+// the fw4 (uci) firewall config — it never changes it. IMPORTANT: WayHop routes tunnel
 // carve-outs by firewall mark, so a flowtable must EXCLUDE marked connections; otherwise a
 // carve-out could be offloaded straight past the VPN (a leak). The fix text says so, to avoid
 // a naive flow_offloading_hw flip. Degrades to a warn off-OpenWrt.
@@ -193,7 +193,7 @@ func flowOffloadCheck(ctx context.Context) healthRow {
 	default:
 		row.Status, row.Summary = "warn", "flow offload is off"
 		row.Detail = "general routed throughput is bounded by the CPU forwarding rate; the hardware fast path is unused"
-		row.Fix = "Enabling flow offload (hardware where supported) can greatly increase routed throughput and lower CPU. Because Velinx routes tunnel carve-outs by firewall mark, the flowtable must EXCLUDE marked connections so a carve-out isn't offloaded past the VPN — don't just flip flow_offloading_hw without that exclusion."
+		row.Fix = "Enabling flow offload (hardware where supported) can greatly increase routed throughput and lower CPU. Because WayHop routes tunnel carve-outs by firewall mark, the flowtable must EXCLUDE marked connections so a carve-out isn't offloaded past the VPN — don't just flip flow_offloading_hw without that exclusion."
 	}
 	return row
 }

@@ -47,7 +47,7 @@ func TestSubLanding_BrowserGetsHTMLPage(t *testing.T) {
 		t.Errorf("Cache-Control = %q, want no-store", cc)
 	}
 	body := w.Body.String()
-	if !strings.Contains(body, "Velinx subscription") {
+	if !strings.Contains(body, "WayHop subscription") {
 		t.Errorf("page is missing the heading: %q", body)
 	}
 	// The (token-gated) subscription URL must be shown for the QR / copy helpers.
@@ -86,7 +86,7 @@ func TestSubLanding_VPNClientUnaffected(t *testing.T) {
 	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
 		t.Fatalf("Content-Type = %q, want text/plain (client must get the blob, not HTML)", ct)
 	}
-	if strings.Contains(w.Body.String(), "Velinx subscription") {
+	if strings.Contains(w.Body.String(), "WayHop subscription") {
 		t.Errorf("client wrongly received the HTML landing page")
 	}
 }
@@ -114,7 +114,7 @@ func TestSubLanding_ExplicitFlagWinsOverBrowser(t *testing.T) {
 	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/yaml") {
 		t.Fatalf("Content-Type = %q, want text/yaml (explicit flag must win)", ct)
 	}
-	if strings.Contains(w.Body.String(), "Velinx subscription") {
+	if strings.Contains(w.Body.String(), "WayHop subscription") {
 		t.Errorf("flag=clash browser wrongly received the HTML landing page")
 	}
 }
@@ -135,7 +135,7 @@ func TestSubLanding_WebQueryForcesHTML(t *testing.T) {
 	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Fatalf("?web=1: Content-Type = %q, want text/html", ct)
 	}
-	if !strings.Contains(w.Body.String(), "Velinx subscription") {
+	if !strings.Contains(w.Body.String(), "WayHop subscription") {
 		t.Errorf("?web=1 did not render the HTML page")
 	}
 }
@@ -153,7 +153,7 @@ func TestSubLanding_InvalidTokenStill403(t *testing.T) {
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("invalid token: got %d, want 403", w.Code)
 	}
-	if strings.Contains(w.Body.String(), "Velinx subscription") {
+	if strings.Contains(w.Body.String(), "WayHop subscription") {
 		t.Errorf("forbidden response wrongly rendered the HTML page")
 	}
 }

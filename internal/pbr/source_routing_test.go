@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestCompileSourceIPZone pins the Phase-C compiler activation: a source_ip_cidr + dest rule on

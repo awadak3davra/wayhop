@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"velinx/internal/model"
-	"velinx/internal/netvpn"
+	"wayhop/internal/model"
+	"wayhop/internal/netvpn"
 )
 
 // handleVPNDiscover lists native VPN tunnels (WireGuard / AmneziaWG) already configured on
@@ -60,7 +60,7 @@ func peerEndpointHost(peers []netvpn.Peer) string {
 
 // endpointFromDiscovered maps a discovered native tunnel to a DISABLED
 // model.EngineExternal endpoint the user can then route through. It is pure (no I/O)
-// so it is unit-tested directly. The OS owns the iface; Velinx only uses it as an
+// so it is unit-tested directly. The OS owns the iface; WayHop only uses it as an
 // egress, so no Server/Port/keys are created. Enabled is false — adoption never
 // auto-enables or auto-applies; enabling + routing is the user's explicit next step.
 //
@@ -76,6 +76,12 @@ func endpointFromDiscovered(d netvpn.DiscoveredVPN) model.Endpoint {
 	}
 	if d.PublicKey != "" {
 		params["public_key"] = d.PublicKey
+	}
+	// Capture the raw NDM interface name (Keenetic only) so the native managed-toggle can
+	// target the right interface WITHOUT guessing it from the derived kernel name. Absent for
+	// wg/awg-dump discovery (OpenWrt), where NDMName is empty — no key added.
+	if d.NDMName != "" {
+		params["ndm_name"] = d.NDMName
 	}
 	name := d.Iface + " (native)"
 	if strings.TrimSpace(d.Name) != "" {

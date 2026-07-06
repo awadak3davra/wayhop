@@ -11,10 +11,10 @@
 
   <!-- logo mark -->
   <rect x="58" y="59" width="72" height="72" rx="16" fill="url(#logo)"/>
-  <text x="94" y="107" font-size="33" font-weight="700" fill="#ffffff" text-anchor="middle">vx</text>
+  <text x="94" y="107" font-size="30" font-weight="700" fill="#ffffff" text-anchor="middle">WH</text>
 
   <!-- wordmark + subtitle -->
-  <text x="152" y="92" font-size="50" font-weight="800" letter-spacing="-0.5" fill="#eef4fb">Velinx</text>
+  <text x="152" y="92" font-size="50" font-weight="800" letter-spacing="-0.5" fill="#eef4fb">WayHop</text>
   <text x="154" y="123" font-size="17" letter-spacing="0.3" fill="#8197b0">proxy control for your router</text>
 
   <!-- routing / failover motif: one active path (bright) to a green exit, alternates dimmed -->

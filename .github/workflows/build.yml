@@ -67,22 +67,22 @@ jobs:
         run: |
           set -euo pipefail
           version="0.0.0-dev+$(git rev-parse --short HEAD)"
-          stage="velinx-${{ matrix.name }}-pkg"
+          stage="wayhop-${{ matrix.name }}-pkg"
           mkdir -p "$stage"
           go build -trimpath \
-            -ldflags "-s -w -X velinx/internal/version.Version=${version}" \
-            -o "$stage/velinx-${{ matrix.name }}" ./cmd/velinx
+            -ldflags "-s -w -X wayhop/internal/version.Version=${version}" \
+            -o "$stage/wayhop-${{ matrix.name }}" ./cmd/wayhop
           # Entware /opt tarball
-          cp packaging/install.sh packaging/uninstall.sh packaging/S99velinx "$stage/"
-          chmod +x "$stage"/*.sh "$stage"/S99velinx "$stage/velinx-${{ matrix.name }}"
-          tar -C "$stage" -czf "velinx-${version}-${{ matrix.name }}.tar.gz" .
+          cp packaging/install.sh packaging/uninstall.sh packaging/S99wayhop "$stage/"
+          chmod +x "$stage"/*.sh "$stage"/S99wayhop "$stage/wayhop-${{ matrix.name }}"
+          tar -C "$stage" -czf "wayhop-${version}-${{ matrix.name }}.tar.gz" .
           # OpenWrt native tarball
-          owstage="velinx-${{ matrix.name }}-openwrt-pkg"
+          owstage="wayhop-${{ matrix.name }}-openwrt-pkg"
           mkdir -p "$owstage"
-          cp "$stage/velinx-${{ matrix.name }}" "$owstage/velinx-${{ matrix.name }}"
-          cp packaging/openwrt/install.sh packaging/openwrt/uninstall.sh packaging/openwrt/velinx.init "$owstage/"
-          chmod +x "$owstage"/*.sh "$owstage"/velinx.init "$owstage/velinx-${{ matrix.name }}"
-          tar -C "$owstage" -czf "velinx-${version}-${{ matrix.name }}-openwrt.tar.gz" .
+          cp "$stage/wayhop-${{ matrix.name }}" "$owstage/wayhop-${{ matrix.name }}"
+          cp packaging/openwrt/install.sh packaging/openwrt/uninstall.sh packaging/openwrt/wayhop.init "$owstage/"
+          chmod +x "$owstage"/*.sh "$owstage"/wayhop.init "$owstage/wayhop-${{ matrix.name }}"
+          tar -C "$owstage" -czf "wayhop-${version}-${{ matrix.name }}-openwrt.tar.gz" .
 
   # Tag-only: rebuild every arch in one job and create the GitHub Release with the tarballs
   # attached as RELEASE ASSETS (not Actions artifacts). One job → deterministic SHA256SUMS and
@@ -109,19 +109,19 @@ jobs:
           mkdir -p dist
           build_one() {  # name goarch [gomips] [goarm]
             local name="$1" stage owstage
-            stage="velinx-${name}-pkg"; owstage="velinx-${name}-openwrt-pkg"
+            stage="wayhop-${name}-pkg"; owstage="wayhop-${name}-openwrt-pkg"
             mkdir -p "$stage" "$owstage"
             GOARCH="$2" GOMIPS="${3:-}" GOARM="${4:-}" go build -trimpath \
-              -ldflags "-s -w -X velinx/internal/version.Version=${version}" \
-              -o "$stage/velinx-${name}" ./cmd/velinx
-            cp packaging/install.sh packaging/uninstall.sh packaging/S99velinx "$stage/"
-            chmod +x "$stage"/*.sh "$stage"/S99velinx "$stage/velinx-${name}"
-            tar -C "$stage" -czf "dist/velinx-${version}-${name}.tar.gz" .
-            cp "$stage/velinx-${name}" "$owstage/velinx-${name}"
-            cp packaging/openwrt/install.sh packaging/openwrt/uninstall.sh packaging/openwrt/velinx.init "$owstage/"
-            chmod +x "$owstage"/*.sh "$owstage"/velinx.init "$owstage/velinx-${name}"
-            tar -C "$owstage" -czf "dist/velinx-${version}-${name}-openwrt.tar.gz" .
-            ( cd dist && sha256sum "velinx-${version}-${name}.tar.gz" "velinx-${version}-${name}-openwrt.tar.gz" )
+              -ldflags "-s -w -X wayhop/internal/version.Version=${version}" \
+              -o "$stage/wayhop-${name}" ./cmd/wayhop
+            cp packaging/install.sh packaging/uninstall.sh packaging/S99wayhop "$stage/"
+            chmod +x "$stage"/*.sh "$stage"/S99wayhop "$stage/wayhop-${name}"
+            tar -C "$stage" -czf "dist/wayhop-${version}-${name}.tar.gz" .
+            cp "$stage/wayhop-${name}" "$owstage/wayhop-${name}"
+            cp packaging/openwrt/install.sh packaging/openwrt/uninstall.sh packaging/openwrt/wayhop.init "$owstage/"
+            chmod +x "$owstage"/*.sh "$owstage"/wayhop.init "$owstage/wayhop-${name}"
+            tar -C "$owstage" -czf "dist/wayhop-${version}-${name}-openwrt.tar.gz" .
+            ( cd dist && sha256sum "wayhop-${version}-${name}.tar.gz" "wayhop-${version}-${name}-openwrt.tar.gz" )
           }
           build_one mipsle mipsle softfloat
           build_one mips   mips   softfloat
@@ -136,5 +136,5 @@ jobs:
           set -euo pipefail
           gh release create "${GITHUB_REF_NAME}" dist/*.tar.gz dist/SHA256SUMS.txt \
             --repo "${GITHUB_REPOSITORY}" \
-            --title "Velinx ${GITHUB_REF_NAME}" \
+            --title "WayHop ${GITHUB_REF_NAME}" \
             --generate-notes

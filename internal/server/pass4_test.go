@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"velinx/internal/config"
-	"velinx/internal/generator"
-	"velinx/internal/model"
-	"velinx/internal/pbr"
+	"wayhop/internal/config"
+	"wayhop/internal/generator"
+	"wayhop/internal/model"
+	"wayhop/internal/pbr"
 )
 
 // pbrApplyServer builds a non-demo Server with an injected RecordRunner so the kernel
@@ -83,7 +83,7 @@ func TestPass4_HybridApplyInstallsPlan(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("handleApply: got %d, want 200 (%s)", w.Code, w.Body.String())
 	}
-	if !rrStdinHasFrom(rr, 0, "198.51.100.0/24") || !rrStdinHasFrom(rr, 0, "delete table inet velinx_pbr") {
+	if !rrStdinHasFrom(rr, 0, "198.51.100.0/24") || !rrStdinHasFrom(rr, 0, "delete table inet wayhop_pbr") {
 		t.Errorf("nft stdin missing zone CIDR / self-flush:\n%v", rr.Stdin)
 	}
 	if !rrHasFrom(rr, 0, "ip route replace default dev awg1 table 151") {
@@ -197,7 +197,7 @@ func TestPass4_RollbackRestoresBaseline(t *testing.T) {
 	mark := len(rr.Calls)
 	_ = s.failsafe.RollbackNow() // returns sing-box Restore error in this harness; PBR teardown still runs
 
-	if !rrHasFrom(rr, mark, "nft delete table inet velinx_pbr") {
+	if !rrHasFrom(rr, mark, "nft delete table inet wayhop_pbr") {
 		t.Errorf("rollback did not tear down the nft table: %v", rr.Calls[mark:])
 	}
 	if s.pbrPlan != nil {
@@ -258,7 +258,7 @@ func TestPass4_ModeChangeTeardown(t *testing.T) {
 	if w := opshandlers_post(s.handleApply, "/api/apply", `{"save":true}`); w.Code != http.StatusOK {
 		t.Fatalf("tun apply: %d (%s)", w.Code, w.Body.String())
 	}
-	if !rrHasFrom(rr, mark, "nft delete table inet velinx_pbr") {
+	if !rrHasFrom(rr, mark, "nft delete table inet wayhop_pbr") {
 		t.Errorf("mode change must tear down the kernel plane: %v", rr.Calls[mark:])
 	}
 	if s.pbrPlan != nil {
@@ -288,13 +288,13 @@ func TestPass4_BootSyncInstallsHybrid(t *testing.T) {
 }
 
 // TestPass4_BootSyncOrphanTeardown: SyncPlugins in a non-hybrid mode clears any stale
-// velinx_pbr table left by a prior hybrid era (the user switched mode + rebooted).
+// wayhop_pbr table left by a prior hybrid era (the user switched mode + rebooted).
 func TestPass4_BootSyncOrphanTeardown(t *testing.T) {
 	s, rr := pbrApplyServer(t)
 	s.cfg.RoutingMode = "tun"
 	seedVoWiFi(t, s)
 	s.SyncPlugins()
-	if !rrHasFrom(rr, 0, "nft delete table inet velinx_pbr") {
+	if !rrHasFrom(rr, 0, "nft delete table inet wayhop_pbr") {
 		t.Errorf("non-hybrid boot sync must clear a stale table: %v", rr.Calls)
 	}
 	if rrHasFrom(rr, 0, "ip route replace default dev") {

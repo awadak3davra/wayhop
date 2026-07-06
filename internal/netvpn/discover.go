@@ -1,6 +1,6 @@
 // Package netvpn discovers VPN tunnels that are ALREADY configured on the router
-// (WireGuard / AmneziaWG) so Velinx can understand and route through them without
-// re-importing keys — the OS owns the tunnel, Velinx just uses it as an egress.
+// (WireGuard / AmneziaWG) so WayHop can understand and route through them without
+// re-importing keys — the OS owns the tunnel, WayHop just uses it as an egress.
 //
 // Discovery reads the runtime via the wg/awg CLIs (`wg show all dump`), which is the
 // authoritative view of live interfaces + peers. It captures only the non-secret fields
@@ -29,7 +29,12 @@ type Peer struct {
 
 // DiscoveredVPN is a native tunnel found on the router.
 type DiscoveredVPN struct {
-	Iface      string `json:"iface"`          // kernel interface name (awg0, wg0, nwg1…)
+	Iface string `json:"iface"` // kernel interface name (awg0, wg0, nwg1…)
+	// NDMName is the KeeneticOS NDM interface name (e.g. "Wireguard5"); "" off Keenetic
+	// (the wg/awg dumps carry no NDM name). The kernel Iface is DERIVED from it
+	// (Wireguard0→nwg0), but a hand-named tunnel's NDM name is NOT recoverable from the
+	// kernel name — so it is captured verbatim here for the native managed-toggle/state path.
+	NDMName    string `json:"ndm_name,omitempty"`
 	Type       string `json:"type"`           // "wireguard" | "amneziawg"
 	Name       string `json:"name,omitempty"` // human-friendly label ("" if unknown; wg/awg dumps carry none, NDM "description:")
 	PublicKey  string `json:"public_key"`     // this interface's own public key

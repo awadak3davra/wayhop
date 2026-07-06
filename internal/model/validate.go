@@ -16,6 +16,26 @@ const (
 	maxMTU = 9200
 )
 
+// Bounds for a routing list's CIDRSource auto-refresh cadence (RefreshHours). The floor protects the
+// router flash overlay: even a churny feed can only rewrite the profile once per this many hours per
+// list. 0 is always legal and means the built-in default (24h / once a day). The auto-refresh ticker
+// clamps to these too, so a hand-edited profile.json can't drive refreshes faster than the floor.
+const (
+	MinCIDRRefreshHours = 6
+	MaxCIDRRefreshHours = 720 // 30 days
+)
+
+// ValidRefreshHours reports whether a routing list's RefreshHours is acceptable for a NEW write.
+// The bound only bites when the list has a CIDRSource (the flash-relevant kernel feed); a
+// Source-only list's RefreshHours is just sing-box's rule_set update_interval, where any positive
+// value is fine. Enforced at the CRUD boundary, NOT in Validate — see the note there (legacy data).
+func ValidRefreshHours(rl RoutingList) bool {
+	if rl.CIDRSource == "" || rl.RefreshHours == 0 {
+		return rl.RefreshHours >= 0
+	}
+	return rl.RefreshHours >= MinCIDRRefreshHours && rl.RefreshHours <= MaxCIDRRefreshHours
+}
+
 // Validate checks structural integrity: unique IDs, resolvable members and
 // rule targets, and sane ports. It returns the first problem found.
 func (p *Profile) Validate() error {
@@ -259,6 +279,11 @@ func (p *Profile) Validate() error {
 		if rl.CIDRSource != "" && !validCIDRSource(rl.CIDRSource) {
 			return fmt.Errorf("routing list %q: cidr_source %q must be https://… , http://… , or asn:N,N", rl.ID, rl.CIDRSource)
 		}
+		// RefreshHours bounds are deliberately NOT enforced here: Validate gates Apply/generate, so
+		// hard-failing would brick Apply for a pre-existing profile whose refresh_hours predates the
+		// bounds (they were legal before 0.4.1). The CRUD boundary (handleUpsertRoutingList) rejects
+		// new out-of-range writes with a 400 via ValidRefreshHours, and the auto-refresh ticker
+		// clamps whatever is persisted (cidrIntervalHours) — bad legacy data degrades, never bricks.
 		if !isResolvable(rl.Outbound, ids) {
 			return fmt.Errorf("routing list %q: outbound %q does not resolve", rl.ID, rl.Outbound)
 		}
@@ -275,6 +300,14 @@ func (p *Profile) Validate() error {
 			if !isBuiltin(rl.DownloadVia) && !enabled[rl.DownloadVia] {
 				return fmt.Errorf("routing list %q: download_via %q targets a disabled endpoint", rl.ID, rl.DownloadVia)
 			}
+		}
+	}
+
+	// DNS plane (the "DNS" section) — greenfield, so a strict check can't brick a legacy profile.
+	// Detours resolve against the endpoint/group namespace built above; rule_sets against RoutingLists.
+	if p.DNS != nil {
+		if err := validateDNS(p.DNS, ids, enabled); err != nil {
+			return err
 		}
 	}
 	return nil

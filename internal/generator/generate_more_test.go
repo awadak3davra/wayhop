@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // generator_vlessReality builds a VLESS-Reality sing-box endpoint.

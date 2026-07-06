@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // ifaceInfo is one network interface as reported to the UI for the source_iface picker

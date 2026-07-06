@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"velinx/internal/traffic"
+	"wayhop/internal/traffic"
 )
 
 // clash_newClient builds a Client pointing at ts with the given secret. It is a

@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"velinx/internal/config"
-	"velinx/internal/initserver"
-	"velinx/internal/serverstore"
-	"velinx/internal/store"
-	"velinx/internal/util"
+	"wayhop/internal/config"
+	"wayhop/internal/initserver"
+	"wayhop/internal/serverstore"
+	"wayhop/internal/store"
+	"wayhop/internal/util"
 )
 
 // redactSecrets must blank credential-bearing marker lines (client configs, the
@@ -23,8 +23,8 @@ func TestRedactSecrets(t *testing.T) {
 		"WR_CLIENT_CONFIG=vless://SECRETUUID@1.2.3.4:443?security=reality#x",
 		"WR_CLIENT_CONFIG_B64=c2VjcmV0LXdnLWNvbmYtd2l0aC1rZXk=",
 		"WR_SSH_KEY_B64=c2VjcmV0LXNzaC1wcml2YXRlLWtleQ==",
-		"WR_SSH_PUB=ssh-ed25519 AAAApublic velinx",
-		"[velinx-harden] done",
+		"WR_SSH_PUB=ssh-ed25519 AAAApublic wayhop",
+		"[wayhop-harden] done",
 	}, "\n")
 	out := redactSecrets(in)
 	for _, secret := range []string{"SECRETUUID", "c2VjcmV0LXdnLWNvbmY", "c2VjcmV0LXNzaC1wcml2"} {
@@ -341,7 +341,7 @@ func TestRunHardenKeysDemo(t *testing.T) {
 		t.Errorf("private_key looks wrong: %q", priv)
 	}
 	fn, _ := v.Result["filename"].(string)
-	if want := "velinx-192-0-2-40-ed25519"; fn != want {
+	if want := "wayhop-192-0-2-40-ed25519"; fn != want {
 		t.Errorf("filename = %q, want %q", fn, want)
 	}
 	if _, ok := v.Result["public_key"].(string); !ok {

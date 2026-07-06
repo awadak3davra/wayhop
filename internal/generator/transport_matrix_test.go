@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/importer"
-	"velinx/internal/model"
+	"wayhop/internal/importer"
+	"wayhop/internal/model"
 )
 
 // TestGeneratorTransportMatrix imports a spread of real-world share-links that vary the

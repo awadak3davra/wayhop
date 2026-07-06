@@ -1,4 +1,4 @@
-module velinx
+module wayhop
 
 go 1.22
 

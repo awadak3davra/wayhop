@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestAWGKeepalive (L4): an AmneziaWG peer gets a 20s PersistentKeepalive default when the config

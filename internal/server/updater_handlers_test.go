@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/updater"
+	"wayhop/internal/updater"
 )
 
 // updaterinstall_serverWithUpdater builds a *Server via the shared sharehandlers_server
@@ -16,7 +16,7 @@ import (
 // (handleUpdaterEngines / handleUpdaterVersions / handleUpdaterInstall) all dereference
 // s.updater, which the shared helper leaves nil, so every test must set it.
 //
-// arch picks the velinx arch token. BinDir is a fresh t.TempDir(); since no engine binary is
+// arch picks the wayhop arch token. BinDir is a fresh t.TempDir(); since no engine binary is
 // ever written there (and none of the registry bin names exist on PATH in CI), Installed()
 // reports Present=false for every engine — which keeps handleUpdaterEngines offline and
 // deterministic.

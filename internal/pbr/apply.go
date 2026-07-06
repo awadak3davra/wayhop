@@ -73,10 +73,36 @@ func (pl *Plan) Apply(r Runner, opt Options) error {
 	for _, c := range pl.RenderIP(opt) {
 		name, args := splitCmd(c)
 		if _, err := r.Run("", name, args...); err != nil {
+			// A per-egress `default dev <iface>` route legitimately fails ONLY when the tunnel iface
+			// is DOWN at apply time (it comes up later; and for a FailClosed kill-switch egress the
+			// blackhole fallback in the SAME table catches the traffic meanwhile). Skip just that
+			// missing-device failure so a single down tunnel can't tear out the WHOLE plane (every
+			// carve-out + the kill-switch blackhole → failing OPEN). ANY OTHER failure — including a
+			// generic apply error on that line — still aborts, so the caller rolls back / abstains
+			// rather than commit a half-applied plane.
+			if isDefaultDevRoute(c) && isMissingDeviceErr(err) {
+				continue
+			}
 			return fmt.Errorf("%s: %w", c, err)
 		}
 	}
 	return nil
+}
+
+// isDefaultDevRoute reports whether c is a per-egress `… route replace default dev <iface> …` line
+// (v4 or v6) — the only Apply command with a benign, recoverable failure mode (the tunnel iface is
+// absent), and only then (see isMissingDeviceErr).
+func isDefaultDevRoute(c string) bool {
+	return strings.Contains(c, "route replace default dev ")
+}
+
+// isMissingDeviceErr reports whether err is iproute2's "device is absent" failure. ExecRunner wraps
+// the command's stderr into the error (`%w: %s`), so a down tunnel surfaces as "... Cannot find
+// device \"awgN\"" / "No such device"; a generic error (e.g. a real apply fault) does not match and
+// stays fatal.
+func isMissingDeviceErr(err error) bool {
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "cannot find device") || strings.Contains(s, "no such device")
 }
 
 // Teardown removes everything Apply installed; best-effort (errors ignored).

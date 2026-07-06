@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	"velinx/internal/clash"
+	"wayhop/internal/clash"
 )
 
 // handleConnections exposes the live Clash /connections list for the Dashboard's

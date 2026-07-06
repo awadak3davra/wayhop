@@ -1,7 +1,7 @@
 name: feed
 
 # Build + sign + publish the native package feed (opkg .ipk + Entware + apk .apk) to the
-# awadak3davra/velinx-feed GitHub Pages site. Runs on a v* release tag, or manually for validation.
+# awadak3davra/wayhop-feed GitHub Pages site. Runs on a v* release tag, or manually for validation.
 # The opkg/Entware path is the verified core; the apk path is best-effort until apk-tools v3 is pinned.
 on:
   push:
@@ -44,7 +44,7 @@ jobs:
           fi
           [ -n "$v" ] || { echo "could not resolve a version" >&2; exit 1; }
           echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "packaging Velinx $v"
+          echo "packaging WayHop $v"
 
       - name: Build per-arch binaries
         env:
@@ -55,7 +55,7 @@ jobs:
           v="${{ steps.ver.outputs.version }}"
           mkdir -p bins
           build() { GOARCH="$2" GOMIPS="${3:-}" GOARM="${4:-}" go build -trimpath \
-            -ldflags "-s -w -X velinx/internal/version.Version=$v" -o "bins/velinx-$1" ./cmd/velinx; }
+            -ldflags "-s -w -X wayhop/internal/version.Version=$v" -o "bins/wayhop-$1" ./cmd/wayhop; }
           build mipsle mipsle softfloat
           build mips   mips   softfloat
           build arm    arm    ''        7
@@ -79,17 +79,17 @@ jobs:
             goname="$1"; shift; owtokens="$*"
             ewtoken="$(printf '%s' "$ew" | tr -d ' ')"
             # shellcheck disable=SC2086
-            sh packaging/feed/pack-ipk.sh     "bins/velinx-$goname" "$v" 1 feed/ipk     $owtokens
-            sh packaging/feed/pack-entware.sh "bins/velinx-$goname" "$v" 1 feed/entware "$ewtoken"
+            sh packaging/feed/pack-ipk.sh     "bins/wayhop-$goname" "$v" 1 feed/ipk     $owtokens
+            sh packaging/feed/pack-entware.sh "bins/wayhop-$goname" "$v" 1 feed/entware "$ewtoken"
           done < packaging/feed/arch-map.txt
 
       - name: Sign opkg indexes (usign)
         run: |
           set -eu
           umask 077
-          printf '%s' "${{ secrets.VELINX_USIGN_SEC }}" > "$RUNNER_TEMP/velinx.sec"
-          sh packaging/feed/make-index.sh feed "$RUNNER_TEMP/velinx.sec" bins/usigntool
-          rm -f "$RUNNER_TEMP/velinx.sec"
+          printf '%s' "${{ secrets.VELINX_USIGN_SEC }}" > "$RUNNER_TEMP/wayhop.sec"
+          sh packaging/feed/make-index.sh feed "$RUNNER_TEMP/wayhop.sec" bins/usigntool
+          rm -f "$RUNNER_TEMP/wayhop.sec"
 
       - name: Pack apk (.apk) + index — best-effort (needs apk-tools v3 in a container)
         id: apk
@@ -109,7 +109,7 @@ jobs:
             while IFS= read -r line; do
               case "$line" in ""|\#*) continue ;; esac
               ow="${line%%|*}"; set -- $ow; goname="$1"; shift; owtokens="$*"
-              sh packaging/feed/pack-apk.sh "bins/velinx-$goname" "$v" 1 feed $owtokens
+              sh packaging/feed/pack-apk.sh "bins/wayhop-$goname" "$v" 1 feed $owtokens
             done < packaging/feed/arch-map.txt
             for d in feed/apk/*/; do
               [ -d "$d" ] || continue
@@ -122,25 +122,38 @@ jobs:
         run: |
           set -eu
           rm -f "$PWD/.apk-sign.pem" 2>/dev/null || true
-          cp packaging/feed/keys/velinx.pub          feed/velinx.pub
-          cp packaging/feed/keys/velinx-apk.pem.pub  feed/velinx-apk.pem.pub
+          cp packaging/feed/keys/wayhop.pub          feed/wayhop.pub
+          cp packaging/feed/keys/wayhop-apk.pem.pub  feed/wayhop-apk.pem.pub
           touch feed/.nojekyll
+          BASE="https://awadak3davra.github.io/wayhop-feed"
           {
-            echo "<!doctype html><meta charset=utf-8><title>Velinx package feed</title>"
-            echo "<h1>Velinx package feed</h1>"
-            echo "<p>Native OpenWrt / Entware / Keenetic feed for <a href=https://github.com/awadak3davra/velinx>Velinx</a>."
-            echo "See <a href=https://github.com/awadak3davra/velinx/blob/main/docs/INSTALL_OPENWRT.md>install docs</a>.</p>"
-            echo "<pre>opkg: src/gz velinx \$BASE/ipk/\$arch   key: velinx.pub"
-            echo "apk : \$BASE/apk/\$arch/packages.adb       key: velinx-apk.pem.pub</pre>"
+            echo "<!doctype html><meta charset=utf-8><title>WayHop package feed</title>"
+            echo "<style>body{font:15px/1.5 system-ui,sans-serif;max-width:820px;margin:2rem auto;padding:0 1rem;color:#1a2230}"
+            echo "h1{margin:.2rem 0}code,pre{background:#0b0e13;color:#e6edf3;border-radius:6px}"
+            echo "pre{padding:.8rem 1rem;overflow:auto}code{padding:.1rem .35rem}a{color:#0097dc}.v{color:#6b7684}</style>"
+            echo "<h1>WayHop package feed</h1>"
+            echo "<p class=v>Native OpenWrt / Entware / Keenetic packages for <a href=https://github.com/awadak3davra/wayhop>WayHop</a>"
+            echo " &mdash; <b>${{ steps.ver.outputs.version }}</b>. Prefer a one-shot install instead? See the"
+            echo " <a href=https://github.com/awadak3davra/wayhop#install>README install guide</a>.</p>"
+            echo "<h2>OpenWrt 24.10+ &middot; apk</h2>"
+            echo "<pre>wget -O /etc/apk/keys/wayhop.pem $BASE/wayhop-apk.pem.pub"
+            echo "echo \"$BASE/apk/\$(cat /etc/apk/arch)\" &gt;&gt; /etc/apk/repositories.d/wayhop.list"
+            echo "apk update &amp;&amp; apk add wayhop</pre>"
+            echo "<h2>OpenWrt 23.x / Entware / Keenetic &middot; opkg</h2>"
+            echo "<pre>wget -O /tmp/wayhop.pub $BASE/wayhop.pub &amp;&amp; opkg-key add /tmp/wayhop.pub"
+            echo "echo \"src/gz wayhop $BASE/ipk/\$(opkg print-architecture | awk 'NR==2{print \$2}')\" &gt;&gt; /etc/opkg/customfeeds.conf"
+            echo "opkg update &amp;&amp; opkg install wayhop</pre>"
+            echo "<p class=v>Then open <code>http://&lt;router-ip&gt;:8088</code>. Upgrades: <code>apk add -u wayhop</code> / <code>opkg upgrade wayhop</code>."
+            echo " Your <code>/etc/wayhop</code> config is never touched on upgrade or removal.</p>"
           } > feed/index.html
           echo "feed tree:"; find feed -maxdepth 3 -type f | sort
 
-      - name: Deploy to velinx-feed Pages
+      - name: Deploy to wayhop-feed Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           deploy_key: ${{ secrets.FEED_DEPLOY_KEY }}
-          external_repository: awadak3davra/velinx-feed
+          external_repository: awadak3davra/wayhop-feed
           publish_branch: gh-pages
           publish_dir: ./feed
           force_orphan: true
-          commit_message: "Velinx feed ${{ steps.ver.outputs.version }}"
+          commit_message: "WayHop feed ${{ steps.ver.outputs.version }}"

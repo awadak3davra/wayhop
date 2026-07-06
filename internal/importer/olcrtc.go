@@ -4,7 +4,7 @@ import (
 	"net/url"
 	"strings"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // looksLikeOlcRTC detects an olcRTC client YAML config (WebRTC-over-meet tunnel).

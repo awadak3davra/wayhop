@@ -15,7 +15,7 @@ func TestUpdateSingBoxScript_VerifiesRestartAndRollsBack(t *testing.T) {
 	for _, want := range []string{
 		"is-active",         // systemd service-up check
 		"pgrep -x sing-box", // non-systemd fallback
-		"velinx.bak",        // rollback source
+		"wayhop.bak",        // rollback source
 		"WR_UPDATE_ERR=",    // failure signal → UpdateConfirmed ok=false
 		"WR_UPDATE_OK=",     // success signal (happy path)
 	} {

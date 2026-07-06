@@ -3,8 +3,8 @@ package server
 import (
 	"testing"
 
-	"velinx/internal/model"
-	"velinx/internal/pbr"
+	"wayhop/internal/model"
+	"wayhop/internal/pbr"
 )
 
 // TestApplyPBR_SkipsUnchangedPlan (QW3): re-applying a deep-equal plan must be a no-op — no

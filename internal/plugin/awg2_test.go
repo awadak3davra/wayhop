@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestAWGConfig_V2Params asserts the AmneziaWG 2.0 obfuscation params (S3/S4,

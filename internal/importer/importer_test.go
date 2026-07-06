@@ -4,7 +4,7 @@ import (
 	"encoding/base64"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 func TestParseVLESSReality(t *testing.T) {

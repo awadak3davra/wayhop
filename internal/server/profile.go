@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"net"
@@ -16,13 +17,13 @@ import (
 	"syscall"
 	"time"
 
-	"velinx/internal/atomicfile"
-	"velinx/internal/config"
-	"velinx/internal/generator"
-	"velinx/internal/importer"
-	"velinx/internal/model"
-	"velinx/internal/pbr"
-	"velinx/internal/plugin"
+	"wayhop/internal/atomicfile"
+	"wayhop/internal/config"
+	"wayhop/internal/generator"
+	"wayhop/internal/importer"
+	"wayhop/internal/model"
+	"wayhop/internal/pbr"
+	"wayhop/internal/plugin"
 )
 
 // handleImport parses a share link / conf into an endpoint WITHOUT saving it
@@ -51,7 +52,7 @@ func (s *Server) handleGetProfile(w http.ResponseWriter, r *http.Request) {
 // uploaded backup — the JSON that GET /api/profile returns. store.Replace validates it before it
 // lands (a bad backup is rejected, the current profile untouched), and persists atomically; the
 // change goes live on the next Apply (with the fail-safe net). The companion to handleConfigExport
-// for the daemon config — together they let a user back up + restore or migrate a full Velinx
+// for the daemon config — together they let a user back up + restore or migrate a full WayHop
 // setup. POST /api/profile.
 func (s *Server) handleRestoreProfile(w http.ResponseWriter, r *http.Request) {
 	var p model.Profile
@@ -143,6 +144,13 @@ func (s *Server) handleUpsertRoutingList(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusBadRequest, "invalid routing list JSON")
 		return
 	}
+	// Bound the auto-refresh cadence at the write boundary (400), NOT in Validate — a hard Validate
+	// failure would brick Apply for profiles persisted before the bounds existed. The ticker clamps
+	// legacy values; new writes are rejected here.
+	if !model.ValidRefreshHours(rl) {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("refresh_hours must be 0 (default 24h) or %d–%d hours for a CIDR-source list (flash protection)", model.MinCIDRRefreshHours, model.MaxCIDRRefreshHours))
+		return
+	}
 	if err := s.store.UpsertRoutingList(rl); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -159,9 +167,42 @@ func (s *Server) handleDeleteRoutingList(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": id})
 }
 
-// handleRoutingCatalog returns the curated pre-defined rule-set presets.
+// routingCatalog{Once,JSON,ETag} memoize the marshaled preset catalog + its content ETag.
+// model.RoutingPresets() is a build-constant (a hardcoded slice, no config/time/rand), so the
+// JSON is identical for the whole process life — marshal it once and let the browser 304 it.
+var (
+	routingCatalogOnce sync.Once
+	routingCatalogJSON []byte
+	routingCatalogETag string
+)
+
+func routingCatalogCached() ([]byte, string) {
+	routingCatalogOnce.Do(func() {
+		b, err := json.Marshal(model.RoutingPresets())
+		if err != nil {
+			b = []byte("[]") // a static catalog can't really fail to marshal; degrade to empty
+		}
+		h := fnv.New64a()
+		_, _ = h.Write(b)
+		routingCatalogJSON = b
+		routingCatalogETag = fmt.Sprintf(`W/"cat-%x"`, h.Sum64())
+	})
+	return routingCatalogJSON, routingCatalogETag
+}
+
+// handleRoutingCatalog returns the curated pre-defined rule-set presets. The catalog is
+// build-constant, so it's served from a cached buffer with a content ETag: the Routing page
+// revalidates cheaply (If-None-Match → 304) instead of re-marshaling the whole list each visit.
 func (s *Server) handleRoutingCatalog(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, model.RoutingPresets())
+	body, etag := routingCatalogCached()
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "no-cache") // always revalidate, but a match is a body-less 304
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
 }
 
 // handleRoutingStatus reports, per routing list, whether its remote rule-set source
@@ -203,7 +244,7 @@ func (s *Server) handleRoutingStatus(w http.ResponseWriter, r *http.Request) {
 				res[i] = cur
 				return
 			}
-			req.Header.Set("User-Agent", "velinx")
+			req.Header.Set("User-Agent", "wayhop")
 			resp, err := client.Do(req)
 			if err != nil {
 				cur.Error = err.Error()
@@ -267,7 +308,7 @@ func (s *Server) SyncPlugins() {
 		// Boot path: a swallowed generate error here means the engine plugins + kernel PBR
 		// plane never come up after a reboot, with no trace of why. Log it (the watchdog /
 		// next Apply will retry); don't change the fail-soft behavior otherwise.
-		log.Printf("velinx: boot SyncPlugins skipped — config generation failed (tunnels/PBR not brought up): %v", err)
+		log.Printf("wayhop: boot SyncPlugins skipped — config generation failed (tunnels/PBR not brought up): %v", err)
 		return
 	}
 	s.syncPluginsFor(res) // brings AmneziaWG/olcRTC interfaces UP first
@@ -290,10 +331,17 @@ func (s *Server) SyncPlugins() {
 			}
 		}
 	} else if s.pbrRunner != nil {
-		// Not hybrid/fast: clear any stale "velinx_pbr" table left by a prior hybrid era
+		// Not hybrid/fast: clear any stale "wayhop_pbr" table left by a prior hybrid era
 		// (e.g. the user switched to tun via Settings and never Applied, then rebooted —
 		// the in-memory pbrPlan is nil so there's nothing else to tear down). Idempotent.
-		_ = (&pbr.Plan{Table: "velinx_pbr"}).Teardown(s.pbrRunner, pbr.Options{})
+		// The EMPTY plan's Teardown names no egresses, so it deletes the nft table but can't
+		// emit any `ip rule del` — the prior era's fwmark rules + per-egress tables would
+		// strand forever. SweepStrandedRules removes exactly those (double-keyed: wayhop's
+		// mark mask AND the wayhop table window; never touches foreign rules).
+		_ = (&pbr.Plan{Table: "wayhop_pbr"}).Teardown(s.pbrRunner, pbr.Options{})
+		if n, err := pbr.SweepStrandedRules(s.pbrRunner, pbr.Options{}); n > 0 || err != nil {
+			log.Printf("SyncPlugins: swept %d stranded PBR ip rule(s) from a prior hybrid/fast era (err=%v)", n, err)
+		}
 	}
 }
 
@@ -609,7 +657,7 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "bad url: "+err.Error())
 			return
 		}
-		req.Header.Set("User-Agent", "velinx")
+		req.Header.Set("User-Agent", "wayhop")
 		resp, err := s.subscriptionFetchClient().Do(req)
 		if err != nil {
 			writeErr(w, http.StatusBadGateway, "fetch failed: "+err.Error())
@@ -630,7 +678,7 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.Subscription.URL != body.URL {
 			s.cfg.Subscription.URL = body.URL
 			if err := s.cfg.Save(); err != nil {
-				log.Printf("velinx: could not persist subscription URL for auto-refresh: %v", err)
+				log.Printf("wayhop: could not persist subscription URL for auto-refresh: %v", err)
 			}
 		}
 		s.cfgMu.Unlock()
@@ -899,6 +947,34 @@ func (s *Server) genOptions(p *model.Profile) generator.Options {
 // black-hole traffic; this predicate is the gate that makes the skip safe.
 func (s *Server) datapathNativeOnly(c config.Config, p *model.Profile) bool {
 	return generator.DatapathNativeOnly(p, s.routingMode(c))
+}
+
+// nativeOnlyCached is datapathNativeOnly for the read-only hot path (the ~5s /api/health
+// poll). The verdict is a pure function of (profile, routing mode), so it's memoized on
+// (store gen, mode): a hit returns instantly, skipping both the full Profile() clone and
+// the profile walk. gen is read BEFORE the profile snapshot on a miss, so a mutation racing
+// between the two only ever forces one extra recompute — never serves a stale verdict.
+func (s *Server) nativeOnlyCached() bool {
+	if s.store == nil {
+		return false
+	}
+	gen := s.store.Gen()
+	mode := s.routingMode(s.config())
+	s.nativeOnlyMu.Lock()
+	if s.nativeOnlyOK && s.nativeOnlyGen == gen && s.nativeOnlyMode == mode {
+		v := s.nativeOnlyVal
+		s.nativeOnlyMu.Unlock()
+		return v
+	}
+	s.nativeOnlyMu.Unlock()
+
+	p := s.store.Profile()
+	v := generator.DatapathNativeOnly(&p, mode)
+
+	s.nativeOnlyMu.Lock()
+	s.nativeOnlyGen, s.nativeOnlyMode, s.nativeOnlyVal, s.nativeOnlyOK = gen, mode, v, true
+	s.nativeOnlyMu.Unlock()
+	return v
 }
 
 // applyPBR installs newPlan as the kernel PBR plane, or tears the plane down when nil.

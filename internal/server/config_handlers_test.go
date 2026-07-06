@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"velinx/internal/config"
+	"wayhop/internal/config"
 )
 
 // TestPutConfig_RoundTripsGateway guards the cutover toggle: PUT /api/config must

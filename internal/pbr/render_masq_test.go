@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestRenderNft_MasqInterfaceEgress: a plan with an EgressInterface egress (a tunnel iface)

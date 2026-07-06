@@ -19,7 +19,7 @@ import (
 // iface (the no-kill-switch fallback). Synthetic data only (RFC5737 / documentation ifnames).
 func wanFallbackPlan(wanIface string, tunIfaces ...string) *Plan {
 	pl := &Plan{
-		Table:    "velinx_pbr",
+		Table:    "wayhop_pbr",
 		Mask:     0x00ff0000,
 		Egresses: []Egress{{Tag: "direct", Kind: EgressWAN, Iface: wanIface, Mark: 0x00010000, Table: 254}},
 	}
@@ -87,7 +87,7 @@ func TestRenderNft_WanFallbackDedupWithTunnel(t *testing.T) {
 // single masquerade line (de-dupe across WAN egresses).
 func TestRenderNft_WanFallbackMultiDedup(t *testing.T) {
 	plan := &Plan{
-		Table: "velinx_pbr",
+		Table: "wayhop_pbr",
 		Mask:  0x00ff0000,
 		Egresses: []Egress{
 			{Tag: "direct", Kind: EgressWAN, Iface: "eth0", Mark: 0x00010000, Table: 254},
@@ -104,7 +104,7 @@ func TestRenderNft_WanFallbackMultiDedup(t *testing.T) {
 // tunnel masquerade and NO extra WAN-iface line — the WAN-fallback path is inert.
 func TestRenderNft_TunnelOnlyNoWanLine(t *testing.T) {
 	plan := &Plan{
-		Table:      "velinx_pbr",
+		Table:      "wayhop_pbr",
 		Mask:       0x00ff0000,
 		Egresses:   []Egress{{Tag: "direct", Kind: EgressWAN, Mark: 0x00010000, Table: 254}}, // WAN egress, NO Iface
 		MasqIfaces: []string{"awg0"},
@@ -124,7 +124,7 @@ func TestRenderNft_TunnelOnlyNoWanLine(t *testing.T) {
 // NO wr_nat chain at all — the byte-identical no-op that protects the render goldens.
 func TestRenderNft_NoEgressNoNat(t *testing.T) {
 	plan := &Plan{
-		Table:    "velinx_pbr",
+		Table:    "wayhop_pbr",
 		Mask:     0x00ff0000,
 		Egresses: []Egress{{Tag: "direct", Kind: EgressWAN, Mark: 0x00010000, Table: 254}},
 	}

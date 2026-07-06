@@ -18,6 +18,32 @@ function el(tag, props, ...kids) {
   return n;
 }
 
+// switchEl: an accessible on/off switch. The old bare <div class="toggle"> had no role/tabindex/
+// keydown, so keyboard + screen-reader users literally could not flip a tunnel on/off (and the
+// .toggle:focus-visible CSS was dead). onToggle(el) fires on click AND Enter/Space; aria-checked
+// reflects `on`. Callers that re-render on change get the new state for free; those that flip the
+// class in place (selfAutoToggle) update aria-checked themselves.
+function switchEl(on, onToggle, label) {
+  const s = el("div", { class: "toggle" + (on ? " on" : ""), role: "switch", tabindex: "0", "aria-checked": on ? "true" : "false" });
+  if (label) s.setAttribute("aria-label", label);
+  const fire = () => onToggle(s);
+  s.addEventListener("click", fire);
+  s.addEventListener("keydown", ev => { if (ev.key === "Enter" || ev.key === " " || ev.key === "Spacebar") { ev.preventDefault(); fire(); } });
+  return s;
+}
+
+// a11yClick makes a non-button clickable element (an icon/span like the IPTV drill-down ▸ expander or
+// the 📌 pin) keyboard-operable and screen-reader-announced — role=button + tabindex + Enter/Space —
+// matching switchEl so icon controls aren't mouse-only.
+function a11yClick(elm, handler, label) {
+  elm.setAttribute("role", "button");
+  elm.setAttribute("tabindex", "0");
+  if (label) elm.setAttribute("aria-label", label);
+  elm.addEventListener("click", handler);
+  elm.addEventListener("keydown", ev => { if (ev.key === "Enter" || ev.key === " " || ev.key === "Spacebar") { ev.preventDefault(); handler(ev); } });
+  return elm;
+}
+
 // emptyState builds a richer empty placeholder — a bold title + an optional muted
 // how-to hint (and optional leading glyph) — replacing bare run-on sentences. A plain
 // string child still renders via .empty, so existing call sites stay unaffected.
@@ -68,6 +94,32 @@ const api = {
 
 /* ---------- state ---------- */
 const state = { health: null, profile: { endpoints: [], groups: [], rules: [] } };
+
+// --- pending-Apply (profile-dirty) tracking ------------------------------
+// Every connection/group/routing edit only STAGES into the store; it activates on Apply. Without a
+// signal the Apply button looks identical whether or not changes are pending, silently dead-ending
+// the primary "paste link → it works" flow. We snapshot the profile at Apply time and compare on
+// each reload, so the topbar can flag unsaved changes — no per-mutation-site bookkeeping needed.
+let _appliedSnapshot = null;
+let profileDirty = false;
+function profileSnapshot() {
+  const p = state.profile || {};
+  return JSON.stringify([p.endpoints, p.groups, p.rules, p.routing_lists, p.dns]);
+}
+function reflectDirty() {
+  const ab = document.getElementById("applybtn"), asb = document.getElementById("applysavebtn");
+  [ab, asb].forEach(b => b && b.classList.toggle("dirty", profileDirty));
+  if (ab) ab.title = profileDirty
+    ? t("Unsaved changes — Apply to activate them (live, reverts on reboot)")
+    : t("Apply live — not saved, reverts on reboot or if connectivity drops");
+}
+function updateDirty() {
+  const snap = profileSnapshot();
+  if (_appliedSnapshot === null) _appliedSnapshot = snap; // first load = the current live baseline
+  profileDirty = snap !== _appliedSnapshot;
+  reflectDirty();
+}
+function clearDirty() { _appliedSnapshot = profileSnapshot(); profileDirty = false; reflectDirty(); }
 const findEndpoint = id => state.profile.endpoints.find(e => e.id === id);
 const findGroup = id => state.profile.groups.find(g => g.id === id);
 const nameOf = id => (findEndpoint(id) || findGroup(id) || {}).name || id;
@@ -86,7 +138,8 @@ const fmtTime = ms => new Date(ms).toLocaleTimeString("en-GB");
 function toast(msg, kind = "info") {
   // Localize whole-string toasts via the dictionary; concatenated/interpolated
   // messages that aren't an exact key pass through unchanged.
-  const node = el("div", { class: "toast " + kind }, (typeof t === "function" ? t(msg) : msg));
+  const node = el("div", { class: "toast " + kind, role: kind === "err" ? "alert" : "status" },
+    (typeof t === "function" ? t(msg) : msg));
   $("#toasts").appendChild(node);
   setTimeout(() => node.remove(), 4200);
 }
@@ -180,10 +233,10 @@ const DICTS = window.WR_DICTS || {};
     "Adopt as exit": "Принять как выход",
     "Adopted": "Принят",
     "Already added as a routing exit": "Уже добавлен как маршрутный выход",
-    "Add this OS-owned tunnel as a routing exit (added disabled — Velinx will not manage it)":
-      "Добавить этот туннель ОС как маршрутный выход (добавляется отключённым — Velinx не управляет им)",
-    "Velinx will ROUTE THROUGH the tunnel but does not manage it (the OS owns it). It is added disabled — enable it in Connections to start routing.":
-      "Velinx будет МАРШРУТИЗИРОВАТЬ ЧЕРЕЗ туннель, но не управляет им (туннель принадлежит ОС). Он добавляется отключённым — включите его в разделе «Подключения», чтобы начать маршрутизацию.",
+    "Add this OS-owned tunnel as a routing exit (added disabled — WayHop will not manage it)":
+      "Добавить этот туннель ОС как маршрутный выход (добавляется отключённым — WayHop не управляет им)",
+    "WayHop will ROUTE THROUGH the tunnel but does not manage it (the OS owns it). It is added disabled — enable it in Connections to start routing.":
+      "WayHop будет МАРШРУТИЗИРОВАТЬ ЧЕРЕЗ туннель, но не управляет им (туннель принадлежит ОС). Он добавляется отключённым — включите его в разделе «Подключения», чтобы начать маршрутизацию.",
     "Adopted {0} — enable it in Connections to route through it":
       "Принят {0} — включите его в разделе «Подключения», чтобы маршрутизировать через него",
     // Set-up-Server option picker
@@ -215,6 +268,18 @@ const DICTS = window.WR_DICTS || {};
     "This group has no members to test": "В этой группе нет участников для проверки",
     "Tested {0} members — {1} alive": "Проверено участников: {0} — активны: {1}",
     // Failover: edit group + kill switch
+    "Use ▲/▼ to set priority. A selector group uses the top member; urltest/fallback auto-pick the fastest working member and use your order as a tiebreak.":
+      "Стрелками ▲/▼ задайте приоритет. Группа selector использует верхний туннель; urltest/fallback сами выбирают самый быстрый рабочий, а ваш порядок — лишь при равенстве.",
+    "sing-box is routing through this member right now": "sing-box прямо сейчас направляет трафик через этот туннель",
+    "Lowest latency — but not the member currently routed": "Наименьшая задержка — но трафик сейчас идёт не через него",
+    "Local network problem": "Проблема локальной сети",
+    "Every exit is unreachable at once — this looks like your internet/uplink, not the VPNs. Failover is paused until connectivity returns.":
+      "Все выходы недоступны одновременно — похоже на проблему вашего интернета/аплинка, а не VPN. Переключение приостановлено до восстановления связи.",
+    "Health check URL": "URL проверки доступности",
+    "Probe interval (s)": "Интервал проверки (с)",
+    "Flap tolerance (ms)": "Порог антидребезга (мс)",
+    "Higher tolerance = stickier exit on a jittery/DPI link (try 100–150 ms); lower interval = faster failover (floored to 5 s). Tunes urltest/fallback auto-failover; a selector group only uses the URL for its health badge.":
+      "Больше порог = стабильнее выбор на дёрганом/DPI-канале (попробуйте 100–150 мс); меньше интервал = быстрее переключение (минимум 5 с). Настраивает автопереключение urltest/fallback; selector использует только URL для индикатора здоровья.",
     "Edit": "Изменить",
     "Edit group settings": "Изменить настройки группы",
     "Edit failover group": "Изменить группу отказоустойчивости",
@@ -231,11 +296,11 @@ const DICTS = window.WR_DICTS || {};
     "Full backup (everything)": "Полный бэкап (всё)",
     "Download full backup": "Скачать полный бэкап",
     "Restore full backup…": "Восстановить из полного бэкапа…",
-    "Save your whole setup — connections, failover groups, routing lists, saved servers and routing mode — to one file. Ideal before a firmware reflash or when moving to another Velinx. Restoring validates everything first and never applies on its own; you review it and press Apply.":
-      "Сохраните всю конфигурацию — подключения, группы отказоустойчивости, списки маршрутизации, сохранённые серверы и режим маршрутизации — в один файл. Удобно перед перепрошивкой или при переносе на другой Velinx. При восстановлении всё сначала проверяется и ничего не применяется автоматически; вы просматриваете и нажимаете «Применить».",
+    "Save your whole setup — connections, failover groups, routing lists, saved servers and routing mode — to one file. Ideal before a firmware reflash or when moving to another WayHop. Restoring validates everything first and never applies on its own; you review it and press Apply.":
+      "Сохраните всю конфигурацию — подключения, группы отказоустойчивости, списки маршрутизации, сохранённые серверы и режим маршрутизации — в один файл. Удобно перед перепрошивкой или при переносе на другой WayHop. При восстановлении всё сначала проверяется и ничего не применяется автоматически; вы просматриваете и нажимаете «Применить».",
     "The backup file contains your connection secrets (keys, passwords) — keep it private. Daemon access settings (panel port and host allow-list) are NOT changed by a restore.":
       "Файл бэкапа содержит секреты подключений (ключи, пароли) — храните его в тайне. Настройки доступа к демону (порт панели и список разрешённых хостов) при восстановлении НЕ меняются.",
-    "That is not a Velinx full backup.": "Это не файл полного бэкапа Velinx.",
+    "That is not a WayHop full backup.": "Это не файл полного бэкапа WayHop.",
     "Restore your whole setup from this backup? It replaces all connections, groups and routing lists (validated first). Nothing is applied automatically — review it, then press Apply. Your panel address and access settings are NOT changed.":
       "Восстановить всю конфигурацию из этого бэкапа? Это заменит все подключения, группы и списки маршрутизации (сначала с проверкой). Ничего не применяется автоматически — просмотрите и нажмите «Применить». Адрес панели и настройки доступа НЕ меняются.",
     "Restored {0} connections, {1} groups, {2} servers — review and press Apply to activate.":
@@ -249,6 +314,111 @@ const DICTS = window.WR_DICTS || {};
     "✗ unreachable: {0}": "✗ недоступен: {0}",
     "✗ check failed: {0}": "✗ проверка не удалась: {0}",
     "no response": "нет ответа",
+    // DNS section
+    "Encrypted, split, failover-aware DNS — hides lookups from the ISP, degrades gracefully":
+      "Шифрованный, раздельный, отказоустойчивый DNS — прячет запросы от провайдера, деградирует плавно",
+    "Encrypted, split, failover-aware DNS: hides your lookups from the ISP while a tunnel is up, and gracefully falls back to encrypted DoH over the raw WAN when every VPN is down — so DNS never goes dark.":
+      "Шифрованный, раздельный, отказоустойчивый DNS: прячет ваши запросы от провайдера, пока туннель поднят, и плавно откатывается на шифрованный DoH через обычный WAN, когда все VPN упали — так DNS никогда не «гаснет».",
+    "Preview the generated sing-box dns block": "Показать сгенерированный блок dns для sing-box",
+    "+ Add resolver": "+ Добавить резолвер",
+    "Secure defaults": "Безопасные настройки",
+    "One-click encrypted DoH via the tunnel + local for in-country, leak-proof": "В один клик: шифрованный DoH через туннель + local для внутренних доменов, без утечек",
+    "DNS is not managed by WayHop yet — sing-box uses its default resolver. Click “Secure defaults” for one-click encrypted, failover-aware DNS, or add resolvers manually.":
+      "DNS ещё не управляется WayHop — sing-box использует резолвер по умолчанию. Нажмите «Безопасные настройки» для шифрованного отказоустойчивого DNS в один клик или добавьте резолверы вручную.",
+    "Settings": "Настройки",
+    "Enable DNS management": "Включить управление DNS",
+    "Emit a dns block. Off keeps sing-box's default resolver (today's behaviour).": "Генерировать блок dns. Выкл — sing-box использует резолвер по умолчанию (текущее поведение).",
+    "Leak protection (encrypted-only)": "Защита от утечек (только шифрование)",
+    "Reject plaintext resolvers and require an encrypted default — the ISP can never read your queries, even on the WAN fallback.":
+      "Запретить незашифрованные резолверы и требовать шифрованный по умолчанию — провайдер никогда не прочитает ваши запросы, даже при откате на WAN.",
+    "FakeIP domain routing": "Доменная маршрутизация FakeIP",
+    "Synthetic IPs so domain rules match reliably. Requires gateway/TUN mode; ignored in fast/mixed mode.":
+      "Синтетические IP, чтобы доменные правила срабатывали надёжно. Требует режим шлюза/TUN; в быстром/смешанном режиме игнорируется.",
+    "IP strategy": "Стратегия IP",
+    "ipv4_only suppresses AAAA — pick it when your tunnels are IPv4-only to stop v6 DNS leaks.":
+      "ipv4_only подавляет AAAA — выберите его, если туннели только IPv4, чтобы исключить утечки DNS по v6.",
+    "Resolvers": "Резолверы",
+    "No resolvers": "Нет резолверов",
+    "Add an encrypted resolver (DoH/DoT), or apply the secure defaults.": "Добавьте шифрованный резолвер (DoH/DoT) или примените безопасные настройки.",
+    "Default resolver (unmatched queries)": "Резолвер по умолчанию (для несовпавших запросов)",
+    "(first resolver)": "(первый резолвер)",
+    "Keep it encrypted for leak protection — a plaintext/local default would let a foreign lookup reach the ISP.":
+      "Держите его шифрованным для защиты от утечек — незашифрованный/local по умолчанию пропустил бы внешний запрос к провайдеру.",
+    "Split-DNS rules": "Правила раздельного DNS",
+    "+ Add rule": "+ Добавить правило",
+    "No rules — every query uses the default resolver. Add a rule to resolve chosen lists via a specific resolver (e.g. domestic sites via the local resolver, or block a list at DNS level).":
+      "Правил нет — все запросы идут через резолвер по умолчанию. Добавьте правило, чтобы разрешать выбранные списки через конкретный резолвер (например, внутренние сайты через local или блокировать список на уровне DNS).",
+    "DNS leak test": "Тест утечки DNS",
+    "Run test": "Запустить тест",
+    "Checks that lookups are private (DoH) and that no IPv6 path leaks around the tunnel. Runs the same server-side probes as Diagnostics.":
+      "Проверяет, что запросы приватны (DoH) и что IPv6 не утекает мимо туннеля. Использует те же серверные проверки, что и «Диагностика».",
+    "No DNS probe available on this device.": "На этом устройстве нет проверки DNS.",
+    "Leak test unavailable: ": "Тест утечки недоступен: ",
+    "device resolver": "резолвер устройства",
+    "plaintext DNS — the ISP can read your queries": "незашифрованный DNS — провайдер может читать ваши запросы",
+    "block": "блок",
+    "(no match)": "(нет условия)",
+    // DNS resolver modal
+    "Add resolver": "Добавить резолвер",
+    "Edit resolver": "Изменить резолвер",
+    "Provider preset": "Готовый провайдер",
+    "— choose a provider —": "— выберите провайдера —",
+    "Recommended — secure, global": "Рекомендуемые — защищённые, глобальные",
+    "Country-local — geo-fallback": "Локальные для страны — гео-резерв",
+    "Tag": "Тег",
+    "Type": "Тип",
+    "Server (IP or hostname)": "Сервер (IP или имя хоста)",
+    "Port (blank = default)": "Порт (пусто = по умолчанию)",
+    "DoH path": "Путь DoH",
+    "Ride via (detour)": "Идти через (detour)",
+    "Bootstrap resolver (hostname only)": "Загрузочный резолвер (только для имени хоста)",
+    "(none — server is an IP)": "(нет — сервер задан как IP)",
+    "FakeIP IPv4 range": "Диапазон FakeIP IPv4",
+    "FakeIP IPv6 range (optional)": "Диапазон FakeIP IPv6 (необязательно)",
+    "Enabled": "Включён",
+    "Tag is required": "Тег обязателен",
+    "Resolver added": "Резолвер добавлен",
+    "Resolver updated": "Резолвер обновлён",
+    "Save": "Сохранить",
+    "Cancel": "Отмена",
+    // DNS rule modal
+    "Add DNS rule": "Добавить правило DNS",
+    "Edit DNS rule": "Изменить правило DNS",
+    "Match routing lists": "Списки маршрутизации для совпадения",
+    "Domain suffixes (one per line)": "Суффиксы доменов (по одному в строке)",
+    "Query types (comma-separated, e.g. A,AAAA)": "Типы запросов (через запятую, напр. A,AAAA)",
+    "Resolve via": "Разрешать через",
+    "Block (reject)": "Блокировать (reject)",
+    "Rule saved": "Правило сохранено",
+    "A rule needs at least one match condition": "Правилу нужно хотя бы одно условие совпадения",
+    // DNS preview + apply
+    "Generated dns block": "Сгенерированный блок dns",
+    "No dns block — enable DNS management first.": "Блока dns нет — сначала включите управление DNS.",
+    "Close": "Закрыть",
+    "Applied secure DNS defaults": "Применены безопасные настройки DNS",
+    "Replace the current DNS setup with the secure defaults (encrypted DoH via the tunnel + local, leak-proof)?":
+      "Заменить текущую настройку DNS безопасными значениями (шифрованный DoH через туннель + local, без утечек)?",
+    "DNS API unavailable: ": "API DNS недоступен: ",
+    // Native adopt (router's own DNS)
+    "Router's native DNS": "Собственный DNS роутера",
+    "adopted": "принято",
+    "strict-order": "строгий порядок",
+    "The DNS your router actually serves (dnsmasq + DoH). Preview the write-back to see the exact router commands; applying them is a manual, gated step.":
+      "DNS, который реально раздаёт ваш роутер (dnsmasq + DoH). Нажмите «Показать запись», чтобы увидеть точные команды роутера; их применение — ручной, защищённый шаг.",
+    "Preview write-back": "Показать запись",
+    "Show the uci/dnsmasq commands that would write this back to the router (not run automatically)":
+      "Показать команды uci/dnsmasq, которые запишут это обратно в роутер (не выполняются автоматически)",
+    "Native DNS write-back plan": "План нативной записи DNS",
+    "What writing the current native DNS back to your router would change. Nothing is applied automatically — the apply step is manual/gated.":
+      "Что изменит запись текущего нативного DNS обратно в роутер. Ничего не применяется автоматически — шаг применения ручной/защищённый.",
+    "uci commands": "команды uci",
+    "dnsmasq.d content": "содержимое dnsmasq.d",
+    "Then, to apply (user-gated):": "Затем, чтобы применить (по решению пользователя):",
+    "No upstreams detected.": "Апстримы не обнаружены.",
+    "via VPN": "через VPN",
+    "WAN-encrypted": "шифрованный WAN",
+    "geo-fallback": "гео-резерв",
+    "via tunnel": "через туннель",
   };
   try {
     const ru = DICTS.ru || (DICTS.ru = {});
@@ -329,7 +499,7 @@ function i18nObserve() {
 }
 // Static chrome (nav labels + topbar) lives in index.html, outside any render();
 // translate it directly. data-page -> English label.
-const NAV_LABELS = { dashboard: "Dashboard", server: "Set up Server", connections: "Connections", failover: "Failover", routing: "Routing", updater: "Updater", diagnostics: "Diagnostics", settings: "Settings" };
+const NAV_LABELS = { dashboard: "Dashboard", server: "Set up Server", connections: "Connections", failover: "Failover", routing: "Routing", dns: "DNS", updater: "Updater", diagnostics: "Diagnostics", plugins: "Plugins", settings: "Settings" };
 // Short hover explanations for each nav item (data-page -> English tooltip). Applied as the
 // element's title in translateChrome so they localize alongside the labels.
 const NAV_TOOLTIPS = {
@@ -338,8 +508,10 @@ const NAV_TOOLTIPS = {
   connections: "Your proxy/VPN connections — add, import, edit and test them",
   failover: "Group connections so traffic auto-switches to a healthy one",
   routing: "Send chosen domain/IP lists through a tunnel; everything else stays direct",
+  dns: "Encrypted, split, failover-aware DNS — hides lookups from the ISP, degrades gracefully",
   updater: "Update the proxy cores and the panel itself",
   diagnostics: "Health checks — connectivity, DNS, IPv6, exit IP, ping/traceroute",
+  plugins: "Optional features — install a plugin to add it to the menu",
   settings: "Ports, routing mode, web panel, fail-safe and other options",
 };
 function translateChrome() {
@@ -362,14 +534,15 @@ function translateChrome() {
   // an English key.
   if (ab) { ab.textContent = t("Apply"); ab.title = t("Apply live — not saved, reverts on reboot or if connectivity drops"); }
   if (asb) { asb.textContent = t("Apply & Save"); asb.title = t("Apply and persist as the saved baseline"); }
+  try { reflectDirty(); } catch (e) {} // re-assert the dirty title/marker after a language switch
   const bs = document.querySelector(".brand .bs");
   if (bs) bs.textContent = t("proxy control");
   try { updateStatusPill(); } catch (e) {} // re-localize the live status pill
 }
 
-/* ---------- restart the Velinx service ---------- */
+/* ---------- restart the WayHop service ---------- */
 async function restartService() {
-  if (!confirm(t("Restart the Velinx service now?\nThe web panel will be unavailable for a few seconds while the init system brings it back."))) return;
+  if (!await modalConfirm(t("Restart the WayHop service now?\nThe web panel will be unavailable for a few seconds while the init system brings it back."))) return;
   try { await api.post("/api/service/restart"); }
   catch (e) { return toast(e.message, "err"); }
   toast("Restarting… the panel will reconnect when it's back.", "info");
@@ -500,7 +673,7 @@ function updateStatusPill() {
   if (h.singbox && h.singbox.running) { pill.className = "pill ok"; text.textContent = t("ONLINE"); }
   else if (isNativeOnly(h)) { pill.className = "pill ok"; text.textContent = t("NATIVE"); }
   else { pill.className = "pill muted"; text.textContent = t("IDLE"); }
-  $("#foot").textContent = "velinx " + (h.version || "");
+  $("#foot").textContent = "wayhop " + (h.version || "");
 }
 
 /* ---------- routing ---------- */
@@ -510,8 +683,11 @@ const PAGES = {
   connections: { title: "Connections", render: renderConnections },
   failover: { title: "Failover", render: renderFailover },
   routing: { title: "Routing", render: renderRouting },
+  dns: { title: "DNS", render: renderDNS },
   updater: { title: "Updater", render: renderUpdater },
   diagnostics: { title: "Diagnostics", render: renderDiagnostics },
+  plugins: { title: "Plugins", render: renderPlugins },
+  iptv: { title: "IPTV", render: renderIptv },
   settings: { title: "Settings", render: renderSettings },
 };
 // isNetworkError distinguishes a daemon-UNREACHABLE failure (fetch rejected — the
@@ -533,7 +709,7 @@ function showReconnect() {
   const sub = el("div", { class: "hint", style: "margin-top:4px" }, t("The panel will return as soon as the service is back."));
   const ov = el("div", { class: "wr-reconnect" }, el("div", { class: "wr-reconnect-box" },
     el("span", { class: "spin" }),
-    el("div", {}, el("div", { style: "font-weight:600" }, t("Reconnecting to Velinx…")), sub)));
+    el("div", {}, el("div", { style: "font-weight:600" }, t("Reconnecting to WayHop…")), sub)));
   document.body.appendChild(ov);
   let tries = 0;
   const iv = setInterval(async () => {
@@ -553,6 +729,725 @@ function renderError(view, e) {
   view.appendChild(el("div", { class: "empty" }, "Error: " + e.message));
 }
 
+/* ---------- Plugins (feature modules) ---------- */
+// The Plugins section (P4). Lists every compiled-in feature module with an install switch. Installing
+// flips config.Features[id].Enabled server-side (PUT /api/features/{id}) — a hot config flip, no
+// restart — and the module's routes go live immediately. The left-menu nav item for an enabled module
+// is injected by P5 (refreshPluginNav, guarded here so P4 stands alone).
+async function renderPlugins(view) {
+  view.appendChild(el("div", { class: "block-head" },
+    el("div", {},
+      el("div", { class: "ttl" }, "Plugins"),
+      el("div", { class: "desc" }, "Optional features. Install one to add it to the left menu."))));
+  const loading = el("div", { class: "hint", style: "margin:18px 0" }, "loading plugins…");
+  view.appendChild(loading);
+  let mods;
+  try { mods = await api.get("/api/features"); }
+  catch (e) { loading.remove(); return renderError(view, e); }
+  loading.remove();
+  if (!Array.isArray(mods) || !mods.length) {
+    view.appendChild(el("div", { class: "card" },
+      emptyState(t("No plugins available"), t("This build has no optional plugins compiled in."), "⧉")));
+    return;
+  }
+  mods.forEach(m => view.appendChild(pluginCard(m)));
+}
+
+// pluginCard renders one module: icon, name, description, and an install switch. The switch flips the
+// class in place (selfAutoToggle pattern) and refreshes the nav so the module appears/disappears.
+function pluginCard(mod) {
+  const card = el("div", { class: "card" });
+  const sw = switchEl(mod.enabled, async node => {
+    const next = !node.classList.contains("on");
+    try {
+      await api.put("/api/features/" + encodeURIComponent(mod.id), { enabled: next });
+    } catch (e) { return toast(e.message, "err"); }
+    node.classList.toggle("on", next);
+    node.setAttribute("aria-checked", next ? "true" : "false");
+    toast(next ? t("Installed — added to the menu") : t("Removed from the menu"), "ok");
+    if (typeof refreshPluginNav === "function") refreshPluginNav(); // P5 injects/removes the nav item
+  }, mod.name);
+  card.appendChild(el("div", { class: "card-head" },
+    el("div", { style: "display:flex;gap:13px;align-items:center;min-width:0" },
+      el("span", { style: "font-size:26px;line-height:1;flex:none" }, mod.icon || "⧉"),
+      el("div", { style: "min-width:0" },
+        el("div", { class: "card-title" }, mod.name),
+        mod.tip ? el("div", { class: "hint", style: "margin-top:2px" }, mod.tip) : null)),
+    sw));
+  return card;
+}
+
+// P5: dynamic left-menu injection for installed modules. Generic — the label/tooltip/icon come from
+// each module's Descriptor (GET /api/features), so ANY future plugin appears with no per-module code.
+// Called at boot and after every install/uninstall (pluginCard). translateChrome() skips unknown
+// data-page keys, so it never clobbers these injected labels; route() picks up the .active state.
+let _pluginNavMods = [];
+async function refreshPluginNav() {
+  try { _pluginNavMods = (await api.get("/api/features")).filter(m => m.enabled); }
+  catch (_) { return; } // best-effort: a fetch failure leaves the menu unchanged
+  injectPluginNav();
+}
+function injectPluginNav() {
+  document.querySelectorAll(".nav-item.nav-plugin").forEach(n => n.remove()); // idempotent rebuild
+  const anchor = document.querySelector('.nav-item[data-page="plugins"]');
+  if (!anchor || !anchor.parentNode) return;
+  _pluginNavMods.forEach(m => {
+    const item = el("div", { class: "nav-item nav-plugin", "data-page": m.id, title: m.tip || "" },
+      el("span", { class: "ico" }, m.icon || "⧉"), " " + m.name);
+    item.addEventListener("click", () => { location.hash = "#" + m.id; });
+    anchor.parentNode.insertBefore(item, anchor); // installed modules sit just above the Plugins manager
+  });
+  const key = (location.hash || "#dashboard").slice(1);
+  document.querySelectorAll(".nav-item").forEach(n => n.classList.toggle("active", n.dataset.page === key));
+}
+
+// IPTV plugin page (U1). Manages the user's channel lists over the backend at /api/iptv/*: pick
+// countries from the compiled-in catalog, and WayHop aggregates each country's open iptv-org playlist
+// into one deduped, auto-refreshing M3U served at a token URL (add to a player, or open the landing +
+// QR in a browser). Nav routing + this page's registration live in P5; here we fill the body.
+async function renderIptv(view) {
+  const loading = el("div", { class: "hint", style: "margin:18px 0" }, "loading…");
+  view.appendChild(el("div", { class: "block-head" }, el("div", {},
+    el("div", { class: "ttl" }, "IPTV"),
+    el("div", { class: "desc" }, "Add open, auto-updating channel lists — by country, language or category — as one deduped M3U your player imports."))));
+  view.appendChild(loading);
+  let lists, catalog;
+  try { [lists, catalog] = await Promise.all([api.get("/api/iptv/lists"), api.get("/api/iptv/catalog")]); }
+  catch (e) { loading.remove(); return renderError(view, e); }
+  loading.remove();
+  if (!Array.isArray(lists)) lists = []; // the API returns null (not []) when there are no lists
+  const catMap = {};
+  (catalog || []).forEach(c => { catMap[c.code] = c; });
+  // Which exit countries do you have a WayHop tunnel for? (R1 inference; informational — routing is
+  // device-gated R2/R3). Best-effort: a failure just omits the exit hints.
+  let exits = [];
+  try { exits = await api.get("/api/iptv/exits"); } catch (_) {}
+  const exitCC = new Set((exits || []).filter(e => e.country).map(e => e.country));
+  // Language/category iptv-org lists (the picker beyond countries) → a token→name map for card labels.
+  let catalogKinds = [];
+  try { catalogKinds = await api.get("/api/iptv/catalogs"); } catch (_) {}
+  const catLabels = {};
+  (catalogKinds || []).forEach(k => (k.entries || []).forEach(e => { catLabels[k.kind + ":" + e.code] = e.name; }));
+
+  view.appendChild(el("div", { style: "display:flex;justify-content:space-between;align-items:center;gap:12px;margin:4px 0 12px;flex-wrap:wrap" },
+    el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" },
+      el("button", { class: "btn", onclick: () => openIptvCatalog() }, "Browse public lists"),
+      el("button", { class: "btn btn-sm", onclick: () => openIptvList(null, catalog) }, "+ Custom list"),
+      el("button", { class: "btn btn-sm", onclick: () => importIptvList() }, "Import")),
+    el("span", { class: "hint" }, (lists.length || 0) + " list" + (lists.length === 1 ? "" : "s"))));
+  view.appendChild(el("div", { class: "hint", style: "margin:0 0 14px;max-width:72ch" },
+    "Playlists link to publicly-listed free-to-air streams from the open iptv-org per-country catalogs. WayHop serves links only — it never hosts or re-streams. Availability isn't guaranteed; adult channels are excluded unless you opt in per list."));
+
+  if (!Array.isArray(lists) || !lists.length) {
+    view.appendChild(el("div", { class: "card" }, emptyState(t("No channel lists yet"),
+      t("Add a list, pick one or more countries, and WayHop builds a deduped, auto-refreshing M3U you add to your player."), "📺")));
+    return;
+  }
+  lists.forEach(l => view.appendChild(iptvListCard(l, catMap, catalog, exitCC, catLabels)));
+}
+
+// Auto-refresh cadence choices (label ↔ hours). The backend clamps to 6h..2w regardless.
+const IPTV_REFRESH = [["6h", 6], ["12h", 12], ["24h", 24], ["2 days", 48], ["1 week", 168]];
+function iptvRefreshLabel(h) { const o = IPTV_REFRESH.find(x => x[1] === h); return o ? o[0] : "12h"; }
+function iptvLabelHours(l) { const o = IPTV_REFRESH.find(x => x[0] === l); return o ? o[1] : 12; }
+
+// flagEmoji derives a flag from a 2-letter code (two regional-indicator symbols), matching the Go
+// catalog — so a code missing from catMap still shows a flag.
+function flagEmoji(code) {
+  code = (code || "").toLowerCase();
+  if (!/^[a-z]{2}$/.test(code)) return "";
+  return String.fromCodePoint(0x1f1e6 + code.charCodeAt(0) - 97, 0x1f1e6 + code.charCodeAt(1) - 97);
+}
+function countryLabel(code, catMap) {
+  const c = catMap[code];
+  return (c && c.flag ? c.flag : flagEmoji(code)) + " " + (c ? c.name : code.toUpperCase());
+}
+
+function iptvListCard(l, catMap, catalog, exitCC, catLabels) {
+  const card = el("div", { class: "card" });
+  const url = window.location.origin + "/api/iptv/" + l.token + "/tv.m3u";
+  const srcParts = (l.countries || []).map(c => countryLabel(c, catMap));
+  (l.source_urls || []).forEach(u => { try { srcParts.push("🔗 " + new URL(u).host); } catch (_) { srcParts.push("🔗 custom"); } });
+  (l.xtream_sources || []).forEach(x => { try { srcParts.push("🔗 " + new URL(/:\/\//.test(x.url) ? x.url : "http://" + x.url).host + " (Xtream)"); } catch (_) { srcParts.push("🔗 Xtream"); } });
+  (l.catalogs || []).forEach(tok => srcParts.push("📺 " + ((catLabels && catLabels[tok]) || tok)));
+  const flags = srcParts.join(" · ");
+  const st = l.stats || {};
+  let status;
+  if (st.last_refresh > 0) {
+    const parts = [t("{0} channels", st.channels || 0)];
+    if (st.category_cut) parts.push(t("{0} you cut", st.category_cut));    // deliberate category curation
+    const autoPruned = (st.pruned || 0) - (st.category_cut || 0);          // blocked/junk/dead (automatic)
+    if (autoPruned > 0) parts.push(t("{0} pruned", autoPruned));
+    if (st.adult_cut) parts.push(t("{0} adult-filtered", st.adult_cut));
+    parts.push(t("refreshed {0}", timeAgo(st.last_refresh * 1000)));
+    status = parts.join(" · ");
+  } else if (st.last_attempt > 0) {
+    // Attempted but never succeeded (e.g. every source failing behind a not-yet-up tunnel) — say so
+    // honestly instead of an eternal "runs shortly"; the error detail is on its own line below.
+    status = l.paused ? t("first build failed {0} — paused", timeAgo(st.last_attempt * 1000))
+      : t("first build failed {0} — will retry automatically", timeAgo(st.last_attempt * 1000));
+  } else {
+    status = t("not refreshed yet — first build runs shortly");
+  }
+  const badges = el("div", { style: "display:flex;gap:6px;flex:none" },
+    l.paused ? el("span", { class: "badge", style: "border-color:var(--warn,#d29922);color:var(--warn,#d29922)", title: "Auto-refresh paused" }, "paused") : null,
+    l.adult ? el("span", { class: "badge", title: "Adult channels included" }, "adult") : null,
+    l.probe ? el("span", { class: "badge", title: "Health-checked — dead channels dropped" }, "checked") : null);
+  card.appendChild(el("div", { class: "card-head" },
+    el("div", { style: "min-width:0" },
+      el("div", { class: "card-title" }, l.name),
+      el("div", { class: "hint", style: "margin-top:2px" }, flags)),
+    badges));
+  card.appendChild(el("div", { class: "hint", style: "margin:8px 0 2px" }, status));
+  // Exit-match (informational): per source country, do you have a WayHop tunnel that exits there? Many
+  // national streams are geo-locked, so a "none" hints why some channels may not play (routing = R2/R3).
+  if (exitCC && (l.countries || []).length) {
+    const parts = (l.countries || []).map(cc => (catMap[cc]?.flag || flagEmoji(cc)) + (exitCC.has(cc) ? " ✓" : " ✗"));
+    const missing = (l.countries || []).some(cc => !exitCC.has(cc));
+    card.appendChild(el("div", { class: "hint", style: "margin:2px 0" + (missing ? ";color:var(--warn,#d29922)" : "") },
+      t("Exits: {0}", parts.join(" · ")) + (missing ? t(" — no matching exit; geo-locked channels there may not play") : t(" — all covered"))));
+  }
+  if (st.last_error) card.appendChild(el("div", { class: "hint", style: "color:var(--err);margin:2px 0" }, "last error: " + st.last_error));
+  // Weak TV boxes / older players stall or OOM parsing a huge M3U — the router is fine, but the DEVICE
+  // that imports the token URL isn't. Warn (don't truncate) so the user can cut categories if needed.
+  if ((st.channels || 0) > IPTV_BIG_LIST) card.appendChild(el("div", { class: "hint", style: "color:var(--warn,#d29922);margin:2px 0" },
+    t("⚠ {0} channels — some TV boxes/players load large lists slowly; cut categories to trim", st.channels)));
+  card.appendChild(el("pre", { class: "wr-console", style: "max-height:56px;margin:8px 0" }, url));
+  card.appendChild(el("div", { style: "display:flex;gap:8px;flex-wrap:wrap" },
+    // "N new — review": categories that appeared upstream since setup, awaiting a keep/cut decision.
+    (l.new_categories && l.new_categories.length)
+      ? el("button", { class: "btn btn-sm", style: "border-color:var(--warn,#d29922);color:var(--warn,#d29922);font-weight:600", onclick: () => reviewIptvList(l) },
+          t("⚑ {0} new — review", l.new_categories.length))
+      : null,
+    el("button", { class: "btn btn-sm", onclick: () => copyText(url) }, "Copy URL"),
+    el("button", { class: "btn btn-sm", onclick: () => iptvQR(l) }, "QR"),
+    el("button", { class: "btn btn-sm", onclick: () => exportIptvList(l) }, "⤓ Export"),
+    el("button", { class: "btn btn-sm", onclick: () => dupIptvList(l) }, "⎘ Duplicate"),
+    el("button", { class: "btn btn-sm", onclick: e => refreshIptvList(l, e.target) }, "↻ Update now"),
+    el("button", { class: "btn btn-sm", onclick: () => pauseIptvList(l) }, l.paused ? "▶ Resume" : "⏸ Pause"),
+    el("button", { class: "btn btn-sm", onclick: () => openIptvList(l, catalog) }, "Edit"),
+    el("button", { class: "btn btn-danger btn-sm", onclick: () => delIptvList(l) }, "Delete")));
+  return card;
+}
+
+// countryPicker: a filterable checkbox list over the whole catalog with a live selected-count. Mutates
+// the passed `selected` Set; returns the wrapper element.
+// openIptvCatalog is the public-lists browser — modelled on the Routing preset catalog (openRoutingCatalog):
+// a searchable catalog of ready-made iptv-org lists (per-country, per-language, per-category), grouped
+// with a type badge + description and an "Added"/"+ Add" control. "+ Add" creates a first-class IPTV
+// list from that single source (its own token URL, auto-refresh, edit/delete) — exactly like adding a
+// routing list from a preset. Building a CUSTOM combined list stays on "+ Add list" (openIptvList).
+async function openIptvCatalog() {
+  let countries, kinds, lists;
+  try { [countries, kinds, lists] = await Promise.all([api.get("/api/iptv/catalog"), api.get("/api/iptv/catalogs"), api.get("/api/iptv/lists")]); }
+  catch (e) { return toast(e.message, "err"); }
+  // Which sources are already covered by an existing list → show "Added" instead of "+ Add".
+  const have = new Set();
+  (lists || []).forEach(l => { (l.countries || []).forEach(c => have.add("country:" + c)); (l.catalogs || []).forEach(tok => have.add(tok)); });
+  // Build the grouped entries. key = the dedup key; name = display; the POST body creates the list.
+  const groups = [{
+    label: "Countries", badge: "country", desc: "Free-to-air channels in this country",
+    entries: (countries || []).map(c => ({ key: "country:" + c.code, name: (c.flag ? c.flag + " " : "") + c.name, plain: c.name, body: { name: c.name, countries: [c.code] } })),
+  }];
+  (kinds || []).forEach(k => groups.push({
+    label: k.label === "Language" ? "Languages" : "Categories", badge: k.kind,
+    desc: k.kind === "language" ? "Channels in this language" : "Channels in this category",
+    entries: (k.entries || []).map(e => ({ key: k.kind + ":" + e.code, name: e.name, plain: e.name, body: { name: e.name, catalogs: [k.kind + ":" + e.code] } })),
+  }));
+
+  const filter = el("input", { placeholder: "Filter…", style: "width:100%;margin-bottom:10px" });
+  const listWrap = el("div", {});
+  const render = () => {
+    listWrap.innerHTML = "";
+    const q = filter.value.trim().toLowerCase();
+    groups.forEach(g => {
+      const matches = g.entries.filter(e => !q || e.plain.toLowerCase().includes(q));
+      if (!matches.length) return;
+      listWrap.appendChild(el("div", { class: "card-title", style: "margin:10px 0 6px" }, g.label));
+      matches.forEach(e => {
+        const act = have.has(e.key)
+          ? el("span", { class: "pill ok", style: "margin:0" }, el("span", { class: "dot" }), "Added")
+          : el("button", { class: "btn btn-sm btn-primary", onclick: ev => addIptvCatalogEntry(e, ev.target, back, have) }, "+ Add");
+        listWrap.appendChild(el("div", { class: "conn" },
+          el("div", { class: "body" },
+            el("div", { class: "name" }, e.name, el("span", { class: "badge proto" }, g.badge)),
+            el("div", { class: "sub" }, el("span", { class: "addr" }, g.desc))),
+          el("div", { class: "acts" }, act)));
+      });
+    });
+    i18nApply(listWrap);
+  };
+  render();
+  filter.addEventListener("input", render);
+  const back = modal({ title: "Public channel lists", body: el("div", {}, filter, listWrap) });
+}
+
+// addIptvCatalogEntry creates a single-source IPTV list from a catalog entry (mirrors routing's
+// addPreset): POST the list, then re-render so it shows in the user's lists. The catalog closes on add
+// (like the routing preset catalog); re-open to add more.
+async function addIptvCatalogEntry(e, btn, back, have) {
+  if (btn) { btn.disabled = true; btn.textContent = "Adding…"; }
+  try { await api.post("/api/iptv/lists", e.body); }
+  catch (err) { if (btn) { btn.disabled = false; btn.textContent = "+ Add"; } return toast(err.message, "err"); }
+  if (have) have.add(e.key);
+  if (back) back.remove();
+  route();
+  toast(t("List added — it builds shortly; add the link to your player"), "ok");
+}
+
+function countryPicker(catalog, selected) {
+  const listBox = el("div", { class: "wr-console", style: "max-height:230px;overflow:auto;padding:6px;text-align:left" });
+  const rows = [];
+  const count = el("div", { class: "hint", style: "margin:6px 0 4px" });
+  const updateCount = () => { count.textContent = selected.size + " selected"; };
+  (catalog || []).forEach(c => {
+    const cb = el("input", { type: "checkbox", checked: selected.has(c.code) ? "checked" : null });
+    cb.addEventListener("change", () => { cb.checked ? selected.add(c.code) : selected.delete(c.code); updateCount(); });
+    const row = el("label", { class: "check", style: "display:flex;gap:8px;align-items:center;padding:3px 4px", "data-q": (c.name + " " + c.code).toLowerCase() },
+      cb, el("span", {}, (c.flag ? c.flag + " " : "") + c.name));
+    rows.push(row);
+    listBox.appendChild(row);
+  });
+  const filter = el("input", { type: "text", placeholder: "Filter countries…", style: "width:100%" });
+  filter.addEventListener("input", () => {
+    const q = filter.value.trim().toLowerCase();
+    rows.forEach(r => { r.style.display = !q || r.dataset.q.includes(q) ? "" : "none"; });
+  });
+  updateCount();
+  return el("div", {}, filter, count, listBox);
+}
+
+// JUNK_CATEGORIES are the low-value buckets the "Cut common junk" shortcut (and the smart default for
+// a brand-new list) switch off — matched case-insensitively against the source's group-titles.
+const JUNK_CATEGORIES = ["undefined", "uncategorized", "religious", "legislative", "shop", "shopping"];
+// Soft threshold above which the card warns that weak TV boxes/players may struggle with the M3U size.
+const IPTV_BIG_LIST = 8000;
+
+async function openIptvList(list, catalog) {
+  const editing = !!list;
+  const selected = new Set((list && list.countries) || []);
+  const name = fInput("iptv-name", "Name (optional)", (list && list.name) || "", { ph: "defaults to the country names" });
+  const picker = countryPicker(catalog, selected);
+  // A list's iptv-org language/category lists ("kind:code" tokens) are added via the public-lists
+  // catalog browser (openIptvCatalog); here we only PRESERVE what the list already has across an edit
+  // so a plain edit never drops them.
+  const catalogSet = new Set((list && list.catalogs) || []);
+  const readCatalogs = () => [...catalogSet];
+  // Owner-supplied provider / custom M3U URLs (one per line). Optional — a list can be countries, URLs,
+  // or both. Fetched through the same SSRF-guarded client, links-only.
+  const sourcesBox = el("textarea", { id: "iptv-sources", rows: "2", placeholder: "https://your-provider.example/playlist.m3u   (one per line)", style: "width:100%" },
+    ((list && list.source_urls) || []).join("\n"));
+  const readSources = () => $("#iptv-sources").value.split("\n").map(s => s.trim()).filter(Boolean);
+  // Xtream Codes accounts (host + username + password): WayHop builds the get.php M3U and fetches it like
+  // a custom source. Credentials stay on the router; they never appear in a user-facing error or a log.
+  const xtreamRows = el("div", { id: "iptv-xtream", style: "display:flex;flex-direction:column;gap:6px" });
+  const addXtreamRow = x => {
+    const host = el("input", { class: "iptv-xt-host", placeholder: "host or http://host:port", value: (x && x.url) || "", style: "flex:2;min-width:130px" });
+    const user = el("input", { class: "iptv-xt-user", placeholder: "username", value: (x && x.username) || "", style: "flex:1;min-width:90px" });
+    const pass = el("input", { class: "iptv-xt-pass", type: "password", placeholder: "password", value: (x && x.password) || "", style: "flex:1;min-width:90px" });
+    const row = el("div", { class: "iptv-xt-row", style: "display:flex;gap:6px;flex-wrap:wrap;align-items:center" }, host, user, pass);
+    row.appendChild(el("button", { class: "btn btn-sm btn-ghost", type: "button", title: "Remove account", onclick: () => row.remove() }, "✕"));
+    xtreamRows.appendChild(row);
+  };
+  ((list && list.xtream_sources) || []).forEach(addXtreamRow);
+  const addXtreamBtn = el("button", { class: "btn btn-sm", type: "button", onclick: () => addXtreamRow() }, "+ Add Xtream account");
+  const readXtream = () => [...xtreamRows.querySelectorAll(".iptv-xt-row")].map(r => ({
+    url: r.querySelector(".iptv-xt-host").value.trim(),
+    username: r.querySelector(".iptv-xt-user").value.trim(),
+    password: r.querySelector(".iptv-xt-pass").value.trim(),
+  })).filter(x => x.url || x.username || x.password);
+  const adult = fCheck("iptv-adult", "Include adult channels — off by default", list && list.adult);
+  const probe = fCheck("iptv-probe", "Check availability every refresh and drop dead channels (the automatic interval checker — slower)", list && list.probe);
+  const strict = fCheck("iptv-strict", "Hold new categories for review before adding them to the box", list && list.strict_new);
+  const cadence = fSelect("iptv-refresh", "Auto-refresh", IPTV_REFRESH.map(x => x[0]), iptvRefreshLabel((list && list.refresh_hours) || 12));
+  const block = el("textarea", { id: "iptv-block", rows: "3", placeholder: "one tvg-id or exact stream URL per line", style: "width:100%" },
+    ((list && list.blocklist) || []).join("\n"));
+  const adv = el("details", { style: "margin-top:8px" },
+    el("summary", { class: "hint", style: "cursor:pointer;font-weight:600" }, "Advanced — block individual channels"),
+    el("div", { class: "field", style: "margin-top:6px" }, el("label", {}, "Blocklist"), block));
+
+  // ---- Channel curation (categories) ----
+  // excludeSet holds the LOWERCASED category names to drop (exclude-list = auto-update safe: a category
+  // you keep keeps filling with new channels on refresh; only what you switch off stays off).
+  const excludeSet = new Set(((list && list.exclude_categories) || []).map(s => s.toLowerCase()));
+  // blockSet holds per-channel exclusions (tvg-id or URL) — the drill-down un-ticks feed it; it merges
+  // with the Advanced blocklist textarea on save. origBlock lets us tell drill-down edits apart from
+  // manual textarea edits so neither clobbers the other.
+  const origBlock = new Set((list && list.blocklist) || []);
+  const blockSet = new Set(origBlock);
+  // includeSet holds per-channel RESCUES (tvg-ids kept even though their category is cut). The
+  // drill-down is its only editor, so [...includeSet] round-trips cleanly on save.
+  const includeSet = new Set((list && list.channel_include) || []);
+  // pinnedList is ORDERED (pin priority) — pinned categories lead the served M3U in this order. It's the
+  // source of truth (preserves a pinned category even if it's transiently absent from a later preview).
+  let pinnedList = ((list && list.pinned_categories) || []).slice();
+  const isPinned = n => pinnedList.some(p => p.toLowerCase() === n.toLowerCase());
+  const togglePin = n => { isPinned(n) ? (pinnedList = pinnedList.filter(p => p.toLowerCase() !== n.toLowerCase())) : pinnedList.push(n); };
+  let previewCats = null; // [{name,count}] once previewed
+  let previewTotal = 0;
+  const totalBanner = el("div", { class: "hint", style: "font-weight:600;margin:8px 0 4px" });
+  const catPanel = el("div", {});
+  const previewBtn = el("button", { class: "btn btn-sm", type: "button" }, "🔎 Preview & choose channels");
+
+  function recomputeTotal() {
+    if (!previewCats) { totalBanner.textContent = ""; return; }
+    let n = previewTotal;
+    for (const c of previewCats) if (excludeSet.has(c.name.toLowerCase())) n -= c.count;
+    n += includeSet.size; // per-channel rescues (only exist inside cut categories → add them back)
+    n -= [...blockSet].filter(k => !origBlock.has(k)).length; // drill-down blocklist additions (all in kept categories)
+    if (n < 0) n = 0;
+    totalBanner.textContent = t("You'll get about {0} of {1} channels — the rest stay off.", n, previewTotal);
+  }
+  function renderCats() {
+    catPanel.innerHTML = "";
+    if (!previewCats) return;
+    if (!previewCats.length) { catPanel.appendChild(el("div", { class: "hint" }, "No channels found for these countries.")); return; }
+    catPanel.appendChild(el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin:6px 0" },
+      el("button", { class: "btn btn-sm", type: "button", onclick: () => { excludeSet.clear(); renderCats(); } }, "Keep all"),
+      el("button", { class: "btn btn-sm", type: "button", onclick: () => { previewCats.forEach(c => { if (JUNK_CATEGORIES.includes(c.name.toLowerCase())) excludeSet.add(c.name.toLowerCase()); }); renderCats(); } }, "Cut common junk")));
+    const box = el("div", { class: "wr-console", style: "max-height:300px;overflow:auto;padding:6px;text-align:left" });
+    // Pinned categories lead the panel (in pin order), then the rest in the previewed (count-desc) order.
+    const pinnedFirst = pinnedList.map(p => previewCats.find(c => c.name.toLowerCase() === p.toLowerCase())).filter(Boolean);
+    const displayCats = [...pinnedFirst, ...previewCats.filter(c => !isPinned(c.name))];
+    displayCats.forEach((c, ci) => {
+      const key = c.name.toLowerCase();
+      // id keyed by INDEX, not a slug of the name — compound names ("General;News" vs "General/News")
+      // slug to the same string and a label click would then toggle the wrong category.
+      const cb = el("input", { type: "checkbox", id: "iptv-cat-" + ci, checked: excludeSet.has(key) ? null : "checked" });
+      const sub = el("div", { style: "margin:2px 0 6px 24px;display:none" }); // lazy per-channel drill-down
+      let loaded = false;
+      const arrow = el("span", { style: "cursor:pointer;width:14px;display:inline-block;user-select:none;color:var(--muted)", title: "Show channels" }, "▸");
+      const collapse = () => { sub.style.display = "none"; sub.innerHTML = ""; arrow.textContent = "▸"; loaded = false; };
+      cb.addEventListener("change", () => {
+        cb.checked ? excludeSet.delete(key) : excludeSet.add(key);
+        recomputeTotal();
+        if (sub.style.display !== "none") collapse(); // category kept/cut flipped → drop the now-stale drill-down
+      });
+      a11yClick(arrow, async () => {
+        if (sub.style.display !== "none") { collapse(); return; }
+        sub.style.display = ""; arrow.textContent = "▾";
+        if (!loaded) { loaded = true; await loadCategoryChannels(c.name, sub); }
+      }, "Show channels in " + c.name);
+      // 📌 pin toggle — a pinned category leads the served M3U (bright = pinned, dim = not).
+      const pin = el("span", { style: "cursor:pointer;user-select:none;flex:none;font-size:12px;opacity:" + (isPinned(c.name) ? "1" : "0.3"), title: isPinned(c.name) ? "Unpin from top" : "Pin to top" }, "📌");
+      a11yClick(pin, () => { togglePin(c.name); renderCats(); }, (isPinned(c.name) ? "Unpin " : "Pin ") + c.name);
+      // Row is a div (not a label) so clicking the arrow doesn't toggle the checkbox.
+      box.appendChild(el("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:3px 4px" },
+        el("span", { style: "display:flex;gap:6px;align-items:center;min-width:0" },
+          arrow, cb, el("label", { for: cb.id, style: "cursor:pointer" }, c.name)),
+        el("span", { style: "display:flex;gap:8px;align-items:center;flex:none" }, pin, el("span", { class: "hint" }, String(c.count)))));
+      box.appendChild(sub);
+    });
+    catPanel.appendChild(box);
+    recomputeTotal();
+  }
+  // setHealthStatus paints a channel's reachability marker: green ✓ alive, amber ◐ geo-blocked, red ✗ dead.
+  function setHealthStatus(span, status) {
+    if (status === "alive") { span.textContent = "✓"; span.style.color = "var(--accent,#3fb950)"; span.title = "Reachable"; }
+    else if (status === "geo") { span.textContent = "◐"; span.style.color = "var(--warn,#d29922)"; span.title = "Geo-blocked — needs an in-country exit"; }
+    else if (status) { span.textContent = "✗"; span.style.color = "var(--err,#d9534f)"; span.title = "Unreachable"; }
+    else { span.textContent = ""; span.title = ""; }
+  }
+  // loadCategoryChannels lazily fetches one category's capped channel page and renders per-channel
+  // checkboxes (checked = kept; un-ticking adds the tvg-id/URL to blockSet) + an on-demand "Check
+  // availability" button that probes them live (POST preview/health) and paints ✓/◐/✗ per channel.
+  async function loadCategoryChannels(catName, box) {
+    box.appendChild(el("div", { class: "hint" }, "loading channels…"));
+    const req = { countries: [...selected], catalogs: readCatalogs(), source_urls: readSources(), adult: $("#iptv-adult").checked, category: catName, limit: 100 };
+    let res;
+    try { res = await api.post("/api/iptv/preview/channels", req); }
+    catch (e) { box.innerHTML = ""; box.appendChild(el("div", { class: "hint", style: "color:var(--err)" }, e.message)); return; }
+    box.innerHTML = "";
+    const items = res.items || [];
+    // Dual meaning by parent-category state: in a KEPT category a checkbox = "in the list" (un-tick →
+    // blocklist); in a CUT category the whole category is dropped, so checkboxes default OFF and
+    // checking one RESCUES it via channel_include (tvg-id only — a channel without one can't be rescued).
+    const rescueMode = excludeSet.has(catName.toLowerCase());
+    const statusEls = {}; // key -> status span, for the health check to paint into
+    if (rescueMode) {
+      box.appendChild(el("div", { class: "hint", style: "margin:0 0 4px;color:var(--warn,#d29922)" },
+        "This category is cut — check a channel to keep it anyway."));
+    }
+    const checkBtn = el("button", { class: "btn btn-sm", type: "button" }, "🔍 Check availability");
+    checkBtn.addEventListener("click", async () => {
+      const prev = checkBtn.textContent; checkBtn.disabled = true; checkBtn.textContent = "Checking…";
+      try {
+        const h = await api.post("/api/iptv/preview/health", { ...req, limit: 50 });
+        (h.items || []).forEach(it => { const k = it.tvg_id || it.url; if (statusEls[k]) setHealthStatus(statusEls[k], it.status); });
+      } catch (e) { toast(e.message, "err"); }
+      finally { checkBtn.disabled = false; checkBtn.textContent = prev; }
+    });
+    box.appendChild(el("div", { style: "display:flex;align-items:center;gap:8px;margin:2px 0 4px" },
+      checkBtn, el("span", { class: "hint" }, items.length + (res.total > items.length ? " of " + res.total : "") + " channels")));
+    items.forEach(it => {
+      const k = it.tvg_id || it.url;
+      let cb;
+      if (rescueMode) {
+        // Rescue: default OFF; checking adds the tvg-id to channel_include. No tvg-id → can't rescue.
+        const canRescue = !!it.tvg_id;
+        cb = el("input", { type: "checkbox", checked: (canRescue && includeSet.has(it.tvg_id)) ? "checked" : null, disabled: canRescue ? null : "disabled" });
+        cb.addEventListener("change", () => { cb.checked ? includeSet.add(it.tvg_id) : includeSet.delete(it.tvg_id); recomputeTotal(); });
+      } else {
+        // Normal: default ON; un-ticking blocklists the channel by tvg-id/URL.
+        cb = el("input", { type: "checkbox", checked: blockSet.has(k) ? null : "checked" });
+        cb.addEventListener("change", () => { cb.checked ? blockSet.delete(k) : blockSet.add(k); recomputeTotal(); });
+      }
+      const statusSpan = el("span", { style: "width:14px;text-align:center;flex:none" });
+      setHealthStatus(statusSpan, it.status); // preview/channels may already carry a status
+      statusEls[k] = statusSpan;
+      // Logo thumbnail. CSP allows external images (no default-src/img-src), but we lazy-load and send
+      // no referrer (don't leak the panel URL to the logo host); a broken logo removes itself, and a
+      // fixed-width slot keeps the rows aligned whether or not a logo exists.
+      const logoSlot = el("span", { style: "width:18px;height:18px;flex:none;display:inline-block" });
+      if (it.logo) {
+        logoSlot.appendChild(el("img", {
+          src: it.logo, width: 18, height: 18, loading: "lazy", referrerpolicy: "no-referrer", alt: "",
+          style: "width:18px;height:18px;object-fit:contain;border-radius:3px",
+          onerror: function () { this.remove(); },
+        }));
+      }
+      box.appendChild(el("label", { class: "check", style: "display:flex;gap:7px;align-items:center;padding:2px 2px" },
+        cb, statusSpan, logoSlot, el("span", { style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, it.name)));
+    });
+    if (!items.length) box.appendChild(el("div", { class: "hint" }, "No channels."));
+  }
+  previewBtn.addEventListener("click", async () => {
+    const countries = [...selected], sources = readSources();
+    if (!countries.length && !readCatalogs().length && !sources.length) return toast(t("Pick a country or add a provider URL first"), "err");
+    const prev = previewBtn.textContent;
+    previewBtn.disabled = true; previewBtn.textContent = "Loading channels…";
+    try {
+      const pr = await api.post("/api/iptv/preview", { countries, catalogs: readCatalogs(), source_urls: sources, adult: $("#iptv-adult").checked });
+      previewCats = pr.categories || [];
+      previewTotal = pr.total || 0;
+      // Smart default: only for a brand-new list with no prior curation — pre-cut obvious junk so the
+      // user subtracts a couple more rather than staring at 1471 channels of shopping/legislative/etc.
+      if (!editing && excludeSet.size === 0) {
+        previewCats.forEach(c => { if (JUNK_CATEGORIES.includes(c.name.toLowerCase())) excludeSet.add(c.name.toLowerCase()); });
+      }
+      renderCats();
+      if (pr.errors && pr.errors.length) toast(pr.errors.length + " source(s) failed to load — showing the rest", "err");
+    } catch (e) { toast(e.message, "err"); }
+    finally { previewBtn.disabled = false; previewBtn.textContent = prev; }
+  });
+  const chooseSection = el("div", { class: "field" }, el("label", {}, "Channels"),
+    el("div", { class: "hint", style: "margin-bottom:6px" },
+      "Preview what's inside and switch off whole categories you don't want (shopping, religious, …). Channels in the categories you keep update automatically."),
+    previewBtn, totalBanner, catPanel);
+
+  const save = el("button", { class: "btn btn-primary" }, editing ? "Save" : "Add list");
+  const back = modal({
+    title: editing ? "Edit channel list" : "Add channel list",
+    body: el("div", {}, name,
+      el("div", { class: "field" }, el("label", {}, "Countries"),
+        el("div", { class: "hint", style: "margin-bottom:6px" },
+          "Channels come from the open iptv-org project — one live, auto-updating list per country."),
+        picker),
+      el("div", { class: "field" }, el("label", {}, "Provider / custom playlist URL"),
+        el("div", { class: "hint", style: "margin-bottom:6px" },
+          "Optional: paste your own provider's M3U URL (one per line). Fetched securely; WayHop serves the links, never the stream."),
+        sourcesBox),
+      el("div", { class: "field" }, el("label", {}, "Xtream Codes account"),
+        el("div", { class: "hint", style: "margin-bottom:6px" },
+          "Optional: your provider's Xtream login (host + username + password). WayHop builds the playlist for you; the credentials stay on your router."),
+        xtreamRows, addXtreamBtn),
+      el("div", { style: "display:flex;flex-direction:column;gap:8px;margin:10px 0" }, adult, probe, strict),
+      cadence, chooseSection, adv),
+    footer: [el("button", { class: "btn btn-ghost", onclick: () => back.close() }, "Cancel"), save],
+  });
+  save.addEventListener("click", async () => {
+    const countries = [...selected], sources = readSources(), xtream = readXtream(), catalogs = readCatalogs();
+    if (!countries.length && !catalogs.length && !sources.length && !xtream.length) return toast(t("Add at least one country or a provider URL"), "err");
+    // exclude_categories: derived from the previewed checkboxes when the user previewed; otherwise the
+    // list's existing curation is preserved untouched (so a plain edit never wipes it).
+    let excludeCategories;
+    if (previewCats) {
+      excludeCategories = previewCats.filter(c => excludeSet.has(c.name.toLowerCase())).map(c => c.name);
+      // Preserve deliberately-cut categories that are transiently ABSENT from this preview (upstream
+      // outage/rename), so a category you cut never silently un-cuts and floods the box on its return.
+      const inPreview = new Set(previewCats.map(c => c.name.toLowerCase()));
+      ((list && list.exclude_categories) || []).forEach(n => { if (!inPreview.has(n.toLowerCase())) excludeCategories.push(n); });
+    } else {
+      excludeCategories = ((list && list.exclude_categories) || []);
+    }
+    // blocklist: the manual Advanced textarea is the base; drill-down additions (blockSet − orig) are
+    // added and drill-down removals (orig − blockSet) are removed, so the two editors don't clobber.
+    const blockOut = new Set($("#iptv-block").value.split("\n").map(s => s.trim()).filter(Boolean));
+    blockSet.forEach(k => { if (!origBlock.has(k)) blockOut.add(k); });          // drill-down added
+    origBlock.forEach(k => { if (!blockSet.has(k)) blockOut.delete(k); });       // drill-down removed
+    const body = {
+      name: $("#iptv-name").value.trim(),
+      countries,
+      catalogs,
+      source_urls: sources,
+      xtream_sources: xtream,
+      adult: $("#iptv-adult").checked,
+      probe: $("#iptv-probe").checked,
+      strict_new: $("#iptv-strict").checked,
+      refresh_hours: iptvLabelHours($("#iptv-refresh").value),
+      blocklist: [...blockOut],
+      exclude_categories: excludeCategories,
+      channel_include: [...includeSet],
+      pinned_categories: pinnedList,
+    };
+    save.disabled = true;
+    try {
+      if (editing) await api.put("/api/iptv/lists/" + encodeURIComponent(list.id), body);
+      else await api.post("/api/iptv/lists", body);
+    } catch (e) { save.disabled = false; return toast(e.message, "err"); }
+    back.close();
+    toast(editing ? t("Saved — your box updates itself; the same link keeps working") : t("List added — it builds shortly; add the link to your player"), "ok");
+    route();
+  });
+}
+
+async function iptvQR(l) {
+  const url = window.location.origin + "/api/iptv/" + l.token + "/tv.m3u";
+  const qrWrap = el("div", { class: "qr-wrap" }, el("div", { class: "hint" }, "rendering…"));
+  modal({
+    title: l.name,
+    body: el("div", {},
+      el("div", { class: "hint", style: "margin-bottom:12px" }, "Scan in your IPTV player (TiviMate, IPTV Smarters, VLC, Kodi), or copy the URL."),
+      qrWrap,
+      el("pre", { class: "wr-console", style: "max-height:56px;margin-top:10px" }, url),
+      el("div", { style: "display:flex;gap:10px;margin-top:10px" },
+        el("button", { class: "btn btn-sm", onclick: () => copyText(url) }, "Copy URL"),
+        el("a", { class: "btn btn-sm", href: url + "?web=1", target: "_blank", rel: "noopener" }, "Open landing page"))),
+  });
+  try { const img = await qrImg(url, 280); qrWrap.innerHTML = ""; qrWrap.appendChild(img); }
+  catch (_) { qrWrap.innerHTML = ""; qrWrap.appendChild(el("div", { class: "hint", style: "color:var(--err)" }, "QR rendering failed")); }
+}
+
+async function delIptvList(l) {
+  if (!await modalConfirm(t("Delete list \"{0}\"? Its playlist URL stops working immediately.", l.name))) return;
+  try { await api.del("/api/iptv/lists/" + encodeURIComponent(l.id)); }
+  catch (e) { return toast(e.message, "err"); }
+  toast(t("List deleted"), "ok");
+  route();
+}
+
+// refreshIptvList forces an immediate rebuild (POST …/refresh → 202, build runs in the background,
+// re-checking availability when the list's health-check is on). The card re-renders shortly after so
+// the fresh "refreshed …" status shows.
+async function refreshIptvList(l, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = "Updating…"; }
+  try { await api.post("/api/iptv/lists/" + encodeURIComponent(l.id) + "/refresh", {}); }
+  catch (e) { if (btn) { btn.disabled = false; btn.textContent = "↻ Update now"; } return toast(e.message, "err"); }
+  toast(t("Updating in the background — your box gets the fresh list within a minute"), "ok");
+  setTimeout(route, 4000); // give the background build a moment, then re-render the fresh stats
+}
+
+// pauseIptvList toggles a list's auto-refresh (POST …/pause). Paused keeps the token serving the
+// last-good playlist (players unaffected) but stops the scheduled rebuild — a flaky source or
+// flash-wear can be halted without deleting the list, which would change the URL and break players.
+async function pauseIptvList(l) {
+  try { await api.post("/api/iptv/lists/" + encodeURIComponent(l.id) + "/pause", { paused: !l.paused }); }
+  catch (e) { return toast(e.message, "err"); }
+  toast(l.paused ? t("Auto-refresh resumed") : t("Auto-refresh paused"), "ok");
+  route();
+}
+
+// reviewIptvList opens the "new categories" review: each category that appeared upstream since setup
+// gets a Keep (default — auto-update safe) / Cut choice; Apply POSTs {keep,cut} to …/review (cut →
+// added to the list's exclusions) and re-renders (the badge clears).
+// exportIptvList shows a list's portable curation JSON (GET …/export) to copy or download; importing
+// it on any WayHop recreates the list.
+async function exportIptvList(l) {
+  let blob;
+  try { blob = await api.get("/api/iptv/lists/" + encodeURIComponent(l.id) + "/export"); }
+  catch (e) { return toast(e.message, "err"); }
+  const json = JSON.stringify(blob, null, 2);
+  const fname = ((l.name || "iptv-list").replace(/[^\w.-]+/g, "_")) + ".json";
+  modal({
+    title: "Export — " + l.name,
+    body: el("div", {},
+      el("div", { class: "hint", style: "margin-bottom:8px" }, "Copy or download this to back up or share the list's setup. Import recreates the list on any WayHop (with a fresh URL)."),
+      el("textarea", { rows: "12", readonly: "readonly", style: "width:100%;font-family:monospace;font-size:12px" }, json),
+      el("div", { style: "display:flex;gap:10px;margin-top:10px" },
+        el("button", { class: "btn btn-sm", onclick: () => copyText(json) }, "Copy"),
+        el("button", { class: "btn btn-sm", onclick: () => downloadText(fname, json) }, "⤓ Download"))),
+  });
+}
+
+// importIptvList pastes an exported curation JSON and creates a NEW list from it (POST /lists, which
+// validates + mints a fresh id/token).
+function importIptvList() {
+  const ta = el("textarea", { rows: "10", placeholder: "Paste an exported list JSON here", style: "width:100%;font-family:monospace;font-size:12px" });
+  const imp = el("button", { class: "btn btn-primary" }, "Import");
+  const back = modal({
+    title: "Import a list",
+    body: el("div", {},
+      el("div", { class: "hint", style: "margin-bottom:8px" }, "Paste a list exported from WayHop. It's added as a new list with its own URL."),
+      ta),
+    footer: [el("button", { class: "btn btn-ghost", onclick: () => back.close() }, "Cancel"), imp],
+  });
+  imp.addEventListener("click", async () => {
+    let obj;
+    try { obj = JSON.parse(ta.value); } catch (_) { return toast(t("That isn't valid JSON"), "err"); }
+    imp.disabled = true;
+    try { await api.post("/api/iptv/lists", obj); }
+    catch (e) { imp.disabled = false; return toast(e.message, "err"); }
+    back.close();
+    toast(t("List imported"), "ok");
+    route();
+  });
+}
+
+// dupIptvList clones a list — GET its portable curation, then POST it back as a new list (fresh
+// id/token), so making a near-identical list (different country, adult on, …) doesn't mean redoing
+// every country + category pick from scratch. The export payload's json fields match listInput.
+async function dupIptvList(l) {
+  let blob;
+  try { blob = await api.get("/api/iptv/lists/" + encodeURIComponent(l.id) + "/export"); }
+  catch (e) { return toast(e.message, "err"); }
+  blob.name = (l.name || "List") + " (copy)";
+  try { await api.post("/api/iptv/lists", blob); }
+  catch (e) { return toast(e.message, "err"); }
+  toast(t("List duplicated"), "ok");
+  route();
+}
+
+async function reviewIptvList(l) {
+  const cats = l.new_categories || [];
+  if (!cats.length) return;
+  const keepSet = new Set(cats); // default: keep everything (new channels flow in)
+  const setters = [];            // per-row set(keep) so the bulk buttons can drive every checkbox
+  const rows = cats.map(c => {
+    const cb = el("input", { type: "checkbox", checked: "checked" });
+    const tag = el("span", { class: "hint", style: "margin-left:auto" }, "keep");
+    const sync = () => { tag.textContent = cb.checked ? "keep" : "cut"; tag.style.color = cb.checked ? "" : "var(--err,#d9534f)"; };
+    cb.addEventListener("change", () => { cb.checked ? keepSet.add(c) : keepSet.delete(c); sync(); });
+    setters.push(keep => { cb.checked = keep; keep ? keepSet.add(c) : keepSet.delete(c); sync(); });
+    return el("label", { class: "check", style: "display:flex;gap:8px;align-items:center;padding:4px 2px" }, cb, el("span", {}, c), tag);
+  });
+  const setAll = keep => setters.forEach(s => s(keep));
+  // Bulk actions — adding a big country can surface dozens of new categories at once, so single-clicking
+  // each is untenable; mirror the category-picker's Keep-all / Cut-common-junk shortcuts.
+  const bulk = el("div", { style: "display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px" },
+    el("button", { class: "btn btn-sm", type: "button", onclick: () => setAll(true) }, "Keep all"),
+    el("button", { class: "btn btn-sm", type: "button", onclick: () => setAll(false) }, "Cut all"),
+    el("button", { class: "btn btn-sm", type: "button", onclick: () => setters.forEach((s, i) => { if (JUNK_CATEGORIES.includes(cats[i].toLowerCase())) s(false); }) }, "Cut junk"));
+  const apply = el("button", { class: "btn btn-primary" }, "Apply");
+  const back = modal({
+    title: "New channel categories",
+    body: el("div", {},
+      el("div", { class: "hint", style: "margin-bottom:10px" },
+        "These categories appeared in your sources since you set up this list. Keep the ones you want; un-check to cut them (excluded from now on)."),
+      bulk,
+      el("div", { class: "wr-console", style: "max-height:260px;overflow:auto;padding:6px;text-align:left" }, ...rows)),
+    footer: [el("button", { class: "btn btn-ghost", onclick: () => back.close() }, "Cancel"), apply],
+  });
+  apply.addEventListener("click", async () => {
+    const keep = [...keepSet], cut = cats.filter(c => !keepSet.has(c));
+    apply.disabled = true;
+    try { await api.post("/api/iptv/lists/" + encodeURIComponent(l.id) + "/review", { keep, cut }); }
+    catch (e) { apply.disabled = false; return toast(e.message, "err"); }
+    back.close();
+    toast(cut.length ? t("Kept {0}, cut {1}", keep.length, cut.length) : t("All kept"), "ok");
+    route();
+  });
+}
+
 async function route() {
   // Close any open modal when navigating: modals are appended to <body>, so
   // clearing #view alone would leave the dialog floating over the new page.
@@ -565,7 +1460,17 @@ async function route() {
   const view = $("#view");
   view.innerHTML = "";
   pillGen++; // invalidate refreshPills' cached node lists — the page DOM is being rebuilt
+  // Skeleton placeholder so the four core pages (which await loadProfile/loadHealth before appending
+  // any DOM) don't flash a blank pane — the 'is it broken?' moment on a slow router link. Removed
+  // once render resolves; render's appends and this removal happen in the same tick, so the browser
+  // never paints skeleton+content together.
+  const skel = el("div", { class: "skeleton-page", "aria-hidden": "true" },
+    el("div", { class: "skel skel-title" }),
+    el("div", { class: "skel skel-line" }), el("div", { class: "skel skel-line short" }),
+    el("div", { class: "skel skel-card" }), el("div", { class: "skel skel-card" }));
+  view.appendChild(skel);
   try { await page.render(view); associateLabels(view); } catch (e) { renderError(view, e); }
+  skel.remove();
   i18nApply(view); // localize the freshly-rendered (English) page in place
 }
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -607,14 +1512,22 @@ async function renderDashboard(view) {
           el("div", { class: "hint", style: "margin-top:3px" },
             t("Every endpoint is kernel-native and traffic is routed by the kernel plane in fast mode, so the sing-box core is intentionally not running.")))));
     } else {
+      const inner = el("div", {},
+        el("b", {}, t("Proxy core not running")),
+        el("div", { class: "hint", style: "margin-top:3px" },
+          eps.length
+            ? t("sing-box isn't started — Apply a config to bring a tunnel up. Live stats appear once it's running.")
+            : t("Add a connection under Connections, then Apply — live stats appear once sing-box is running.")));
+      // First run (no endpoints yet): give a one-click path to the Connections page
+      // instead of only telling the user where to go.
+      if (!eps.length) {
+        inner.appendChild(el("button", {
+          class: "btn btn-primary btn-sm", style: "margin-top:8px",
+          onclick: () => { location.hash = "#connections"; },
+        }, t("Add a connection →")));
+      }
       view.appendChild(el("div", { class: "card notice-core" },
-        el("span", { class: "notice-core-ico" }, "○"),
-        el("div", {},
-          el("b", {}, "Proxy core not running"),
-          el("div", { class: "hint", style: "margin-top:3px" },
-            eps.length
-              ? "sing-box isn't started — Apply a config to bring a tunnel up. Live stats appear once it's running."
-              : "Add a connection under Connections, then Apply — live stats appear once sing-box is running."))));
+        el("span", { class: "notice-core-ico" }, "○"), inner));
     }
   }
 
@@ -805,10 +1718,14 @@ function systemStrip() {
   return strip; // painted by paintSystem() after it's in the DOM (see renderDashboard)
 }
 let prevIfaces = null; // {name:{rx,tx,t}} — previous /api/system iface counters, for rate calc
-function paintSystem() {
+// paintSystem repaints the system strip. When the 5 s health tick already fetched
+// /api/system as part of its parallel batch it passes the sample in (si !== undefined),
+// so the strip refreshes without a second, serial round-trip on the router link. Called
+// with no argument (initial render, manual refresh) it fetches its own copy.
+function paintSystem(si) {
   const strip = document.getElementById("sys-strip");
   if (!strip) return;
-  api.get("/api/system").then(si => {
+  const apply = si => {
     if (!si || !si.available) { strip.remove(); return; } // no procfs (non-Linux) → drop the strip
     const tot = si.mem_total_kb / 1024, used = (si.mem_total_kb - si.mem_avail_kb) / 1024, pct = Math.round(si.mem_used_pct);
     const ram = strip.querySelector('[data-sys="ram"]');
@@ -830,7 +1747,9 @@ function paintSystem() {
     }
     const thru = strip.querySelector('[data-sys="thru"] .sys-v');
     if (thru) paintThroughput(thru, si.interfaces || []);
-  }).catch(() => strip.remove());
+  };
+  if (si !== undefined) { apply(si); return; } // supplied by the batched poll — no extra round-trip
+  api.get("/api/system").then(apply).catch(() => strip.remove());
 }
 // paintThroughput shows REAL WAN throughput (rate = Δbytes/Δt across successive /api/system
 // polls) and, on the tile's hover title, the per-interface breakdown (WAN + each tunnel +
@@ -1146,7 +2065,7 @@ async function paintDashRouting() {
 }
 
 function connRow(e, showSpark) {
-  const tog = el("div", { class: "toggle" + (e.enabled ? " on" : ""), onclick: () => toggleEndpoint(e) });
+  const tog = switchEl(e.enabled, (s) => toggleEndpoint(e, s), (e.name || e.id) + " enabled");
   // Per-row sparkline only on failover-group members (the paths that carry/back up
   // traffic) — not every ungrouped endpoint — to keep the stack focused + compact.
   let spark = null;
@@ -1188,9 +2107,28 @@ function bySeverity(a, b) {
   return la - lb;
 }
 
-async function toggleEndpoint(e) {
-  try { await api.post("/api/endpoints", { ...e, enabled: !e.enabled }); await loadProfile(); route(); }
-  catch (err) { toast(err.message, "err"); }
+// Optimistic in-place toggle: flip the switch (smooth CSS) + local state IMMEDIATELY, persist in the
+// background, and revert only if the POST fails. No route() — a full re-render killed the animation,
+// jumped the row (disabled sinks to the bottom) and lost scroll position. The dashboard "N enabled"
+// count / row re-sort refresh naturally on the next navigation.
+function flipSwitch(sw, on) {
+  if (!sw) return;
+  sw.classList.toggle("on", on);
+  sw.setAttribute("aria-checked", on ? "true" : "false");
+}
+async function toggleEndpoint(e, sw) {
+  const want = !e.enabled;
+  flipSwitch(sw, want);
+  e.enabled = want; // live ref inside state.profile; the change is STAGED until Apply
+  updateDirty();    // light the Apply/Save buttons (the removed loadProfile() used to do this)
+  try {
+    await api.post("/api/endpoints", { ...e, enabled: want });
+  } catch (err) {
+    flipSwitch(sw, !want);
+    e.enabled = !want;
+    updateDirty();
+    toast(err.message, "err");
+  }
 }
 
 async function renderConnections(view) {
@@ -1209,7 +2147,7 @@ async function renderConnections(view) {
     card.appendChild(emptyState("No connections yet", "Paste a vless:// / hysteria2:// link or a WireGuard config to add one."));
   } else {
     state.profile.endpoints.forEach(e => {
-      const tog = el("div", { class: "toggle" + (e.enabled ? " on" : ""), onclick: () => toggleEndpoint(e) });
+      const tog = switchEl(e.enabled, (s) => toggleEndpoint(e, s), (e.name || e.id) + " enabled");
       const isExternal = e.engine === "external";
       card.appendChild(el("div", { class: "conn" }, tog,
         el("div", { class: "body" },
@@ -1272,7 +2210,7 @@ async function renderConnections(view) {
 }
 
 async function delEndpoint(e) {
-  if (!confirm("Delete connection " + (e.name || e.id) + "?")) return;
+  if (!await modalConfirm("Delete connection " + (e.name || e.id) + "?")) return;
   try { await api.del("/api/endpoints/" + encodeURIComponent(e.id)); await loadProfile(); route(); toast("Deleted", "ok"); }
   catch (err) { toast(err.message, "err"); }
 }
@@ -1283,6 +2221,13 @@ async function delEndpoint(e) {
 // gets a "BEST" pill so the user sees which exit currently carries traffic. Read-only:
 // it reuses the live per-endpoint healthMap the dashboard already polls (no extra fetch);
 // when health is absent it falls back to the configured member order.
+// failoverState holds the daemon's REAL failover view, polled from GET /api/failover/state:
+// elected[groupID] = the member sing-box is actually routing through right now (Clash `now`),
+// and local_fault = every exit is unreachable at once (likely the local uplink). This is the
+// authoritative truth the "● LIVE" pill and the local-fault banner render — distinct from the
+// client-side lowest-latency "✓ BEST" guess.
+let failoverState = { elected: {}, local_fault: false };
+
 function failoverMemberRank(id) {
   const h = healthMap[id];
   if (h && h.state === "alive") return 0; // live exits sort to the top
@@ -1293,6 +2238,7 @@ function failoverMembers(g) {
   const ids = (g.members || []).slice();
   const best = bestAliveMember(ids.map(findEndpoint).filter(Boolean));
   const bestId = best ? best.ep.id : null;
+  const electedId = (failoverState.elected || {})[g.id] || null;
   // Stable sort: rank first, then latency (alive members ascending), preserving the
   // configured order for ties (e.g. two unknown members) via the original index.
   const order = new Map(ids.map((id, i) => [id, i]));
@@ -1318,7 +2264,15 @@ function failoverMembers(g) {
       el("span", { class: "dot" }),
       nameOf(id),
       alive && h.latency_ms ? el("small", { style: "margin-left:6px;color:inherit;opacity:.75" }, h.latency_ms + " ms") : null));
-    if (id === bestId) chip.appendChild(el("span", { class: "pill ok", title: "urltest would route through this member (alive, lowest latency)", style: "font-weight:600" }, "✓ BEST"));
+    // "● LIVE" = the member sing-box is ACTUALLY routing through now (authoritative, from the
+    // daemon). "✓ BEST" = the client-side lowest-latency guess — shown only when there is no live
+    // truth, or when it DIFFERS from LIVE (so the user sees "you'd expect X by latency, but sing-box
+    // is on Y" instead of a misleading single guess).
+    if (electedId && id === electedId) {
+      chip.appendChild(el("span", { class: "pill ok", title: t("sing-box is routing through this member right now"), style: "font-weight:600" }, "● LIVE"));
+    } else if (id === bestId && (!electedId || bestId !== electedId)) {
+      chip.appendChild(el("span", { class: "pill", title: electedId ? t("Lowest latency — but not the member currently routed") : t("urltest would route through this member (alive, lowest latency)"), style: "font-weight:600" }, "✓ BEST"));
+    }
     wrap.appendChild(chip);
   });
   return wrap;
@@ -1326,6 +2280,13 @@ function failoverMembers(g) {
 
 async function renderFailover(view) {
   await loadProfile();
+  // Pull the daemon's REAL failover truth (elected member per group + local-fault flag). Best-effort:
+  // on any error fall back to an empty state so the page still renders with the latency guess.
+  try {
+    const fs = await api.get("/api/failover/state");
+    failoverState = { elected: (fs && fs.elected) || {}, local_fault: !!(fs && fs.local_fault) };
+  } catch (e) { failoverState = { elected: {}, local_fault: false }; }
+
   const head = el("div", { class: "block-head" },
     el("div", {},
       el("div", { class: "ttl" }, "Failover"),
@@ -1333,6 +2294,13 @@ async function renderFailover(view) {
     el("div", { class: "side" },
       el("button", { class: "btn btn-primary", title: "Create a failover group — pick members and traffic auto-switches to a healthy one", onclick: openNewGroup }, "+ New group")));
   view.appendChild(head);
+
+  if (failoverState.local_fault) {
+    view.appendChild(el("div", { class: "card", style: "border:1px solid var(--err,#d9534f)" },
+      el("div", { style: "display:flex;gap:10px;align-items:center;flex-wrap:wrap" },
+        el("span", { class: "pill err" }, el("span", { class: "dot" }), t("Local network problem")),
+        el("div", { class: "desc", style: "min-width:0" }, t("Every exit is unreachable at once — this looks like your internet/uplink, not the VPNs. Failover is paused until connectivity returns.")))));
+  }
 
   if (!state.profile.groups.length) {
     view.appendChild(el("div", { class: "card" }, emptyState("No failover groups",
@@ -1362,7 +2330,7 @@ async function setDefault(g) {
   catch (err) { toast(err.message, "err"); }
 }
 async function delGroup(g) {
-  if (!confirm("Delete group " + g.name + "?")) return;
+  if (!await modalConfirm("Delete group " + g.name + "?")) return;
   try { await api.del("/api/groups/" + encodeURIComponent(g.id)); await loadProfile(); route(); toast("Deleted", "ok"); }
   catch (err) { toast(err.message, "err"); }
 }
@@ -1543,7 +2511,7 @@ async function paintRoutingStatus() {
 }
 
 function routingRow(rl) {
-  const tog = el("div", { class: "toggle" + (rl.enabled ? " on" : ""), onclick: () => toggleRoutingList(rl) });
+  const tog = switchEl(rl.enabled, (s) => toggleRoutingList(rl, s), (rl.name || rl.id) + " enabled");
   const mcount = (rl.manual || []).length;
   const src = rl.source
     ? el("span", { class: "addr", title: rl.source }, "⛓ " + rlShortURL(rl.source))
@@ -1572,23 +2540,33 @@ function routingRow(rl) {
       el("button", { class: "btn btn-danger btn-sm", onclick: () => delRoutingList(rl) }, "Delete")));
 }
 
-async function toggleRoutingList(rl) {
-  try { await api.post("/api/routing", { ...rl, enabled: !rl.enabled }); await loadProfile(); route(); }
-  catch (e) { toast(e.message, "err"); }
+async function toggleRoutingList(rl, sw) {
+  const want = !rl.enabled;
+  flipSwitch(sw, want);
+  rl.enabled = want;
+  updateDirty(); // light the Apply/Save buttons (the removed loadProfile() used to do this)
+  try {
+    await api.post("/api/routing", { ...rl, enabled: want });
+  } catch (e) {
+    flipSwitch(sw, !want);
+    rl.enabled = !want;
+    updateDirty();
+    toast(e.message, "err");
+  }
 }
 async function saveRoutingList(rl, msg) {
   try { await api.post("/api/routing", rl); toast(msg || "Saved", "ok"); }
   catch (e) { toast(e.message, "err"); }
 }
 async function delRoutingList(rl) {
-  if (!confirm("Delete routing list " + (rl.name || rl.id) + "?")) return;
+  if (!await modalConfirm("Delete routing list " + (rl.name || rl.id) + "?")) return;
   try { await api.del("/api/routing/" + encodeURIComponent(rl.id)); await loadProfile(); route(); toast("Deleted", "ok"); }
   catch (e) { toast(e.message, "err"); }
 }
 
 function openRoutingList(rl) {
   const editing = !!rl;
-  rl = rl || { id: "", name: "", source: "", manual: [], outbound: rlFirstTunnel(), download_via: "", enabled: true };
+  rl = rl || { id: "", name: "", source: "", manual: [], outbound: rlFirstTunnel(), download_via: "", enabled: true, refresh_hours: 0 };
   const name = el("input", { type: "text", value: rl.name || "", placeholder: "My list" });
   const mode = el("select", {},
     el("option", { value: "url" }, "From URL (sing-box rule-set .srs / .json)"),
@@ -1602,11 +2580,29 @@ function openRoutingList(rl) {
   // Optional auto-refresh CIDR feed (kernel modes hybrid/fast) — independent of the
   // url/manual mode above; its result is cached and unioned with any Manual entries.
   const cidrSrc = el("input", { type: "text", value: rl.cidr_source || "", placeholder: "asn:64512,64513  or  https://…/cidrs.txt" });
-  const cachedNote = (rl.cidr_cache && rl.cidr_cache.length) ? "  Cached: " + rl.cidr_cache.length + " CIDRs." : "";
+  const cidrHours = el("select", {},
+    el("option", { value: "6" }, "Every 6 hours"),
+    el("option", { value: "12" }, "Every 12 hours"),
+    el("option", { value: "0" }, "Daily (default)"),
+    el("option", { value: "48" }, "Every 2 days"),
+    el("option", { value: "72" }, "Every 3 days"),
+    el("option", { value: "168" }, "Weekly"));
+  cidrHours.value = String(rl.refresh_hours || 0);
+  if (cidrHours.value !== String(rl.refresh_hours || 0)) {
+    // An API-set value outside the preset options (e.g. 24, 96) — inject it so the select doesn't
+    // render blank and a Save doesn't silently reset the stored interval to 0.
+    cidrHours.appendChild(el("option", { value: String(rl.refresh_hours) }, t("Every {0} hours", rl.refresh_hours)));
+    cidrHours.value = String(rl.refresh_hours);
+  }
+  // The cached-count note is its OWN text node (not concatenated into the hint) so i18nApply can
+  // match the static hint sentence as a dictionary key regardless of cache state.
+  const cachedNote = (rl.cidr_cache && rl.cidr_cache.length) ? el("span", {}, " " + t("Cached: {0} CIDRs.", rl.cidr_cache.length)) : null;
   const cidrField = el("div", { class: "field" },
     el("label", {}, "Auto-refresh CIDR source (optional, kernel modes)"),
     cidrSrc,
-    el("div", { class: "hint" }, "Keep this list's IP-CIDRs current from a feed: asn:N,N (RIPEstat announced prefixes) or an https text list. Cached + unioned with Manual entries; active in hybrid/fast. After saving, use «↻ Refresh sources», then Apply." + cachedNote));
+    el("label", { style: "margin-top:8px" }, "Auto-update interval"),
+    cidrHours,
+    el("div", { class: "hint" }, "Keep this list's IP-CIDRs current from a feed: asn:N,N (RIPEstat announced prefixes) or an https text list. Cached + unioned with Manual entries; active in hybrid/fast. Auto-updates on the interval above (min 6h, and only rewrites flash when the list actually changes); or click «↻ Refresh sources» then Apply.", cachedNote));
   function applyMode() {
     srcField.style.display = mode.value === "url" ? "" : "none";
     manField.style.display = mode.value === "manual" ? "" : "none";
@@ -1623,6 +2619,11 @@ function openRoutingList(rl) {
     // Independent kernel-CIDR auto-refresh feed (the store preserves the system cache on a
     // same-source edit and drops it when this changes). Omit cidr_cache — server-managed.
     body.cidr_source = cidrSrc.value.trim();
+    // Carry the per-list auto-update cadence through UNCONDITIONALLY (0 = daily default). It drives
+    // BOTH the CIDR auto-refresh cadence and a URL list's sing-box rule_set update_interval, so
+    // zeroing it when cidr_source is empty would destroy a Source-only list's custom interval on
+    // any edit — and omitting it entirely lets the whole-struct Upsert zero it (the original bug).
+    body.refresh_hours = parseInt(cidrHours.value, 10) || 0;
     // Preserve the explicit rule-set format on edit — the form has no input for it, so
     // dropping it makes a list whose URL extension doesn't reveal the format (a .json
     // source, or a query-string URL) silently re-infer wrong and fail to load. Catalog
@@ -1690,6 +2691,45 @@ async function addPreset(p, back) {
 }
 
 /* ---------- modal ---------- */
+let modalSeq = 0;
+// modalConfirm is a themed, async replacement for the browser's native confirm().
+// Returns a Promise<boolean>: true = OK, false = Cancel / Escape / backdrop click.
+// Reuses the .modal-backdrop / .modal / .modal-body / .modal-foot CSS classes so it
+// inherits the same look, dark-mode, and responsive sizing as all other modals.
+function modalConfirm(msg) {
+  return new Promise(resolve => {
+    const prevFocus = document.activeElement;
+    let settled = false;
+    const nativeRemove = node => Element.prototype.remove.call(node);
+    const settle = v => {
+      if (settled) return; settled = true;
+      document.removeEventListener("keydown", onKey);
+      nativeRemove(back);
+      if (prevFocus && typeof prevFocus.focus === "function" && document.contains(prevFocus)) prevFocus.focus();
+      resolve(v);
+    };
+    const ok = el("button", { class: "btn btn-primary" }, t("OK"));
+    const cancel = el("button", { class: "btn" }, t("Cancel"));
+    ok.addEventListener("click", () => settle(true));
+    cancel.addEventListener("click", () => settle(false));
+    const onKey = e => { if (e.key === "Escape") { e.preventDefault(); settle(false); } };
+    const back = el("div", { class: "modal-backdrop", onclick: e => { if (e.target === back) settle(false); } });
+    back.appendChild(el("div", { class: "modal", role: "dialog", "aria-modal": "true" },
+      el("div", { class: "modal-body" }, el("p", { style: "margin:0 0 16px;white-space:pre-wrap" }, msg)),
+      el("div", { class: "modal-foot" },
+        el("div", { style: "display:flex;gap:10px;justify-content:flex-end" }, cancel, ok))));
+    document.body.appendChild(back);
+    document.addEventListener("keydown", onKey);
+    ok.focus();
+  });
+}
+// focusables returns the modal's tabbable controls, in DOM order, skipping hidden
+// ones — used both for initial focus and for the Tab focus-trap.
+function focusables(root) {
+  return [...root.querySelectorAll(
+    'input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])')]
+    .filter(n => n.offsetParent !== null || n === document.activeElement);
+}
 function modal({ title, body, footer }) {
   // Remember what was focused so we can restore it when the modal closes (a11y).
   const prevFocus = document.activeElement;
@@ -1709,10 +2749,21 @@ function modal({ title, body, footer }) {
       prevFocus.focus();
     }
   };
-  const onKey = e => { if (e.key === "Escape") { e.preventDefault(); close(); } };
+  // Escape closes; Tab is trapped inside the dialog so keyboard focus can't wander
+  // onto the (aria-hidden, visually-behind) page — required for a real aria-modal.
+  const onKey = e => {
+    if (e.key === "Escape") { e.preventDefault(); close(); return; }
+    if (e.key !== "Tab") return;
+    const items = focusables(m);
+    if (!items.length) { e.preventDefault(); m.focus(); return; }
+    const first = items[0], last = items[items.length - 1], active = document.activeElement;
+    if (e.shiftKey && (active === first || !m.contains(active))) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && (active === last || !m.contains(active))) { e.preventDefault(); first.focus(); }
+  };
   const back = el("div", { class: "modal-backdrop", onclick: e => { if (e.target === back) close(); } });
-  const m = el("div", { class: "modal", tabindex: "-1", role: "dialog", "aria-modal": "true" },
-    el("div", { class: "modal-head" }, el("div", { class: "card-title" }, title),
+  const titleId = "modal-title-" + (++modalSeq);
+  const m = el("div", { class: "modal", tabindex: "-1", role: "dialog", "aria-modal": "true", "aria-labelledby": titleId },
+    el("div", { class: "modal-head" }, el("div", { class: "card-title", id: titleId }, title),
       el("div", { class: "x", onclick: () => close(), "aria-label": t("Close") }, "×")),
     el("div", { class: "modal-body" }, body));
   if (footer) m.appendChild(el("div", { class: "modal-foot" }, footer));
@@ -1722,9 +2773,7 @@ function modal({ title, body, footer }) {
   document.body.appendChild(back);
   document.addEventListener("keydown", onKey);
   // Move focus into the modal: first focusable control, else the dialog container.
-  const focusable = m.querySelector(
-    'input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])');
-  (focusable || m).focus();
+  (focusables(m)[0] || m).focus();
   // Route every existing back.remove() call site through close() so they also
   // detach the keydown listener and restore focus (close() de-dupes; the native
   // removal happens via domRemove inside close). back.close is an explicit alias.
@@ -1783,7 +2832,7 @@ async function openSubscription() {
   // (it grants access to every connection's secrets). Re-renders the URL + QR in place.
   const rotateBtn = el("button", { class: "btn btn-sm", title: "Issue a new URL and invalidate the current one" }, "Rotate token");
   rotateBtn.addEventListener("click", async () => {
-    if (!confirm("Rotate the subscription token? The current URL stops working immediately — you'll need to re-share the new one with every device.")) return;
+    if (!await modalConfirm("Rotate the subscription token? The current URL stops working immediately — you'll need to re-share the new one with every device.")) return;
     const prev = rotateBtn.textContent;
     rotateBtn.disabled = true; rotateBtn.textContent = "Rotating…";
     try {
@@ -1974,11 +3023,17 @@ function manualForm(ep) {
 
   const protoSel = el("select", { id: "f-proto", onchange: e => renderDyn(e.target.value) }, ...PROTOCOLS.map(p => el("option", { value: p }, p)));
   protoSel.value = proto0;
+  const serverInp = el("input", { type: "text", id: "f-server", value: ep.server || "" });
+  const portInp = el("input", { type: "number", id: "f-port", min: "1", max: "65535", value: ep.port || "" });
+  const serverErr = el("span", { class: "hint", style: "color:var(--err);display:block;font-size:.82em" });
+  const portErr = el("span", { class: "hint", style: "color:var(--err);display:block;font-size:.82em" });
+  serverInp.addEventListener("input", () => { serverErr.textContent = serverInp.value.trim() ? "" : t("required"); });
+  portInp.addEventListener("input", () => { const v = parseInt(portInp.value, 10); portErr.textContent = (v >= 1 && v <= 65535) ? "" : t("1–65535"); });
   const wrap = el("div", {},
     el("div", { class: "field" }, el("label", {}, "Name"), el("input", { type: "text", id: "f-name", value: ep.name || "" })),
     el("div", { style: "display:flex;gap:12px" },
-      el("div", { class: "field", style: "flex:2;min-width:0" }, el("label", {}, "Server"), el("input", { type: "text", id: "f-server", value: ep.server || "" })),
-      el("div", { class: "field", style: "flex:1;min-width:0" }, el("label", {}, "Port"), el("input", { type: "number", id: "f-port", value: ep.port || "" }))),
+      el("div", { class: "field", style: "flex:2;min-width:0" }, el("label", {}, "Server"), serverInp, serverErr),
+      el("div", { class: "field", style: "flex:1;min-width:0" }, el("label", {}, "Port"), portInp, portErr)),
     el("div", { class: "field" }, el("label", {}, "Protocol"), protoSel),
     dyn,
     el("div", { class: "field", style: "margin-top:12px" },
@@ -2075,7 +3130,7 @@ function externalForm(ep) {
   const epip = el("input", { type: "text", id: "f-epip", value: P.endpoint_ip || "", placeholder: "optional — e.g. 198.51.100.20" });
   const wrap = el("div", {},
     el("div", { class: "hint", style: "margin-bottom:12px" },
-      t("Routes through an existing kernel interface (an AmneziaWG / WireGuard tunnel configured outside Velinx). It has no protocol of its own.")),
+      t("Routes through an existing kernel interface (an AmneziaWG / WireGuard tunnel configured outside WayHop). It has no protocol of its own.")),
     el("div", { class: "field" }, el("label", {}, t("Name")), name),
     el("div", { class: "field" }, el("label", {}, t("Bound interface")), iface),
     el("div", { class: "field" }, el("label", {}, t("Endpoint IP (anti-recursion bypass, optional)")), epip));
@@ -2111,7 +3166,8 @@ function openAddConnection() {
   const done = msg => { back.remove(); loadProfile().then(route); toast(msg, "ok"); };
 
   function pasteTab() {
-    const ta = el("textarea", { placeholder: "Paste a vless:// / hysteria2:// / tuic:// link — or a [Interface] WireGuard / AmneziaWG config" });
+    const ta = el("textarea", { placeholder: "Paste a vless:// / hysteria2:// / tuic:// link — or a [Interface] WireGuard / AmneziaWG config",
+      onpaste: () => setTimeout(parse, 0) });
     const confirm = el("div", {});
     async function parse() {
       const link = ta.value.trim();
@@ -2174,13 +3230,29 @@ function openAddConnection() {
       el("div", { style: "display:flex;gap:10px" }, fetchBtn, importBtn), list);
   }
 
+  const tabKeys = [["paste", "Paste link"], ["manual", "Manual"], ["sub", "Subscription"]];
+  const order = tabKeys.map(([k]) => k);
   function show(key) {
-    Object.entries(tabEls).forEach(([k, t]) => t.classList.toggle("active", k === key));
+    Object.entries(tabEls).forEach(([k, t]) => {
+      const sel = k === key;
+      t.classList.toggle("active", sel);
+      t.setAttribute("aria-selected", sel ? "true" : "false");
+      t.tabIndex = sel ? 0 : -1; // roving tabindex: only the active tab is in the tab order
+    });
     content.innerHTML = "";
     content.appendChild(key === "paste" ? pasteTab() : key === "manual" ? manualTab() : subTab());
   }
-  const tabBar = el("div", { class: "tabs" }, ...[["paste", "Paste link"], ["manual", "Manual"], ["sub", "Subscription"]].map(([k, label]) => {
-    const t = el("div", { class: "tab", onclick: () => show(k) }, label); tabEls[k] = t; return t;
+  const tabBar = el("div", { class: "tabs", role: "tablist" }, ...tabKeys.map(([k, label]) => {
+    const t = el("div", { class: "tab", role: "tab", tabindex: "-1", onclick: () => { show(k); t.focus(); } }, label);
+    t.addEventListener("keydown", ev => {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); show(k); }
+      else if (ev.key === "ArrowRight" || ev.key === "ArrowLeft") {
+        ev.preventDefault();
+        const nk = order[(order.indexOf(k) + (ev.key === "ArrowRight" ? 1 : order.length - 1)) % order.length];
+        show(nk); tabEls[nk].focus();
+      }
+    });
+    tabEls[k] = t; return t;
   }));
   back = modal({ title: "Add connection", body: el("div", {}, tabBar, content) });
   show("paste");
@@ -2201,18 +3273,74 @@ function parsedView(e) {
   return wrap;
 }
 
+// memberPicker builds the failover-group member list: a checkbox row per endpoint with ▲/▼ arrows
+// that reorder the rows. DOM order IS the saved preference order (both group modals collect checked
+// members via $$("input:checked").map(value) in DOM order), so moving a row changes its priority.
+// The arrows preventDefault+stopPropagation so a click never toggles that row's checkbox.
+// rows: [{ e, checked }] already in the desired initial order.
+function memberPicker(rows) {
+  const box = el("div", { class: "checks" });
+  rows.forEach(({ e, checked }) => {
+    const cb = el("input", { type: "checkbox", value: e.id });
+    if (checked) cb.setAttribute("checked", "true");
+    const up = el("button", { class: "btn btn-sm", type: "button", title: "Move up (higher priority)", "aria-label": "Move up", style: "padding:1px 8px;line-height:1.2" }, "▲");
+    const dn = el("button", { class: "btn btn-sm", type: "button", title: "Move down (lower priority)", "aria-label": "Move down", style: "padding:1px 8px;line-height:1.2" }, "▼");
+    const row = el("label", { class: "check", style: "display:flex;align-items:center;gap:8px" }, cb,
+      el("span", { style: "flex:1;min-width:0" }, (e.name || e.id) + "  ", el("span", { class: "badge" }, e.protocol)),
+      el("span", { style: "display:flex;gap:4px;flex:none" }, up, dn));
+    const move = (dir) => (ev) => {
+      ev.preventDefault(); ev.stopPropagation();
+      if (dir < 0 && row.previousElementSibling) box.insertBefore(row, row.previousElementSibling);
+      else if (dir > 0 && row.nextElementSibling) box.insertBefore(row.nextElementSibling, row);
+    };
+    up.onclick = move(-1);
+    dn.onclick = move(1);
+    box.appendChild(row);
+  });
+  return box;
+}
+
+// memberOrderHint explains what the ▲/▼ order actually does per group type (avoids implying strict
+// priority where sing-box doesn't give it): urltest/fallback auto-pick the fastest ALIVE member and
+// use your order only as a tiebreak; selector routes through the FIRST member until you switch.
+const MEMBER_ORDER_HINT = "Use ▲/▼ to set priority. A selector group uses the top member; urltest/fallback auto-pick the fastest working member and use your order as a tiebreak.";
+
+// testTuningFields builds the shared "health & flap tuning" block for a group's Test config —
+// probe URL, interval (s), and TOLERANCE (ms). tolerance is the anti-flap deadband sing-box gives
+// for free: a higher value keeps the active exit stickier on a jittery/DPI link (stops exit
+// ping-pong), a lower interval detects a dead exit faster (the daemon floors it to 5s). Returns the
+// DOM node + read() yielding a complete model.Health (defaults filled, so no field is dropped).
+function testTuningFields(test) {
+  test = test || {};
+  const url = el("input", { type: "text", value: test.url || "", placeholder: "http://cp.cloudflare.com/generate_204" });
+  const interval = el("input", { type: "number", min: "5", step: "5", value: String(test.interval || 60) });
+  const tolerance = el("input", { type: "number", min: "0", step: "10", value: String(test.tolerance != null ? test.tolerance : 50) });
+  const node = el("div", {},
+    el("div", { class: "field" }, el("label", {}, t("Health check URL")), url),
+    el("div", { style: "display:flex;gap:12px" },
+      el("div", { class: "field", style: "flex:1" }, el("label", {}, t("Probe interval (s)")), interval),
+      el("div", { class: "field", style: "flex:1" }, el("label", {}, t("Flap tolerance (ms)")), tolerance)),
+    el("div", { class: "hint" }, t("Higher tolerance = stickier exit on a jittery/DPI link (try 100–150 ms); lower interval = faster failover (floored to 5 s). Tunes urltest/fallback auto-failover; a selector group only uses the URL for its health badge.")));
+  const read = () => {
+    const iv = parseInt(interval.value, 10);
+    const tol = parseInt(tolerance.value, 10);
+    return {
+      url: url.value.trim() || "http://cp.cloudflare.com/generate_204",
+      interval: Number.isFinite(iv) && iv > 0 ? iv : 60,
+      tolerance: Number.isFinite(tol) && tol >= 0 ? tol : 50,
+    };
+  };
+  return { node, read };
+}
+
 function openNewGroup() {
   if (!state.profile.endpoints.length) { toast("Add some connections first", "err"); return; }
   const name = el("input", { type: "text", placeholder: "Main failover" });
   const type = el("select", {}, el("option", { value: "urltest" }, "urltest — auto, fastest working"),
     el("option", { value: "fallback" }, "fallback — strict order"),
     el("option", { value: "selector" }, "selector — manual"));
-  const checks = el("div", { class: "checks" });
-  state.profile.endpoints.forEach(e => {
-    checks.appendChild(el("label", { class: "check" },
-      el("input", { type: "checkbox", value: e.id }),
-      el("span", {}, (e.name || e.id) + "  "), el("span", { class: "badge" }, e.protocol)));
-  });
+  const checks = memberPicker(state.profile.endpoints.map(e => ({ e, checked: false })));
+  const tuning = testTuningFields();
   const asDefault = el("input", { type: "checkbox" });
   const killSwitch = el("input", { type: "checkbox" });
 
@@ -2224,8 +3352,7 @@ function openNewGroup() {
     try {
       // kill_switch is omitted from the payload when unchecked (omitempty / false =
       // current behavior: WAN fallback when all members are down).
-      const g = { id, name: name.value.trim(), type: type.value, members,
-        test: { url: "http://cp.cloudflare.com/generate_204", interval: 60, tolerance: 50 } };
+      const g = { id, name: name.value.trim(), type: type.value, members, test: tuning.read() };
       if (killSwitch.checked) g.kill_switch = true;
       await api.post("/api/groups", g);
       if (asDefault.checked) await api.post("/api/rules", { id: "default", default: true, outbound: id });
@@ -2236,7 +3363,9 @@ function openNewGroup() {
   const body = el("div", {},
     el("div", { class: "field" }, el("label", {}, "Group name"), name),
     el("div", { class: "field" }, el("label", {}, "Type"), type),
-    el("div", { class: "field" }, el("label", {}, "Members (preference order)"), checks),
+    el("div", { class: "field" }, el("label", {}, "Members (priority order)"), checks,
+      el("div", { class: "hint" }, t(MEMBER_ORDER_HINT))),
+    tuning.node,
     el("label", { class: "check" }, asDefault, el("span", {}, "Set as default route (all traffic)")),
     el("label", { class: "check" }, killSwitch, el("span", {}, t("Kill switch (drop when all members down)"))),
     el("div", { class: "hint" }, t("When on, traffic is dropped instead of falling back to the open WAN if every member is down — no leak to the unprotected internet.")));
@@ -2257,16 +3386,11 @@ function openEditGroup(g) {
     el("option", { value: "selector" }, "selector — manual"));
   type.value = g.type || "urltest";
   const have = new Set(g.members || []);
-  const checks = el("div", { class: "checks" });
   // List current members first (in saved preference order), then the remaining endpoints.
   const ordered = (g.members || []).map(findEndpoint).filter(Boolean)
     .concat(state.profile.endpoints.filter(e => !have.has(e.id)));
-  ordered.forEach(e => {
-    const cb = el("input", { type: "checkbox", value: e.id });
-    if (have.has(e.id)) cb.setAttribute("checked", "true");
-    checks.appendChild(el("label", { class: "check" }, cb,
-      el("span", {}, (e.name || e.id) + "  "), el("span", { class: "badge" }, e.protocol)));
-  });
+  const checks = memberPicker(ordered.map(e => ({ e, checked: have.has(e.id) })));
+  const tuning = testTuningFields(g.test);
   const killSwitch = el("input", { type: "checkbox" });
   if (g.kill_switch) killSwitch.setAttribute("checked", "true");
 
@@ -2275,8 +3399,9 @@ function openEditGroup(g) {
     if (!name.value.trim()) return toast("Name required", "err");
     if (!members.length) return toast("Pick at least one member", "err");
     try {
-      // Spread g first so unedited fields (test config, etc.) round-trip unchanged.
-      const out = { ...g, name: name.value.trim(), type: type.value, members, kill_switch: killSwitch.checked };
+      // Spread g first so unedited fields round-trip unchanged; test is rebuilt from the tuning
+      // block (seeded from g.test, so untouched values round-trip and no Health field is dropped).
+      const out = { ...g, name: name.value.trim(), type: type.value, members, kill_switch: killSwitch.checked, test: tuning.read() };
       await api.post("/api/groups", out);
       back.remove(); await loadProfile(); route(); toast(t("Saved {0}", name.value.trim()), "ok");
     } catch (e) { toast(e.message, "err"); }
@@ -2285,7 +3410,9 @@ function openEditGroup(g) {
   const body = el("div", {},
     el("div", { class: "field" }, el("label", {}, "Group name"), name),
     el("div", { class: "field" }, el("label", {}, "Type"), type),
-    el("div", { class: "field" }, el("label", {}, "Members (preference order)"), checks),
+    el("div", { class: "field" }, el("label", {}, "Members (priority order)"), checks,
+      el("div", { class: "hint" }, t(MEMBER_ORDER_HINT))),
+    tuning.node,
     el("label", { class: "check" }, killSwitch, el("span", {}, t("Kill switch (drop when all members down)"))),
     el("div", { class: "hint" }, t("When on, traffic is dropped instead of falling back to the open WAN if every member is down — no leak to the unprotected internet.")));
   const back = modal({ title: t("Edit failover group"), body,
@@ -2294,21 +3421,77 @@ function openEditGroup(g) {
 }
 
 /* ---------- apply ---------- */
+// Phased progress for the multi-second Apply. The server runs check → reload → routing
+// in that order but the POST only returns at the very end, so on a slow A53 the button
+// text would otherwise freeze for 3-8s at the moment of peak user anxiety. We advance
+// honest phase hints on a timer that mirrors the real sequence, plus a live elapsed
+// counter — never claiming "done" until the promise resolves. Returns a stop() fn.
+function applyProgress(btn) {
+  const phases = [
+    [0,    t("Checking…")],
+    [1200, t("Reloading…")],
+    [3800, t("Applying routing…")],
+    [7000, t("Finishing…")],
+  ];
+  const started = Date.now();
+  const paint = () => {
+    const dt = Date.now() - started;
+    let label = phases[0][1];
+    for (const [ms, txt] of phases) { if (dt >= ms) label = txt; }
+    const secs = dt >= 2000 ? " " + Math.round(dt / 1000) + "s" : "";
+    btn.textContent = "";
+    btn.appendChild(el("span", { class: "spin", "aria-hidden": "true" }));
+    btn.appendChild(document.createTextNode(" " + label + secs));
+  };
+  paint();
+  const iv = setInterval(paint, 500);
+  return () => clearInterval(iv);
+}
+
+function hideApplyError() {
+  const b = $("#apply-error");
+  if (b) { b.style.display = "none"; b.innerHTML = ""; }
+}
+function showApplyError(msg, save) {
+  const b = $("#apply-error");
+  if (!b) { toast("Apply failed: " + msg, "err"); return; }
+  b.style.display = "block"; b.innerHTML = "";
+  b.appendChild(el("div", { class: "card", style: "margin:0;border-left:3px solid var(--err)" },
+    el("div", { class: "row-between" },
+      el("div", {},
+        el("b", {}, "Apply failed"),
+        el("span", { class: "hint", style: "margin-left:10px" }, msg)),
+      el("button", { class: "btn btn-sm", onclick: () => { hideApplyError(); applyConfig(save); } }, "Retry"))));
+}
+
 async function applyConfig(save) {
   const btn = save ? $("#applysavebtn") : $("#applybtn");
   if (!btn) return;
   const label = btn.textContent;
-  btn.setAttribute("disabled", "true"); btn.textContent = "Applying…";
+  btn.setAttribute("disabled", "true");
+  btn.setAttribute("aria-busy", "true");
+  btn.classList.remove("dirty"); // spinner replaces the dirty dot while working
+  btn.classList.add("working");
+  const stop = applyProgress(btn);
   try {
     const r = await api.post("/api/apply", { save: !!save });
     let msg = save ? "Applied & saved" : "Applied (live, not saved)";
     if (r.checked) msg += " · check OK";
     if (r.reloaded) msg += " · reloaded";
+    hideApplyError();
     toast(msg, "ok");
     if (!save && r.failsafe && r.failsafe.pending) startFailsafeBanner();
     else hideFailsafeBanner();
-  } catch (e) { toast("Apply failed: " + e.message, "err"); }
-  finally { btn.removeAttribute("disabled"); btn.textContent = label; }
+    clearDirty(); // the staged profile is now the live baseline
+  } catch (e) { showApplyError(e.message, save); }
+  finally {
+    stop();
+    btn.classList.remove("working");
+    btn.removeAttribute("aria-busy");
+    btn.removeAttribute("disabled");
+    btn.textContent = label;
+    try { reflectDirty(); } catch (e) {} // restore the dirty dot if the apply failed
+  }
 }
 
 /* ---------- fail-safe countdown banner (R1) ---------- */
@@ -2337,6 +3520,425 @@ function hideFailsafeBanner() {
   b.style.display = "none"; b.innerHTML = "";
   if (failsafeTimer) { clearInterval(failsafeTimer); failsafeTimer = null; }
 }
+
+/* ---------- DNS ---------- */
+// The DNS plane is edited as a whole object and PUT to /api/dns on every change (staged in the store;
+// the global Apply then regenerates + activates it). It is FAILOVER-AWARE: a resolver's detour is a
+// failover group, so DNS rides the tunnel while a VPN tier is up (the ISP sees nothing) and falls to
+// encrypted DoH over the raw WAN when every tier is down (the query stays encrypted — DNS never goes
+// dark). See docs/DNS_SECTION.md for the "hide while we can, degrade gracefully" model.
+let dnsState = null;
+const DNS_NET_TYPES = ["https", "tls", "quic", "h3", "udp", "tcp"];
+const DNS_ENC_TYPES = ["https", "tls", "quic", "h3"];
+const DNS_TYPE_LABEL = { https: "DoH (HTTPS)", tls: "DoT (TLS)", quic: "DoQ (QUIC)", h3: "DoH3", udp: "Plain (UDP)", tcp: "Plain (TCP)", local: "Local (device resolver)", fakeip: "FakeIP" };
+const DNS_TYPE_BADGE = { https: "DoH", tls: "DoT", quic: "DoQ", h3: "DoH3", udp: "Do53", tcp: "Do53", local: "Local", fakeip: "FakeIP" };
+
+async function renderDNS(view) {
+  await loadProfile();
+  let resp;
+  try { resp = await api.get("/api/dns"); }
+  catch (e) { view.appendChild(el("div", { class: "card" }, el("div", { class: "hint" }, t("DNS API unavailable: ") + e.message))); return; }
+  // When DNS is not yet managed the endpoint still returns a secure-default TEMPLATE (for the "Apply
+  // secure defaults" prefill), but the page starts EMPTY so "not managed yet" isn't contradicted by a
+  // list of resolvers that don't actually exist — the template is loaded on demand via ?template=1.
+  const configured = !!(resp && resp.configured);
+  dnsState = (configured && resp && resp.dns) ? resp.dns : { enabled: true, servers: [], rules: [] };
+  dnsState.servers = dnsState.servers || [];
+  dnsState.rules = dnsState.rules || [];
+
+  view.appendChild(el("div", { class: "block-head" },
+    el("div", {},
+      el("div", { class: "ttl" }, "DNS"),
+      el("div", { class: "desc" }, t("Encrypted, split, failover-aware DNS: hides your lookups from the ISP while a tunnel is up, and gracefully falls back to encrypted DoH over the raw WAN when every VPN is down — so DNS never goes dark."))),
+    el("div", { class: "side" },
+      el("button", { class: "btn", title: t("Preview the generated sing-box dns block"), onclick: previewDNS }, "Preview dns{}"),
+      el("button", { class: "btn btn-primary", title: t("One-click encrypted DoH via the tunnel + local for in-country, leak-proof"), onclick: applyDNSSecureDefaults }, t("Secure defaults")))));
+
+  if (!configured) {
+    view.appendChild(el("div", { class: "card" }, el("div", { class: "hint" },
+      t("DNS is not managed by WayHop yet — sing-box uses its default resolver. Click “Secure defaults” for one-click encrypted, failover-aware DNS, or add resolvers manually."))));
+  }
+
+  // The router's OWN native DNS stack (dnsmasq + DoH), if WayHop is running on a router that has one —
+  // a read-only "adopted" view so there's no hidden second config. Editing lands with native write-back.
+  try {
+    const nat = await api.get("/api/dns/native");
+    if (nat && nat.available && nat.native) view.appendChild(dnsNativeCard(nat));
+  } catch (_) { /* off a router / endpoint absent — no card */ }
+
+  // Global toggles + strategy.
+  const g = el("div", { class: "card" });
+  g.appendChild(el("div", { class: "card-head" }, el("div", { class: "card-title" }, t("Settings"))));
+  g.appendChild(dnsToggleRow(t("Enable DNS management"), "enabled", t("Emit a dns block. Off keeps sing-box's default resolver (today's behaviour).")));
+  g.appendChild(dnsToggleRow(t("Leak protection (encrypted-only)"), "leak_proof", t("Reject plaintext resolvers and require an encrypted default — the ISP can never read your queries, even on the WAN fallback.")));
+  g.appendChild(dnsToggleRow(t("FakeIP domain routing"), "fakeip", t("Synthetic IPs so domain rules match reliably. Requires gateway/TUN mode; ignored in fast/mixed mode.")));
+  const strat = el("select", {}, ...["prefer_ipv4", "ipv4_only", "prefer_ipv6", "ipv6_only"].map(s => el("option", { value: s }, s)));
+  strat.value = dnsState.strategy || "prefer_ipv4";
+  strat.onchange = () => { dnsState.strategy = strat.value; saveDNS("strategy → " + strat.value); };
+  g.appendChild(el("div", { class: "field", style: "margin-top:14px;margin-bottom:0" }, el("label", {}, t("IP strategy")), strat,
+    el("div", { class: "hint" }, t("ipv4_only suppresses AAAA — pick it when your tunnels are IPv4-only to stop v6 DNS leaks."))));
+  view.appendChild(g);
+
+  // Resolvers (with the default-resolver picker as a footer, so it's one coherent card).
+  const sc = el("div", { class: "card" });
+  sc.appendChild(el("div", { class: "card-head" },
+    el("div", { class: "card-title" }, t("Resolvers")),
+    el("div", { class: "acts" }, el("button", { class: "btn btn-sm", onclick: () => openDNSServer(null) }, t("+ Add resolver")))));
+  if (!dnsState.servers.length) sc.appendChild(emptyState(t("No resolvers"), t("Add an encrypted resolver (DoH/DoT), or apply the secure defaults.")));
+  else {
+    dnsState.servers.forEach((s, i) => sc.appendChild(dnsServerRow(s, i)));
+    const fin = el("select", {}, el("option", { value: "" }, t("(first resolver)")), ...dnsState.servers.map(s => el("option", { value: s.tag }, s.tag)));
+    fin.value = dnsState.final || "";
+    fin.onchange = () => { dnsState.final = fin.value; saveDNS("default → " + (fin.value || "first")); };
+    sc.appendChild(el("div", { class: "field", style: "margin-top:16px;margin-bottom:0" },
+      el("label", {}, t("Default resolver (unmatched queries)")), fin,
+      el("div", { class: "hint" }, t("Keep it encrypted for leak protection — a plaintext/local default would let a foreign lookup reach the ISP."))));
+  }
+  view.appendChild(sc);
+
+  // Split-DNS rules.
+  const rc = el("div", { class: "card" });
+  rc.appendChild(el("div", { class: "card-head" },
+    el("div", { class: "card-title" }, t("Split-DNS rules")),
+    el("div", { class: "acts" }, el("button", { class: "btn btn-sm", onclick: () => openDNSRule(null) }, t("+ Add rule")))));
+  if (!dnsState.rules.length) rc.appendChild(el("div", { class: "hint" }, t("No rules — every query uses the default resolver. Add a rule to resolve chosen lists via a specific resolver (e.g. domestic sites via the local resolver, or block a list at DNS level).")));
+  else dnsState.rules.forEach((r, i) => rc.appendChild(dnsRuleRow(r, i)));
+  view.appendChild(rc);
+
+  view.appendChild(dnsLeakWidget());
+}
+
+// dnsToggleRow — a labelled accessible switch bound to a boolean key on dnsState. Optimistic: flips
+// the switch, mutates state, PUTs; saveDNS's error path re-renders from the persisted state (reverting
+// a rejected flip). fakeip forces independent_cache (sing-box requires the pairing; validateDNS 400s).
+function dnsToggleRow(label, key, hint) {
+  const sw = switchEl(!!dnsState[key], (s) => {
+    const want = !dnsState[key];
+    flipSwitch(s, want);
+    dnsState[key] = want;
+    if (key === "fakeip" && want) dnsState.independent_cache = true;
+    saveDNS(label + (want ? " ✓" : " ✕"));
+  }, label);
+  return el("div", { class: "dns-tog" },
+    el("div", { class: "top" }, el("label", {}, label), sw),
+    hint ? el("div", { class: "hint" }, hint) : null);
+}
+
+function dnsServerRow(s, i) {
+  const net = DNS_NET_TYPES.includes(s.type);
+  const enc = DNS_ENC_TYPES.includes(s.type);
+  const addr = net ? (s.server + (s.server_port ? ":" + s.server_port : "") + (s.path || "")) : (s.type === "fakeip" ? (s.inet4_range || "198.18.0.0/15") : t("device resolver"));
+  const leakWarn = (net && !enc) ? el("span", { class: "pill err", title: t("plaintext DNS — the ISP can read your queries") }, "⚠ plaintext") : null;
+  const via = net ? "via " + (nameOf(s.detour) || (s.detour ? s.detour : t("direct"))) : null;
+  return el("div", { class: "dns-row" },
+    el("span", { class: "badge" }, DNS_TYPE_BADGE[s.type] || s.type),
+    el("div", { class: "main" },
+      el("div", { class: "name" }, el("span", { class: "tag" }, s.tag), leakWarn),
+      el("div", { class: "sub" }, el("span", { class: "addr" }, addr), via ? el("span", {}, "· " + via) : null)),
+    el("div", { class: "acts" },
+      el("button", { class: "btn btn-sm", onclick: () => openDNSServer(i) }, t("Edit")),
+      el("button", { class: "btn btn-danger btn-sm", onclick: () => { dnsState.servers.splice(i, 1); if (dnsState.final === s.tag) dnsState.final = ""; saveDNS(s.tag + " ✕", true); } }, t("Delete"))));
+}
+
+function dnsRuleRow(r, i) {
+  const via = r.server === "reject" ? el("span", { class: "pill err" }, t("block")) : el("span", { class: "pill" }, r.server);
+  const parts = (r.rule_sets || []).map(x => nameOf(x) || x)
+    .concat(r.domain_suffix || [], r.geosite || [], (r.query_type || []).map(q => "type:" + q));
+  const match = parts.length ? parts.join(", ") : t("(no match)");
+  return el("div", { class: "dns-rule" },
+    el("div", { class: "match" },
+      el("div", { class: "m" }, match),
+      el("div", { class: "via" }, "→", via)),
+    el("div", { class: "acts" },
+      el("button", { class: "btn btn-sm", onclick: () => openDNSRule(i) }, t("Edit")),
+      el("button", { class: "btn btn-danger btn-sm", onclick: () => { dnsState.rules.splice(i, 1); saveDNS("rule ✕", true); } }, t("Delete"))));
+}
+
+// dnsNativeCard renders the router's ADOPTED native DNS stack (read-only) — the resolvers the device
+// actually serves, in tier order — so WayHop reflects the router's reality, not a hidden second config.
+const DNS_TIER_LABEL = { 1: "via VPN", 2: "WAN-encrypted", 3: "geo-fallback" };
+function dnsNativeCard(nat) {
+  const nd = nat.native || {};
+  const rows = nd.resolvers || [];
+  const card = el("div", { class: "card" });
+  card.appendChild(el("div", { class: "card-head" },
+    el("div", { class: "card-title" }, t("Router's native DNS")),
+    el("div", { class: "acts" },
+      rows.length ? el("button", { class: "btn btn-sm", title: t("Show the uci/dnsmasq commands that would write this back to the router (not run automatically)"), onclick: () => openNativePlan(nat) }, t("Preview write-back")) : null,
+      nd.strict_order ? el("span", { class: "pill muted" }, t("strict-order")) : null,
+      el("span", { class: "pill ok" }, t("adopted") + " · " + (nat.platform || "")))));
+  card.appendChild(el("div", { class: "hint", style: "margin-bottom:8px" },
+    t("The DNS your router actually serves (dnsmasq + DoH). Preview the write-back to see the exact router commands; applying them is a manual, gated step.")));
+  if (!rows.length) card.appendChild(el("div", { class: "hint" }, t("No upstreams detected.")));
+  else rows.forEach(rz => card.appendChild(dnsNativeRow(rz)));
+  return card;
+}
+
+function dnsNativeRow(rz) {
+  const kind = (rz.kind || "").toUpperCase();
+  const badge = kind === "PLAIN" ? "Do53" : (kind === "DOH" ? "DoH" : (kind === "DOT" ? "DoT" : (kind === "LOCAL" ? "Local" : kind)));
+  const tier = el("span", {}, t(DNS_TIER_LABEL[rz.tier] || ("tier " + rz.tier)));
+  return el("div", { class: "dns-row" },
+    el("span", { class: "badge" }, badge),
+    el("div", { class: "main" },
+      el("div", { class: "name" }, el("span", { class: "tag" }, rz.address || "")),
+      el("div", { class: "sub" }, tier, rz.via_tunnel ? el("span", {}, "· " + t("via tunnel")) : null)),
+    el("div", { class: "acts" }, el("span", { class: "pill muted" }, rz.source || "")));
+}
+
+// openNativePlan previews the native write-back: POSTs the adopted NativeDNS to /api/dns/native/plan
+// and shows the exact uci (OpenWrt) / dnsmasq.d (Keenetic) the router WOULD get, plus the separate
+// user-gated apply commands. Nothing is applied — this is the safe, offline-verifiable end of the wiring.
+async function openNativePlan(nat) {
+  try {
+    const r = await api.post("/api/dns/native/plan", { native: nat.native });
+    const body = el("div", {},
+      el("div", { class: "hint", style: "margin-bottom:8px" }, t("What writing the current native DNS back to your router would change. Nothing is applied automatically — the apply step is manual/gated.")),
+      el("div", { class: "name", style: "margin:6px 0 4px" }, r.platform === "openwrt" ? t("uci commands") : t("dnsmasq.d content")),
+      el("pre", { class: "code", style: "max-height:38vh;overflow:auto;white-space:pre-wrap;margin:0" }, r.content || ""),
+      el("div", { class: "name", style: "margin:12px 0 4px" }, t("Then, to apply (user-gated):")),
+      el("pre", { class: "code", style: "max-height:20vh;overflow:auto;white-space:pre-wrap;margin:0" }, (r.apply || []).join("\n")));
+    const back = modal({ title: t("Native DNS write-back plan"), body, footer: el("button", { class: "btn", onclick: () => back.close() }, t("Close")) });
+  } catch (e) { toast(e.message, "err"); }
+}
+
+// saveDNS PUTs the whole plane. On reject (a bad detour/rule/leak-proof violation) it toasts the
+// precise 400 and re-renders from the persisted state, so a rejected local edit never lingers in the UI.
+async function saveDNS(msg, rerender) {
+  try {
+    const r = await api.put("/api/dns", dnsState);
+    if (r && r.dns) dnsState = r.dns;
+    state.profile.dns = dnsState;
+    updateDirty();
+    if (msg) toast(msg, "ok");
+    if (rerender) route();
+    return true;
+  } catch (e) {
+    toast(e.message, "err");
+    route();
+    return false;
+  }
+}
+
+// primaryDetourGuess mirrors the server's primaryDetour for the "Add resolver" default: the default
+// route's outbound (usually the main failover group ⇒ failover-aware), else the first group, else Direct.
+function primaryDetourGuess() {
+  const def = (state.profile.rules || []).find(r => r.default && r.outbound && r.outbound !== "block");
+  if (def) return def.outbound;
+  if ((state.profile.groups || []).length) return state.profile.groups[0].id;
+  return "direct";
+}
+
+function dnsSuggestTag(p) {
+  const base = (p.name || p.type || "dns").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 24) || "dns";
+  const taken = new Set(dnsState.servers.map(s => s.tag));
+  let tag = base, n = 1;
+  while (taken.has(tag)) tag = base + "_" + (++n);
+  return tag;
+}
+
+async function openDNSServer(idx) {
+  const editing = idx != null;
+  const cur = editing ? dnsState.servers[idx] : { type: "https", enabled: true, path: "/dns-query", detour: primaryDetourGuess() };
+  let presets = [];
+  try { presets = (await api.get("/api/dns/catalog")).presets || []; } catch (_) {}
+
+  // Group the picker: recommended secure/global resolvers vs country-local (geo-fallback) ones.
+  // Option values stay the ORIGINAL preset index, so the onchange handler is unchanged.
+  const presetSel = el("select", { id: "dnsm-preset" }, el("option", { value: "" }, t("— choose a provider —")));
+  [["", t("Recommended — secure, global")], ["local", t("Country-local — geo-fallback")]].forEach(([cat, label]) => {
+    const items = presets.map((p, i) => [p, i]).filter(([p]) => (p.category || "") === cat);
+    if (items.length) presetSel.appendChild(el("optgroup", { label },
+      ...items.map(([p, i]) => el("option", { value: String(i), title: p.note || "" }, p.name))));
+  });
+  const tagIn = el("input", { id: "dnsm-tag", type: "text", value: cur.tag || "", placeholder: "dns_secure" });
+  const typeSel = el("select", { id: "dnsm-type" }, ...Object.keys(DNS_TYPE_LABEL).map(x => el("option", { value: x }, DNS_TYPE_LABEL[x])));
+  typeSel.value = cur.type || "https";
+  const serverIn = el("input", { id: "dnsm-server", type: "text", value: cur.server || "", placeholder: "1.1.1.1" });
+  const portIn = el("input", { id: "dnsm-port", type: "number", value: cur.server_port || "", placeholder: "443" });
+  const pathIn = el("input", { id: "dnsm-path", type: "text", value: cur.path || "", placeholder: "/dns-query" });
+  const detourSel = routingOutboundSelect(cur.detour || "direct", false); detourSel.id = "dnsm-detour";
+  const bootSel = el("select", { id: "dnsm-boot" }, el("option", { value: "" }, t("(none — server is an IP)")),
+    ...dnsState.servers.filter((_, j) => j !== idx).map(x => el("option", { value: x.tag }, x.tag)));
+  bootSel.value = cur.domain_resolver || "";
+  const i4In = el("input", { id: "dnsm-i4", type: "text", value: cur.inet4_range || "198.18.0.0/15", placeholder: "198.18.0.0/15" });
+  const i6In = el("input", { id: "dnsm-i6", type: "text", value: cur.inet6_range || "", placeholder: "fc00::/18" });
+  const enChk = el("input", { id: "dnsm-en", type: "checkbox" }); if (cur.enabled !== false) enChk.setAttribute("checked", "true");
+
+  const rowServer = el("div", { class: "field" }, el("label", {}, t("Server (IP or hostname)")), serverIn);
+  const rowPort = el("div", { class: "field" }, el("label", {}, t("Port (blank = default)")), portIn);
+  const rowPath = el("div", { class: "field" }, el("label", {}, t("DoH path")), pathIn);
+  const rowDetour = el("div", { class: "field" }, el("label", {}, t("Ride via (detour)")), detourSel);
+  const rowBoot = el("div", { class: "field" }, el("label", {}, t("Bootstrap resolver (hostname only)")), bootSel);
+  const rowI4 = el("div", { class: "field" }, el("label", {}, t("FakeIP IPv4 range")), i4In);
+  const rowI6 = el("div", { class: "field" }, el("label", {}, t("FakeIP IPv6 range (optional)")), i6In);
+
+  const sync = () => {
+    const ty = typeSel.value;
+    const net = DNS_NET_TYPES.includes(ty), enc = DNS_ENC_TYPES.includes(ty), fake = ty === "fakeip";
+    rowServer.style.display = net ? "" : "none";
+    rowPort.style.display = net ? "" : "none";
+    rowPath.style.display = (ty === "https" || ty === "h3") ? "" : "none";
+    rowDetour.style.display = net ? "" : "none";
+    rowBoot.style.display = enc ? "" : "none";
+    rowI4.style.display = fake ? "" : "none";
+    rowI6.style.display = fake ? "" : "none";
+  };
+  typeSel.onchange = sync;
+  presetSel.onchange = () => {
+    const p = presets[+presetSel.value];
+    if (!p) return;
+    typeSel.value = p.type;
+    if (p.server != null) serverIn.value = p.server;
+    portIn.value = p.server_port || "";
+    pathIn.value = p.path || "";
+    if (!tagIn.value.trim()) tagIn.value = dnsSuggestTag(p);
+    sync();
+  };
+
+  const body = el("div", {},
+    el("div", { class: "field" }, el("label", {}, t("Provider preset")), presetSel),
+    el("div", { class: "field" }, el("label", {}, t("Tag")), tagIn),
+    el("div", { class: "field" }, el("label", {}, t("Type")), typeSel),
+    rowServer, rowPort, rowPath, rowDetour, rowBoot, rowI4, rowI6,
+    el("label", { class: "check" }, enChk, el("span", {}, t("Enabled"))));
+
+  const saveBtn = el("button", { class: "btn btn-primary" }, t("Save"));
+  const back = modal({
+    title: editing ? t("Edit resolver") : t("Add resolver"),
+    body,
+    footer: [el("button", { class: "btn", onclick: () => back.close() }, t("Cancel")), saveBtn],
+  });
+  sync();
+  saveBtn.onclick = async () => {
+    const ty = typeSel.value;
+    const o = { tag: tagIn.value.trim(), type: ty, enabled: enChk.checked };
+    if (!o.tag) { toast(t("Tag is required"), "err"); return; }
+    if (DNS_NET_TYPES.includes(ty)) {
+      o.server = serverIn.value.trim();
+      const port = parseInt(portIn.value, 10); if (port) o.server_port = port;
+      const det = detourSel.value; if (det && det !== "direct") o.detour = det;
+      const boot = bootSel.value; if (boot) o.domain_resolver = boot;
+      if (ty === "https" || ty === "h3") { const pth = pathIn.value.trim(); if (pth) o.path = pth; }
+    }
+    if (ty === "fakeip") {
+      o.inet4_range = i4In.value.trim() || "198.18.0.0/15";
+      const i6 = i6In.value.trim(); if (i6) o.inet6_range = i6;
+    }
+    const prev = dnsState.servers.slice();
+    if (editing) dnsState.servers[idx] = o; else dnsState.servers.push(o);
+    if (dnsState.fakeip && ty === "fakeip") dnsState.independent_cache = true;
+    saveBtn.disabled = true;
+    try {
+      const r = await api.put("/api/dns", dnsState);
+      if (r && r.dns) dnsState = r.dns;
+      state.profile.dns = dnsState; updateDirty();
+      toast(editing ? t("Resolver updated") : t("Resolver added"), "ok");
+      back.close(); route();
+    } catch (e) {
+      dnsState.servers = prev; saveBtn.disabled = false;
+      toast(e.message, "err");
+    }
+  };
+}
+
+function openDNSRule(idx) {
+  const editing = idx != null;
+  const cur = editing ? dnsState.rules[idx] : { rule_sets: [], domain_suffix: [], query_type: [], server: dnsState.servers[0] ? dnsState.servers[0].tag : "reject" };
+  const lists = state.profile.routing_lists || [];
+  const listBox = el("div", { style: "max-height:160px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:8px" });
+  if (!lists.length) listBox.appendChild(el("div", { class: "hint" }, t("No routing lists — add one under Routing to match by list.")));
+  const listChecks = {};
+  lists.forEach(rl => {
+    const c = el("input", { type: "checkbox" }); if ((cur.rule_sets || []).includes(rl.id)) c.setAttribute("checked", "true");
+    listChecks[rl.id] = c;
+    listBox.appendChild(el("label", { class: "check" }, c, el("span", {}, rl.name || rl.id)));
+  });
+  const sufIn = el("textarea", { id: "dnsr-suf", rows: "3", placeholder: "example.com\ninternal.lan" }, (cur.domain_suffix || []).join("\n"));
+  const qtIn = el("input", { id: "dnsr-qt", type: "text", value: (cur.query_type || []).join(","), placeholder: "A,AAAA" });
+  const srvSel = el("select", { id: "dnsr-srv" }, ...dnsState.servers.map(s => el("option", { value: s.tag }, s.tag)), el("option", { value: "reject" }, t("Block (reject)")));
+  srvSel.value = cur.server || "reject";
+
+  const body = el("div", {},
+    el("div", { class: "field" }, el("label", {}, t("Match routing lists")), listBox),
+    el("div", { class: "field" }, el("label", {}, t("Domain suffixes (one per line)")), sufIn),
+    el("div", { class: "field" }, el("label", {}, t("Query types (comma-separated, e.g. A,AAAA)")), qtIn),
+    el("div", { class: "field" }, el("label", {}, t("Resolve via")), srvSel));
+
+  const saveBtn = el("button", { class: "btn btn-primary" }, t("Save"));
+  const back = modal({
+    title: editing ? t("Edit DNS rule") : t("Add DNS rule"),
+    body,
+    footer: [el("button", { class: "btn", onclick: () => back.close() }, t("Cancel")), saveBtn],
+  });
+  saveBtn.onclick = async () => {
+    const o = {
+      id: (editing && cur.id) ? cur.id : ("r" + Date.now().toString(36)),
+      rule_sets: Object.keys(listChecks).filter(id => listChecks[id].checked),
+      domain_suffix: sufIn.value.split("\n").map(x => x.trim()).filter(Boolean),
+      query_type: qtIn.value.split(",").map(x => x.trim()).filter(Boolean),
+      server: srvSel.value,
+    };
+    if (!o.rule_sets.length && !o.domain_suffix.length && !o.query_type.length) { toast(t("A rule needs at least one match condition"), "err"); return; }
+    const prev = dnsState.rules.slice();
+    if (editing) dnsState.rules[idx] = o; else dnsState.rules.push(o);
+    saveBtn.disabled = true;
+    try {
+      const r = await api.put("/api/dns", dnsState);
+      if (r && r.dns) dnsState = r.dns;
+      state.profile.dns = dnsState; updateDirty();
+      toast(t("Rule saved"), "ok"); back.close(); route();
+    } catch (e) { dnsState.rules = prev; saveBtn.disabled = false; toast(e.message, "err"); }
+  };
+}
+
+async function previewDNS() {
+  try {
+    const gen = await api.post("/api/generate", {});
+    const dns = gen && gen.config && gen.config.dns;
+    const pre = el("pre", { class: "code", style: "max-height:60vh;overflow:auto;white-space:pre-wrap;margin:0" },
+      dns ? JSON.stringify(dns, null, 2) : t("No dns block — enable DNS management first."));
+    const back = modal({ title: t("Generated dns block"), body: pre, footer: el("button", { class: "btn", onclick: () => back.close() }, t("Close")) });
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function applyDNSSecureDefaults() {
+  if (dnsState && dnsState.servers && dnsState.servers.length &&
+    !await modalConfirm(t("Replace the current DNS setup with the secure defaults (encrypted DoH via the tunnel + local, leak-proof)?"))) return;
+  try {
+    const resp = await api.get("/api/dns?template=1");
+    dnsState = resp.dns;
+    await saveDNS(t("Applied secure DNS defaults"), true);
+  } catch (e) { toast(e.message, "err"); }
+}
+
+function dnsLeakWidget() {
+  const card = el("div", { class: "card" });
+  const body = el("div", {}, el("div", { class: "hint" }, t("Checks that lookups are private (DoH) and that no IPv6 path leaks around the tunnel. Runs the same server-side probes as Diagnostics.")));
+  card.appendChild(el("div", { class: "card-head" },
+    el("div", { class: "card-title" }, t("DNS leak test")),
+    el("div", { class: "acts" }, el("button", { class: "btn btn-sm", onclick: () => runDNSLeak(body) }, t("Run test")))));
+  card.appendChild(body);
+  return card;
+}
+
+async function runDNSLeak(body) {
+  body.textContent = ""; body.appendChild(el("div", { class: "hint" }, t("Testing…")));
+  try {
+    const d = await api.get("/api/healthcheck");
+    const rows = (d.checks || []).filter(c => c.id === "dns" || c.id === "ipv6");
+    body.textContent = "";
+    if (!rows.length) { body.appendChild(el("div", { class: "hint" }, t("No DNS probe available on this device."))); return; }
+    rows.forEach(c => {
+      const cls = c.status === "ok" ? "ok" : (c.status === "warn" ? "warn" : "err");
+      body.appendChild(el("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:10px;padding:5px 0" },
+        el("span", {}, c.label || c.id),
+        el("span", { class: "pill " + cls, title: c.detail || "" }, c.summary || c.status)));
+      if (c.status !== "ok" && c.fix) body.appendChild(el("div", { class: "hint" }, "→ " + c.fix));
+    });
+  } catch (e) { body.textContent = ""; body.appendChild(el("div", { class: "hint" }, t("Leak test unavailable: ") + e.message)); }
+}
+
 function renderFailsafeBanner(st) {
   const b = $("#failsafe-banner");
   if (!b) return;
@@ -2417,7 +4019,7 @@ function paintEngineTile(node) {
 function subMeta(e) {
   const sub = el("div", { class: "sub" });
   // External endpoints bind an existing kernel interface (e.g. an AmneziaWG/WireGuard
-  // tunnel set up outside Velinx) — they have no protocol/server of their own, so
+  // tunnel set up outside WayHop) — they have no protocol/server of their own, so
   // showing an empty proto badge + ":0" reads as a broken/mislabeled (vless) entry.
   // Render the bound interface instead, which is what actually carries the traffic.
   if (e.engine === "external") {
@@ -2547,7 +4149,7 @@ function pillNodes() {
   }
   return pillCache;
 }
-function refreshPills() {
+function refreshPills(sys) {
   const c = pillNodes();
   c.health.forEach(span => {
     const e = findEndpoint(span.getAttribute("data-health"));
@@ -2569,7 +4171,7 @@ function refreshPills() {
   c.spark.forEach(cv => drawSpark(cv, sparkBuf[cv.getAttribute("data-spark")]));
   paintHero();
   paintConnections(); // live-refresh the connections table (no-op off the dashboard)
-  paintSystem();      // live-refresh RAM/temp + compute real interface throughput rates
+  paintSystem(sys);   // live-refresh RAM/temp + throughput; reuses the batched sample when given
 }
 // Pin the last speed-test result for `key` (an endpoint id, or "__global" for the
 // throughput test) into `out`, with the time it was measured — so the Speed/Speedtest
@@ -2597,16 +4199,27 @@ async function pollHealth() {
   if (healthInFlight) return;
   healthInFlight = true;
   try {
-    const r = await api.get("/api/health/endpoints"); healthMap = {};
+    // Fetch the independent dashboard feeds concurrently — serial awaits stacked round-trips
+    // of latency on every 5s poll, which is felt on a high-latency router link. plugins/watchdog/
+    // system are best-effort (null on failure); only the endpoints feed drives the reconnect
+    // banner. /api/system is batched here so the system strip refreshes in the SAME round-trip
+    // instead of a 4th one stacked after this poll inside paintSystem().
+    const [r, pl, wd, sys] = await Promise.all([
+      api.get("/api/health/endpoints"),
+      api.get("/api/plugins").catch(() => null),
+      api.get("/api/watchdog").catch(() => null),
+      api.get("/api/system").catch(() => null),
+    ]);
+    healthMap = {};
     (r || []).forEach(h => {
       healthMap[h.id] = h;
       const b = sparkBuf[h.id] || (sparkBuf[h.id] = []);
       b.push({ up: h.rate_up_bps || 0, down: h.rate_down_bps || 0 });
       if (b.length > SPARK_MAX) b.shift();
     });
-    try { const pl = await api.get("/api/plugins"); pluginMap = {}; (pl || []).forEach(p => pluginMap[p.id] = p); } catch (_) {}
-    try { watchdog = await api.get("/api/watchdog"); } catch (_) {}
-    refreshPills();
+    if (pl) { pluginMap = {}; pl.forEach(p => pluginMap[p.id] = p); }
+    if (wd) watchdog = wd;
+    refreshPills(sys);
   } catch (e) {
     // The dashboard polls every 5s. If the daemon went down while the user is just
     // SITTING on the dashboard (not navigating, so route()'s catch never fires), the
@@ -2638,8 +4251,8 @@ async function renderUpdater(view) {
   view.appendChild(el("div", { class: "block-head" },
     el("div", {},
       el("div", { class: "ttl" }, "Updater"),
-      el("div", { class: "desc" }, "Keep Velinx and its proxy engines up to date."))));
-  view.appendChild(selfUpdateCard()); // Velinx self-update — at the top (fills async, non-blocking)
+      el("div", { class: "desc" }, "Keep WayHop and its proxy engines up to date."))));
+  view.appendChild(selfUpdateCard()); // WayHop self-update — at the top (fills async, non-blocking)
   const loadingEngines = el("div", { class: "hint", style: "margin:18px 0" }, "checking engine versions…");
   view.appendChild(loadingEngines);
   let data;
@@ -2654,27 +4267,28 @@ async function renderUpdater(view) {
   // catalog-only standalone cores (sing-box covers their protocols natively) into a
   // collapsed "Advanced" group. Falls back to a flat list if the backend predates roles.
   const engines = data.engines || [];
+  const pmKind = data.package_manager || "";
   const router = engines.filter(e => e.role && e.role !== "standalone");
   const advanced = engines.filter(e => !e.role || e.role === "standalone");
-  (router.length ? router : engines).forEach(e => view.appendChild(engineCard(e)));
+  (router.length ? router : engines).forEach(e => view.appendChild(engineCard(e, pmKind)));
   if (router.length && advanced.length) {
     const det = el("details", { style: "margin-top:6px" });
     det.appendChild(el("summary", { class: "hint", style: "cursor:pointer;font-weight:600;padding:8px 0" },
       "Advanced — " + advanced.length + " engine" + (advanced.length > 1 ? "s" : "") + " not used on this router"));
     det.appendChild(el("div", { class: "hint", style: "margin:2px 0 12px;max-width:60ch" },
       "sing-box handles these protocols natively, so the router never runs these binaries. Install one only if you run the standalone core yourself."));
-    advanced.forEach(e => det.appendChild(engineCard(e)));
+    advanced.forEach(e => det.appendChild(engineCard(e, pmKind)));
     view.appendChild(det);
   }
 }
 const ENGINE_ROLE_HINT = { "core": "core", "kernel-plugin": "kernel plugin", "socks-plugin": "SOCKS plugin", "standalone": "standalone core" };
 
-// Velinx self-update card: current version, available release, "Update now",
+// WayHop self-update card: current version, available release, "Update now",
 // and an auto-update toggle. Backed by /api/updater/self*. Returns synchronously with a
 // placeholder and fills in async so the slow GitHub check never blocks the page render.
 function selfUpdateCard() {
   const card = el("div", { class: "card" });
-  card.appendChild(el("div", { class: "card-title", style: "margin-bottom:10px" }, "Velinx"));
+  card.appendChild(el("div", { class: "card-title", style: "margin-bottom:10px" }, "WayHop"));
   const body = el("div", {}, el("div", { class: "hint" }, t("checking for updates…")));
   card.appendChild(body);
   (async () => {
@@ -2682,18 +4296,26 @@ function selfUpdateCard() {
     const s = await api.get("/api/updater/self");
     body.innerHTML = "";
     const avail = !!s.update_available;
+    // Feed-installed wayhop (opkg/apk owns the binary): a panel self-swap would fight the package
+    // manager, so the backend refuses it (409) — hide the button and say how to upgrade instead.
+    const managed = !!s.native_managed;
     const badge = avail
       ? el("span", { class: "badge badge-ok", style: "margin-left:8px" }, "update → " + (s.latest || "?"))
       : el("span", { class: "pill muted", style: "margin-left:8px" }, el("span", { class: "dot" }), s.error ? "check failed" : "up to date");
     body.appendChild(el("div", { class: "row-between" },
       el("div", {},
-        el("div", { class: "name", style: "font-size:16px" }, "v" + (s.current || "?"), badge),
+        el("div", { class: "name", style: "font-size:16px" }, "v" + (s.current || "?"), badge,
+          managed ? el("span", { class: "pill muted", style: "margin-left:8px" }, el("span", { class: "dot" }), t("managed by {0}", s.package_manager || "the system")) : null),
         el("div", { class: "sub", style: "margin-top:3px" }, s.repo + (s.error ? " · " + s.error : (s.latest ? " · latest " + s.latest : "")))),
       el("div", { class: "acts" },
-        avail ? el("button", { class: "btn btn-primary btn-sm", onclick: ev => selfUpdate(ev.target) }, "Update now") : null)));
-    const tog = el("div", { class: "toggle" + (s.auto_update ? " on" : ""), onclick: () => selfAutoToggle(tog) });
+        (avail && !managed) ? el("button", { class: "btn btn-primary btn-sm", onclick: ev => selfUpdate(ev.target) }, "Update now") : null)));
+    if (managed) {
+      body.appendChild(el("div", { class: "hint", style: "margin-top:10px" },
+        t("WayHop was installed from the package feed — upgrade it with {0} over SSH; the panel's self-update (and auto-update) won't replace a package-owned binary.", s.package_manager || "opkg/apk")));
+    }
+    const tog = switchEl(s.auto_update, tel => selfAutoToggle(tel), "Auto-update WayHop");
     body.appendChild(el("div", { class: "row-between", style: "margin-top:14px" },
-      el("div", { class: "hint", style: "max-width:70%" }, "Auto-update: install new Velinx releases automatically (daily check) and restart"),
+      el("div", { class: "hint", style: "max-width:70%" }, "Auto-update: install new WayHop releases automatically (daily check) and restart"),
       tog));
   } catch (e) {
     body.innerHTML = "";
@@ -2704,36 +4326,49 @@ function selfUpdateCard() {
 }
 
 async function selfUpdate(btn) {
-  if (!confirm("Download the latest Velinx release, replace the running binary, and restart the service? The panel will briefly drop, then return.")) return;
+  if (!await modalConfirm("Download the latest WayHop release, replace the running binary, and restart the service? The panel will briefly drop, then return.")) return;
   btn.setAttribute("disabled", "true"); btn.textContent = "Updating…";
   try {
     const r = await api.post("/api/updater/self/install", {});
-    toast("Velinx → " + r.installed + (r.restarting ? " · restarting…" : (r.note ? " · " + r.note : "")), "ok");
+    toast("WayHop → " + r.installed + (r.restarting ? " · restarting…" : (r.note ? " · " + r.note : "")), "ok");
   } catch (e) { toast("Update failed: " + e.message, "err"); btn.removeAttribute("disabled"); btn.textContent = "Update now"; }
 }
 
 async function selfAutoToggle(tog) {
   const on = !tog.classList.contains("on");
-  try { await api.put("/api/updater/self/auto", { enabled: on }); tog.classList.toggle("on", on); toast("Auto-update " + (on ? "enabled" : "disabled"), "ok"); }
-  catch (e) { toast(e.message, "err"); }
+  try {
+    await api.put("/api/updater/self/auto", { enabled: on });
+    tog.classList.toggle("on", on);
+    tog.setAttribute("aria-checked", on ? "true" : "false"); // flipped in place, no re-render
+    toast("Auto-update " + (on ? "enabled" : "disabled"), "ok");
+  } catch (e) { toast(e.message, "err"); }
 }
 
-function engineCard(e) {
+function engineCard(e, pmKind) {
   const card = el("div", { class: "card" });
   const inst = e.installed || {};
+  // A PM-owned binary (apk/opkg): the backend refuses panel install/remove (409) so it can't
+  // clobber the packaged file or orphan the package DB — say so up front instead of after a
+  // failed click, and don't render buttons that can only error.
+  const managed = !!e.native_managed;
   card.appendChild(el("div", { class: "row-between" },
     el("div", {},
       el("div", { class: "name", style: "font-size:16px" }, e.name,
         inst.present
           ? el("span", { class: "badge", style: "margin-left:8px" }, inst.version || "installed")
-          : el("span", { class: "pill muted", style: "margin-left:8px" }, el("span", { class: "dot" }), "not installed")),
+          : el("span", { class: "pill muted", style: "margin-left:8px" }, el("span", { class: "dot" }), "not installed"),
+        managed ? el("span", { class: "pill muted", style: "margin-left:8px" }, el("span", { class: "dot" }), t("managed by {0}", pmKind || "the system")) : null),
       el("div", { class: "sub", style: "margin-top:3px" }, e.repo + (e.role ? " · runs as " + (ENGINE_ROLE_HINT[e.role] || e.role) : ""))),
     el("div", { class: "acts" },
-      el("button", { class: "btn btn-sm", onclick: () => loadVersions(e, card) }, "Check updates"),
-      (inst.present && !e.source_only)
+      managed ? null : el("button", { class: "btn btn-sm", onclick: () => loadVersions(e, card) }, "Check updates"),
+      (!managed && inst.present && !e.source_only)
         ? el("button", { class: "btn btn-sm btn-danger", onclick: ev => removeEngine(e, ev.currentTarget) }, "Remove")
         : null)));
   const box = el("div", { class: "vbox", style: "margin-top:12px" });
+  if (managed) box.appendChild(el("div", { class: "hint" },
+    e.native_owner
+      ? t("Installed by the system package manager (package {0}). Update or remove it with {1} over SSH — the panel won't touch it.", e.native_owner, pmKind || "opkg/apk")
+      : t("Installed by the system package manager. Update or remove it with {0} over SSH — the panel won't touch it.", pmKind || "opkg/apk")));
   if (e.source_only) box.appendChild(el("div", { class: "hint" }, e.note || "No prebuilt releases."));
   if (e.last_error) box.appendChild(el("div", { class: "hint", style: "color:var(--err);margin-top:4px" }, t("Last update failed:") + " " + e.last_error));
   card.appendChild(box);
@@ -2765,7 +4400,7 @@ async function loadVersions(e, card) {
 
 async function installVersion(e, version, btn) {
   if (!version) return;
-  if (!confirm("Download and install " + e.name + " " + version + " for this router?")) return;
+  if (!await modalConfirm("Download and install " + e.name + " " + version + " for this router?")) return;
   btn.setAttribute("disabled", "true"); btn.textContent = "Installing…";
   try {
     const r = await api.post("/api/updater/" + encodeURIComponent(e.id) + "/install", { version });
@@ -2781,7 +4416,7 @@ async function installVersion(e, version, btn) {
 }
 
 async function removeEngine(e, btn) {
-  if (!confirm(t("Delete the installed {0} binary from this router?", e.name))) return;
+  if (!await modalConfirm(t("Delete the installed {0} binary from this router?", e.name))) return;
   btn.setAttribute("disabled", "true"); btn.textContent = t("Removing…");
   try {
     await api.del("/api/updater/" + encodeURIComponent(e.id));
@@ -2920,7 +4555,7 @@ async function loadNativeCaps() {
 
   // Detected native tunnels — what /api/vpn/discover already found on the router
   // (iface · type · name). Each row gets an "Adopt as exit" button that POSTs to
-  // /api/vpn/adopt: the OS keeps owning the tunnel; Velinx only adds a DISABLED
+  // /api/vpn/adopt: the OS keeps owning the tunnel; WayHop only adds a DISABLED
   // external endpoint that ROUTES THROUGH it. Best-effort: a 404 / empty list shows
   // nothing extra, mirroring loadNativeCaps' own graceful try/catch.
   try {
@@ -2936,7 +4571,7 @@ async function loadNativeCaps() {
         el("div", { class: "hint", style: "font-weight:600;margin-bottom:var(--sp-2)" }, t("Detected native tunnels")),
         // One-time explainer: adopting is non-destructive and never auto-enables.
         el("div", { class: "hint", style: "color:var(--ink-2);margin-bottom:var(--sp-2);line-height:1.5" },
-          t("Velinx will ROUTE THROUGH the tunnel but does not manage it (the OS owns it). It is added disabled — enable it in Connections to start routing.")));
+          t("WayHop will ROUTE THROUGH the tunnel but does not manage it (the OS owns it). It is added disabled — enable it in Connections to start routing.")));
       vpns.forEach(v => {
         const parts = [v.iface, v.type, v.public_key].filter(Boolean);
         const statusPill = v.active
@@ -2946,7 +4581,7 @@ async function loadNativeCaps() {
         // for this iface; otherwise a btn-sm that adopts + refreshes the card.
         const adoptBtn = adopted(v.iface)
           ? el("button", { class: "btn btn-sm", disabled: "true", title: t("Already added as a routing exit") }, t("Adopted"))
-          : el("button", { class: "btn btn-sm", title: t("Add this OS-owned tunnel as a routing exit (added disabled — Velinx will not manage it)"),
+          : el("button", { class: "btn btn-sm", title: t("Add this OS-owned tunnel as a routing exit (added disabled — WayHop will not manage it)"),
               onclick: async () => {
                 try {
                   await api.post("/api/vpn/adopt", { iface: v.iface });
@@ -3228,7 +4863,7 @@ function buildReport(h, mask) {
   const res = h.results, done = HC_ORDER.filter(id => res[id]);
   const worst = done.map(id => res[id]).reduce((a, r) => r.status === "fail" ? "fail" : (r.status === "warn" && a !== "fail") ? "warn" : a, "pass");
   const sys = (res.system && res.system.meta) || {}, exit = (res.exit && res.exit.geo) || {};
-  let out = "## Velinx diagnostics\n";
+  let out = "## WayHop diagnostics\n";
   out += "- time: " + new Date(h.ranAt).toISOString() + "\n";
   if (sys.version) out += "- build: " + sys.version + (sys.arch ? " (" + sys.arch + ")" : "") + "\n";
   if (exit.ip) out += "- exit: " + exit.ip + (exit.cc ? " " + exit.cc : "") + (exit.asn ? " · " + exit.asn : "") + "\n";
@@ -3575,7 +5210,7 @@ async function renderServer(view) {
   view.appendChild(el("div", { class: "block-head" },
     el("div", {},
       el("div", { class: "ttl" }, "Set up Server"),
-      el("div", { class: "desc" }, "Provision and manage proxy servers over SSH. Velinx installs what you pick, auto-adds the client to Connections and tests it — keep several servers for redundancy, and harden fresh ones with key-only login.")),
+      el("div", { class: "desc" }, "Provision and manage proxy servers over SSH. WayHop installs what you pick, auto-adds the client to Connections and tests it — keep several servers for redundancy, and harden fresh ones with key-only login.")),
     el("div", { class: "side" },
       el("button", { class: "btn btn-primary", title: "Provision a new remote server over SSH and add its client to Connections", onclick: openAddServer }, "+ Add server"))));
 
@@ -3616,7 +5251,7 @@ function serverCard(sv) {
 }
 
 async function delServer(sv) {
-  if (!confirm("Remove “" + (sv.name || sv.host) + "” from your servers list? The server itself is not touched.")) return;
+  if (!await modalConfirm("Remove “" + (sv.name || sv.host) + "” from your servers list? The server itself is not touched.")) return;
   try { await api.del("/api/servers/" + encodeURIComponent(sv.id)); toast("Removed", "ok"); route(); }
   catch (e) { toast(e.message, "err"); }
 }
@@ -3673,7 +5308,7 @@ function protoCard(o, checked) {
   return { cb, card };
 }
 
-// Setup-options picker — the list of what Velinx can install, with details.
+// Setup-options picker — the list of what WayHop can install, with details.
 // Recommended protocols (the suggested defaults) are surfaced first; the rest are
 // grouped under "Also available". A single self-signed-TLS caveat is shown once for
 // the group of protocols whose option data says they use a self-signed certificate.
@@ -3796,7 +5431,7 @@ function offerNextStep(sv) {
   const back = modal({
     title: "Server added",
     body: el("div", {}, el("div", {}, "“" + (sv.name || sv.host) + "” is saved."),
-      el("div", { class: "hint", style: "margin-top:8px" }, "If it's a fresh server, securing it first is recommended — Velinx installs an SSH key, lets you download it, then can disable password login so only the key works.")),
+      el("div", { class: "hint", style: "margin-top:8px" }, "If it's a fresh server, securing it first is recommended — WayHop installs an SSH key, lets you download it, then can disable password login so only the key works.")),
     footer: el("div", { style: "display:flex;gap:10px" }, later, setup, secure),
   });
   later.onclick = () => back.remove();
@@ -3886,7 +5521,7 @@ async function openHarden(sv) {
   savedCb.addEventListener("change", () => { lockBtn.style.display = savedCb.checked ? "" : "none"; });
   lockBtn.addEventListener("click", async () => {
     if (!installedKey) return toast("Generate a key first", "err");
-    if (!confirm("Disable password login on " + (sv ? sv.host : "this server") + "?\n\nMake sure you downloaded the key and it works — afterwards only the key can log in.")) return;
+    if (!await modalConfirm("Disable password login on " + (sv ? sv.host : "this server") + "?\n\nMake sure you downloaded the key and it works — afterwards only the key can log in.")) return;
     lockBtn.disabled = true; lockBtn.textContent = "Working…";
     try {
       const cr = c.get();
@@ -3965,7 +5600,7 @@ function renderVersionTable(box, result, sv, c, con) {
 
 async function updateBinary(sv, c, con, b, version) {
   const what = b.managed === "apt" ? (b.name + " via apt upgrade") : (b.name + " → " + version);
-  if (!confirm("Update " + what + " on " + (sv ? sv.host : "the server") + "?\n\nThe service will briefly restart. The old binary is backed up on the server as <path>.velinx.bak.")) return;
+  if (!await modalConfirm("Update " + what + " on " + (sv ? sv.host : "the server") + "?\n\nThe service will briefly restart. The old binary is backed up on the server as <path>.wayhop.bak.")) return;
   const cr = c.get();
   if (!cr.host || !cr.user) return toast("Host and SSH user are required", "err");
   try {
@@ -4038,7 +5673,7 @@ async function renderSettings(view) {
   view.appendChild(el("div", { class: "block-head" },
     el("div", {},
       el("div", { class: "ttl" }, t("Settings")),
-      el("div", { class: "desc" }, t("Daemon configuration. Saving here stores these settings; the Apply button in the top bar regenerates routing — they are separate actions. Fields tagged ↻ take effect only after Velinx restarts."))),
+      el("div", { class: "desc" }, t("Daemon configuration. Saving here stores these settings; the Apply button in the top bar regenerates routing — they are separate actions. Fields tagged ↻ take effect only after WayHop restarts."))),
     el("div", { class: "side" })));
 
   // Appearance — client-side prefs (theme + language persist in localStorage, not server config).
@@ -4126,7 +5761,7 @@ async function renderSettings(view) {
   const listen = txt(cfg.listen, ":8088");
   // Proxy core
   const sbBin = txt(cfg.singbox && cfg.singbox.bin, "/opt/sbin/sing-box");
-  const sbCfg = txt(cfg.singbox && cfg.singbox.config, "/opt/etc/velinx/singbox.json");
+  const sbCfg = txt(cfg.singbox && cfg.singbox.config, "/opt/etc/wayhop/singbox.json");
   const clashCtl = txt(cfg.clash && cfg.clash.controller, "127.0.0.1:9090");
   const clashSecF = secretInput(cfg.clash && cfg.clash.secret, t("optional"));
   const clashSec = clashSecF.input;
@@ -4151,8 +5786,8 @@ async function renderSettings(view) {
   allowedHosts.value = (cfg.allowed_hosts || []).join("\n");
   // Routing mode (applies on the next Apply, not a restart)
   const ROUTE_MODES = [
-    ["hybrid", t("Everything via Velinx (domain carve-outs work; general traffic slower / CPU-bound)")],
-    ["fast", t("Fast: general traffic bypasses Velinx (kernel fast-path) — IP carve-outs (calls/VoWiFi) still work; domain carve-outs OFF")],
+    ["hybrid", t("Everything via WayHop (domain carve-outs work; general traffic slower / CPU-bound)")],
+    ["fast", t("Fast: general traffic bypasses WayHop (kernel fast-path) — IP carve-outs (calls/VoWiFi) still work; domain carve-outs OFF")],
     ["tun", t("All traffic through sing-box (TUN)")],
     ["mixed", t("Local proxy only, no gateway (mixed)")],
     ["", t("Auto (derive from Gateway)")],
@@ -4257,7 +5892,7 @@ async function renderSettings(view) {
       lastSavedRouteMode = next.routing_mode || "";
       lastSavedOffload = offloadNow;
       baseline = JSON.stringify(collectSettings()); _settingsDirty = false; dirtyBadge.style.display = "none";
-      toast(r.restart_needed ? t("Saved — restart Velinx for all changes to take effect.") : t("Saved."), "ok");
+      toast(r.restart_needed ? t("Saved — restart WayHop for all changes to take effect.") : t("Saved."), "ok");
       if (routeModeChanged) toast(t("Routing mode changed — press Apply (top bar) to activate it."), "info");
       else if (offloadChanged) toast(t("Flow offload changed — press Apply (top bar) to activate it."), "info");
     } catch (e) { status.textContent = ""; toast(e.message, "err"); }
@@ -4304,7 +5939,7 @@ async function renderSettings(view) {
 
   view.appendChild(el("div", { class: "card" },
     el("div", { class: "card-title", style: "margin-bottom:8px" }, t("Fail-safe")),
-    el("div", { class: "hint", style: "margin-bottom:10px" }, t("After an Apply (not yet saved), Velinx pings this target to confirm the new config kept you online; if it can't be reached, the previous config is rolled back.")),
+    el("div", { class: "hint", style: "margin-bottom:10px" }, t("After an Apply (not yet saved), WayHop pings this target to confirm the new config kept you online; if it can't be reached, the previous config is rolled back.")),
     field(t("Connectivity-check target"), fsTarget),
     el("label", { class: "check", style: "display:inline-flex;margin-top:10px" }, fsReboot, el("span", {}, t("Allow auto-reboot as a last resort"))),
     el("div", { class: "hint", style: "margin-top:6px" }, t("Off by default. Only triggers if a rollback still can't restore connectivity — leave off unless you trust unattended reboots."))));
@@ -4323,7 +5958,7 @@ async function renderSettings(view) {
   const includeSecrets = el("input", { type: "checkbox" });
   const downloadBtn = el("button", { class: "btn", type: "button" }, t("Download backup"));
   downloadBtn.addEventListener("click", () => {
-    const a = el("a", { href: "/api/config/export" + (includeSecrets.checked ? "?secrets=1" : ""), download: "velinx-config.json" });
+    const a = el("a", { href: "/api/config/export" + (includeSecrets.checked ? "?secrets=1" : ""), download: "wayhop-config.json" });
     document.body.appendChild(a); a.click(); a.remove();
   });
   const fileInput = el("input", { type: "file", accept: "application/json,.json", style: "display:none" });
@@ -4335,20 +5970,20 @@ async function renderSettings(view) {
     let parsed;
     try { parsed = JSON.parse(await f.text()); }
     catch { fileInput.value = ""; return toast(t("That file is not valid JSON."), "err"); }
-    if (!confirm(t("Restore settings from this backup? It replaces your current settings (they are validated first)."))) { fileInput.value = ""; return; }
+    if (!await modalConfirm(t("Restore settings from this backup? It replaces your current settings (they are validated first)."))) { fileInput.value = ""; return; }
     try {
       const r = await api.post("/api/config/import", parsed);
-      toast(r.restart_needed ? t("Restored — restart Velinx to apply.") : t("Restored."), "ok");
+      toast(r.restart_needed ? t("Restored — restart WayHop to apply.") : t("Restored."), "ok");
       route();
     } catch (e) { toast(e.message, "err"); }
     finally { fileInput.value = ""; }
   });
   const resetBtn = el("button", { class: "btn btn-danger", type: "button" }, t("Reset to defaults"));
   resetBtn.addEventListener("click", async () => {
-    if (!confirm(t("Reset settings to defaults? Your panel address, UI port, host allow-list and subscription token are kept; everything else returns to defaults."))) return;
+    if (!await modalConfirm(t("Reset settings to defaults? Your panel address, UI port, host allow-list and subscription token are kept; everything else returns to defaults."))) return;
     try {
       const r = await api.post("/api/config/reset", {});
-      toast(r.restart_needed ? t("Reset to defaults — restart Velinx to apply.") : t("Reset to defaults."), "ok");
+      toast(r.restart_needed ? t("Reset to defaults — restart WayHop to apply.") : t("Reset to defaults."), "ok");
       route();
     } catch (e) { toast(e.message, "err"); }
   });
@@ -4362,8 +5997,8 @@ async function renderSettings(view) {
 
   // Full backup (everything) — the whole setup (connections, failover groups,
   // routing lists, saved servers, routing mode) in one file, for saving before a
-  // firmware reflash or migrating to another Velinx instance.
-  const fullDownloadBtn = el("a", { class: "btn", href: "/api/backup", download: "velinx-backup.json" }, t("Download full backup"));
+  // firmware reflash or migrating to another WayHop instance.
+  const fullDownloadBtn = el("a", { class: "btn", href: "/api/backup", download: "wayhop-backup.json" }, t("Download full backup"));
   const fullFileInput = el("input", { type: "file", accept: "application/json,.json", style: "display:none" });
   const fullRestoreBtn = el("button", { class: "btn", type: "button" }, t("Restore full backup…"));
   fullRestoreBtn.addEventListener("click", () => fullFileInput.click());
@@ -4373,8 +6008,8 @@ async function renderSettings(view) {
     let parsed;
     try { parsed = JSON.parse(await f.text()); }
     catch { fullFileInput.value = ""; return toast(t("That file is not valid JSON."), "err"); }
-    if (parsed.velinx_backup !== 1) { fullFileInput.value = ""; return toast(t("That is not a Velinx full backup."), "err"); }
-    if (!confirm(t("Restore your whole setup from this backup? It replaces all connections, groups and routing lists (validated first). Nothing is applied automatically — review it, then press Apply. Your panel address and access settings are NOT changed."))) { fullFileInput.value = ""; return; }
+    if (parsed.wayhop_backup !== 1) { fullFileInput.value = ""; return toast(t("That is not a WayHop full backup."), "err"); }
+    if (!await modalConfirm(t("Restore your whole setup from this backup? It replaces all connections, groups and routing lists (validated first). Nothing is applied automatically — review it, then press Apply. Your panel address and access settings are NOT changed."))) { fullFileInput.value = ""; return; }
     try {
       const r = await api.post("/api/backup/restore", parsed);
       toast(t("Restored {0} connections, {1} groups, {2} servers — review and press Apply to activate.", r.endpoints, r.groups, r.servers), "ok");
@@ -4385,7 +6020,7 @@ async function renderSettings(view) {
   });
   view.appendChild(el("div", { class: "card" },
     el("div", { class: "card-title", style: "margin-bottom:8px" }, t("Full backup (everything)")),
-    el("div", { class: "hint", style: "margin-bottom:6px" }, t("Save your whole setup — connections, failover groups, routing lists, saved servers and routing mode — to one file. Ideal before a firmware reflash or when moving to another Velinx. Restoring validates everything first and never applies on its own; you review it and press Apply.")),
+    el("div", { class: "hint", style: "margin-bottom:6px" }, t("Save your whole setup — connections, failover groups, routing lists, saved servers and routing mode — to one file. Ideal before a firmware reflash or when moving to another WayHop. Restoring validates everything first and never applies on its own; you review it and press Apply.")),
     el("div", { class: "hint", style: "margin-bottom:12px" }, t("The backup file contains your connection secrets (keys, passwords) — keep it private. Daemon access settings (panel port and host allow-list) are NOT changed by a restore.")),
     el("div", { style: "display:flex;gap:10px;flex-wrap:wrap;align-items:center" },
       fullDownloadBtn, fullRestoreBtn, fullFileInput)));
@@ -4394,7 +6029,7 @@ async function renderSettings(view) {
   restartBtn.addEventListener("click", restartService);
   view.appendChild(el("div", { class: "card" },
     el("div", { class: "card-title", style: "margin-bottom:10px" }, t("Service")),
-    el("div", { class: "hint", style: "margin-bottom:12px" }, t("Restart the whole Velinx daemon (panel + proxy core). The web panel drops for a few seconds while the init system brings it back; this page reconnects automatically. (Not available in the demo.)")),
+    el("div", { class: "hint", style: "margin-bottom:12px" }, t("Restart the whole WayHop daemon (panel + proxy core). The web panel drops for a few seconds while the init system brings it back; this page reconnects automatically. (Not available in the demo.)")),
     restartBtn));
 
   view.appendChild(errBox);
@@ -4414,6 +6049,7 @@ async function loadProfile() {
   // Nested: a group's members can be null too (dashboard/Failover call .map on it).
   p.groups.forEach(g => { g.members = g.members || []; });
   state.profile = p;
+  updateDirty();
 }
 async function loadHealth() { state.health = await api.get("/api/health"); updateStatusPill(); }
 
@@ -4447,6 +6083,7 @@ async function init() {
   });
   i18nObserve();
   translateChrome();
+  refreshPluginNav(); // inject nav items for any installed plugin modules (P5)
   route();
 }
 init();

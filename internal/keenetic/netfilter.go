@@ -5,24 +5,24 @@ import (
 	"os"
 	"strings"
 
-	"velinx/internal/atomicfile"
+	"wayhop/internal/atomicfile"
 )
 
-// netfilter.go installs Velinx's NDM netfilter.d re-apply hook. KeeneticOS NDM rebuilds
+// netfilter.go installs WayHop's NDM netfilter.d re-apply hook. KeeneticOS NDM rebuilds
 // netfilter periodically and on every config change, WIPING any iptables rules added from
 // /opt (the red-team's "NDM rebuild silently kills LAN-through-TUN" hole — this is why the
-// live S89/keen-pbr re-assert their rules from a netfilter.d hook + a 1-min cron). Velinx
+// live S89/keen-pbr re-assert their rules from a netfilter.d hook + a 1-min cron). WayHop
 // installs its own hook so the LAN-through-TUN forwarding survives every rebuild.
 
 // NetfilterHookOptions configure the hook.
 type NetfilterHookOptions struct {
-	Path     string // default /opt/etc/ndm/netfilter.d/40-velinx.sh
+	Path     string // default /opt/etc/ndm/netfilter.d/40-wayhop.sh
 	TunIface string // the routing TUN device; default "wr-tun"
 }
 
 func (o *NetfilterHookOptions) defaults() {
 	if o.Path == "" {
-		o.Path = "/opt/etc/ndm/netfilter.d/40-velinx.sh"
+		o.Path = "/opt/etc/ndm/netfilter.d/40-wayhop.sh"
 	}
 	if o.TunIface == "" {
 		o.TunIface = "wr-tun"
@@ -35,8 +35,8 @@ func (o *NetfilterHookOptions) defaults() {
 func wrNetfilterHookScript(tun string) string {
 	var b strings.Builder
 	b.WriteString("#!/opt/bin/sh\n")
-	b.WriteString("# Velinx — re-assert LAN-through-TUN forwarding after NDM netfilter rebuilds.\n")
-	b.WriteString("# Auto-generated; do not edit. Removed on Velinx teardown.\n")
+	b.WriteString("# WayHop — re-assert LAN-through-TUN forwarding after NDM netfilter rebuilds.\n")
+	b.WriteString("# Auto-generated; do not edit. Removed on WayHop teardown.\n")
 	fmt.Fprintf(&b, "IF=%s\n", tun)
 	b.WriteString(`ip link show "$IF" >/dev/null 2>&1 || exit 0` + "\n")
 	b.WriteString(`if [ "$table" = "filter" ]; then` + "\n")
@@ -60,7 +60,7 @@ func InstallNetfilterHook(opt NetfilterHookOptions) error {
 	return nil
 }
 
-// RemoveNetfilterHook deletes the hook (Velinx teardown). A missing file is not an error.
+// RemoveNetfilterHook deletes the hook (WayHop teardown). A missing file is not an error.
 func RemoveNetfilterHook(opt NetfilterHookOptions) error {
 	opt.defaults()
 	if err := os.Remove(opt.Path); err != nil && !os.IsNotExist(err) {

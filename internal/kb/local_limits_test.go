@@ -3,7 +3,7 @@ package kb
 import "testing"
 
 // TestLocalPortAndFdEntries: the two router-failure entries match their representative log lines
-// (Velinx's own :7890/:9090 binding, and fd exhaustion) and carry a cause + fix, while NOT
+// (WayHop's own :7890/:9090 binding, and fd exhaustion) and carry a cause + fix, while NOT
 // firing on the provisioned-inbound port conflict (which has its own dedicated entry).
 func TestLocalPortAndFdEntries(t *testing.T) {
 	matches := []struct{ line, wantID string }{

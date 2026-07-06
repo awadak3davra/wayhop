@@ -3,7 +3,7 @@ name: ci
 # Comprehensive per-element quality gates. Complements build.yml (which runs the
 # unit tests, cross-compiles the 5 router arches, and publishes releases). Here we
 # add the checks build.yml lacks: format/vet, fuzzing, the real sing-box config
-# validation for every protocol, source-builds of the engine binaries Velinx
+# validation for every protocol, source-builds of the engine binaries WayHop
 # orchestrates (so a broken/upgraded olcRTC or amneziawg-go is caught in CI), and
 # informational static analysis (golangci-lint / govulncheck / shellcheck).
 on:
@@ -60,13 +60,32 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with: { go-version: '${{ env.GO_VERSION }}', cache: false}
-      - name: Fuzz smoke (importer + exporter targets)
+      - name: Fuzz smoke (untrusted-input parsers)
         run: |
           set -euo pipefail
           go test -run=^$ -fuzz=^FuzzParse$             -fuzztime=25s ./internal/importer/
           go test -run=^$ -fuzz=^FuzzParseSubscription$ -fuzztime=25s ./internal/importer/
+          # The other pasted-config importers (their doc-contract is "never panic/hang on untrusted input").
+          go test -run=^$ -fuzz=^FuzzParseClash$        -fuzztime=25s ./internal/importer/
+          go test -run=^$ -fuzz=^FuzzParseConf$         -fuzztime=25s ./internal/importer/
+          go test -run=^$ -fuzz=^FuzzParseSingbox$      -fuzztime=25s ./internal/importer/
           go test -run=^$ -fuzz=^FuzzExportRoundTrip$   -fuzztime=25s ./internal/exporter/
           go test -run=^$ -fuzz=^FuzzExportOddParams$   -fuzztime=25s ./internal/exporter/
+          # IPTV M3U parser: fed arbitrary upstream + user-supplied (Xtream/custom) playlists.
+          go test -run=^$ -fuzz=^FuzzParse$             -fuzztime=25s ./internal/iptv/
+
+  # --- validate the embedded vanilla-JS UI (build.yml embeds web/dist into the binary but never
+  # exercises the JS, so a SyntaxError or a broken i18n dict would ship a broken UI on a green build) ---
+  ui:
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v6
+      - name: node --check every embedded dist script
+        run: |
+          set -euo pipefail
+          for f in web/dist/*.js; do node --check "$f"; echo "  ok: $f"; done
+      - name: i18n completeness (every language has every IPTV key, placeholders preserved)
+        run: node scripts/check-i18n.mjs
 
   # --- shellcheck the install / init scripts (informational until clean) ---
   scripts:
@@ -78,7 +97,11 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck
           shellcheck packaging/*.sh packaging/openwrt/*.sh \
-                     packaging/S99velinx packaging/openwrt/velinx.init
+                     packaging/S99wayhop packaging/openwrt/wayhop.init
+          # the feed pack scripts + maintainer scripts run as ROOT on user routers — lint them too
+          shellcheck -s sh packaging/feed/*.sh \
+                     packaging/feed/postinst packaging/feed/postinst.apk \
+                     packaging/feed/prerm packaging/feed/prerm.apk packaging/feed/postupgrade.apk
 
   # --- validate EVERY protocol against the real sing-box core, on BOTH the
   # deployed 1.12.x line AND 1.13.x (which REMOVED the legacy wireguard outbound).
@@ -91,7 +114,7 @@ jobs:
       fail-fast: false
       matrix:
         # 1.12.17 = the version on the AX3000T today; 1.13.13 = the line that
-        # removed the wireguard outbound. Bump deliberately when Velinx moves.
+        # removed the wireguard outbound. Bump deliberately when WayHop moves.
         singbox: ['1.12.17', '1.13.13']
     steps:
       - uses: actions/checkout@v6
@@ -112,7 +135,7 @@ jobs:
         run: go test -run 'TestAllProtocolsGenerate|TestGeneratorTransportMatrix|TestClashSubscriptionGenerate|TestWireGuardConfGenerate|TestSourceRuleSingBoxCheck' -count=1 ./internal/generator/
 
   # --- validate the clash subscription EXPORT against the real mihomo (clash-meta) client ---
-  # The export was previously only round-trip tested (re-imported into Velinx); this runs
+  # The export was previously only round-trip tested (re-imported into WayHop); this runs
   # `mihomo -t` on a generated subscription (incl. the failover proxy-groups) so a field a real
   # clash client rejects is caught before users are. mihomo is pinned; bump deliberately.
   clash-export-check:
@@ -132,7 +155,7 @@ jobs:
       - name: mihomo -t on the exported clash subscription
         run: go test -run TestClashExportMihomo -count=1 ./internal/exporter/
 
-  # --- source-build the engine binaries Velinx orchestrates ---
+  # --- source-build the engine binaries WayHop orchestrates ---
   # Heavy (olcRTC pulls a large WebRTC stack and needs Go 1.26), so it is skipped
   # on PRs to keep them fast and runs on push / the weekly schedule / manual.
   engines:

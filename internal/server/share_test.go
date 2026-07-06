@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/config"
-	"velinx/internal/model"
-	"velinx/internal/store"
+	"wayhop/internal/config"
+	"wayhop/internal/model"
+	"wayhop/internal/store"
 )
 
 // sharehandlers_server builds a minimal *Server backed by a temp config.json and

@@ -1,0 +1,9 @@
+#!/bin/sh
+# apk pre-deinstall: stop + disable the service BEFORE the binary/init are removed. Without this,
+# `apk del wayhop` deletes the files under a live daemon: the deleted-inode process keeps running
+# unmanaged (holding :8088 / nft state) and the rc.d boot symlink is left dangling. Mirrors the
+# opkg prerm (apk has no IPKG_INSTROOT equivalent, so no guard). /etc/wayhop is deliberately NOT
+# touched — remove never purges user config.
+/etc/init.d/wayhop stop 2>/dev/null
+/etc/init.d/wayhop disable 2>/dev/null
+exit 0

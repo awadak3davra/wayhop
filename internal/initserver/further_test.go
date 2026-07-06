@@ -162,7 +162,7 @@ func TestBuildScriptStartsWithShebangExactly(t *testing.T) {
 // "WR_CLIENT_CONFIG=" prefix may be stripped; every '=' inside the link must
 // survive intact, or the client config is silently mangled.
 func TestExtractConfigVlessKeepsEmbeddedEquals(t *testing.T) {
-	link := "vless://u@1.2.3.4:443?security=reality&sni=www.microsoft.com&pbk=ABC=&sid=ff00#velinx-server"
+	link := "vless://u@1.2.3.4:443?security=reality&sni=www.microsoft.com&pbk=ABC=&sid=ff00#wayhop-server"
 	got := ExtractConfig("noise\nWR_PROTO=vless-reality\nWR_CLIENT_CONFIG=" + link + "\ntail")
 	if got != link {
 		t.Fatalf("embedded '=' mangled.\n got=%q\nwant=%q", got, link)
@@ -262,7 +262,7 @@ func TestExtractConfigsAlwaysNonNil(t *testing.T) {
 // without leaking the password even when one is supplied.
 func TestOneLinerPasswordBranchShape(t *testing.T) {
 	line := OneLiner(Creds{Host: "srv", Port: 2200, User: "ada", Password: "hunter2"})
-	for _, want := range []string{"-p 2200", "ada@srv", "velinx-install.sh", "sshpass"} {
+	for _, want := range []string{"-p 2200", "ada@srv", "wayhop-install.sh", "sshpass"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("password one-liner missing %q: %q", want, line)
 		}

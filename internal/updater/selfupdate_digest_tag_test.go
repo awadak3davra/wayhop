@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// TestMain lets the test binary double as a sanity-runnable Velinx binary: SelfUpdate
+// TestMain lets the test binary double as a sanity-runnable WayHop binary: SelfUpdate
 // stages the downloaded binary and runs `<staged> -version`, requiring a parseable version
 // in the output. When this process is re-exec'd with a leading "-version" arg we print a
 // version and exit, so a full SelfUpdate (present-digest) path can install + sanity-check the
@@ -18,7 +18,7 @@ import (
 func TestMain(m *testing.M) {
 	for _, a := range os.Args[1:] {
 		if a == "-version" || a == "--version" {
-			os.Stdout.WriteString("velinx 9.9.9 (self-update test stub)\n")
+			os.Stdout.WriteString("wayhop 9.9.9 (self-update test stub)\n")
 			os.Exit(0)
 		}
 	}
@@ -49,10 +49,10 @@ func TestSelfUpdate_PresentDigestVerifiesAndInstalls(t *testing.T) {
 	const tag = "v0.2.0"
 	arch := "amd64"
 	bin := selfUpdateFakeBinary(t)
-	tgz := updaterinstall_tarGz(t, "velinx-0.2.0-amd64", "velinx-"+arch, bin)
+	tgz := updaterinstall_tarGz(t, "wayhop-0.2.0-amd64", "wayhop-"+arch, bin)
 
-	assetName := "velinx-0.2.0-" + arch + ".tar.gz"
-	assetURL := "https://github.com/awadak3davra/velinx/releases/download/" + tag + "/" + assetName
+	assetName := "wayhop-0.2.0-" + arch + ".tar.gz"
+	assetURL := "https://github.com/awadak3davra/wayhop/releases/download/" + tag + "/" + assetName
 	assetPathSuffix := "/" + assetName
 	rel := updaterinstall_releaseJSON(t, tag, []Asset{
 		{Name: assetName, URL: assetURL, Digest: updaterinstall_sha256(tgz), Size: int64(len(tgz))},
@@ -64,7 +64,7 @@ func TestSelfUpdate_PresentDigestVerifiesAndInstalls(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	exePath := filepath.Join(dir, "velinx")
+	exePath := filepath.Join(dir, "wayhop")
 	if err := os.WriteFile(exePath, []byte("OLD-BINARY"), 0o755); err != nil {
 		t.Fatalf("seed current exe: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestSelfUpdate_PresentDigestVerifiesAndInstalls(t *testing.T) {
 	u := New(dir, arch, nil)
 	u.hc = &http.Client{Transport: rt}
 
-	got, err := u.SelfUpdate(context.Background(), "awadak3davra/velinx", tag, exePath)
+	got, err := u.SelfUpdate(context.Background(), "awadak3davra/wayhop", tag, exePath)
 	if err != nil {
 		t.Fatalf("SelfUpdate (present digest): %v", err)
 	}
@@ -95,8 +95,8 @@ func TestSelfUpdate_PresentDigestVerifiesAndInstalls(t *testing.T) {
 	if string(bak) != "OLD-BINARY" {
 		t.Errorf("backup = %q, want OLD-BINARY", bak)
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".velinx.new")); !os.IsNotExist(err) {
-		t.Errorf("leftover .velinx.new after swap")
+	if _, err := os.Stat(filepath.Join(dir, ".wayhop.new")); !os.IsNotExist(err) {
+		t.Errorf("leftover .wayhop.new after swap")
 	}
 }
 
@@ -107,10 +107,10 @@ func TestSelfUpdate_EmptyDigestRefused(t *testing.T) {
 	const tag = "v0.2.0"
 	arch := "amd64"
 	bin := selfUpdateFakeBinary(t)
-	tgz := updaterinstall_tarGz(t, "velinx-0.2.0-amd64", "velinx-"+arch, bin)
+	tgz := updaterinstall_tarGz(t, "wayhop-0.2.0-amd64", "wayhop-"+arch, bin)
 
-	assetName := "velinx-0.2.0-" + arch + ".tar.gz"
-	assetURL := "https://github.com/awadak3davra/velinx/releases/download/" + tag + "/" + assetName
+	assetName := "wayhop-0.2.0-" + arch + ".tar.gz"
+	assetURL := "https://github.com/awadak3davra/wayhop/releases/download/" + tag + "/" + assetName
 	assetPathSuffix := "/" + assetName
 	// Digest intentionally empty -> mirror channel is the only trust root -> refuse.
 	rel := updaterinstall_releaseJSON(t, tag, []Asset{
@@ -123,7 +123,7 @@ func TestSelfUpdate_EmptyDigestRefused(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	exePath := filepath.Join(dir, "velinx")
+	exePath := filepath.Join(dir, "wayhop")
 	if err := os.WriteFile(exePath, []byte("OLD-BINARY"), 0o755); err != nil {
 		t.Fatalf("seed current exe: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestSelfUpdate_EmptyDigestRefused(t *testing.T) {
 	u := New(dir, arch, nil)
 	u.hc = &http.Client{Transport: rt}
 
-	_, err := u.SelfUpdate(context.Background(), "awadak3davra/velinx", tag, exePath)
+	_, err := u.SelfUpdate(context.Background(), "awadak3davra/wayhop", tag, exePath)
 	if err == nil {
 		t.Fatal("SelfUpdate accepted an asset with no digest; want refusal")
 	}
@@ -145,8 +145,8 @@ func TestSelfUpdate_EmptyDigestRefused(t *testing.T) {
 	if _, err := os.Stat(exePath + ".bak"); !os.IsNotExist(err) {
 		t.Errorf("a backup was written despite refusal")
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".velinx.new")); !os.IsNotExist(err) {
-		t.Errorf("a staged .velinx.new was written despite refusal")
+	if _, err := os.Stat(filepath.Join(dir, ".wayhop.new")); !os.IsNotExist(err) {
+		t.Errorf("a staged .wayhop.new was written despite refusal")
 	}
 }
 

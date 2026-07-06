@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // run_real_test.go exercises the REAL process paths of the plugin Manager
@@ -398,6 +398,44 @@ func TestPluginrun_StopAllKillsRealProcess(t *testing.T) {
 	// on Unix; on Windows Kill on a dead handle also errors. We just assert StopAll
 	// awaited the exit above, which is the observable contract.
 	_ = proc
+}
+
+// TestPluginrun_StopByBinStopsMatchingPlugin: StopByBin stops only the plugin(s) launched from a
+// given engine binary (so that binary can be removed/updated without an orphan), and a non-matching
+// name is a no-op. This is the plugin-side of the updater's stop-before-mutate.
+func TestPluginrun_StopByBinStopsMatchingPlugin(t *testing.T) {
+	cfgDir := t.TempDir()
+	binDir := t.TempDir()
+	pluginrun_buildOlcStub(t, binDir)
+	m := New(cfgDir, binDir)
+	m.Sync([]Spec{{ID: "olc1", Endpoint: pluginrun_olcEndpoint("olc1"), SOCKSPort: 17911}})
+	pluginrun_waitFor(t, "olc1 running", func() bool { return pluginrun_isRunning(m, "olc1") })
+
+	if n := m.StopByBin("some-other-binary"); n != 0 {
+		t.Errorf("StopByBin(non-matching) = %d, want 0", n)
+	}
+	if !pluginrun_isRunning(m, "olc1") {
+		t.Fatal("olc1 must still run after a non-matching StopByBin")
+	}
+
+	m.mu.Lock()
+	binName := m.procs["olc1"].binName
+	done := m.procs["olc1"].done
+	m.mu.Unlock()
+	if n := m.StopByBin(binName); n != 1 {
+		t.Errorf("StopByBin(%q) = %d, want 1", binName, n)
+	}
+	if got := m.Status(); len(got) != 0 {
+		t.Errorf("Status() after StopByBin = %+v, want empty", got)
+	}
+	select {
+	case <-done:
+	default:
+		t.Fatal("process exit not awaited after StopByBin")
+	}
+	if n := m.StopByBin(binName); n != 0 {
+		t.Errorf("second StopByBin = %d, want 0 (already stopped)", n)
+	}
 }
 
 // TestPluginrun_SyncChangedSpecRestartsProcess verifies that Sync with a CHANGED

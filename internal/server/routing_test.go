@@ -9,21 +9,21 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/clash"
-	"velinx/internal/config"
-	"velinx/internal/core"
-	"velinx/internal/health"
-	"velinx/internal/serverstore"
-	"velinx/internal/store"
-	"velinx/internal/traffic"
-	"velinx/web"
+	"wayhop/internal/clash"
+	"wayhop/internal/config"
+	"wayhop/internal/core"
+	"wayhop/internal/health"
+	"wayhop/internal/serverstore"
+	"wayhop/internal/store"
+	"wayhop/internal/traffic"
+	"wayhop/web"
 )
 
 // These tests live in package server, so the real exported constructor New and
 // the real Server type are referenced directly (unqualified) — no self-import.
 
 // routing_newServer builds a FULL *Server through the real server.New
-// constructor, wiring every dependency the way cmd/velinx/main.go does but rooted in
+// constructor, wiring every dependency the way cmd/wayhop/main.go does but rooted in
 // t.TempDir() so the suite stays entirely offline and leaves nothing behind.
 //
 // Key choices that keep it offline + deterministic:
@@ -198,7 +198,7 @@ func TestRouting_IndexServesEmbeddedUI(t *testing.T) {
 	if !strings.Contains(body, "<!doctype html>") {
 		t.Errorf("response is not the index doctype: %.120q", body)
 	}
-	if !strings.Contains(body, "Velinx") {
+	if !strings.Contains(body, "WayHop") {
 		t.Errorf("response does not contain the UI title: %.200q", body)
 	}
 	if !strings.Contains(body, `src="app.js"`) {
@@ -233,7 +233,7 @@ func TestRouting_UnknownAPIPath404(t *testing.T) {
 		t.Fatalf("GET /api/does-not-exist: got %d, want 404 (%s)", code, body)
 	}
 	// Must not have fallen through to serving the SPA index.
-	if strings.Contains(body, "Velinx") {
+	if strings.Contains(body, "WayHop") {
 		t.Errorf("unknown api path leaked the UI index: %.200q", body)
 	}
 }
@@ -269,7 +269,7 @@ func TestRouting_WrongMethodOnMethodScopedRoute(t *testing.T) {
 			resp.StatusCode, string(body))
 	}
 	// It must NOT have served the SPA index in place of a 404.
-	if strings.Contains(string(body), "Velinx") {
+	if strings.Contains(string(body), "WayHop") {
 		t.Errorf("wrong-method request leaked the UI index: %.200q", string(body))
 	}
 }

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // extEndpoint is the canonical adopted-native-tunnel endpoint: EngineExternal,

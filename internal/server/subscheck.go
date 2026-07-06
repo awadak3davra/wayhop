@@ -12,7 +12,7 @@ import (
 func subscriptionVerdict(refreshHours int, last time.Time, errStr string, now time.Time) (status, summary, fix string) {
 	if errStr != "" {
 		return "warn", "last subscription refresh failed: " + errStr,
-			"Velinx couldn't re-fetch your subscription, so it may be missing servers your provider rotated in. Check the subscription URL is reachable from the router (the DNS/reachability diagnostics help) or re-import it."
+			"WayHop couldn't re-fetch your subscription, so it may be missing servers your provider rotated in. Check the subscription URL is reachable from the router (the DNS/reachability diagnostics help) or re-import it."
 	}
 	if last.IsZero() {
 		return "pass", "auto-refresh enabled; not run yet", ""
@@ -28,7 +28,7 @@ func subscriptionVerdict(refreshHours int, last time.Time, errStr string, now ti
 
 // subscriptionCheck is a Diagnostics-battery probe for an auto-refreshing subscription: it flags a
 // failing or stalled refresh, which silently leaves your endpoint list outdated (the provider rotated
-// servers but Velinx never re-fetched) — a confusing "my servers stopped working" failure.
+// servers but WayHop never re-fetched) — a confusing "my servers stopped working" failure.
 // Read-only; pass/skip when no auto-refreshing subscription is configured.
 func (s *Server) subscriptionCheck(_ context.Context) healthRow {
 	row := healthRow{ID: "subscription", Label: "Subscription auto-refresh is healthy"}

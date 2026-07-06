@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/importer"
-	"velinx/internal/model"
+	"wayhop/internal/importer"
+	"wayhop/internal/model"
 )
 
 // TestAnyTLSRoundTrip: an AnyTLS endpoint exports to an anytls:// link that re-imports to the same

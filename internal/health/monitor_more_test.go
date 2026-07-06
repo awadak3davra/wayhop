@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/clash"
-	"velinx/internal/model"
-	"velinx/internal/store"
+	"wayhop/internal/clash"
+	"wayhop/internal/model"
+	"wayhop/internal/store"
 )
 
 // health_logs is a fake LogSource returning a fixed set of lines, newest last.

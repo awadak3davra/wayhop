@@ -14,7 +14,7 @@ func TestCutover_SuccessThenRollback(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(`{"outbounds":[{"tag":"orig-hy2"}]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	hookPath := filepath.Join(dir, "40-velinx.sh")
+	hookPath := filepath.Join(dir, "40-wayhop.sh")
 	run := &recRunner{}
 	var kApplied, kTorndown bool
 

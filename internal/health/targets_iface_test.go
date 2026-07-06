@@ -3,8 +3,8 @@ package health
 import (
 	"testing"
 
-	"velinx/internal/model"
-	"velinx/internal/util"
+	"wayhop/internal/model"
+	"wayhop/internal/util"
 )
 
 // TestTargetsResolveKernelIface: an AmneziaWG endpoint must get its kernel iface so it is probed via

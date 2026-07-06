@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // All servers / keys here are SYNTHETIC.

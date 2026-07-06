@@ -43,12 +43,18 @@ func TestParseSystemUnavailable(t *testing.T) {
 	}
 }
 
-func TestParseMeminfoKB(t *testing.T) {
-	mem := "MemTotal:  80000 kB\nMemAvailable: 40000 kB\n"
-	if got := parseMeminfoKB(mem, "MemTotal:"); got != 80000 {
-		t.Errorf("MemTotal = %d, want 80000", got)
+func TestParseMeminfo(t *testing.T) {
+	// Both keys present (MemFree in between must not confuse the single-pass scan).
+	total, avail := parseMeminfo("MemTotal:  80000 kB\nMemFree: 5000 kB\nMemAvailable: 40000 kB\n")
+	if total != 80000 || avail != 40000 {
+		t.Errorf("parseMeminfo = (%d,%d), want (80000,40000)", total, avail)
 	}
-	if got := parseMeminfoKB(mem, "Missing:"); got != 0 {
-		t.Errorf("missing key = %d, want 0", got)
+	// MemAvailable absent (older kernels) → avail 0, total still read.
+	if total, avail := parseMeminfo("MemTotal:  80000 kB\n"); total != 80000 || avail != 0 {
+		t.Errorf("partial meminfo = (%d,%d), want (80000,0)", total, avail)
+	}
+	// Empty / non-Linux input → both 0, no panic.
+	if total, avail := parseMeminfo(""); total != 0 || avail != 0 {
+		t.Errorf("empty meminfo = (%d,%d), want (0,0)", total, avail)
 	}
 }

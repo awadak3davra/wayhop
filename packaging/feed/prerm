@@ -1,6 +1,6 @@
 #!/bin/sh
 # opkg pre-remove: stop + disable the service on a live device (no-op on the build host).
 [ -n "${IPKG_INSTROOT:-}" ] && exit 0
-/etc/init.d/velinx stop 2>/dev/null
-/etc/init.d/velinx disable 2>/dev/null
+/etc/init.d/wayhop stop 2>/dev/null
+/etc/init.d/wayhop disable 2>/dev/null
 exit 0

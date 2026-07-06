@@ -3,7 +3,7 @@ package importer
 import (
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestParseConf_AWG2 round-trips an AmneziaWG 2.0 [Interface]: S3/S4 stay ints,

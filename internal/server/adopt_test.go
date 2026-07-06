@@ -3,8 +3,8 @@ package server
 import (
 	"testing"
 
-	"velinx/internal/model"
-	"velinx/internal/netvpn"
+	"wayhop/internal/model"
+	"wayhop/internal/netvpn"
 )
 
 // TestEndpointFromDiscovered locks the EngineExternal adoption mapping: an OS-owned
@@ -99,6 +99,25 @@ func TestEndpointFromDiscovered_NamedTunnel(t *testing.T) {
 	}
 	if ip, _ := got.Params["endpoint_ip"].(string); ip != "198.51.100.4" {
 		t.Errorf("params[endpoint_ip] = %q, want %q", ip, "198.51.100.4")
+	}
+}
+
+// TestEndpointFromDiscovered_NDMName locks the native-toggle mapping capture: an
+// NDM-discovered tunnel carries its raw NDM name into params["ndm_name"] (so the managed
+// toggle targets the right interface without guessing), while a wg/awg-dump tunnel with no
+// NDM name gets no such key.
+func TestEndpointFromDiscovered_NDMName(t *testing.T) {
+	ndm := netvpn.DiscoveredVPN{Iface: "nwg5", NDMName: "Wireguard5", Type: "amneziawg", Name: "ND_NL"}
+	got := endpointFromDiscovered(ndm)
+	if n, _ := got.Params["ndm_name"].(string); n != "Wireguard5" {
+		t.Errorf("params[ndm_name] = %q, want %q", n, "Wireguard5")
+	}
+
+	// wg/awg dump (OpenWrt) has no NDM name ⇒ no ndm_name param at all.
+	dump := netvpn.DiscoveredVPN{Iface: "awg0", Type: "amneziawg", PublicKey: "pk"}
+	got2 := endpointFromDiscovered(dump)
+	if _, ok := got2.Params["ndm_name"]; ok {
+		t.Errorf("params[ndm_name] should be absent for a dump-discovered tunnel, got %v", got2.Params["ndm_name"])
 	}
 }
 

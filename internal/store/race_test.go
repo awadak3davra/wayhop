@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // Regression for the Profile() slice-aliasing race: a caller iterating the

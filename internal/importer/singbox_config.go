@@ -22,7 +22,7 @@ import (
 	"strconv"
 	"strings"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // looksLikeSingbox reports whether text is a sing-box config.json: valid JSON whose

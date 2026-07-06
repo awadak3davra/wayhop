@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 func nfqwsEndpoint(params map[string]any) model.Endpoint {

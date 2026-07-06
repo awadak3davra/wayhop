@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestCompile_NativeFirst: an AmneziaWG endpoint becomes a native interface and a non-native
@@ -127,6 +127,6 @@ func TestCompile_AdoptInterfaces(t *testing.T) {
 		t.Errorf("teardown must NOT remove an adopted interface\n%s", td)
 	}
 	if !strings.Contains(td, "no ip route 149.154.160.0 255.255.240.0 nwg3") {
-		t.Errorf("teardown must still remove Velinx's own route\n%s", td)
+		t.Errorf("teardown must still remove WayHop's own route\n%s", td)
 	}
 }

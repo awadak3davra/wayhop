@@ -16,6 +16,7 @@ import (
 func watchdogcomplete_newAt(sup Supervisor, t *time.Time) *Watchdog {
 	w := New("test", sup)
 	w.now = func() time.Time { return *t }
+	w.rng = nil // deterministic backoff (no jitter) for exact nextAttempt timing assertions
 	return w
 }
 

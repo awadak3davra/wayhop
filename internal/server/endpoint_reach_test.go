@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 func reach_hostPort(t *testing.T, rawURL string) (string, int) {

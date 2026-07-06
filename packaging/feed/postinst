@@ -2,6 +2,59 @@
 # opkg post-install. OpenWrt's default_postinst already enables a shipped init.d script; this also
 # STARTS it on a live device. The guard keeps it from running on the build host / inside ImageBuilder.
 [ -n "${IPKG_INSTROOT:-}" ] && exit 0
-/etc/init.d/velinx enable 2>/dev/null
-/etc/init.d/velinx start 2>/dev/null
+
+# One-time migration from a previous "wakeroute"/"velinx"-named install (mirrors install.sh): an
+# install over an old-named box must preserve the user's config + not dual-install. Self-guarding
+# (no-op when neither old name is present, e.g. a fresh install or a wayhop->wayhop upgrade).
+# "velinx" (the newer name most field devices run) is tried first; its dir wins if both exist.
+for _OLD in velinx wakeroute; do
+  [ -x "/etc/init.d/$_OLD" ] || [ -d "/etc/$_OLD" ] || [ -x "/usr/sbin/$_OLD" ] || continue
+  if [ -x "/etc/init.d/$_OLD" ]; then
+    "/etc/init.d/$_OLD" stop 2>/dev/null
+    "/etc/init.d/$_OLD" disable 2>/dev/null
+    rm -f "/etc/init.d/$_OLD"
+  fi
+  [ -d "/etc/$_OLD" ] && [ ! -d /etc/wayhop ] && { mv "/etc/$_OLD" /etc/wayhop 2>/dev/null || { cp -a "/etc/$_OLD" /etc/wayhop && rm -rf "/etc/$_OLD"; }; }
+  [ -d "/var/lib/$_OLD" ] && [ ! -d /var/lib/wayhop ] && { mv "/var/lib/$_OLD" /var/lib/wayhop 2>/dev/null || { cp -a "/var/lib/$_OLD" /var/lib/wayhop && rm -rf "/var/lib/$_OLD"; }; }
+  # Rewrite old paths in EVERY text config -- incl singbox.json's cache_file.path, which the daemon
+  # loads as-is (a stale path crash-loops sing-box on "initialize cache-file"). Never sed cache.db.
+  for _f in /etc/wayhop/config.json /etc/wayhop/singbox.json /etc/wayhop/singbox.json.bak /etc/wayhop/singbox.json.good /etc/wayhop/plugins/*.conf; do
+    [ -f "$_f" ] && sed -i "s#/etc/$_OLD#/etc/wayhop#g; s#/var/lib/$_OLD#/var/lib/wayhop#g" "$_f" 2>/dev/null
+  done
+  command -v nft >/dev/null 2>&1 && nft delete table inet "${_OLD}_pbr" 2>/dev/null || true
+  rm -f "/usr/sbin/$_OLD" "/usr/sbin/$_OLD.bak"
+done
+for _p in $(pgrep -f 'sing-box run' 2>/dev/null); do kill "$_p" 2>/dev/null || true; done
+
+# Seed a minimal config when absent (mirrors install.sh): wayhop.init deliberately refuses to
+# start without /etc/wayhop/config.json (anti-respawn-loop guard), so a FRESH feed install would
+# otherwise be dead-on-arrival. The package never SHIPS /etc/wayhop (protection-by-omission:
+# opkg/apk only touch files they own, so upgrades/removes can't clobber user config) — seeding at
+# postinst keeps that invariant while making first boot work.
+if [ ! -f /etc/wayhop/config.json ]; then
+  mkdir -p /etc/wayhop /var/lib/wayhop
+  _sb="$(command -v sing-box 2>/dev/null || echo /usr/bin/sing-box)"
+  cat > /etc/wayhop/config.json <<JSON
+{
+  "listen": ":8088",
+  "data_dir": "/var/lib/wayhop",
+  "demo": false,
+  "ports": { "ui": 8088, "clash": 9090, "dns": 5353, "mixed": 7890 },
+  "clash": { "controller": "127.0.0.1:9090", "secret": "" },
+  "singbox": { "bin": "$_sb", "config": "/etc/wayhop/singbox.json" },
+  "failsafe": { "target": "1.1.1.1", "auto_reboot": false }
+}
+JSON
+  chmod 0600 /etc/wayhop/config.json 2>/dev/null
+fi
+
+/etc/init.d/wayhop enable 2>/dev/null
+# Adoption: when a pre-package (non-PM) wayhop is ALREADY running, `start` is a procd no-op for an
+# identical instance — the old deleted-inode binary would keep serving until a manual restart.
+# Restart in that case so the packaged binary takes over immediately.
+if /etc/init.d/wayhop running 2>/dev/null; then
+  /etc/init.d/wayhop restart 2>/dev/null
+else
+  /etc/init.d/wayhop start 2>/dev/null
+fi
 exit 0

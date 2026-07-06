@@ -3,7 +3,7 @@ package importer
 import (
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestParse_UppercaseScheme: an upper/mixed-case scheme (VMESS:// / SS://, which other clients

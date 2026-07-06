@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"velinx/internal/importer"
+	"wayhop/internal/importer"
 )
 
 // subRefreshStatus records the outcome of the most recent REAL refresh attempt
@@ -85,7 +85,7 @@ func (s *Server) refreshSubscriptionOnce(ctx context.Context) (added int, err er
 	if err != nil {
 		return 0, fmt.Errorf("%w: build subscription request: %v", errSubConfig, err)
 	}
-	req.Header.Set("User-Agent", "velinx")
+	req.Header.Set("User-Agent", "wayhop")
 
 	resp, err := s.subscriptionFetchClient().Do(req) // SSRF-guarded (blockInternalDial)
 	if err != nil {

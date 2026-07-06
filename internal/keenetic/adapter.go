@@ -7,9 +7,9 @@ import (
 	"os"
 	"sync"
 
-	"velinx/internal/atomicfile"
-	"velinx/internal/model"
-	"velinx/internal/platform"
+	"wayhop/internal/atomicfile"
+	"wayhop/internal/model"
+	"wayhop/internal/platform"
 )
 
 // Backend is the KeeneticOS implementation of platform.RoutingBackend. It compiles a profile

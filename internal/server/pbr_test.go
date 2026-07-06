@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 func TestHandlePBRPreview(t *testing.T) {

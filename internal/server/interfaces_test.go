@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"velinx/internal/model"
+	"wayhop/internal/model"
 )
 
 // TestFilterInterfaces locks the pure filter: loopback dropped, the rest sorted by name with the

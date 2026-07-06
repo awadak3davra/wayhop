@@ -23,7 +23,7 @@ import (
 // Unlike `wg show all dump`, NDM does NOT expose per-peer endpoints, public keys, or
 // transfer counters here — only the interface's identity/state — so discovered NDM tunnels
 // carry no Peers and no PublicKey. This is purely a "which native tunnels exist" signal that
-// lets Velinx treat a Keenetic Wireguard/AmneziaWG interface as an egress.
+// lets WayHop treat a Keenetic Wireguard/AmneziaWG interface as an egress.
 
 // parseNDMInterfaces parses `ndmc -c "show interface"` output, returning one DiscoveredVPN
 // per interface whose NDM type is "Wireguard" (KeeneticOS labels both plain WireGuard and
@@ -73,6 +73,10 @@ func parseNDMInterfaces(out string) []DiscoveredVPN {
 		}
 		res = append(res, DiscoveredVPN{
 			Iface: ndmKernelIface(in.name),
+			// Capture the raw NDM name verbatim: it is the authoritative handle for the
+			// managed-toggle/state path and is NOT recoverable from the derived kernel name
+			// when the tunnel was created by hand with an arbitrary NDM name.
+			NDMName: in.name,
 			// KeeneticOS "Wireguard" interfaces carry AmneziaWG params; classify as
 			// amneziawg (plain "wireguard" would also be acceptable).
 			Type: "amneziawg",
