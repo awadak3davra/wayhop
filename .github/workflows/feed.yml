@@ -148,6 +148,15 @@ jobs:
           } > feed/index.html
           echo "feed tree:"; find feed -maxdepth 3 -type f | sort
 
+      # peaceiris/actions-gh-pages hard-codes ssh-agent's socket at /tmp/ssh-auth.sock. On a
+      # PERSISTENT self-hosted runner that path survives between jobs, so a prior feed run leaves a
+      # stale socket and the next deploy dies on "cannot bind ... Address already in use". Clear any
+      # stale agent + socket first so the deploy is idempotent across runs on the same runner.
+      - name: Clear stale ssh-agent socket (self-hosted runner hygiene)
+        run: |
+          pkill -f 'ssh-agent -a /tmp/ssh-auth.sock' 2>/dev/null || true
+          rm -f /tmp/ssh-auth.sock || true
+
       - name: Deploy to wayhop-feed Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
