@@ -20,16 +20,16 @@
         <div class="bs">proxy control</div>
       </div>
     </div>
-    <div class="nav-item" data-page="dashboard"><span class="ico">▤</span> Dashboard</div>
-    <div class="nav-item" data-page="server"><span class="ico">⊕</span> Set up Server</div>
-    <div class="nav-item" data-page="connections"><span class="ico">⇄</span> Connections</div>
-    <div class="nav-item" data-page="failover"><span class="ico">⛃</span> Failover</div>
-    <div class="nav-item" data-page="routing"><span class="ico">⋔</span> Routing</div>
-    <div class="nav-item" data-page="dns"><span class="ico">⚇</span> DNS</div>
-    <div class="nav-item" data-page="updater"><span class="ico">⭳</span> Updater</div>
-    <div class="nav-item" data-page="diagnostics"><span class="ico">⚠</span> Diagnostics</div>
-    <div class="nav-item" data-page="plugins"><span class="ico">⧉</span> Plugins</div>
-    <div class="nav-item" data-page="settings"><span class="ico">⚙</span> Settings</div>
+    <div class="nav-item" data-page="dashboard"><span class="ico" aria-hidden="true">▤</span> Dashboard</div>
+    <div class="nav-item" data-page="server"><span class="ico" aria-hidden="true">⊕</span> Set up Server</div>
+    <div class="nav-item" data-page="connections"><span class="ico" aria-hidden="true">⇄</span> Connections</div>
+    <div class="nav-item" data-page="failover"><span class="ico" aria-hidden="true">⛃</span> Failover</div>
+    <div class="nav-item" data-page="routing"><span class="ico" aria-hidden="true">⋔</span> Routing</div>
+    <div class="nav-item" data-page="dns"><span class="ico" aria-hidden="true">⚇</span> DNS</div>
+    <div class="nav-item" data-page="updater"><span class="ico" aria-hidden="true">⭳</span> Updater</div>
+    <div class="nav-item" data-page="diagnostics"><span class="ico" aria-hidden="true">⚠</span> Diagnostics</div>
+    <div class="nav-item" data-page="plugins"><span class="ico" aria-hidden="true">⧉</span> Plugins</div>
+    <div class="nav-item" data-page="settings"><span class="ico" aria-hidden="true">⚙</span> Settings</div>
     <div class="grow"></div>
     <div class="foot" id="foot">wayhop —</div>
   </aside>
@@ -43,8 +43,8 @@
       <button class="btn btn-ghost" id="applybtn" title="Apply live — not saved, reverts on reboot or if connectivity drops">Apply</button>
       <button class="btn btn-primary" id="applysavebtn" title="Apply and persist as the saved baseline">Apply &amp; Save</button>
     </header>
-    <div id="failsafe-banner" style="display:none;padding:14px 24px 0"></div>
-    <div id="apply-error" style="display:none"></div>
+    <div id="failsafe-banner" role="alert" aria-live="assertive" style="display:none"></div>
+    <div id="apply-error" role="alert" aria-live="assertive" style="display:none"></div>
     <div class="content" id="view"></div>
   </main>
 </div>

@@ -167,6 +167,35 @@ func (s *Server) handleDeleteRoutingList(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": id})
 }
 
+// handleUpsertDeviceGroup adds/replaces a device group (named MAC/IP set that RoutingLists scope to).
+// Validates the members at the boundary (400) so a malformed group can never brick Apply.
+func (s *Server) handleUpsertDeviceGroup(w http.ResponseWriter, r *http.Request) {
+	var g model.DeviceGroup
+	if err := json.NewDecoder(r.Body).Decode(&g); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid device group JSON")
+		return
+	}
+	if err := model.ValidateDeviceGroup(g); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.store.UpsertDeviceGroup(g); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, g)
+}
+
+// handleDeleteDeviceGroup removes a device group; the store prunes its id from any list's scope.
+func (s *Server) handleDeleteDeviceGroup(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.store.DeleteDeviceGroup(id); err != nil {
+		writeErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": id})
+}
+
 // routingCatalog{Once,JSON,ETag} memoize the marshaled preset catalog + its content ETag.
 // model.RoutingPresets() is a build-constant (a hardcoded slice, no config/time/rand), so the
 // JSON is identical for the whole process life — marshal it once and let the browser 304 it.

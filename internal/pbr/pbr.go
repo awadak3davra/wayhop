@@ -67,6 +67,10 @@ type Zone struct {
 	SrcIface  []string `json:"src_iface,omitempty"`
 	SrcPort   []int    `json:"src_port,omitempty"`
 	SrcScoped bool     `json:"src_scoped,omitempty"`
+	// SrcNegate inverts the source match — the zone marks traffic NOT from the source predicates
+	// (renders `ether/ip saddr != …`). Used for a RoutingList's "except" scope: mark for EVERY device
+	// except the group's members (AND of negations = the De Morgan of the group's any-member OR).
+	SrcNegate bool `json:"src_negate,omitempty"`
 }
 
 // Warning flags model content the IP-based Phase-1 compiler does not kernel-route.
@@ -276,7 +280,7 @@ func Compile(p *model.Profile, opt Options) (*Plan, []Warning, error) {
 		iface []string
 		port  []int
 	}
-	addZone := func(name, egTag string, cidrs []string, src *srcSpec, scope string) {
+	addZone := func(name, egTag string, cidrs []string, src *srcSpec, negate bool, scope string) {
 		v4, v6, bad := classifyCIDRs(cidrs)
 		// Classify the source CIDRs up front so the no-matcher early-return can keep a source-only
 		// zone (no dest) when the rule still carries a source matcher (ip/mac/iface/port).
@@ -321,6 +325,7 @@ func Compile(p *model.Profile, opt Options) (*Plan, []Warning, error) {
 			z.SrcV4, z.SrcV6 = sv4, sv6
 			z.SrcMAC, z.SrcIface, z.SrcPort = src.mac, src.iface, src.port
 			z.SrcScoped = true
+			z.SrcNegate = negate
 		}
 		plan.Zones = append(plan.Zones, z)
 	}
@@ -376,10 +381,37 @@ func Compile(p *model.Profile, opt Options) (*Plan, []Warning, error) {
 			// Build a zone when there is a dest OR a source matcher (source-only zone). addZone's
 			// early-return drops a zone that ends up with neither after classification.
 			if len(cidrsForZone) > 0 || src != nil {
-				addZone("rule_"+nftName(r.ID), r.Outbound, cidrsForZone, src, r.ID)
+				addZone("rule_"+nftName(r.ID), r.Outbound, cidrsForZone, src, false, r.ID)
 			}
 		}
 	}
+	// Device-scope resolver: a RoutingList's ScopeGroups → the member MACs + IPs of its groups.
+	// "only" narrows the list to those devices. MAC-identified and IP-identified members are emitted
+	// as SEPARATE source-scoped zones so they OR (a device matches by MAC OR by IP), matching the
+	// group's any-member semantics — the engine ANDs SrcMAC with SrcV4 within ONE zone, so they can't
+	// share a zone. "except" is not kernel-negated yet (P8) → applies to all + a warning.
+	devGroupByID := make(map[string]*model.DeviceGroup, len(p.DeviceGroups))
+	for i := range p.DeviceGroups {
+		devGroupByID[p.DeviceGroups[i].ID] = &p.DeviceGroups[i]
+	}
+	scopeMembers := func(rl *model.RoutingList) (macs, ips []string) {
+		for _, gid := range rl.ScopeGroups {
+			g := devGroupByID[gid]
+			if g == nil {
+				continue
+			}
+			for _, m := range g.Members {
+				if mac := strings.TrimSpace(m.MAC); mac != "" {
+					macs = append(macs, mac)
+				}
+				if ip := strings.TrimSpace(m.IP); ip != "" {
+					ips = append(ips, ip)
+				}
+			}
+		}
+		return
+	}
+
 	for i := range p.RoutingLists {
 		rl := &p.RoutingLists[i]
 		if !rl.Enabled {
@@ -399,14 +431,52 @@ func Compile(p *model.Profile, opt Options) (*Plan, []Warning, error) {
 		if len(cidrs) == 0 {
 			continue
 		}
+		// Resolve device scope. "only" routes just for the group members (as MAC + IP zones); an
+		// "only" scope that resolves to no device routes for nobody. "all"/"" (and "except", for now)
+		// route for everyone.
+		var scopeMAC, scopeIP []string
+		scopeKind := "" // "" (all clients), "only", or "except"
+		switch rl.ScopeMode {
+		case "only":
+			scopeMAC, scopeIP = scopeMembers(rl)
+			if len(scopeMAC) == 0 && len(scopeIP) == 0 {
+				warn(rl.ID, "device scope resolves to no MAC/IP — list not kernel-routed")
+				continue
+			}
+			scopeKind = "only"
+		case "except":
+			scopeMAC, scopeIP = scopeMembers(rl)
+			if len(scopeMAC) > 0 || len(scopeIP) > 0 {
+				scopeKind = "except"
+			} // "except nobody" (no members) resolves to everyone ⇒ leave unscoped (route all)
+		}
 		if k, _, ok := resolveEgress(rl.ID, rl.Outbound); ok && k != "" {
 			cidrList := cidrs
 			if k == EgressInterface && egressV4OnlyPosture(p, rl.Outbound) {
 				// v4-only fail-closed posture (EngineExternal, or a positively-v4-only AmneziaWG).
 				cidrList, _, _ = classifyCIDRs(cidrList)
 			}
-			if len(cidrList) > 0 {
-				addZone("list_"+nftName(rl.ID), rl.Outbound, cidrList, nil, rl.ID)
+			if len(cidrList) == 0 {
+				continue
+			}
+			base := "list_" + nftName(rl.ID)
+			switch scopeKind {
+			case "only":
+				// Separate MAC / IP source zones so they OR (see the scopeMembers comment).
+				if len(scopeMAC) > 0 {
+					addZone(base+"_dm", rl.Outbound, cidrList, &srcSpec{mac: scopeMAC}, false, rl.ID)
+				}
+				if len(scopeIP) > 0 {
+					addZone(base+"_di", rl.Outbound, cidrList, &srcSpec{cidrs: scopeIP}, false, rl.ID)
+				}
+			case "except":
+				// ONE NEGATED zone: mark for every source NOT in the group (ether saddr != macs AND ip
+				// saddr != ips = De Morgan of the members' OR). Kernel-enforced; on a pure sing-box
+				// egress in tun-only mode the excluded group can't be negated in sing-box (documented
+				// limit — use an AmneziaWG/kernel egress for reliable except).
+				addZone(base, rl.Outbound, cidrList, &srcSpec{mac: scopeMAC, cidrs: scopeIP}, true, rl.ID)
+			default:
+				addZone(base, rl.Outbound, cidrList, nil, false, rl.ID)
 			}
 		}
 	}

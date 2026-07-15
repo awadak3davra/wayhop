@@ -35,6 +35,31 @@ func TestDhcpDevices(t *testing.T) {
 	}
 }
 
+// TestParseARP: the cross-platform ARP fallback keeps complete LAN-bridge private entries (MAC
+// lowercased), and drops the header row, incomplete entries, non-bridge (WAN) devices, public IPs
+// and zero MACs — so a WAN neighbour never appears in the LAN device picker.
+func TestParseARP(t *testing.T) {
+	in := strings.Join([]string{
+		"IP address       HW type     Flags       HW address            Mask     Device",
+		"192.168.1.50     0x1         0x2         AA:BB:CC:DD:EE:FF     *        br-lan", // kept, lowercased
+		"192.168.1.60     0x1         0x2         11:22:33:44:55:66     *        br0",    // kept (Keenetic bridge)
+		"192.168.1.70     0x1         0x0         de:ad:be:ef:00:11     *        br-lan", // incomplete flag → skip
+		"10.0.0.1         0x1         0x2         de:ad:be:ef:00:99     *        eth0",   // non-bridge (WAN) → skip
+		"8.8.8.8          0x1         0x2         de:ad:be:ef:00:aa     *        br-lan", // public IP → skip
+		"192.168.1.80     0x1         0x2         00:00:00:00:00:00     *        br-lan", // zero MAC → skip
+	}, "\n")
+	got := parseARP(in)
+	if len(got) != 2 {
+		t.Fatalf("want 2 LAN devices, got %d: %+v", len(got), got)
+	}
+	if got[0].MAC != "aa:bb:cc:dd:ee:ff" || got[0].IP != "192.168.1.50" || got[0].Hostname != "" {
+		t.Errorf("got[0] = %+v", got[0])
+	}
+	if got[1].MAC != "11:22:33:44:55:66" {
+		t.Errorf("got[1] = %+v", got[1])
+	}
+}
+
 // TestHandleDevices checks the endpoint wiring: 200 + a decodable {devices:[...]} payload (empty
 // when the lease file is absent, e.g. on the dev/CI host).
 func TestHandleDevices(t *testing.T) {

@@ -440,6 +440,28 @@ func Generate(p *model.Profile, opts Options) (*Result, error) {
 	return res, nil
 }
 
+// listScopeIPs returns the IP/CIDR members of a routing list's scope groups — the only device-scope
+// dimension sing-box can match (MAC/iface are kernel-only). Empty for an unscoped list or a MAC-only
+// scope. Blank entries are dropped by the caller's addIf.
+func listScopeIPs(p *model.Profile, rl *model.RoutingList) []string {
+	if len(rl.ScopeGroups) == 0 {
+		return nil
+	}
+	byID := make(map[string][]model.DeviceMember, len(p.DeviceGroups))
+	for i := range p.DeviceGroups {
+		byID[p.DeviceGroups[i].ID] = p.DeviceGroups[i].Members
+	}
+	var ips []string
+	for _, gid := range rl.ScopeGroups {
+		for _, m := range byID[gid] {
+			if ip := strings.TrimSpace(m.IP); ip != "" {
+				ips = append(ips, ip)
+			}
+		}
+	}
+	return ips
+}
+
 // routingFrom turns the profile's RoutingLists into sing-box route.rule_set
 // entries and the route rules that reference them. Reject (block) lists are
 // emitted before route lists so a block always wins. A list contributes a remote
@@ -451,6 +473,20 @@ func routingFrom(p *model.Profile, hybrid bool) (sets []map[string]any, rules []
 		rl := &p.RoutingLists[i]
 		if !rl.Enabled {
 			continue
+		}
+		// Device scoping on the sing-box plane: only source_ip_cidr is expressible (MAC/iface are
+		// kernel-only). An "only" scope that resolves to MAC-only (no IP members) has no sing-box
+		// source expression — a dest-only rule would over-match every in-TUN client hitting the dest,
+		// so this list contributes nothing to sing-box (the kernel plane scopes it; MAC-in-TUN is a
+		// documented limit; fast-mode LAN never reaches sing-box rules anyway). Compute early + skip
+		// before building any rule_set so we don't leave orphan sets. "except" isn't source-negated on
+		// the sing-box plane yet (P8), so its rule stays dest-only (routes for all — matches the pbr warn).
+		var scopeIPs []string
+		if rl.ScopeMode == "only" {
+			scopeIPs = listScopeIPs(p, rl)
+			if len(scopeIPs) == 0 {
+				continue
+			}
 		}
 		// Hybrid: a manual IP list pointed at a kernel egress is kernel-routed by pbr
 		// (same CIDRs, same egress) — drop it from sing-box. Only when it is PURELY IPs
@@ -504,6 +540,7 @@ func routingFrom(p *model.Profile, hybrid bool) (sets []map[string]any, rules []
 			continue
 		}
 		rule := map[string]any{"rule_set": tags}
+		addIf(rule, "source_ip_cidr", scopeIPs) // "only"-scope IP members; nil/empty for unscoped/except → no-op
 		if isBlock(rl.Outbound) {
 			rule["action"] = "reject"
 			rejects = append(rejects, rule)

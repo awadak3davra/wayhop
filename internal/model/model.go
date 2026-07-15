@@ -212,6 +212,30 @@ type RoutingList struct {
 	// its schedule from it across daemon restarts — without it a router restarted more often than
 	// a list's interval would NEVER auto-refresh. 0 = never refreshed.
 	CIDRRefreshed int64 `json:"cidr_refreshed,omitempty"`
+	// Scope narrows this list to specific devices instead of ALL clients. ScopeMode "" or "all" =
+	// everyone (byte-identical to today for existing profiles); "only" = ONLY devices in the referenced
+	// DeviceGroups; "except" = everyone EXCEPT them (kernel nft negation — a fast-follow). ScopeGroups
+	// holds DeviceGroup IDs. Resolves to the pbr source-scoped-zone Src* fields at compile time; a
+	// SourceMAC member is same-L2 only. An empty/unset scope keeps today's all-clients behaviour.
+	ScopeMode   string   `json:"scope_mode,omitempty"`
+	ScopeGroups []string `json:"scope_groups,omitempty"`
+}
+
+// DeviceMember identifies one LAN device by MAC and/or IP; at least one must be set. MAC is the stable,
+// IP-independent matcher (nft `ether saddr`; same-L2 clients only), IP/CIDR is broader and survives
+// behind a repeater. Both set ⇒ that device on that address.
+type DeviceMember struct {
+	MAC string `json:"mac,omitempty"` // e.g. aa:bb:cc:dd:ee:ff
+	IP  string `json:"ip,omitempty"`  // IPv4/IPv6 address or CIDR
+}
+
+// DeviceGroup is a named set of LAN devices (e.g. "Kids", "IoT"). A RoutingList references groups via
+// ScopeGroups to apply or block that list only for those devices. Persisted in the Profile; a group
+// with no members matches nothing.
+type DeviceGroup struct {
+	ID      string         `json:"id"`
+	Name    string         `json:"name"`
+	Members []DeviceMember `json:"members,omitempty"`
 }
 
 // Profile is the whole user configuration.
@@ -220,6 +244,9 @@ type Profile struct {
 	Groups       []Group       `json:"groups"`
 	Rules        []Rule        `json:"rules"`
 	RoutingLists []RoutingList `json:"routing_lists,omitempty"`
+	// DeviceGroups: named sets of LAN devices (MAC/IP) a RoutingList can scope to (apply/block a list
+	// for only those devices). omitempty ⇒ nil ⇒ byte-identical for existing profiles.
+	DeviceGroups []DeviceGroup `json:"device_groups,omitempty"`
 	// DNS is the optional DNS plane (the "DNS" panel section). POINTER + omitempty is the
 	// backward-compat lever: nil ⇒ marshals to nothing ⇒ existing profiles byte-identical ⇒ the
 	// generator emits no dns block (today's behaviour). See dns.go.

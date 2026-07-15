@@ -67,6 +67,9 @@ button { font-family:inherit; }
 .topbar .title { font-size:15px; font-weight:600; }
 .topbar .spacer { flex:1; }
 .content { padding:var(--content-pad); width:100%; }
+/* Fail-safe / apply banners sit above .content and align to its horizontal padding. Kept in CSS (not
+   inline) so the mobile rule below (max-width:760px) can narrow it — an inline padding would outrank it. */
+#failsafe-banner { padding:14px 24px 0; }
 
 /* pills + badges */
 .pill { display:inline-flex; align-items:center; gap:8px; padding:4px 11px; border-radius:var(--radius-sm);
@@ -291,7 +294,7 @@ canvas.graph { width:100%; height:200px; display:block; border:1px solid var(--p
 .field { margin-bottom:14px; max-width:480px; }
 .field:has(textarea) { max-width:780px; }
 .field label { display:block; font-size:var(--fs-small); color:var(--ink-2); margin-bottom:6px; }
-input[type=text], input[type=number], select, textarea {
+input[type=text], input[type=password], input[type=number], input[type=search], select, textarea {
   width:100%; background:var(--card-2); border:1px solid var(--divider); border-radius:var(--radius-sm);
   color:var(--ink); padding:9px 11px; font-size:var(--fs-control); font-family:inherit; }
 textarea { min-height:90px; resize:vertical; }
@@ -393,6 +396,15 @@ input:disabled, select:disabled, textarea:disabled { opacity:.6; cursor:not-allo
 .block-head .ttl { font-size:var(--fs-xl); font-weight:600; color:var(--ink); letter-spacing:var(--ls-tight); }
 .block-head .desc { font-size:var(--fs-small); color:var(--ink-2); margin-top:3px; max-width:60ch; }
 .block-head .side { flex:none; display:flex; gap:8px; align-items:center; }
+/* The .side action cluster is flex:none (its buttons can't shrink); on the Routing/DNS pages that
+   cluster is wide enough that between ~761px and the desktop breakpoint — with the sidebar still
+   present — it can't sit beside the title and the whole page overflows horizontally (iPad portrait
+   768px hits this). Wrap the cluster below the title from here up to 980px (the mobile <=760px block
+   repeats this for its own layout reset). */
+@media (max-width:980px) {
+  .block-head { flex-wrap:wrap; }
+  .block-head .side { width:100%; }
+}
 /* hint was --ink-3 (the dimmest ink) which fell below comfortable contrast at 12px
    in both themes; --ink-2 reads clearly while still staying quieter than body ink,
    so the muted-helper hierarchy is preserved. */
@@ -401,7 +413,10 @@ input:disabled, select:disabled, textarea:disabled { opacity:.6; cursor:not-allo
 /* Routing page — fixed-column "table" so the Route via / Download via dropdowns
    align in their own columns on every row, instead of flowing inline after the
    variable-width source text (which drifted them left/right by ~200px per row). */
-.rltable { display:flex; flex-direction:column; }
+.rltable { display:flex; flex-direction:column; overflow-x:auto; }
+/* The fixed-column grid rows have a ~700px min-content width (46px + 180 + 150 + 150 + actions);
+   above lets the table scroll horizontally instead of overflowing the page on tablet widths (761–950px)
+   where the content column is narrower than that minimum. */
 .rlhead, .rlrow { display:grid; grid-template-columns:46px minmax(180px,1.6fr) minmax(150px,1fr) minmax(150px,1fr) auto; gap:14px; align-items:center; }
 .rlhead { padding:4px 0 10px; font-size:var(--fs-caption); text-transform:uppercase; letter-spacing:.6px; color:var(--ink-3); border-bottom:1px solid var(--divider); }
 .rlrow { padding:14px 0; border-bottom:1px solid var(--divider); }
@@ -474,7 +489,10 @@ input:disabled, select:disabled, textarea:disabled { opacity:.6; cursor:not-allo
 .rm-table .lat-ok { color:var(--ok); }
 .rm-table .lat-warn { color:var(--warn); }
 .rm-table .lat-err { color:var(--err); }
-@media (max-width:480px){
+/* Stack at 760px — the app's mobile-layout breakpoint (see below) — not 480px, else the 481–760px
+   range (large phones/foldables, where the page is already in mobile/full-width mode) shows a cramped
+   4-column table inside the modal. */
+@media (max-width:760px){
   .rm-table, .rm-table tbody, .rm-table tr, .rm-table td { display:block; width:100%; }
   .rm-table thead { display:none; }
   .rm-table tr { border:1px solid var(--divider); border-radius:8px; margin-bottom:8px; padding:2px 0; }
@@ -607,8 +625,10 @@ input:disabled, select:disabled, textarea:disabled { opacity:.6; cursor:not-allo
   /* modal -> bottom sheet, full-width, sticky footer */
   .modal-backdrop { place-items:end center; }
   .modal { width:100vw; max-width:none; max-height:92vh; max-height:92dvh; border-radius:14px 14px 0 0; }
-  .tabs { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
-  /* compact font/padding so 3 labels (incl. long "Subscription") fit on a 320px modal
+  .tabs { display:grid; grid-auto-flow:column; grid-auto-columns:1fr; gap:6px; }
+  /* column-per-tab (not a fixed 3-col grid) so blocks with 2 tabs — e.g. the SSH-credentials
+     Paste-key/Password pair — split full width evenly instead of leaving a dead 3rd column.
+     compact font/padding so 3 labels (incl. long "Subscription") still fit on a 320px modal
      while keeping the >=44px tap height */
   .tab { min-height:44px; display:flex; align-items:center; justify-content:center; text-align:center;
     padding:0 6px; font-size:var(--fs-small); line-height:1.2; }

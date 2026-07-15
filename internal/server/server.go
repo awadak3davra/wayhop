@@ -139,6 +139,8 @@ func (s *Server) Handler() http.Handler {
 	// Routing lists (the "Routing" page): list CRUD + the preset catalog.
 	mux.HandleFunc("POST /api/routing", s.handleUpsertRoutingList)
 	mux.HandleFunc("DELETE /api/routing/{id}", s.handleDeleteRoutingList)
+	mux.HandleFunc("POST /api/device-groups", s.handleUpsertDeviceGroup)
+	mux.HandleFunc("DELETE /api/device-groups/{id}", s.handleDeleteDeviceGroup)
 	mux.HandleFunc("GET /api/routing/catalog", s.handleRoutingCatalog)
 	mux.HandleFunc("GET /api/routing/status", s.handleRoutingStatus)
 	mux.HandleFunc("POST /api/routing/refresh", s.handleRoutingRefresh)

@@ -76,8 +76,14 @@ func TestCatalogM3Us(t *testing.T) {
 	if u, _ := CatalogM3Us("category:news"); !strings.Contains(u[0], "/categories/news.m3u") {
 		t.Fatalf("wrong path: %q", u[0])
 	}
+	if u, ok := CatalogM3Us("region:eur"); !ok || !strings.Contains(u[0], "/regions/eur.m3u") {
+		t.Fatalf("region:eur must resolve to an iptv-org regions URL, got %v", u)
+	}
+	if u, ok := CatalogM3Us("provider:freetv"); !ok || !strings.Contains(u[0], "Free-TV/IPTV/master/playlist.m3u8") {
+		t.Fatalf("provider:freetv must resolve to the Free-TV playlist, got %v", u)
+	}
 	// unknown kind / code / malformed → refused (no URL leaks)
-	for _, bad := range []string{"region:eur", "language:zzz", "category:", "foo", "language", ":rus", ""} {
+	for _, bad := range []string{"region:zzz", "provider:nope", "language:zzz", "category:", "foo", "language", ":rus", ""} {
 		if urls, ok := CatalogM3Us(bad); ok {
 			t.Fatalf("CatalogM3Us(%q) must be refused, got %v", bad, urls)
 		}
@@ -92,8 +98,8 @@ func TestCatalogM3Us(t *testing.T) {
 
 func TestCatalogKinds(t *testing.T) {
 	kinds := CatalogKinds()
-	if len(kinds) != 2 {
-		t.Fatalf("expected 2 kinds (language, category), got %d", len(kinds))
+	if len(kinds) != 4 {
+		t.Fatalf("expected 4 kinds (language, category, region, provider), got %d", len(kinds))
 	}
 	for _, k := range kinds {
 		if k.Kind == "" || k.Label == "" || len(k.Entries) == 0 {

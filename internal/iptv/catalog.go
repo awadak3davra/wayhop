@@ -101,17 +101,20 @@ func CountryM3Us(code string) ([]string, bool) {
 	return iptvOrgPlaylist("countries/" + c), true
 }
 
-// catalogKinds are the iptv-org taxonomies BEYOND per-country: category + language playlists, each a
-// single publicly-listed, auto-updating iptv-org list — the same trusted source + legal posture as the
-// country catalog, just a different slice. Regions are deliberately excluded (a region playlist is
-// huge — often megabytes — and redundant with the countries it contains). A List references these as
-// "kind:code" tokens (e.g. "language:rus", "category:news"); code sets were verified live against
-// iptv-org (a code it stops publishing simply 404s at fetch time, handled gracefully upstream).
+// catalogKinds are the taxonomies BEYOND per-country: language + category + region playlists (all from
+// iptv-org — the same trusted, publicly-listed, auto-updating source + legal posture as the country
+// catalog, just a different slice), plus a small "provider" kind for hand-curated free-to-air GitHub
+// playlists (Free-TV) that share the same free-to-air posture. A List references these as "kind:code"
+// tokens (e.g. "language:rus", "category:news", "region:eur", "provider:freetv"); each kind carries its
+// own m3us resolver, and every URL is a compile-time shape (only the allowlisted code varies) so the
+// SSRF boundary holds. NB region playlists are large (often several MB) and overlap the countries they
+// contain — the big-list warning + category-cut UI keep them usable on weak player devices.
 var catalogKinds = []struct {
-	kind, label, path string
-	names             map[string]string
+	kind, label string
+	names       map[string]string
+	m3us        func(code string) []string // allowlisted code -> playlist URLs (primary + mirror), compile-time shapes only
 }{
-	{"language", "Language", "languages", map[string]string{
+	{"language", "Language", map[string]string{
 		"rus": "Russian", "eng": "English", "ara": "Arabic", "fas": "Persian", "spa": "Spanish",
 		"fra": "French", "deu": "German", "por": "Portuguese", "ita": "Italian", "tur": "Turkish",
 		"hin": "Hindi", "zho": "Chinese", "ukr": "Ukrainian", "pol": "Polish", "ron": "Romanian",
@@ -120,15 +123,43 @@ var catalogKinds = []struct {
 		"ind": "Indonesian", "msa": "Malay", "jpn": "Japanese", "kor": "Korean", "aze": "Azerbaijani",
 		"kaz": "Kazakh", "uzb": "Uzbek", "hye": "Armenian", "kat": "Georgian", "tgk": "Tajik",
 		"kir": "Kyrgyz", "tuk": "Turkmen", "ben": "Bengali", "urd": "Urdu", "tam": "Tamil",
-	}},
-	{"category", "Category", "categories", map[string]string{
+	}, func(c string) []string { return iptvOrgPlaylist("languages/" + c) }},
+	{"category", "Category", map[string]string{
 		"news": "News", "sports": "Sports", "movies": "Movies", "music": "Music", "kids": "Kids",
 		"entertainment": "Entertainment", "documentary": "Documentary", "general": "General",
 		"comedy": "Comedy", "culture": "Culture", "education": "Education", "lifestyle": "Lifestyle",
 		"science": "Science", "series": "Series", "travel": "Travel", "weather": "Weather",
 		"religious": "Religious", "cooking": "Cooking", "outdoor": "Outdoor", "relax": "Relax",
 		"business": "Business", "animation": "Animation", "classic": "Classic", "family": "Family",
-	}},
+	}, func(c string) []string { return iptvOrgPlaylist("categories/" + c) }},
+	// Continental / geopolitical slices (iptv-org regions/*.m3u). A curated, non-redundant subset — the
+	// mega-lists (WW/UN/EMEA ≈ "everything") are left out. CIS + Central Asia matter for this user base.
+	{"region", "Region", map[string]string{
+		"cis": "Commonwealth of Independent States", "eur": "Europe", "eu": "European Union",
+		"balkan": "Balkans", "nord": "Nordics", "cee": "Central & Eastern Europe",
+		"asia": "Asia", "sea": "Southeast Asia", "cas": "Central Asia", "sas": "South Asia",
+		"eas": "East Asia", "arab": "Arab world", "mena": "Middle East & North Africa",
+		"afr": "Africa", "noram": "North America", "latam": "Latin America", "oce": "Oceania",
+	}, func(c string) []string { return iptvOrgPlaylist("regions/" + c) }},
+	// Hand-curated free-to-air GitHub providers beyond iptv-org (same free-to-air posture, resolved to a
+	// compile-time host/path via providerM3Us so the SSRF boundary still holds).
+	{"provider", "Provider", map[string]string{
+		"freetv": "Free-TV (free-to-air)",
+	}, providerM3Us},
+}
+
+// providerM3Us resolves a curated provider token to its playlist URLs (primary + a jsDelivr mirror).
+// Free-TV is a hand-maintained free-to-air GitHub playlist — same free-to-air posture as iptv-org, a
+// different maintainer. Hosts/paths are hard-coded, so no user-supplied string reaches the fetcher.
+func providerM3Us(code string) []string {
+	switch normCode(code) {
+	case "freetv":
+		return []string{
+			"https://raw.githubusercontent.com/Free-TV/IPTV/master/playlist.m3u8",
+			"https://cdn.jsdelivr.net/gh/Free-TV/IPTV@master/playlist.m3u8",
+		}
+	}
+	return nil
 }
 
 // CatalogM3Us resolves a "kind:code" catalog token (e.g. "language:rus") to its iptv-org playlist URLs
@@ -143,7 +174,9 @@ func CatalogM3Us(token string) ([]string, bool) {
 	for _, k := range catalogKinds {
 		if k.kind == kind {
 			if _, ok := k.names[code]; ok {
-				return iptvOrgPlaylist(k.path + "/" + code), true
+				if urls := k.m3us(code); len(urls) > 0 {
+					return urls, true
+				}
 			}
 			return nil, false
 		}

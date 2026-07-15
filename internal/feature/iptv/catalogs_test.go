@@ -53,8 +53,9 @@ func TestCatalogsEndpointAndCreate(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "language:rus") {
 		t.Fatalf("export missing catalogs: %s", rec.Body)
 	}
-	// An unknown/typo'd token is rejected (matches the country allowlist's strictness).
-	if rec := do(t, mux, "POST", "/api/iptv/lists", `{"catalogs":["region:eur"]}`); rec.Code != http.StatusBadRequest {
+	// An unknown/typo'd token is rejected (matches the country allowlist's strictness). region:eur is
+	// now a VALID token, so use an unknown region code to exercise the reject path.
+	if rec := do(t, mux, "POST", "/api/iptv/lists", `{"catalogs":["region:zzz"]}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("unknown catalog = %d, want 400", rec.Code)
 	}
 }

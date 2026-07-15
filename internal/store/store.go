@@ -89,6 +89,7 @@ func (s *Store) Profile() model.Profile {
 	p.Groups = p.Groups[:len(p.Groups):len(p.Groups)]
 	p.Rules = p.Rules[:len(p.Rules):len(p.Rules)]
 	p.RoutingLists = p.RoutingLists[:len(p.RoutingLists):len(p.RoutingLists)]
+	p.DeviceGroups = p.DeviceGroups[:len(p.DeviceGroups):len(p.DeviceGroups)]
 	return p
 }
 
@@ -110,6 +111,10 @@ func cloneProfile(src *model.Profile) model.Profile {
 	}
 	p.Rules = append([]model.Rule{}, src.Rules...)
 	p.RoutingLists = append([]model.RoutingList{}, src.RoutingLists...)
+	// DeviceGroups: top-level slice cloned so DeleteDeviceGroup's kept[:0] compaction runs on the
+	// writer's private copy. Members + each list's ScopeGroups are shared by reference and only ever
+	// REPLACED wholesale (Upsert swaps the group; DeleteDeviceGroup assigns a fresh ScopeGroups).
+	p.DeviceGroups = append([]model.DeviceGroup{}, src.DeviceGroups...)
 	return p
 }
 
@@ -417,6 +422,71 @@ func (s *Store) DeleteRoutingList(id string) error {
 		return fmt.Errorf("routing list %q not found", id)
 	}
 	p.RoutingLists = kept
+	return s.publish(&p)
+}
+
+// UpsertDeviceGroup adds or replaces a device group (a named MAC/IP set that RoutingLists scope to).
+// Atomic + persisted, copy-on-write; the returned live profile stays read-only.
+func (s *Store) UpsertDeviceGroup(g model.DeviceGroup) error {
+	if g.ID == "" {
+		return errors.New("device group id is required")
+	}
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	p := s.snapshot()
+	for i := range p.DeviceGroups {
+		if p.DeviceGroups[i].ID == g.ID {
+			p.DeviceGroups[i] = g
+			return s.publish(&p)
+		}
+	}
+	p.DeviceGroups = append(p.DeviceGroups, g)
+	return s.publish(&p)
+}
+
+// DeleteDeviceGroup removes a device group and prunes its id from every RoutingList.ScopeGroups. A
+// list whose scope becomes empty under "only"/"except" is reset to all-clients (ScopeMode "") so the
+// profile stays valid — a scoped list can't reference zero groups. Atomic + persisted.
+func (s *Store) DeleteDeviceGroup(id string) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	p := s.snapshot()
+	kept := p.DeviceGroups[:0]
+	found := false
+	for _, g := range p.DeviceGroups {
+		if g.ID == id {
+			found = true
+			continue
+		}
+		kept = append(kept, g)
+	}
+	if !found {
+		return fmt.Errorf("device group %q not found", id)
+	}
+	p.DeviceGroups = kept
+	// Referential integrity: drop the deleted id from each list's scope, REPLACING the slice wholesale
+	// (never mutating the shared original in place — a lock-free reader may still alias it).
+	for i := range p.RoutingLists {
+		sg := p.RoutingLists[i].ScopeGroups
+		if len(sg) == 0 {
+			continue
+		}
+		pruned := make([]string, 0, len(sg))
+		for _, gid := range sg {
+			if gid != id {
+				pruned = append(pruned, gid)
+			}
+		}
+		if len(pruned) == len(sg) {
+			continue // this list didn't reference the deleted group
+		}
+		if len(pruned) == 0 {
+			p.RoutingLists[i].ScopeMode = "" // no groups left → back to all-clients so Validate passes
+			p.RoutingLists[i].ScopeGroups = nil
+		} else {
+			p.RoutingLists[i].ScopeGroups = pruned
+		}
+	}
 	return s.publish(&p)
 }
 

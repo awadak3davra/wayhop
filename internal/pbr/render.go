@@ -72,15 +72,19 @@ func nftIntSet(ns []int) string {
 // none. The caller appends the family-specific `ip/ip6 saddr @<name>_s4/_s6` term after this.
 func (z *Zone) srcMatchPrefix() string {
 	var parts []string
+	op := " " // positive match; " != " inverts every source term for an "except" (negated) zone
+	if z.SrcNegate {
+		op = " != "
+	}
 	if len(z.SrcIface) > 0 {
-		parts = append(parts, "iifname "+nftStrSet(z.SrcIface))
+		parts = append(parts, "iifname"+op+nftStrSet(z.SrcIface))
 	}
 	if len(z.SrcMAC) > 0 {
-		parts = append(parts, "ether saddr "+nftRawSet(z.SrcMAC))
+		parts = append(parts, "ether saddr"+op+nftRawSet(z.SrcMAC))
 	}
 	if len(z.SrcPort) > 0 {
 		// th sport needs a transport header — guard with l4proto so non-tcp/udp packets skip it.
-		parts = append(parts, "meta l4proto { tcp, udp } th sport "+nftIntSet(z.SrcPort))
+		parts = append(parts, "meta l4proto { tcp, udp } th sport"+op+nftIntSet(z.SrcPort))
 	}
 	if len(parts) == 0 {
 		return ""
@@ -175,17 +179,27 @@ func (pl *Plan) RenderNft() string {
 		// source on a v4 dest line), the source can't constrain this family's traffic — emitting
 		// it would mark the dest for every source (an over-route). Skip that line. A zone with no
 		// source IP (plain dest, or iface/mac/port only) is unaffected.
-		if len(z.V4) > 0 && (len(z.SrcV4) > 0 || len(z.SrcV6) == 0) {
+		neg := ""
+		if z.SrcNegate {
+			neg = "!= " // "except" zone: mark for every source NOT in the group's IP set
+		}
+		// Negated (except) zone: ALWAYS emit a family's dest line — the `!=` terms only carve out
+		// exceptions, so a family whose exception lives in the OTHER family (e.g. a v6-only member on
+		// a v4 dest, un-excludable on the v4 plane) still routes everyone in this family. Without the
+		// SrcNegate escape the guard below would drop the line → the whole list silently routes nobody
+		// on that family. Positive zones keep the original cross-family guard (a v6-only source on a v4
+		// dest can't constrain v4, so skip it rather than over-route all v4).
+		if len(z.V4) > 0 && (z.SrcNegate || len(z.SrcV4) > 0 || len(z.SrcV6) == 0) {
 			src := ""
 			if len(z.SrcV4) > 0 {
-				src = fmt.Sprintf("ip saddr @%s_s4 ", z.Name)
+				src = fmt.Sprintf("ip saddr %s@%s_s4 ", neg, z.Name)
 			}
 			fmt.Fprintf(&b, "\t\t%s%sip daddr @%s_4 %s\n", pre, src, z.Name, pl.markSet(z.Mark))
 		}
-		if len(z.V6) > 0 && (len(z.SrcV6) > 0 || len(z.SrcV4) == 0) {
+		if len(z.V6) > 0 && (z.SrcNegate || len(z.SrcV6) > 0 || len(z.SrcV4) == 0) {
 			src := ""
 			if len(z.SrcV6) > 0 {
-				src = fmt.Sprintf("ip6 saddr @%s_s6 ", z.Name)
+				src = fmt.Sprintf("ip6 saddr %s@%s_s6 ", neg, z.Name)
 			}
 			fmt.Fprintf(&b, "\t\t%s%sip6 daddr @%s_6 %s\n", pre, src, z.Name, pl.markSet(z.Mark))
 		}

@@ -29,6 +29,30 @@ const (
 // The bound only bites when the list has a CIDRSource (the flash-relevant kernel feed); a
 // Source-only list's RefreshHours is just sing-box's rule_set update_interval, where any positive
 // value is fine. Enforced at the CRUD boundary, NOT in Validate — see the note there (legacy data).
+// ValidateDeviceGroup validates a single device group — a non-empty id and, per member, a valid MAC
+// and/or IP (≥1 set). Used at the CRUD boundary (a 400 instead of a bricked Apply) AND by Validate
+// (which adds the shared-namespace uniqueness check + wraps the error with the group name).
+func ValidateDeviceGroup(g DeviceGroup) error {
+	if strings.TrimSpace(g.ID) == "" {
+		return fmt.Errorf("id is required")
+	}
+	for _, m := range g.Members {
+		mac, ip := strings.TrimSpace(m.MAC), strings.TrimSpace(m.IP)
+		if mac == "" && ip == "" {
+			return fmt.Errorf("a member needs a MAC or an IP")
+		}
+		if mac != "" {
+			if _, err := net.ParseMAC(mac); err != nil {
+				return fmt.Errorf("invalid MAC %q (e.g. aa:bb:cc:dd:ee:ff)", m.MAC)
+			}
+		}
+		if ip != "" && firstInvalidCIDR([]string{ip}) != "" {
+			return fmt.Errorf("invalid IP/CIDR %q", m.IP)
+		}
+	}
+	return nil
+}
+
 func ValidRefreshHours(rl RoutingList) bool {
 	if rl.CIDRSource == "" || rl.RefreshHours == 0 {
 		return rl.RefreshHours >= 0
@@ -263,6 +287,21 @@ func (p *Profile) Validate() error {
 		return fmt.Errorf("more than one default rule (%d)", defaults)
 	}
 
+	// Device groups (named MAC/IP sets that a RoutingList can scope to). Unique id in the shared
+	// namespace; each member needs a valid MAC and/or IP. Registered before the RoutingLists loop so a
+	// list's scope_groups can be checked against them.
+	devGroups := make(map[string]bool, len(p.DeviceGroups))
+	for _, g := range p.DeviceGroups {
+		if err := ValidateDeviceGroup(g); err != nil {
+			return fmt.Errorf("device group %q: %w", g.Name, err)
+		}
+		if prev, ok := ids[g.ID]; ok {
+			return fmt.Errorf("duplicate id %q (already used by %s)", g.ID, prev)
+		}
+		ids[g.ID] = "device group"
+		devGroups[g.ID] = true
+	}
+
 	// Routing lists (the "Routing" page): unique id, some content, and an
 	// outbound + download interface that resolve to an enabled target/builtin.
 	for _, rl := range p.RoutingLists {
@@ -289,6 +328,20 @@ func (p *Profile) Validate() error {
 		}
 		if !isBuiltin(rl.Outbound) && !enabled[rl.Outbound] {
 			return fmt.Errorf("routing list %q: outbound %q targets a disabled endpoint", rl.ID, rl.Outbound)
+		}
+		// Device scoping: mode enum + referenced groups must exist. "only"/"except" need a group.
+		switch rl.ScopeMode {
+		case "", "all", "only", "except":
+		default:
+			return fmt.Errorf("routing list %q: invalid scope_mode %q (all|only|except)", rl.ID, rl.ScopeMode)
+		}
+		for _, gid := range rl.ScopeGroups {
+			if !devGroups[gid] {
+				return fmt.Errorf("routing list %q: scope references unknown device group %q", rl.ID, gid)
+			}
+		}
+		if (rl.ScopeMode == "only" || rl.ScopeMode == "except") && len(rl.ScopeGroups) == 0 {
+			return fmt.Errorf("routing list %q: scope_mode %q needs at least one device group", rl.ID, rl.ScopeMode)
 		}
 		if rl.DownloadVia != "" {
 			if !isResolvable(rl.DownloadVia, ids) {

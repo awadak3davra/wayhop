@@ -3,6 +3,7 @@ package server
 import (
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"sort"
 	"strings"
@@ -79,13 +80,78 @@ func dhcpDevices(s string) []deviceInfo {
 	return out
 }
 
-// handleDevices lists LAN devices from the DHCP leases (ip/mac/hostname) so the UI can offer a
-// device picker for source-based routing rules instead of hand-typing a MAC/IP. Read-only host
-// probe; an absent lease file (e.g. non-dnsmasq platform) yields an empty list. GET /api/devices.
+// parseARP reads /proc/net/arp into {ip, mac} devices — the cross-platform fallback (OpenWrt +
+// Keenetic + any Linux) for the picker when there's no dnsmasq lease file (Keenetic) or for a device
+// with no current lease. Keeps only COMPLETE entries (flag != 0x0) on a bridge ("br…") LAN device
+// with a private/link-local IP, so WAN neighbours never pollute the LAN list. No hostname (leases
+// supply those). Line format: "IP HWtype Flags HWaddr Mask Device" after a one-line header.
+func parseARP(s string) []deviceInfo {
+	var out []deviceInfo
+	for i, line := range strings.Split(s, "\n") {
+		if i == 0 {
+			continue // header row
+		}
+		f := strings.Fields(line)
+		if len(f) < 6 {
+			continue
+		}
+		ip, flags, mac, dev := f[0], f[2], f[3], f[5]
+		if flags == "0x0" || !strings.HasPrefix(dev, "br") {
+			continue // incomplete entry, or not a LAN bridge (skip WAN/tunnels)
+		}
+		addr, err := netip.ParseAddr(ip)
+		if err != nil || !(addr.IsPrivate() || addr.IsLinkLocalUnicast()) {
+			continue
+		}
+		if _, err := net.ParseMAC(mac); err != nil || mac == "00:00:00:00:00:00" {
+			continue
+		}
+		out = append(out, deviceInfo{IP: ip, MAC: strings.ToLower(mac)})
+	}
+	return out
+}
+
+// handleDevices lists LAN devices for the device picker (source-based routing / per-device list
+// scoping) so the UI offers real devices instead of a hand-typed MAC/IP. Merges the dnsmasq lease
+// file (ip/mac/hostname — OpenWrt) with /proc/net/arp (ip/mac — any platform, incl. Keenetic), deduped
+// by MAC (a lease's hostname wins). Read-only host probe; both sources absent ⇒ an empty list. GET.
 func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
-	devs := []deviceInfo{}
+	byMAC := map[string]int{}
+	var devs []deviceInfo
+	add := func(d deviceInfo) {
+		if d.MAC == "" {
+			return
+		}
+		if idx, ok := byMAC[d.MAC]; ok {
+			if devs[idx].Hostname == "" && d.Hostname != "" {
+				devs[idx].Hostname = d.Hostname
+			}
+			return
+		}
+		byMAC[d.MAC] = len(devs)
+		devs = append(devs, d)
+	}
 	if b, err := os.ReadFile("/tmp/dhcp.leases"); err == nil {
-		devs = dhcpDevices(string(b))
+		for _, d := range dhcpDevices(string(b)) {
+			add(d)
+		}
+	}
+	if b, err := os.ReadFile("/proc/net/arp"); err == nil {
+		for _, d := range parseARP(string(b)) {
+			add(d)
+		}
+	}
+	sort.Slice(devs, func(i, j int) bool {
+		if (devs[i].Hostname == "") != (devs[j].Hostname == "") {
+			return devs[i].Hostname != "" // named devices before unnamed
+		}
+		if devs[i].Hostname != devs[j].Hostname {
+			return devs[i].Hostname < devs[j].Hostname
+		}
+		return devs[i].IP < devs[j].IP
+	})
+	if devs == nil {
+		devs = []deviceInfo{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"devices": devs})
 }
