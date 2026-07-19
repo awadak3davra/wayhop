@@ -68,3 +68,52 @@ func TestClashExportMihomo(t *testing.T) {
 		t.Fatalf("mihomo rejected the exported clash config: %v\n%s", err, strings.TrimSpace(string(out)))
 	}
 }
+
+// TestYamlScalar_QuotesYAMLRetypedTokens: a YAML resolver (yaml.v3, which mihomo uses)
+// re-types bare "007" as int 7, "+7" as 7, "0x1A" as 26, "0o17"/"0b101" as radix ints,
+// a >int64 digit run as a float, and ".inf"/".NaN" as float specials. Left bare, a
+// password/name of that shape reaches a strict clash client as a DIFFERENT string
+// ("007" -> "7" — silent auth failure). yamlScalar must quote every such token; only a
+// canonical base-10 integer (round-trips to identical text) may stay bare.
+func TestYamlScalar_QuotesYAMLRetypedTokens(t *testing.T) {
+	mustQuote := []string{"007", "+7", "0x1A", "0o17", "0b101", "1_000", ".inf", ".Inf", ".NaN", "-.inf", "99999999999999999999"}
+	for _, s := range mustQuote {
+		if got := yamlScalar(s); got == s {
+			t.Errorf("yamlScalar(%q) left bare — a YAML resolver re-types it (want quoted)", s)
+		}
+	}
+	// Canonical ints and ordinary strings stay bare (no noise regression).
+	bare := []string{"42", "0", "password123", "50 Mbps", "aes-256-gcm", "1.2.3.4"}
+	for _, s := range bare {
+		if got := yamlScalar(s); got != s {
+			t.Errorf("yamlScalar(%q) = %q, want bare", s, got)
+		}
+	}
+}
+
+// TestClashExport_LeadingZeroPasswordQuoted: end-to-end guard for the retyping fix — a
+// trojan endpoint whose password is "007" must render with the password QUOTED in the
+// clash YAML and survive a round-trip through our own importer unchanged.
+func TestClashExport_LeadingZeroPasswordQuoted(t *testing.T) {
+	e := model.Endpoint{
+		ID: "t1", Name: "t1", Enabled: true,
+		Engine: model.EngineSingBox, Protocol: model.ProtoTrojan,
+		Server: "1.2.3.4", Port: 443,
+		Params: map[string]any{"password": "007"},
+		TLS:    &model.TLS{Enabled: true, Type: "tls", SNI: "ex.com"},
+	}
+	yaml, _ := ClashConfig([]model.Endpoint{e})
+	if !strings.Contains(yaml, `password: "007"`) {
+		t.Fatalf("password 007 not quoted in clash export:\n%s", yaml)
+	}
+	eps, err := importer.ParseClash(yaml)
+	if err != nil {
+		t.Fatalf("re-import: %v", err)
+	}
+	if len(eps) != 1 {
+		t.Fatalf("re-import: got %d endpoints, want 1", len(eps))
+	}
+	if pw, _ := eps[0].Params["password"].(string); pw != "007" {
+		t.Errorf("round-trip password = %q, want \"007\"", pw)
+	}
+}

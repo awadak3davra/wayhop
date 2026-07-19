@@ -9,8 +9,18 @@ import (
 	"strings"
 	"time"
 
+	"wayhop/internal/model"
 	"wayhop/internal/netdiag"
 )
+
+// handleRealityDests returns the curated catalog of recommended Reality camouflage SNIs so the UI
+// can offer one-click dest picks. Build-constant + non-secret; the picker feeds each choice to
+// POST /api/probe/tls to verify reachability + TLS 1.3 before the user saves.
+//
+//	GET /api/reality/dests → []model.RealityDest
+func (s *Server) handleRealityDests(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, model.RealityDests())
+}
 
 // handleProbeTLS probes a Reality dest/SNI from the router's vantage: is the
 // camouflage site TCP-reachable, does it speak TLS, and does it negotiate TLS 1.3?

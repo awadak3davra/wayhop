@@ -126,7 +126,16 @@ func routingBrainUp(available, running bool) bool {
 
 // handleApplyConfirm commits the live config (user confirmed it works).
 func (s *Server) handleApplyConfirm(w http.ResponseWriter, r *http.Request) {
+	// Commit() writes <config>.good — the fail-safe's rollback baseline. Hold applyMu so it
+	// serializes against handleApply's config swap AND the fail-safe rollback's Restore(), exactly
+	// as copyFile's caller-invariant requires and every other Backup/Restore/Commit caller already
+	// does. Without it, a confirm racing an in-flight apply/rollback could snapshot a stale/half-
+	// applied config as .good (atomicfile keeps each write torn-free, but the LOGICAL ordering still
+	// matters). Scope the lock to just Commit; failsafe.Confirm() must NOT run under applyMu (the
+	// rollback closure takes applyMu — holding it across Confirm would invert the documented order).
+	s.applyMu.Lock()
 	_ = s.singbox.Commit()
+	s.applyMu.Unlock()
 	s.failsafe.Confirm()
 	writeJSON(w, http.StatusOK, map[string]any{"committed": true, "failsafe": s.failsafe.Status()})
 }

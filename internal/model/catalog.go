@@ -59,6 +59,13 @@ func RoutingPresets() []RoutingPreset {
 		srs("svc-tiktok", "TikTok", "https://github.com/itdoginfo/allow-domains/releases/latest/download/tiktok.srs", "domain", service, "TikTok domains.", "proxy"),
 		srs("svc-ai", "Google AI", "https://github.com/itdoginfo/allow-domains/releases/latest/download/google_ai.srs", "domain", service, "Google AI (Gemini) domains.", "proxy"),
 		srs("svc-hdrezka", "HDrezka", "https://github.com/itdoginfo/allow-domains/releases/latest/download/hdrezka.srs", "domain", service, "HDrezka streaming.", "proxy"),
+		srs("svc-crypto", "Crypto / exchanges", "https://github.com/SagerNet/sing-geosite/raw/rule-set/geosite-category-cryptocurrency.srs", "domain", service, "Crypto exchanges, wallets, DeFi/dapps, block explorers and node RPCs (v2fly cryptocurrency category via sing-geosite). Route via a tunnel to reach services that geo-block, or to keep crypto traffic off the local ISP.", "proxy"),
+		// Streaming geo-unblock: these refuse datacenter/VPN IPs, so pair them with a CLEAN residential-ish
+		// egress (e.g. a Cloudflare WARP or Windscribe WG endpoint added under Connections), not a bare VPS.
+		srs("svc-netflix", "Netflix", "https://github.com/SagerNet/sing-geosite/raw/rule-set/geosite-netflix.srs", "domain", service, "Netflix domains — route via a clean/residential egress (e.g. WARP) to bypass its datacenter-IP block.", "proxy"),
+		srs("svc-disney", "Disney+", "https://github.com/SagerNet/sing-geosite/raw/rule-set/geosite-disney.srs", "domain", service, "Disney+ domains — route via a clean egress to reach it where it geo-restricts.", "proxy"),
+		srs("svc-primevideo", "Amazon Prime Video", "https://github.com/SagerNet/sing-geosite/raw/rule-set/geosite-primevideo.srs", "domain", service, "Amazon Prime Video domains — route via a clean egress to bypass geo/VPN blocks.", "proxy"),
+		srs("svc-spotify", "Spotify", "https://github.com/SagerNet/sing-geosite/raw/rule-set/geosite-spotify.srs", "domain", service, "Spotify domains — route abroad where it is unavailable.", "proxy"),
 		// Blocklists.
 		srs("block-ads", "Ads (block)", "https://github.com/itdoginfo/allow-domains/releases/latest/download/block.srs", "domain", junk, "Known ad/track domains — reject.", "block"),
 		srs("block-porn", "Adult (block)", "https://github.com/itdoginfo/allow-domains/releases/latest/download/porn.srs", "domain", junk, "Adult domains — reject.", "block"),

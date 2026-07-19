@@ -140,6 +140,14 @@ func (t *Tester) upload(ctx context.Context, cl *http.Client, bytes int) (time.D
 		return 0, err
 	}
 	defer resp.Body.Close()
+	// Mirror download()'s status validation: a 4xx/5xx (proxy error page, 429 rate-limit, 413
+	// too-large…) means the upload never landed, so timing against the rejection would report a
+	// bogus UpMbps. Return an error instead — Run treats a non-nil upload error as "couldn't
+	// measure" (UpMbps stays 0), best-effort, same as download. (>=400 not strict ==200, since a
+	// successful upload may legitimately answer 204/2xx, unlike __down which returns 200.)
+	if resp.StatusCode >= 400 {
+		return 0, fmt.Errorf("status %d", resp.StatusCode)
+	}
 	return time.Since(start), nil
 }
 

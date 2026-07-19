@@ -200,6 +200,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/netdiag/all", s.handleNetDiagAll)
 	mux.HandleFunc("GET /api/netdiag/stream", s.handleNetDiagStream)
 	mux.HandleFunc("POST /api/probe/tls", s.handleProbeTLS)
+	mux.HandleFunc("GET /api/reality/dests", s.handleRealityDests)
 	mux.HandleFunc("GET /api/kb", s.handleKB)
 
 	// Init Server (R8) — multi-server registry, options, job-based provisioning,
@@ -228,6 +229,7 @@ func (s *Server) Handler() http.Handler {
 	// touches the access-critical config (see backup.go).
 	mux.HandleFunc("GET /api/backup", s.handleBackupExport)
 	mux.HandleFunc("POST /api/backup/restore", s.handleBackupRestore)
+	mux.HandleFunc("GET /api/support-bundle", s.handleSupportBundle)
 	mux.HandleFunc("POST /api/service/restart", s.handleServiceRestart)
 
 	// Engine version manager (Updater) + WayHop self-update.

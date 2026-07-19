@@ -75,6 +75,16 @@ type Subscription struct {
 	RefreshHours int `json:"refresh_hours,omitempty"`
 }
 
+// Backup configures the scheduled LOCAL auto-backup — a safety net so the whole setup
+// (profile + saved servers + routing knobs) is recoverable before a firmware reflash or a
+// bad change. Opt-in: AutoHours<=0 disables it (the default). Never touches routing; only
+// writes files under Dir. Same bundle format as GET /api/backup, restorable via the panel.
+type Backup struct {
+	AutoHours int    `json:"auto_hours,omitempty"` // write a backup every N hours; 0 = OFF (default)
+	KeepN     int    `json:"keep_n,omitempty"`     // retain the newest N backups; <=0 → 14
+	Dir       string `json:"dir,omitempty"`        // backup directory; "" → <DataDir>/backups
+}
+
 // FeatureConfig is the per-plugin state in Config.Features: whether the optional module is
 // installed (Enabled) + an opaque per-module Settings blob the module owns (so the config package
 // stays decoupled from each module's schema). Enabled is toggled via PUT /api/features/{id}.
@@ -121,6 +131,7 @@ type Config struct {
 	FailSafe       FailSafe     `json:"failsafe"`
 	Watchdog       Watchdog     `json:"watchdog"`
 	Subscription   Subscription `json:"subscription"`
+	Backup         Backup       `json:"backup,omitempty"`
 	// AllowedHosts, when non-empty, restricts which Host header values the panel
 	// will serve (host-only, port-stripped, case-insensitive) — a DNS-rebinding
 	// defense (see docs/SECURITY.md). EMPTY (the default) allows any Host, so this

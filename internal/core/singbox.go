@@ -393,10 +393,11 @@ func (s *SingBox) Commit() error {
 //
 // CALLER INVARIANT: Backup/Restore/Commit must be called under the SAME lock that
 // serializes config writes (the server's applyMu — held by handleApply, the fail-safe
-// rollback, and RollbackNow). atomicfile stages to "<dst>.tmp", which on Restore is the
-// very path handleApply also stages to, so a caller that runs these lock-free would race
-// that staging file and could rename a half-written config over the live one. Every
-// current caller holds applyMu; keep it that way.
+// rollback, RollbackNow, and handleApplyConfirm). atomicfile.Write is itself torn-write-safe
+// (it stages to a UNIQUE temp then atomically renames, so concurrent writers can never leave a
+// half-written file), but the invariant still matters for LOGICAL serialization: run lock-free, a
+// Commit could snapshot a config mid-swap (a half-applied .good baseline) and a Restore could race
+// an in-flight apply's write so last-writer-wins the WRONG config. Every caller holds applyMu; keep it that way.
 func copyFile(src, dst string) error {
 	data, err := os.ReadFile(src)
 	if err != nil {

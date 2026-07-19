@@ -11,6 +11,7 @@ package pbr
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 	"sort"
 	"strings"
@@ -323,7 +324,7 @@ func Compile(p *model.Profile, opt Options) (*Plan, []Warning, error) {
 		// dest in the TUN so non-matching clients still reach it.
 		if srcScoped {
 			z.SrcV4, z.SrcV6 = sv4, sv6
-			z.SrcMAC, z.SrcIface, z.SrcPort = src.mac, src.iface, src.port
+			z.SrcMAC, z.SrcIface, z.SrcPort = canonicalMACs(src.mac), src.iface, src.port
 			z.SrcScoped = true
 			z.SrcNegate = negate
 		}
@@ -695,6 +696,30 @@ func normalizeDomains(in []string) []string {
 		}
 	}
 	sort.Strings(out)
+	return out
+}
+
+// canonicalMACs rewrites each source MAC to the lowercase colon form (net.HardwareAddr.String()).
+// model.Validate accepts a MAC in dash ("aa-bb-cc-dd-ee-ff") or dotted ("0123.4567.89ab") form as
+// well as colon form (net.ParseMAC) and only CHECKS — it never rewrites. But BOTH routing planes
+// render the stored string into a colon-only grammar — nft `ether saddr { <mac> }` (render.go) and
+// iptables `-m mac --mac-source <mac>` (render_ipset.go) — so a non-colon MAC yields an INVALID
+// ruleset and the whole apply fails (device-wide, not just that zone). Canonicalizing here — the
+// single point z.SrcMAC is assigned — fixes both planes at once. A never-parseable entry (shouldn't
+// occur post-Validate) passes through trimmed, unchanged (fail-safe, no worse than before).
+func canonicalMACs(macs []string) []string {
+	if len(macs) == 0 {
+		return macs
+	}
+	out := make([]string, len(macs))
+	for i, m := range macs {
+		m = strings.TrimSpace(m)
+		if hw, err := net.ParseMAC(m); err == nil {
+			out[i] = hw.String()
+		} else {
+			out[i] = m
+		}
+	}
 	return out
 }
 

@@ -35,9 +35,11 @@ type backupBundle struct {
 // downloadable JSON attachment. It is served behind the same access gate as the
 // rest of /api (the panel middleware chain). The bundle carries connection
 // secrets by design — it is a PERSONAL backup, not a shareable one.
-func (s *Server) handleBackupExport(w http.ResponseWriter, r *http.Request) {
+// buildBackupBundle assembles the current whole-setup snapshot. Shared by the HTTP export
+// and the scheduled auto-backup loop so both produce an identical, restore-compatible bundle.
+func (s *Server) buildBackupBundle() backupBundle {
 	cfg := s.config()
-	bundle := backupBundle{
+	return backupBundle{
 		Schema:      backupSchemaVersion,
 		Version:     version.Version,
 		Profile:     s.store.Profile(),
@@ -45,7 +47,10 @@ func (s *Server) handleBackupExport(w http.ResponseWriter, r *http.Request) {
 		RoutingMode: cfg.RoutingMode,
 		Gateway:     cfg.Gateway,
 	}
-	data, err := json.MarshalIndent(bundle, "", "  ")
+}
+
+func (s *Server) handleBackupExport(w http.ResponseWriter, r *http.Request) {
+	data, err := json.MarshalIndent(s.buildBackupBundle(), "", "  ")
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "marshal failed: "+err.Error())
 		return

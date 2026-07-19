@@ -744,11 +744,33 @@ func needsQuote(s string) bool {
 	}
 	// A pure integer (e.g. a port or MTU) is fine left bare — clash/our importer
 	// read it back as a scalar either way, and quoting it makes the emitted config
-	// noisier than a hand-written one. A non-integer float-looking token
-	// (e.g. "1.2.3" is not a float; "1.5" is) is quoted below via ParseFloat to
-	// avoid YAML re-typing it.
-	if !isInteger(s) {
+	// noisier than a hand-written one. But ONLY a canonical base-10 integer: a
+	// YAML resolver re-types "007" as int 7 and "+7" as 7 (and a >int64 digit run
+	// as a float), so a leading-zero/plus-signed/overlong "integer" password would
+	// silently reach a strict clash client as a DIFFERENT string. Bare only when
+	// the YAML int round-trips to the identical text.
+	if isInteger(s) {
+		if n, err := strconv.ParseInt(s, 10, 64); err != nil || strconv.FormatInt(n, 10) != s {
+			return true
+		}
+	} else {
+		// A non-integer float-looking token (e.g. "1.2.3" is not a float; "1.5"
+		// is) is quoted via ParseFloat to avoid YAML re-typing it.
 		if _, err := strconv.ParseFloat(s, 64); err == nil {
+			return true
+		}
+		// Tokens Go's ParseFloat rejects but YAML resolvers (yaml.v3 / mihomo)
+		// still re-type: 0x/0o/0b radix ints (+ "1_0" underscore forms — ParseInt
+		// base 0 accepts exactly those) and the .inf/.nan float specials.
+		trimmed := s
+		if trimmed[0] == '+' || trimmed[0] == '-' {
+			trimmed = trimmed[1:]
+		}
+		if _, err := strconv.ParseInt(trimmed, 0, 64); err == nil && trimmed != "" {
+			return true
+		}
+		switch strings.ToLower(trimmed) {
+		case ".inf", ".nan":
 			return true
 		}
 	}

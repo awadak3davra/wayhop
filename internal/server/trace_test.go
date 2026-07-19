@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"wayhop/internal/clash"
@@ -125,8 +126,20 @@ func TestTraceCandidates(t *testing.T) {
 	if len(cands) != 4 {
 		t.Errorf("want 4 candidates, got %d: %+v", len(cands), cands)
 	}
-	if uneval != 2 {
-		t.Errorf("want unevaluated=2 (geo rule + remote list), got %d", uneval)
+	// unevaluated is now the NAMED geo/remote rules+lists (not a bare count), so the trace can say
+	// WHICH rule/list might also match and why.
+	unevGot := map[string]string{}
+	for _, u := range uneval {
+		unevGot[u.Kind+":"+u.ID] = u.Why
+	}
+	if len(uneval) != 2 {
+		t.Errorf("want 2 unevaluated (geo rule + remote list), got %d: %+v", len(uneval), uneval)
+	}
+	if w := unevGot["rule:geo"]; !strings.Contains(w, "geosite") || !strings.Contains(w, "google") {
+		t.Errorf("geo rule should be named with its geosite category, got %q", w)
+	}
+	if _, ok := unevGot["list:remote"]; !ok {
+		t.Errorf("remote list should be named as unevaluated, got %+v", uneval)
 	}
 }
 

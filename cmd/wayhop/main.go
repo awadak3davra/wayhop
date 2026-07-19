@@ -175,6 +175,7 @@ func main() {
 	go srv.SubscriptionRefreshLoop(ctx)                  // re-fetch an imported subscription when auto-refresh is opted in (off by default)
 	go srv.CIDRRefreshLoop(ctx)                          // auto-refresh each routing list's CIDR carve-out on its RefreshHours cadence (default 24h)
 	go srv.PBRReconcileLoop(ctx)                         // self-heal the kernel PBR plane if its nft table is flushed out-of-band (fw4 reload / https-dns-proxy / adblock)
+	go srv.BackupLoop(ctx)                               // scheduled local whole-setup backup when Backup.AutoHours>0 (opt-in, off by default)
 	go srv.StartFeatures(ctx)                            // background loops of installed plugin modules (each no-ops while disabled)
 	// Crash-restart supervision for sing-box (+ best-effort engine plugins).
 	wdDone := make(chan struct{})

@@ -47,7 +47,7 @@ type traceResult struct {
 	Connections  []traceConn      `json:"connections"`
 	Exits        map[string]int   `json:"exits"` // exit tag -> connection count
 	Configured   []traceCandidate `json:"configured,omitempty"`
-	Unevaluated  int              `json:"unevaluated,omitempty"` // geo/remote matchers that may also match
+	Unevaluated  []traceCandidate `json:"unevaluated,omitempty"` // geo/remote-set rules/lists that MAY also match (can't be checked statically)
 	ResolveError string           `json:"resolve_error,omitempty"`
 	Note         string           `json:"note,omitempty"`
 }
@@ -173,10 +173,8 @@ func splitInline(manual []string) (domains, cidrs []string) {
 // traceCandidates lists the configured rules / inline lists / kernel zones that reference the
 // domain or its IPs, plus a count of geo/remote matchers it could not evaluate here. Pure (model
 // + compiled plan passed in) for unit-testing. plan is nil in tun/mixed (no kernel plane).
-func traceCandidates(domain string, ipStrs []string, p *model.Profile, plan *pbr.Plan) ([]traceCandidate, int) {
+func traceCandidates(domain string, ipStrs []string, p *model.Profile, plan *pbr.Plan) (cands, uneval []traceCandidate) {
 	ips := parseAddrs(ipStrs)
-	var cands []traceCandidate
-	unevaluated := 0
 	for i := range p.Rules {
 		r := &p.Rules[i]
 		if r.Disabled || r.Default {
@@ -185,7 +183,9 @@ func traceCandidates(domain string, ipStrs []string, p *model.Profile, plan *pbr
 		if why := matchDomainIP(domain, ips, r.Domain, r.DomainSuffix, r.IPCIDR); why != "" {
 			cands = append(cands, traceCandidate{Kind: "rule", ID: r.ID, Why: why, Outbound: r.Outbound})
 		} else if len(r.GeoSite) > 0 || len(r.GeoIP) > 0 {
-			unevaluated++ // a geo matcher needs the dataset — can't evaluate here
+			// A geo matcher needs the on-router dataset — NAME it (with its categories + where it'd
+			// route) rather than a bare count, so the trace says WHICH rule might also match.
+			uneval = append(uneval, traceCandidate{Kind: "rule", ID: r.ID, Why: geoMatcherWhy(r), Outbound: r.Outbound})
 		}
 	}
 	for i := range p.RoutingLists {
@@ -197,7 +197,7 @@ func traceCandidates(domain string, ipStrs []string, p *model.Profile, plan *pbr
 		if why := matchDomainIP(domain, ips, domains, domains, cidrs); why != "" {
 			cands = append(cands, traceCandidate{Kind: "list", ID: rl.ID, Why: why, Outbound: rl.Outbound})
 		} else if rl.Source != "" || rl.CIDRSource != "" {
-			unevaluated++ // a remote rule-set's contents aren't loaded here
+			uneval = append(uneval, traceCandidate{Kind: "list", ID: rl.ID, Why: "remote rule-set — contents not loaded here", Outbound: rl.Outbound})
 		}
 	}
 	if plan != nil {
@@ -208,7 +208,21 @@ func traceCandidates(domain string, ipStrs []string, p *model.Profile, plan *pbr
 			}
 		}
 	}
-	return cands, unevaluated
+	return cands, uneval
+}
+
+// geoMatcherWhy names a rule's geo matchers (its geosite/geoip categories) — the reason the trace
+// can't confirm the match statically (the dataset isn't loaded here). Actionable: the user sees
+// exactly which geo categories would route this rule and where.
+func geoMatcherWhy(r *model.Rule) string {
+	var parts []string
+	if len(r.GeoSite) > 0 {
+		parts = append(parts, "geosite: "+strings.Join(r.GeoSite, ", "))
+	}
+	if len(r.GeoIP) > 0 {
+		parts = append(parts, "geoip: "+strings.Join(r.GeoIP, ", "))
+	}
+	return strings.Join(parts, "; ") + " — needs the on-router dataset"
 }
 
 // clashTraceMatches finds connections sing-box saw to the traced domain (by sniffed Host, so it

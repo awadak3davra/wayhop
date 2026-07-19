@@ -288,6 +288,14 @@ button,.btn{cursor:pointer;border:1px solid var(--border);border-radius:8px;padd
 .imports .btn{flex:1;background:#0b0e13;color:var(--fg)}
 .imports .btn:hover{border-color:var(--accent)}
 .works{margin:0;color:var(--muted);font-size:12px}
+.setup{margin:0 0 14px;text-align:left;border:1px solid var(--border);border-radius:8px}
+.setup summary{cursor:pointer;color:var(--accent);font-size:13px;font-weight:600;list-style:none;text-align:center;padding:10px}
+.setup summary::-webkit-details-marker{display:none}
+.setup[open] summary{border-bottom:1px solid var(--border)}
+.setup ol.steps{margin:12px 0;padding:0 16px 0 32px;color:var(--muted);font-size:12px}
+.setup ol.steps li{margin:0 0 8px}
+.setup ol.steps b{color:var(--fg)}
+.setup .tip{margin:0;padding:0 16px 12px;color:var(--muted);font-size:11.5px}
 </style>
 </head>
 <body>
@@ -304,6 +312,17 @@ button,.btn{cursor:pointer;border:1px solid var(--border);border-radius:8px;padd
     <a class="btn" href="` + clashHref + `">Import to Clash</a>
     <a class="btn" href="` + singboxHref + `">Import to sing-box</a>
   </div>
+  <details class="setup">
+    <summary>Set up on your device</summary>
+    <ol class="steps">
+      <li><b>iPhone / iPad</b> — install <b>Streisand</b> or <b>sing-box</b> from the App Store, then tap “Import to sing-box” above.</li>
+      <li><b>Android</b> — install <b>v2rayNG</b>, <b>Hiddify</b> or <b>NekoBox</b>, then tap an Import button, or add the URL as a subscription.</li>
+      <li><b>Windows</b> — install <b>v2rayN</b> or <b>Hiddify</b>, then add the copied URL as a subscription.</li>
+      <li><b>macOS</b> — install <b>sing-box</b>, <b>Streisand</b> or <b>Hiddify</b>, then tap “Import to sing-box” or add the URL.</li>
+      <li><b>Linux</b> — install <b>sing-box</b> or <b>NekoRay</b>, then add the copied URL as a subscription.</li>
+    </ol>
+    <p class="tip">No import button on your device? Copy the URL above and paste it as a <b>subscription</b> in your app.</p>
+  </details>
   <p class="works">Works with: sing-box, v2rayN/NG, Clash Meta / Mihomo, Hiddify, Streisand</p>
 </div>
 <script src="/subcopy.js" defer></script>

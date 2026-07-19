@@ -3147,6 +3147,29 @@ function fCheck(id, label, checked) {
 // reachable + TLS 1.3 from the router's vantage before saving.
 const REALITY_FRONTS = ["www.microsoft.com", "www.cloudflare.com", "www.apple.com", "dl.google.com", "www.amazon.com", "aws.amazon.com", "www.bing.com"];
 
+// The daemon ships a richer, single-source curated catalog (model.RealityDests via GET
+// /api/reality/dests) — more entries, each with a human label — so the picker stays maintained in
+// ONE place (Go) instead of drifting from this list. Fetched once + cached; until it loads (or
+// forever, on an old/offline daemon) the datalist falls back to the built-in REALITY_FRONTS above,
+// so the picker always works. label = the vendor name (a proper noun — no i18n needed).
+let REALITY_DESTS_CACHE = null;
+async function loadRealityDests() {
+  if (REALITY_DESTS_CACHE) return REALITY_DESTS_CACHE;
+  try {
+    const r = await api.get("/api/reality/dests");
+    if (Array.isArray(r) && r.length) REALITY_DESTS_CACHE = r;
+  } catch (e) { /* offline / old daemon → keep the REALITY_FRONTS fallback */ }
+  return REALITY_DESTS_CACHE;
+}
+// realityFrontOptions builds the datalist <option>s: the server catalog (value=host, label=name)
+// when loaded, else the built-in REALITY_FRONTS hostnames.
+function realityFrontOptions() {
+  if (REALITY_DESTS_CACHE && REALITY_DESTS_CACHE.length) {
+    return REALITY_DESTS_CACHE.map(d => el("option", { value: d.host, label: d.name || d.host }));
+  }
+  return REALITY_FRONTS.map(d => el("option", { value: d }));
+}
+
 // Reality crypto-field format checks (mirror the generator's validRealityPubKey/validShortID),
 // surfaced inline so a truncated/typo'd paste is caught at input — otherwise the generator
 // silently degrades the endpoint to plain TLS, which fails against a Reality server with no
@@ -3273,7 +3296,16 @@ function manualForm(ep) {
         fInput("f-path", "Path (ws/http)", R.path), fInput("f-host", "Host header (ws/http)", R.host),
         fInput("f-sname", "gRPC service name", R.service_name));
       // Offer the Reality fronts (datalist) + the hint ONLY when security=reality.
-      dyn.appendChild(el("datalist", { id: "f-sni-fronts" }, ...REALITY_FRONTS.map(d => el("option", { value: d }))));
+      const frontsDL = el("datalist", { id: "f-sni-fronts" }, ...realityFrontOptions());
+      dyn.appendChild(frontsDL);
+      // Upgrade the datalist to the server-curated catalog (more + labeled entries) once it loads;
+      // harmless if the fetch never resolves (the REALITY_FRONTS fallback is already rendered).
+      if (!REALITY_DESTS_CACHE) loadRealityDests().then(() => {
+        if (REALITY_DESTS_CACHE && frontsDL.isConnected) {
+          while (frontsDL.firstChild) frontsDL.removeChild(frontsDL.firstChild);
+          realityFrontOptions().forEach(o => frontsDL.appendChild(o));
+        }
+      });
       const secSel = dyn.querySelector("#f-sec"), sniInp = dyn.querySelector("#f-sni");
       const syncFronts = () => {
         const on = secSel && secSel.value === "reality";
@@ -5313,6 +5345,50 @@ async function renderDiagnostics(view) {
     advanced, ndOut));
   if (state.diag) renderDiagOutput(ndOut); // restore a prior / in-flight result
 
+  // "Where does a domain go?" — surfaces the /api/diagnostics/trace explainer (already in the
+  // daemon, previously UI-less): resolve the domain, then show the LIVE connections to its IPs and
+  // the exit each actually took (ground truth from the connection table — it can't lie about the
+  // real exit), plus the configured rules/lists/kernel-zones that reference it. Read-only.
+  const traceIn = el("input", { type: "text", placeholder: t("domain — e.g. youtube.com, chatgpt.com") });
+  const traceOut = el("div", { style: "margin-top:12px" });
+  async function runTrace() {
+    const d = (traceIn.value || "").trim();
+    if (!d) return;
+    traceOut.innerHTML = ""; traceOut.appendChild(el("div", { class: "hint" }, t("tracing…")));
+    try {
+      const r = await api.get("/api/diagnostics/trace?domain=" + encodeURIComponent(d));
+      traceOut.innerHTML = ""; renderTraceResult(traceOut, r);
+    } catch (e) { traceOut.innerHTML = ""; traceOut.appendChild(el("div", { class: "hint", style: "color:var(--err)" }, e.message)); }
+  }
+  traceIn.addEventListener("keydown", e => { if (e.key === "Enter") runTrace(); });
+  view.appendChild(el("div", { class: "card" },
+    el("div", { class: "card-title", style: "margin-bottom:8px" }, t("Where does a domain go?")),
+    el("div", { class: "hint", style: "margin-bottom:12px" }, t("Resolve a domain and see the live connections to it and which exit each actually took, plus the configured rules and lists that match it.")),
+    el("div", { style: "display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap" },
+      el("div", { class: "field", style: "margin:0;flex:1;min-width:240px" }, el("label", {}, t("Domain")), traceIn),
+      el("button", { class: "btn btn-primary", onclick: runTrace }, t("Trace"))),
+    traceOut));
+
+  // "What each device is reaching" — surfaces GET /api/clients/destinations (already in the daemon,
+  // previously UI-less): per LAN client, the external services it recently contacted + the exit each
+  // took. Read-only visibility (the foundation for "add this as a routing rule"). Load-on-demand (a
+  // full conntrack scan), like Log analysis's Load button.
+  const destOut = el("div", { style: "margin-top:12px" });
+  async function scanDests() {
+    destOut.innerHTML = ""; destOut.appendChild(el("div", { class: "hint" }, t("scanning…")));
+    try {
+      const r = await api.get("/api/clients/destinations");
+      destOut.innerHTML = ""; renderClientDests(destOut, r);
+    } catch (e) { destOut.innerHTML = ""; destOut.appendChild(el("div", { class: "hint", style: "color:var(--err)" }, e.message)); }
+  }
+  view.appendChild(el("div", { class: "card" },
+    el("div", { class: "row-between", style: "margin-bottom:8px" },
+      el("div", { class: "card-title" }, t("What each device is reaching")),
+      el("button", { class: "btn btn-sm", onclick: scanDests }, t("Scan"))),
+    el("div", { class: "hint", style: "margin-bottom:4px" },
+      t("Per device on your network: the external services it recently contacted and which exit each took (WAN or a tunnel).")),
+    destOut));
+
   // Log analysis — paste a log (or load sing-box's) -> known-error cards.
   const ta = el("textarea", { placeholder: "Paste engine log lines (sing-box / Xray / WireGuard…) to find known errors.", style: "min-height:110px;font-family:ui-monospace,Consolas,monospace;font-size:12px" });
   const logOut = el("div", { style: "margin-top:12px" });
@@ -5334,6 +5410,109 @@ async function renderDiagnostics(view) {
 
 function mono(text) {
   return el("div", { style: "font-family:ui-monospace,Consolas,monospace;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--card-2);border-radius:7px;padding:10px 12px;max-height:280px;overflow:auto;line-height:1.5" }, text || "(no output)");
+}
+
+// renderTraceResult draws a /api/diagnostics/trace explain into wrap: resolved IPs, the LIVE
+// connections + the exit each actually took (ground truth), the configured rules/lists/kernel-zones
+// that reference the domain, and the count of geo/remote matchers that can't be checked statically.
+function renderTraceResult(wrap, r) {
+  const rowStyle = "display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px solid var(--divider);font-size:13px";
+  if (r.resolve_error) {
+    wrap.appendChild(el("div", { class: "hint", style: "color:var(--err)" }, t("Could not resolve this domain: ") + r.resolve_error));
+  } else if (r.ips && r.ips.length) {
+    wrap.appendChild(el("div", { class: "hint", style: "margin-bottom:10px" }, t("Resolved IPs: ") + r.ips.join(", ")));
+  }
+  const conns = r.connections || [];
+  if (conns.length) {
+    wrap.appendChild(el("div", { class: "card-title", style: "margin:6px 0;font-size:13px" }, t("Live connections (ground truth)")));
+    conns.forEach(c => wrap.appendChild(el("div", { style: rowStyle },
+      el("span", { style: "font-family:ui-monospace,Consolas,monospace;overflow-wrap:anywhere" },
+        c.dst + (c.dport ? ":" + c.dport : "") + (c.domain && c.domain !== r.domain ? " (" + c.domain + ")" : "")),
+      el("span", { class: "badge" }, t("via {0}", c.exit || "direct")))));
+  }
+  const cfg = r.configured || [];
+  if (cfg.length) {
+    wrap.appendChild(el("div", { class: "card-title", style: "margin:14px 0 6px;font-size:13px" }, t("Configured rules & lists that match")));
+    cfg.forEach(c => wrap.appendChild(el("div", { style: "padding:5px 0;border-bottom:1px solid var(--divider);font-size:13px" },
+      el("span", { class: "badge", style: "margin-right:8px" }, c.kind),
+      el("span", {}, "“" + c.id + "” → " + (c.outbound || "direct")),
+      c.why ? el("span", { class: "hint", style: "margin-left:8px" }, c.why) : null)));
+  }
+  const uneval = r.unevaluated || [];
+  if (uneval.length) {
+    wrap.appendChild(el("div", { class: "card-title", style: "margin:14px 0 6px;font-size:13px" }, t("May also match (can't check statically)")));
+    uneval.forEach(c => wrap.appendChild(el("div", { style: "padding:5px 0;border-bottom:1px solid var(--divider);font-size:13px" },
+      el("span", { class: "badge", style: "margin-right:8px" }, c.kind),
+      el("span", {}, "“" + c.id + "” → " + (c.outbound || "direct")),
+      c.why ? el("span", { class: "hint", style: "margin-left:8px" }, c.why) : null)));
+    wrap.appendChild(el("div", { class: "hint", style: "margin-top:6px" },
+      t("These use geo/remote rule-sets whose contents aren't loaded here — test live to confirm.")));
+  }
+  if (r.note) wrap.appendChild(el("div", { class: "hint", style: "margin-top:10px" }, r.note));
+  if (!conns.length && !cfg.length && !r.resolve_error && !r.note)
+    wrap.appendChild(el("div", { class: "hint" }, t("No live connections and no configured rule matches this domain right now.")));
+}
+
+// renderClientDests draws GET /api/clients/destinations: each LAN client (name + IP) followed by the
+// PUBLIC destinations it reached — the sniffed domain (or bare IP), the exit it took, and its bytes.
+function renderClientDests(wrap, r) {
+  if (!r || !r.available) {
+    wrap.appendChild(el("div", { class: "hint" }, t("The connection table isn't available here (this needs the router).")));
+    return;
+  }
+  const clients = r.clients || [];
+  if (!clients.length) {
+    wrap.appendChild(el("div", { class: "hint" }, t("No active external connections right now.")));
+    return;
+  }
+  clients.forEach(c => {
+    wrap.appendChild(el("div", { class: "card-title", style: "margin:12px 0 4px;font-size:13px" },
+      (c.name ? c.name + " " : "") + "(" + c.ip + ")"));
+    (c.dests || []).forEach(d => wrap.appendChild(el("div", { style: "display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:4px 0;border-bottom:1px solid var(--divider);font-size:12.5px" },
+      el("span", { style: "font-family:ui-monospace,Consolas,monospace;overflow-wrap:anywhere" }, d.domain || d.dst),
+      el("span", { style: "white-space:nowrap;display:inline-flex;align-items:center;gap:8px" },
+        el("span", { class: "hint" }, fmtBytes((d.up_bytes || 0) + (d.down_bytes || 0))),
+        el("span", { class: "badge" }, t("via {0}", d.exit || "direct")),
+        routeDestAction(d)))));
+  });
+}
+
+// routeDestAction: a per-destination "Route" button that adds the observed destination (its sniffed
+// domain, or the bare IP as an explicit /32-/128 CIDR) to a chosen routing list's manual entries —
+// the "discover what a device reaches → route it" flow (COMMUNITY_BACKLOG Tier-B). It STAGES the
+// change (updateDirty), exactly like the Routing page: nothing is applied until the user hits Apply,
+// so mutating from this diagnostic view stays inside the review-before-apply model.
+function routeDestAction(d) {
+  const lists = (state.profile && state.profile.routing_lists) || [];
+  const btn = el("button", { class: "btn btn-sm", title: t("Add this destination to a routing list (staged; apply on the toolbar)") }, t("Route"));
+  const picker = el("span", { style: "display:none;align-items:center;gap:6px;margin-left:6px" });
+  btn.onclick = () => {
+    if (!lists.length) { toast(t("No routing lists yet — create one on the Routing page first."), "err"); return; }
+    if (picker.style.display !== "none") { picker.style.display = "none"; return; }
+    picker.innerHTML = "";
+    const sel = el("select", { style: "font-size:12px;padding:2px 4px" }, ...lists.map(rl => el("option", { value: rl.id }, rl.name || rl.id)));
+    const add = el("button", { class: "btn btn-sm btn-primary" }, t("Add"));
+    add.onclick = async () => {
+      const rl = lists.find(x => x.id === sel.value);
+      if (!rl) return;
+      const entry = d.domain || (String(d.dst).includes(":") ? d.dst + "/128" : d.dst + "/32");
+      rl.manual = rl.manual || [];
+      if (!rl.manual.includes(entry)) rl.manual.push(entry);
+      try {
+        await api.post("/api/routing", rl);
+        updateDirty();
+        toast(t("Added {0} → {1}", entry, rl.name || rl.id), "ok");
+        picker.style.display = "none";
+        btn.textContent = t("Routed ✓"); btn.disabled = true;
+      } catch (e) {
+        const i = rl.manual.indexOf(entry); if (i >= 0) rl.manual.splice(i, 1); // roll back the optimistic add
+        toast(e.message, "err");
+      }
+    };
+    picker.append(sel, add);
+    picker.style.display = "inline-flex";
+  };
+  return el("span", { style: "display:inline-flex;align-items:center" }, btn, picker);
 }
 
 function diagToolLabel(tool) {
@@ -5684,7 +5863,7 @@ async function optionPicker(preselect) {
   const inputs = {};
   const wrap = el("div", {});
 
-  const isOn = o => (preselect && preselect.includes(o.id)) || (!preselect && o.recommended);
+  const isOn = o => (preselect && preselect.length) ? preselect.includes(o.id) : o.recommended;
   const addGroup = (label, list, sub) => {
     if (!list.length) return;
     wrap.appendChild(el("div", { class: "hint", style: "margin:2px 0 8px;font-weight:600;color:var(--ink-2)" },

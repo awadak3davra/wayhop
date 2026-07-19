@@ -263,6 +263,25 @@ func TestUploadOK(t *testing.T) {
 	}
 }
 
+// TestUploadNon200: a 4xx/5xx upload response (proxy error page, 429 rate-limit…) must error rather
+// than report a bogus UpMbps timed against the rejection — parity with TestDownloadNon200.
+func TestUploadNon200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body) // drain the upload body, then reject
+		http.Error(w, "slow down", http.StatusTooManyRequests)
+	}))
+	t.Cleanup(srv.Close)
+	cl := speedtest_clientFor(srv, 10*time.Second)
+	tr := New(0)
+	_, err := tr.upload(context.Background(), cl, 1000)
+	if err == nil {
+		t.Fatal("expected an error on a non-2xx upload status")
+	}
+	if !strings.Contains(err.Error(), "status 429") {
+		t.Fatalf("error = %v want to mention status 429", err)
+	}
+}
+
 func TestUploadClientError(t *testing.T) {
 	srv := speedtest_downServer(t)
 	cl := speedtest_clientFor(srv, time.Second)
