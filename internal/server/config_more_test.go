@@ -49,6 +49,7 @@ func TestApplyConfigFields_CopiesEveryExportedField(t *testing.T) {
 		Subscription: config.Subscription{Token: "tok"},
 		AllowedHosts: []string{"router.lan"},
 		Features:     map[string]config.FeatureConfig{"iptv": {Enabled: true}},
+		Backup:       config.Backup{AutoHours: 6, KeepN: 5, Dir: "/bk"},
 	}
 	dst := &config.Config{}
 	applyConfigFields(dst, in)

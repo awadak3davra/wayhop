@@ -274,3 +274,24 @@ func TestSyncDir_LeavesExistingDirIntact(t *testing.T) {
 		t.Fatalf("SyncDir disturbed dir contents: child = %q; want %q", got, "c")
 	}
 }
+
+// TestWrite_HonorsExecPermViaCreateTemp guards the atomicfile.Write path specifically: CreateTemp
+// makes the temp 0600 and OpenFile's perm is IGNORED when re-opening that existing file, so without
+// an explicit Chmod a caller asking for an executable 0755 (e.g. a Keenetic firewall hook) silently
+// got 0600 and never ran. (Regression guard for the perm bug found in external review.)
+func TestWrite_HonorsExecPermViaCreateTemp(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix exec bit not meaningful on windows")
+	}
+	p := filepath.Join(t.TempDir(), "hook.sh")
+	if err := Write(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o755 {
+		t.Fatalf("Write mode = %o, want 0755 (the CreateTemp-0600 regression)", got)
+	}
+}

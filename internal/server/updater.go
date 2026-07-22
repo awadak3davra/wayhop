@@ -119,16 +119,26 @@ func (s *Server) handleUpdaterInstall(w http.ResponseWriter, r *http.Request) {
 	// apply path holds end-to-end, making the two mutually exclusive. Re-check Running()
 	// under the lock so we don't resurrect a core an in-flight apply intentionally stopped.
 	reloaded := false
+	reloadErr := ""
 	if e.ID == "sing-box" && s.singbox != nil {
 		s.applyMu.Lock()
 		if s.singbox.Running() {
 			if err := s.singbox.Reload(); err == nil {
 				reloaded = true
+			} else {
+				reloadErr = err.Error()
 			}
 		}
 		s.applyMu.Unlock()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"installed": tag, "engine": e.ID, "reloaded": reloaded})
+	resp := map[string]any{"installed": tag, "engine": e.ID, "reloaded": reloaded}
+	if reloadErr != "" {
+		// The install succeeded but the core didn't come back on this reload — surface it instead of
+		// reporting a bare success, and log it. Reload re-asserts desired=true, so the watchdog retries.
+		log.Printf("updater: %s installed %s but sing-box reload failed: %s", e.ID, tag, reloadErr)
+		resp["reload_error"] = reloadErr
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleUpdaterUninstall deletes an installed engine binary from BinDir. A RUNNING engine's binary

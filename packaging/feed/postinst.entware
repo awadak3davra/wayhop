@@ -1,0 +1,53 @@
+#!/bin/sh
+# Entware/Keenetic opkg post-install. Entware auto-runs /opt/etc/init.d/S99* at BOOT, but not on
+# install — so this seeds a default config (S99wayhop refuses to start without one, an anti-respawn
+# guard) and starts the service now. The guard keeps it inert on a build host / offline image install.
+[ -n "${IPKG_INSTROOT:-}" ] && exit 0
+
+ETC=/opt/etc/wayhop
+VAR=/opt/var/wayhop
+INITD=/opt/etc/init.d
+
+# One-time migration from a previous "velinx"/"wakeroute"-named install (mirrors install.sh). Self-
+# guarding: a no-op on a fresh install or a wayhop->wayhop upgrade. "velinx" first; its dir wins.
+for _OLD in velinx wakeroute; do
+  [ -x "$INITD/S99$_OLD" ] || [ -d "/opt/etc/$_OLD" ] || [ -x "/opt/sbin/$_OLD" ] || continue
+  if [ -x "$INITD/S99$_OLD" ]; then
+    "$INITD/S99$_OLD" stop 2>/dev/null
+    rm -f "$INITD/S99$_OLD"
+  fi
+  [ -d "/opt/etc/$_OLD" ] && [ ! -d "$ETC" ] && { mv "/opt/etc/$_OLD" "$ETC" 2>/dev/null || { cp -a "/opt/etc/$_OLD" "$ETC" && rm -rf "/opt/etc/$_OLD"; }; }
+  [ -d "/opt/var/$_OLD" ] && [ ! -d "$VAR" ] && { mv "/opt/var/$_OLD" "$VAR" 2>/dev/null || { cp -a "/opt/var/$_OLD" "$VAR" && rm -rf "/opt/var/$_OLD"; }; }
+  # Rewrite old paths in EVERY text config incl singbox.json's cache_file.path (a stale path
+  # crash-loops sing-box on "initialize cache-file"). Never sed the binary cache.db.
+  for _f in "$ETC"/config.json "$ETC"/singbox.json "$ETC"/singbox.json.bak "$ETC"/singbox.json.good "$ETC"/plugins/*.conf; do
+    [ -f "$_f" ] && sed -i "s#/opt/etc/$_OLD#/opt/etc/wayhop#g; s#/opt/var/$_OLD#/opt/var/wayhop#g" "$_f" 2>/dev/null
+  done
+  rm -f "/opt/sbin/$_OLD" "/opt/sbin/$_OLD.bak"
+done
+
+# Seed a minimal config when absent (mirrors install.sh). The package never SHIPS /opt/etc/wayhop
+# (protection-by-omission: opkg only touches files it owns, so upgrades/removes can't clobber user
+# config) — seeding here keeps that invariant while making first boot work.
+if [ ! -f "$ETC/config.json" ]; then
+  mkdir -p "$ETC" "$VAR"
+  _sb="$(command -v sing-box 2>/dev/null || echo /opt/sbin/sing-box)"
+  cat > "$ETC/config.json" <<JSON
+{
+  "listen": ":8088",
+  "data_dir": "$VAR",
+  "demo": false,
+  "ports": { "ui": 8088, "clash": 9090, "dns": 5353, "mixed": 7890 },
+  "clash": { "controller": "127.0.0.1:9090", "secret": "" },
+  "singbox": { "bin": "$_sb", "config": "$ETC/singbox.json" },
+  "failsafe": { "target": "1.1.1.1", "auto_reboot": false }
+}
+JSON
+  chmod 0600 "$ETC/config.json" 2>/dev/null
+fi
+
+# Start now (or restart to adopt the new binary on upgrade); S99wayhop covers boot auto-start.
+if [ -x "$INITD/S99wayhop" ]; then
+  "$INITD/S99wayhop" restart 2>/dev/null || "$INITD/S99wayhop" start 2>/dev/null || true
+fi
+exit 0

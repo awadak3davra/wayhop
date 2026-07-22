@@ -49,6 +49,14 @@ func WriteSynced(path string, data []byte, perm os.FileMode) error {
 	if err != nil {
 		return err
 	}
+	// OpenFile's perm is IGNORED when the file already EXISTS — and atomicfile.Write re-opens a
+	// CreateTemp file that is already 0600 — so set the mode explicitly. Without this, a caller
+	// asking for an executable 0755 (e.g. a Keenetic firewall hook) silently gets 0600 and the
+	// hook never runs. (On Windows only the writable bit is honored; Chmod still succeeds.)
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		return err
+	}
 	if _, err := f.Write(data); err != nil {
 		f.Close()
 		return err

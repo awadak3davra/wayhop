@@ -23,6 +23,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"wayhop/internal/pm"
@@ -82,6 +83,12 @@ type Updater struct {
 	Mirrors []string // URL prefixes tried in order; "" = direct
 	hc      *http.Client
 	pm      pm.Manager // native package manager (opkg/apk); zero value None = no recognition
+	// mu serializes Install + SelfUpdate. Both stage to FIXED paths (dst+".new" / ".wayhop.new")
+	// opened O_TRUNC, so two concurrent updates — e.g. the auto-update loop racing a user-triggered
+	// install, a single-user race — would interleave into one file and rename a corrupt binary into
+	// place. The SHA-256 is computed over the download stream, not the file, so it can't catch that.
+	// One shared *Updater per daemon ⇒ this in-process lock covers every call site.
+	mu sync.Mutex
 }
 
 // New builds an Updater. An empty arch autodetects from the running binary
@@ -477,6 +484,8 @@ func (u *Updater) Install(ctx context.Context, e Engine, tag string) (string, er
 	if e.SourceOnly {
 		return "", fmt.Errorf("%s has no prebuilt releases: %s", e.ID, e.Note)
 	}
+	u.mu.Lock() // serialize with any other Install/SelfUpdate (fixed staging paths) — see Updater.mu
+	defer u.mu.Unlock()
 	// If this engine's binary is OWNED by the native package manager, do NOT direct-download over it
 	// — that clobbers the packaged binary and desyncs the package DB (the /opt/bin/sing-box hazard).
 	// Defer to opkg/apk. Path-based (no name map trusted); a no-op wherever no PM is present.
@@ -843,6 +852,8 @@ func pickSelfRelease(rels []Release, arch string) (Release, bool) {
 // restart the service to run it (the running process keeps the old inode until then).
 // The sanity-run guarantees a corrupt/wrong-arch download never replaces a working daemon.
 func (u *Updater) SelfUpdate(ctx context.Context, repo, tag, exePath string) (string, error) {
+	u.mu.Lock() // serialize with any other Install/SelfUpdate (fixed staging paths) — see Updater.mu
+	defer u.mu.Unlock()
 	// If wayhop itself was installed from the wayhop-feed (opkg/apk owns exePath), do NOT self-swap
 	// the binary: that fights the package DB + sysupgrade keep-list and races the package's own
 	// postinst restart (red-team R5). Defer to the PM. No-op on the normal GitHub-installed path.
@@ -892,17 +903,24 @@ func (u *Updater) SelfUpdate(ctx context.Context, repo, tag, exePath string) (st
 	// Back up the current binary on the same filesystem, then atomically swap. The .bak is
 	// the reboot-safe rollback, so it is MANDATORY: if we can't read the running binary or
 	// write a COMPLETE backup, abort the swap rather than land a new daemon with no way back
-	// (a self-update that strands the router is the worst outcome). A half-written backup is
-	// worse than none — it poses as a valid rollback — so drop it on a write error too.
+	// (a self-update that strands the router is the worst outcome). Write via a temp + rename so
+	// a failed backup write can neither leave a half-written .bak (poses as a valid rollback) NOR
+	// destroy a prior good .bak from an earlier update (os.WriteFile would O_TRUNC it before failing).
 	cur, err := os.ReadFile(exePath)
 	if err != nil {
 		_ = os.Remove(staged)
 		return "", fmt.Errorf("read current binary for rollback backup: %w", err)
 	}
-	if werr := os.WriteFile(exePath+".bak", cur, 0o755); werr != nil {
-		_ = os.Remove(exePath + ".bak")
+	bakTmp := exePath + ".bak.tmp"
+	if werr := os.WriteFile(bakTmp, cur, 0o755); werr != nil {
+		_ = os.Remove(bakTmp)
 		_ = os.Remove(staged)
 		return "", fmt.Errorf("write rollback backup: %w", werr)
+	}
+	if werr := os.Rename(bakTmp, exePath+".bak"); werr != nil {
+		_ = os.Remove(bakTmp)
+		_ = os.Remove(staged)
+		return "", fmt.Errorf("install rollback backup: %w", werr)
 	}
 	if err := os.Rename(staged, exePath); err != nil {
 		_ = os.Remove(staged)

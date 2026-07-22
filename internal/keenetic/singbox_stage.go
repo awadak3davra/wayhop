@@ -78,7 +78,9 @@ func StageSingboxConfig(cfg map[string]any, opt SingboxStageOptions) error {
 	if err != nil {
 		return fmt.Errorf("marshal sing-box config: %w", err)
 	}
-	if err := atomicfile.Write(opt.ConfigPath, b, 0o644); err != nil {
+	// 0o600: the sing-box config embeds endpoint credentials (WG/VLESS keys, SS/TUIC
+	// passwords), so keep it root-only — matching the snapshot above and the OpenWrt datapath.
+	if err := atomicfile.Write(opt.ConfigPath, b, 0o600); err != nil {
 		return fmt.Errorf("write sing-box config: %w", err)
 	}
 	return nil
@@ -95,7 +97,7 @@ func RestoreSingboxConfig(opt SingboxStageOptions) error {
 		}
 		return fmt.Errorf("read snapshot: %w", err)
 	}
-	if err := atomicfile.Write(opt.ConfigPath, orig, 0o644); err != nil {
+	if err := atomicfile.Write(opt.ConfigPath, orig, 0o600); err != nil {
 		return fmt.Errorf("restore sing-box config: %w", err)
 	}
 	_ = os.Remove(opt.SnapshotPath)

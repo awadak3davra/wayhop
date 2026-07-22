@@ -271,7 +271,9 @@ for _OLD in velinx wakeroute; do
 done
 # Reap a sing-box orphaned by a prior crash (holds the cache.db lock + clash/TUN
 # ports) so the new core starts clean. The wayhop daemon's ReapStrays covers this too.
-for _p in $(pgrep -f 'sing-box run' 2>/dev/null); do kill "$_p" 2>/dev/null || true; done
+# Reap only WayHop's own orphaned sing-box (matched by OUR config path), never a
+# PassWall/HomeProxy/other sing-box running its own config. (Was `sing-box run` = killed them all.)
+for _p in $(pgrep -f "$ETC/singbox.json" 2>/dev/null); do kill "$_p" 2>/dev/null || true; done
 mkdir -p "$ETC" "$VAR" || die "could not create directories"
 if [ -x "$INITD/wayhop" ]; then
   info "note: tunneled traffic pauses for a few seconds while the binary is swapped"

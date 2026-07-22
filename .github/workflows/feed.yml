@@ -126,25 +126,34 @@ jobs:
           cp packaging/feed/keys/wayhop-apk.pem.pub  feed/wayhop-apk.pem.pub
           touch feed/.nojekyll
           BASE="https://awadak3davra.github.io/wayhop-feed"
+          # The apk feed is best-effort (needs apk-tools v3) — only advertise it if it actually shipped.
+          apk_ok=0; if ls feed/apk/*/*.apk >/dev/null 2>&1; then apk_ok=1; fi
           {
             echo "<!doctype html><meta charset=utf-8><title>WayHop package feed</title>"
             echo "<style>body{font:15px/1.5 system-ui,sans-serif;max-width:820px;margin:2rem auto;padding:0 1rem;color:#1a2230}"
-            echo "h1{margin:.2rem 0}code,pre{background:#0b0e13;color:#e6edf3;border-radius:6px}"
+            echo "h1{margin:.2rem 0}h2{margin-top:1.6rem}code,pre{background:#0b0e13;color:#e6edf3;border-radius:6px}"
             echo "pre{padding:.8rem 1rem;overflow:auto}code{padding:.1rem .35rem}a{color:#0097dc}.v{color:#6b7684}</style>"
             echo "<h1>WayHop package feed</h1>"
             echo "<p class=v>Native OpenWrt / Entware / Keenetic packages for <a href=https://github.com/awadak3davra/wayhop>WayHop</a>"
             echo " &mdash; <b>${{ steps.ver.outputs.version }}</b>. Prefer a one-shot install instead? See the"
             echo " <a href=https://github.com/awadak3davra/wayhop#install>README install guide</a>.</p>"
-            echo "<h2>OpenWrt 24.10+ &middot; apk</h2>"
-            echo "<pre>wget -O /etc/apk/keys/wayhop.pem $BASE/wayhop-apk.pem.pub"
-            echo "echo \"$BASE/apk/\$(cat /etc/apk/arch)\" &gt;&gt; /etc/apk/repositories.d/wayhop.list"
-            echo "apk update &amp;&amp; apk add wayhop</pre>"
-            echo "<h2>OpenWrt 23.x / Entware / Keenetic &middot; opkg</h2>"
+            if [ "$apk_ok" = 1 ]; then
+              echo "<h2>OpenWrt 24.10+ &middot; apk</h2>"
+              echo "<pre>wget -O /etc/apk/keys/wayhop.pem $BASE/wayhop-apk.pem.pub"
+              echo "echo \"$BASE/apk/\$(cat /etc/apk/arch)\" &gt;&gt; /etc/apk/repositories.d/wayhop.list"
+              echo "apk update &amp;&amp; apk add wayhop</pre>"
+            fi
+            echo "<h2>OpenWrt 23.x &middot; opkg</h2>"
             echo "<pre>wget -O /tmp/wayhop.pub $BASE/wayhop.pub &amp;&amp; opkg-key add /tmp/wayhop.pub"
-            echo "echo \"src/gz wayhop $BASE/ipk/\$(opkg print-architecture | awk 'NR==2{print \$2}')\" &gt;&gt; /etc/opkg/customfeeds.conf"
+            echo "echo \"src/gz wayhop $BASE/ipk/\$(opkg print-architecture | awk '\$1==\"arch\" && \$2!=\"all\" && \$2!=\"noarch\"{print \$2; exit}')\" &gt;&gt; /etc/opkg/customfeeds.conf"
             echo "opkg update &amp;&amp; opkg install wayhop</pre>"
-            echo "<p class=v>Then open <code>http://&lt;router-ip&gt;:8088</code>. Upgrades: <code>apk add -u wayhop</code> / <code>opkg upgrade wayhop</code>."
-            echo " Your <code>/etc/wayhop</code> config is never touched on upgrade or removal.</p>"
+            echo "<h2>Entware / Keenetic &middot; opkg (installs under /opt)</h2>"
+            echo "<pre>wget -O /tmp/wayhop.pub $BASE/wayhop.pub &amp;&amp; opkg-key add /tmp/wayhop.pub"
+            echo "echo \"src/gz wayhop $BASE/entware/\$(opkg print-architecture | awk '\$1==\"arch\" && \$2!=\"all\" && \$2!=\"noarch\"{print \$2; exit}')\" &gt;&gt; /opt/etc/opkg/customfeeds.conf"
+            echo "opkg update &amp;&amp; opkg install wayhop</pre>"
+            echo "<p class=v>Then open <code>http://&lt;router-ip&gt;:8088</code>. Upgrades: <code>opkg upgrade wayhop</code>$(if [ "$apk_ok" = 1 ]; then printf ' (or <code>apk add -u wayhop</code> on 24.10+)'; fi)."
+            echo " Your config &mdash; <code>/etc/wayhop</code> on OpenWrt, <code>/opt/etc/wayhop</code> on Entware/Keenetic &mdash; is never touched on upgrade or removal.</p>"
+            if [ "$apk_ok" != 1 ]; then echo "<p class=v><em>apk (OpenWrt 24.10+) packages aren't in this release &mdash; use opkg above, or the one-command installer from the README.</em></p>"; fi
           } > feed/index.html
           echo "feed tree:"; find feed -maxdepth 3 -type f | sort
 

@@ -194,7 +194,8 @@ detect_arch() {
       # so field 2 is the byte (same approach as the OpenWrt installer).
       bb="$(command -v busybox 2>/dev/null || echo /bin/busybox)"
       d="$(dd if="$bb" bs=1 skip=5 count=1 2>/dev/null | od -t u1 | head -n1 | tr -s ' ' | cut -d' ' -f2)"
-      [ "$d" = 1 ] && echo mipsle || echo mips ;;
+      # d=1 LE, d=2 BE; default to the more common little-endian (mipsle) when busybox is unreadable.
+      [ "$d" = 2 ] && echo mips || echo mipsle ;;
     *) echo unknown ;;
   esac
 }
@@ -480,8 +481,10 @@ for _OLD in velinx wakeroute; do
   # tears the old-named table down). No-op where nft is absent (Keenetic NDM-native). Best-effort.
   command -v nft >/dev/null 2>&1 && nft delete table inet "${_OLD}_pbr" 2>/dev/null || true
 done
-# Reap a sing-box orphaned by a prior crash so the new core starts clean.
-for _p in $(pgrep -f 'sing-box run' 2>/dev/null); do kill "$_p" 2>/dev/null || true; done
+# Reap a sing-box orphaned by a prior WAYHOP crash, matched by OUR config path (the same match the
+# daemon's own ReapStrays uses) — so a PassWall/HomeProxy/other sing-box running ITS own config is
+# never touched. (Was `sing-box run`, which killed every sing-box on the box.)
+for _p in $(pgrep_f "$ETC/singbox.json" 2>/dev/null); do kill "$_p" 2>/dev/null || true; done
 mkdir -p "$SBIN" "$INITD" "$ETC" "$VAR" || die "could not create install directories"
 
 if [ -x "$INITD/S99wayhop" ]; then

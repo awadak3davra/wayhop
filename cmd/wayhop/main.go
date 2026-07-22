@@ -57,6 +57,7 @@ func main() {
 	// dir, so "try before you install" works for ANY user (non-root, Windows) — the
 	// README's demo one-liner would otherwise MkdirAll("/opt/etc/wayhop") in
 	// config.Load/store.Open and fatal for a non-root user.
+	demoDir := "" // non-empty only for the zero-config throwaway demo (below)
 	if *demo {
 		configSet := false
 		flag.Visit(func(f *flag.Flag) {
@@ -65,10 +66,11 @@ func main() {
 			}
 		})
 		if !configSet {
-			demoDir := filepath.Join(os.TempDir(), "wayhop-demo")
-			if err := os.MkdirAll(demoDir, 0o755); err == nil {
-				*configPath = filepath.Join(demoDir, "config.json")
-				log.Printf("demo: throwaway state in %s (delete it to reset)", demoDir)
+			d := filepath.Join(os.TempDir(), "wayhop-demo")
+			if err := os.MkdirAll(d, 0o755); err == nil {
+				demoDir = d
+				*configPath = filepath.Join(d, "config.json")
+				log.Printf("demo: throwaway state in %s (delete it to reset)", d)
 			}
 		}
 	}
@@ -87,6 +89,15 @@ func main() {
 	}
 	if *demo {
 		cfg.Demo = true
+		// Keep the throwaway demo fully self-contained: an Apply generates a
+		// singbox.json, and without this it would MkdirAll the default
+		// /opt/etc/wayhop (→ C:\opt on Windows) — the same non-root/Windows trap
+		// the config redirect above avoids. Only for the zero-config demo; an
+		// explicit --config keeps whatever SingBox.Config it declares.
+		if demoDir != "" {
+			cfg.SingBox.Config = filepath.Join(demoDir, "singbox.json")
+			cfg.DataDir = demoDir // keep runtime state (e.g. scheduled auto-backups) off /opt too
+		}
 	}
 
 	// Runtime platform detection (D-PLAT-2: one universal binary, behavior chosen at

@@ -70,6 +70,13 @@ func (p *Profile) Validate() error {
 		if e.ID == "" {
 			return fmt.Errorf("endpoint %q has empty id", e.Name)
 		}
+		// The id becomes a filesystem path component for native plugins — the rendered <id>.conf /
+		// <id>.yaml the (root) plugin manager writes and later deletes. A crafted id like
+		// "../../etc/foo" would otherwise escape the plugin dir. Reject a path separator or a bare
+		// traversal token; a legitimate id is a slug and never contains these.
+		if strings.ContainsAny(e.ID, `/\`) || e.ID == "." || e.ID == ".." || strings.ContainsRune(e.ID, 0) {
+			return fmt.Errorf("endpoint %q: invalid id %q (no path separators or '.'/'..')", e.Name, e.ID)
+		}
 		if prev, ok := ids[e.ID]; ok {
 			return fmt.Errorf("duplicate id %q (already used by %s)", e.ID, prev)
 		}
@@ -89,8 +96,16 @@ func (p *Profile) Validate() error {
 		if e.Engine == EngineExternal {
 			// Routes via an existing OS interface, not a server — it needs only the
 			// interface name; server/port/protocol do not apply.
-			if s, _ := e.Params["interface"].(string); strings.TrimSpace(s) == "" {
+			ifn, _ := e.Params["interface"].(string)
+			if strings.TrimSpace(ifn) == "" {
 				return fmt.Errorf("endpoint %q: external engine needs params.interface", e.ID)
+			}
+			// This name is interpolated VERBATIM into the ROOT kernel plane — nft `oifname "x"` and
+			// `ip route ... dev x` — so validate the RAW value (no trimming, so what passes is exactly
+			// what renders) with the injection-safe iface whitelist, and reject wildcards (a concrete
+			// egress dev, not a match). A trailing space/newline is thus rejected, not silently kept.
+			if strings.Contains(ifn, "*") || !validSourceIface(ifn) {
+				return fmt.Errorf("endpoint %q: invalid params.interface %q (plain interface name only)", e.ID, ifn)
 			}
 			continue
 		}

@@ -1,0 +1,24 @@
+# gitleaks config for WayHop — backstop that fails CI if a real secret ever lands
+# in the tree or git history. The feed SIGNING keys (usign *.sec, APK *.pem) live
+# ONLY in GitHub Actions secrets + off-repo backup and are .gitignore'd, so they
+# must never appear here; this catches a slip.
+#
+# The allowlist below suppresses the repo's key-SHAPED but non-secret material:
+# protocol test fixtures (WireGuard/Reality keypairs, UUIDs, sample subscriptions)
+# and the PUBLIC halves of the feed keys that we intentionally ship.
+title = "WayHop gitleaks"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "test fixtures and shipped public keys carry key-shaped but non-secret bytes"
+paths = [
+  '''.*_test\.go$''',
+  '''.*/testdata/.*''',
+  '''web/dist/i18n\.js$''',
+  '''web/dist/iptv-i18n\.js$''',
+  # public keys are meant to ship; only their *.sec / *.pem private halves are secret
+  '''packaging/feed/keys/.*\.pub$''',
+  '''packaging/feed/keys/.*\.pem\.pub$''',
+]

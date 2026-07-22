@@ -48,7 +48,8 @@ func ApplySingbox(cfg map[string]any, opt SingboxApplyOptions, run Runner) error
 	if err != nil {
 		return fmt.Errorf("marshal sing-box config: %w", err)
 	}
-	if err := atomicfile.Write(opt.ConfigPath, b, 0o644); err != nil {
+	// 0o600: this config carries endpoint credentials — keep it root-only (see StageSingboxConfig).
+	if err := atomicfile.Write(opt.ConfigPath, b, 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", opt.ConfigPath, err)
 	}
 	if _, err := run.Run("", opt.ServiceInit, "restart"); err != nil {

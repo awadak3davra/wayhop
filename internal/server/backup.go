@@ -86,6 +86,13 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid profile in backup: "+err.Error())
 		return
 	}
+	// Validate the config knobs the bundle carries BEFORE any commit too, so an out-of-range
+	// routing_mode fails the restore closed (nothing changed) instead of AFTER the profile and
+	// server registry were already overwritten — that's the "a bad bundle changes NOTHING" contract.
+	if err := s.validateRestoreConfig(bundle.RoutingMode, bundle.Gateway); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid config in backup: "+err.Error())
+		return
+	}
 	// Replace the whole profile (validates + persists atomically).
 	if err := s.store.Replace(bundle.Profile); err != nil {
 		writeErr(w, http.StatusInternalServerError, "restore profile failed: "+err.Error())
@@ -124,6 +131,18 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 		"servers":   servers,
 		"note":      "review and Apply to activate",
 	})
+}
+
+// validateRestoreConfig checks that the routing knobs a backup carries would produce a valid
+// config WITHOUT committing, so handleBackupRestore can fail closed before it overwrites the
+// profile / server registry. restoreConfig re-validates under the same lock when it commits.
+func (s *Server) validateRestoreConfig(routingMode string, gateway bool) error {
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+	candidate := *s.cfg
+	candidate.RoutingMode = routingMode
+	candidate.Gateway = gateway
+	return candidate.Validate()
 }
 
 // restoreConfig sets only RoutingMode + Gateway on the live config and saves it,

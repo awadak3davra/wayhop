@@ -17,7 +17,18 @@ import (
 func (s *Server) config() config.Config {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
-	return *s.cfg
+	c := *s.cfg
+	// A value copy ALIASES the Features map, but setFeatureEnabled mutates s.cfg.Features in place
+	// (under cfgMu). A caller that ranges/reads the aliased map after this lock is released would
+	// then race that write — "concurrent map iteration and map write" is fatal. Clone it here (the
+	// single read chokepoint) so every snapshot is truly independent; Features is tiny, the copy is cheap.
+	if s.cfg.Features != nil {
+		c.Features = make(map[string]config.FeatureConfig, len(s.cfg.Features))
+		for k, v := range s.cfg.Features {
+			c.Features[k] = v
+		}
+	}
+	return c
 }
 
 // handleGetConfig returns the current daemon configuration (LAN tool — secrets
@@ -146,6 +157,7 @@ func applyConfigFields(dst, in *config.Config) {
 	dst.FailSafe = in.FailSafe
 	dst.Watchdog = in.Watchdog
 	dst.AllowedHosts = in.AllowedHosts
+	dst.Backup = in.Backup
 	// NOT copied: Subscription (token rotated via its own path) + Features (per-plugin
 	// toggles/settings persisted via PUT /api/features/{id}, never the bulk Settings PUT).
 }

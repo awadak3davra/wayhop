@@ -19,8 +19,8 @@ permissions:
   contents: read
 
 env:
-  # Quality gates run on the dev-toolchain Go so gofmt matches locally; the
-  # release builds in build.yml stay on the router-target 1.22.
+  # Both the quality gates here and the release builds in build.yml run on the same
+  # Go 1.26 (patched stdlib); go.mod's `go 1.22` is only the language-version floor.
   GO_VERSION: '1.26'
   # Run the JS-based actions on the runner's bundled Node 24 (Node 20 is
   # deprecated). The self-hosted runner ships node24; this opts in now.
@@ -100,8 +100,25 @@ jobs:
                      packaging/S99wayhop packaging/openwrt/wayhop.init
           # the feed pack scripts + maintainer scripts run as ROOT on user routers — lint them too
           shellcheck -s sh packaging/feed/*.sh \
-                     packaging/feed/postinst packaging/feed/postinst.apk \
-                     packaging/feed/prerm packaging/feed/prerm.apk packaging/feed/postupgrade.apk
+                     packaging/feed/postinst packaging/feed/postinst.apk packaging/feed/postinst.entware \
+                     packaging/feed/prerm packaging/feed/prerm.apk packaging/feed/prerm.entware packaging/feed/postupgrade.apk
+
+  # --- secret scanning (informational until the fixture allowlist is proven quiet) ---
+  # The feed SIGNING keys live only in GitHub secrets + off-repo backup; this is the
+  # backstop that flags a *.sec / PEM / token that ever lands in the tree OR history.
+  secrets:
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }   # full history so a secret in an OLD commit is caught too
+      - name: gitleaks (tree + history)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          ver='8.21.2'
+          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${ver}/gitleaks_${ver}_linux_x64.tar.gz" -o gitleaks.tgz
+          tar -xzf gitleaks.tgz gitleaks
+          ./gitleaks detect --source . --config .gitleaks.toml --redact --verbose --exit-code 1
 
   # --- validate EVERY protocol against the real sing-box core, on BOTH the
   # deployed 1.12.x line AND 1.13.x (which REMOVED the legacy wireguard outbound).

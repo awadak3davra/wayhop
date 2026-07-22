@@ -292,3 +292,48 @@ func TestBackupRestoreRejectsInvalidProfile(t *testing.T) {
 		t.Errorf("profile changed by a rejected restore: %+v", p.Endpoints)
 	}
 }
+
+// TestBackupRestoreRejectsBadRoutingMode: a bundle whose profile + servers are perfectly valid
+// but whose routing_mode is out of enum must change NOTHING. Before the pre-commit config
+// validation, this passed profile-validate + store.Replace + the server upserts and only THEN
+// failed on restoreConfig — leaving the profile and server registry overwritten despite the 400.
+func TestBackupRestoreRejectsBadRoutingMode(t *testing.T) {
+	srv, h := backup_newServer(t)
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	// Seed a DISTINCT profile + server so a rejected restore is provably a no-op.
+	seed := sampleProfile()
+	seed.Endpoints[0].ID = "seeded"
+	seed.Groups[0].Members = []string{"seeded"}
+	if err := srv.store.Replace(seed); err != nil {
+		t.Fatalf("seed profile: %v", err)
+	}
+	if err := srv.servers.Upsert(serverstore.Server{ID: "seeded-srv", Name: "old", Host: "9.9.9.9", Port: 22, User: "root"}); err != nil {
+		t.Fatalf("seed server: %v", err)
+	}
+
+	bundle := backupBundle{
+		Schema:      backupSchemaVersion,
+		Profile:     sampleProfile(), // valid, carries ep1
+		Servers:     []serverstore.Server{{ID: "s1", Name: "vps", Host: "1.2.3.4", Port: 22, User: "root"}},
+		RoutingMode: "not-a-mode", // out of {"",tun,hybrid,fast,mixed} → config.Validate fails
+	}
+	body, _ := json.Marshal(bundle)
+	code, out := backup_post(t, ts, "/api/backup/restore", body)
+	if code != http.StatusBadRequest {
+		t.Fatalf("bad-routing-mode restore: got %d, want 400 (%s)", code, out)
+	}
+
+	// Profile unchanged: still the seeded endpoint, NOT the bundle's ep1.
+	if p := srv.store.Profile(); len(p.Endpoints) != 1 || p.Endpoints[0].ID != "seeded" {
+		t.Errorf("profile was overwritten by a rejected restore: %+v", p.Endpoints)
+	}
+	// Server registry unchanged: seeded server intact, the bundle's NOT upserted.
+	if _, ok := srv.servers.Get("seeded-srv"); !ok {
+		t.Errorf("seeded server was lost by a rejected restore")
+	}
+	if _, ok := srv.servers.Get("s1"); ok {
+		t.Errorf("bundle server s1 was upserted despite the restore being rejected")
+	}
+}

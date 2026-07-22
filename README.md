@@ -5,7 +5,7 @@
 **Run any modern VPN/proxy protocol on your router — from one clean web panel, with automatic failover.**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-22a06b?style=flat-square)](LICENSE)
-[![Release](https://img.shields.io/badge/release-v0.5.0-0097dc?style=flat-square)](../../releases/latest)
+[![Release](https://img.shields.io/badge/release-v0.5.2-0097dc?style=flat-square)](../../releases/latest)
 [![Go](https://img.shields.io/badge/go-1.22+-00ADD8?style=flat-square&logo=go&logoColor=white)](go.mod)
 [![Platforms](https://img.shields.io/badge/router-OpenWrt%20%C2%B7%20Keenetic%20%C2%B7%20Entware-151c28?style=flat-square)](#install)
 [![Arches](https://img.shields.io/badge/arch-mipsle%20%C2%B7%20mips%20%C2%B7%20arm%20%C2%B7%20arm64%20%C2%B7%20amd64-555?style=flat-square)](#install)
@@ -75,7 +75,31 @@ Subscriptions auto-detect base64 vs. plain text, import each link independently 
 
 ## 🚀 Install
 
-WayHop runs on **OpenWrt** (native `procd`) and on **Keenetic / generic Entware** (busybox `/opt`). Grab the prebuilt tarball for your router from the [**Releases**](../../releases/latest) page — each CPU arch ships in two flavours:
+WayHop runs on **OpenWrt** (native `procd`) and on **Keenetic / generic Entware** (busybox `/opt`) — CPU: MIPS (little/big-endian), ARMv7, ARM64, or x86-64.
+
+### Quick install — one command
+
+SSH into the router and run. This auto-detects your CPU arch + platform, downloads the latest release, **verifies its SHA-256**, and launches the interactive installer:
+
+```sh
+curl -fsSLO https://github.com/awadak3davra/wayhop/releases/latest/download/bootstrap.sh && sh bootstrap.sh
+```
+
+No `curl` on the router? Swap in `wget -qO bootstrap.sh https://github.com/awadak3davra/wayhop/releases/latest/download/bootstrap.sh && sh bootstrap.sh` — the script uses whichever downloader you have. Forward installer flags after a `--` (e.g. `sh bootstrap.sh -- -y --port 8089`); if auto-detect guesses wrong, override with `--arch mipsle` or `--openwrt` / `--entware`.
+
+The installer is **interactive and safe to run on a live router** — it pre-flights everything before touching anything:
+
+- ✅ **System & router status** — arch (incl. MIPS endianness), free flash space, RAM, uptime, internet reachability, and clock/NTP (Reality/TLS need an accurate clock).
+- ✅ **Dependencies** — `ip` / `ipset` / `iptables` / `opkg` / `sing-box`, with an offer to `opkg install` what's missing.
+- ✅ **Conflict detection + one-tap fixes** — it finds whatever already holds the UI port (**lighttpd** on stock Keenetic firmware is the usual culprit), an existing **selective-routing tool**, a stray sing-box, or a previous install, and **asks before disabling each one** (or just moves WayHop to a free port).
+- ✅ **Atomic install** — staged binary swap with a single rolling backup, then a health check on the UI.
+
+Then open **`http://<router-ip>:8088`**. To remove it later: `sh /opt/etc/wayhop/uninstall.sh` (add `--purge` to delete the config too) — the installer saves the uninstaller there so it survives reboots.
+
+<details>
+<summary><b>Manual install — pick your own tarball</b></summary>
+
+Grab the tarball for your router from the [**Releases**](../../releases/latest) page — each CPU arch ships in two flavours:
 
 | Your router's `uname -m` | Arch | Entware / Keenetic | OpenWrt |
 |---|---|---|---|
@@ -85,34 +109,23 @@ WayHop runs on **OpenWrt** (native `procd`) and on **Keenetic / generic Entware*
 | `aarch64` | `arm64` | `wayhop-<ver>-arm64.tar.gz` | `…-arm64-openwrt.tar.gz` |
 | `x86_64` | `amd64` | `wayhop-<ver>-amd64.tar.gz` | `…-amd64-openwrt.tar.gz` |
 
-### Keenetic / Entware (`/opt`, SSH)
+**Keenetic / Entware** (`/opt`, SSH) — download the tarball for your arch into `/tmp`, then:
 
 ```sh
 cd /tmp
-curl -fsSLO <release-url>/wayhop-<ver>-<arch>.tar.gz      # e.g. -arm64.tar.gz
-mkdir wr && tar -xzf wayhop-*.tar.gz -C wr && cd wr
+mkdir -p wr && tar -xzf wayhop-*.tar.gz -C wr && cd wr
 sh ./install.sh
 ```
 
-The installer is **interactive and safe to run on a live router**. It detects your platform and arch, then pre-flights everything before touching anything:
-
-- ✅ **System & router status** — arch (incl. MIPS endianness), free flash space, RAM, uptime, internet reachability, and clock/NTP (Reality/TLS need an accurate clock).
-- ✅ **Dependencies** — `ip` / `ipset` / `iptables` / `opkg` / `sing-box`, with an offer to `opkg install` what's missing.
-- ✅ **Conflict detection + one-tap fixes** — it finds whatever already holds the UI port (**lighttpd** on stock Keenetic firmware is the usual culprit), an existing **selective-routing tool**, a stray sing-box, or a previous install, and **asks before disabling each one** (or just moves WayHop to a free port).
-- ✅ **Atomic install** — staged binary swap with a single rolling backup, then a health check on the UI.
-
 Useful flags: `--dry-run` (run every check, change nothing), `-y` (assume yes), `--port 8089` (use a different UI port), `--arch mipsle` (force arch), `--no-start`.
 
-### OpenWrt (`procd`)
-
-busybox has no `scp`, so stream the `-openwrt` tarball in over SSH:
+**OpenWrt** (`procd`) — the one-liner above works on-device; if you'd rather push from a workstation, busybox has no `scp`, so stream the `-openwrt` tarball in over SSH:
 
 ```sh
 ssh root@192.168.1.1 "cat > /tmp/wr.tgz" < wayhop-<ver>-<arch>-openwrt.tar.gz
 ssh root@192.168.1.1 "mkdir -p /tmp/wr && tar -xzf /tmp/wr.tgz -C /tmp/wr && cd /tmp/wr && sh ./install.sh"
 ```
-
-Then open **`http://<router-ip>:8088`**. To remove it later: `sh ./uninstall.sh` (add `--purge` to delete the config too).
+</details>
 
 <details>
 <summary><b>Build from source</b></summary>
@@ -130,7 +143,7 @@ Single-arch, by hand:
 
 ```sh
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
-  -ldflags "-s -w -X wayhop/internal/version.Version=0.5.0" \
+  -ldflags "-s -w -X wayhop/internal/version.Version=0.5.2" \
   -o wayhop-arm64 ./cmd/wayhop
 ```
 
