@@ -174,7 +174,10 @@ jobs:
             '
             find pkgs -name '*.apk' -exec cp {} dist/ \;
           ) || echo "::warning::apk build skipped (best-effort) — opkg + Entware .ipk still shipped"
-          ( cd dist && for f in *.tar.gz *.ipk *.apk; do [ -e "$f" ] && sha256sum "$f"; done > SHA256SUMS.txt )
+          # `|| true`: when a glob (e.g. *.apk on a no-docker runner) matches nothing it stays literal,
+          # so the final `[ -e "*.apk" ]` fails — which, as the loop's last command under `set -e`,
+          # would kill the step even though every real tarball/.ipk hashed fine. Never let it.
+          ( cd dist && for f in *.tar.gz *.ipk *.apk; do [ -e "$f" ] && sha256sum "$f" || true; done > SHA256SUMS.txt )
           # Online one-command installer. Unversioned asset name so the copy-paste
           # `releases/latest/download/bootstrap.sh` one-liner always resolves; kept out
           # of SHA256SUMS.txt (which lists only the tarballs the bootstrap verifies).
