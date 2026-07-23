@@ -109,7 +109,9 @@ fi
 
 # ===========================================================================
 # 1b. NETWORK RULES: tear down ONLY WayHop's own kernel routing (its nft table +
-#     its fwmark ip rules). Never touches a foreign table/rule. Idempotent.
+#     its fwmark ip rules, both IPv4 and IPv6). Never touches a foreign table/rule. Idempotent.
+#     (The daemon deliberately leaves its plane up across a restart/upgrade so routing never
+#     drops while the panel is swapped — uninstall is where it is removed.)
 # ===========================================================================
 hdr "Network rules"
 CLEANED=0
@@ -120,21 +122,24 @@ if command -v ip >/dev/null 2>&1; then
   # WayHop marks its traffic with fwmark <N>/0x00ff0000 — one mark PER egress, so a multi-tunnel
   # failover setup has several (0x10000, 0x20000, 0x30000, …), each routed via its OWN table. The
   # 0xff0000 mask is WayHop's signature: remove EVERY rule carrying it (not just 0x20000) and flush
-  # the tables those rules pointed at, so no orphaned routes survive. Parse-act one at a time, with
-  # a guard cap against any loop.
-  _tables=""; _n=0
-  while [ "$_n" -lt 64 ]; do
-    _line="$(ip rule show 2>/dev/null | grep -m1 '/0xff0000')"
-    [ -z "$_line" ] && break
-    _mark="$(printf '%s\n' "$_line" | grep -oE '0x[0-9a-f]+/0xff0000' | head -n1)"
-    [ -z "$_mark" ] && break
-    _tbl="$(printf '%s\n' "$_line" | grep -oE 'lookup [0-9]+' | grep -oE '[0-9]+' | head -n1)"
-    ip rule del fwmark "$_mark" 2>/dev/null || break
-    CLEANED=1; _n=$((_n+1))
-    case " $_tables " in *" $_tbl "*) ;; *) [ -n "$_tbl" ] && _tables="$_tables $_tbl" ;; esac
-  done
-  for _t in $_tables; do
-    ip route flush table "$_t" 2>/dev/null && CLEANED=1
+  # the tables those rules pointed at, so no orphaned routes survive. Do BOTH families — the daemon
+  # installs IPv4 AND IPv6 (ip -6) rules/routes, so a v4-only teardown would leave the v6 plane
+  # behind. Parse-act one rule at a time, with a guard cap against any loop.
+  for _fam in -4 -6; do
+    _tables=""; _n=0
+    while [ "$_n" -lt 64 ]; do
+      _line="$(ip "$_fam" rule show 2>/dev/null | grep -m1 '/0xff0000')"
+      [ -z "$_line" ] && break
+      _mark="$(printf '%s\n' "$_line" | grep -oE '0x[0-9a-f]+/0xff0000' | head -n1)"
+      [ -z "$_mark" ] && break
+      _tbl="$(printf '%s\n' "$_line" | grep -oE 'lookup [0-9]+' | grep -oE '[0-9]+' | head -n1)"
+      ip "$_fam" rule del fwmark "$_mark" 2>/dev/null || break
+      CLEANED=1; _n=$((_n+1))
+      case " $_tables " in *" $_tbl "*) ;; *) [ -n "$_tbl" ] && _tables="$_tables $_tbl" ;; esac
+    done
+    for _t in $_tables; do
+      ip "$_fam" route flush table "$_t" 2>/dev/null && CLEANED=1
+    done
   done
 fi
 if [ "$CLEANED" = 1 ]; then ok "WayHop routing rules cleared"; else info "no WayHop routing rules present (already clean)"; fi

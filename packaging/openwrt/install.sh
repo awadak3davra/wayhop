@@ -51,7 +51,7 @@ ASSUME=""; DRY_RUN=0; NO_START=0; PORT=8088; FORCE_ARCH=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -y|--yes) ASSUME=yes ;;
-    --port) shift; PORT="$1" ;; --port=*) PORT="${1#*=}" ;;
+    --port) shift; PORT="$1"; PORT_EXPLICIT=1 ;; --port=*) PORT="${1#*=}"; PORT_EXPLICIT=1 ;;
     --arch) shift; FORCE_ARCH="$1" ;; --arch=*) FORCE_ARCH="${1#*=}" ;;
     --no-start) NO_START=1 ;;
     --dry-run) DRY_RUN=1 ;;
@@ -204,6 +204,16 @@ fi
 hdr "Conflicts"
 UPGRADE=0
 [ -x "$INITD/wayhop" ] && { UPGRADE=1; ok "existing WayHop install detected -- upgrading in place"; }
+# Port persistence: adopt the port the existing config already listens on UNLESS --port was passed.
+# Without this an upgrade run with no --port defaults to 8088 and would (a) health-check the WRONG
+# port -> a needless rollback of a good upgrade, and (b) offer to rewrite a relocated listen port
+# back to 8088. Runs BEFORE the port-occupant check below.
+if [ "${PORT_EXPLICIT:-0}" != 1 ] && [ -f "$ETC/config.json" ]; then
+  _cfg_port="$(grep -oE '"listen"[[:space:]]*:[[:space:]]*":[0-9]+"' "$ETC/config.json" 2>/dev/null | grep -oE '[0-9]+' | tail -n1)"
+  if [ -n "$_cfg_port" ] && [ "$_cfg_port" != "$PORT" ]; then
+    PORT="$_cfg_port"; ok "keeping the configured UI port :$PORT (pass --port to change it)"
+  fi
+fi
 listener="$(port_listener "$PORT")"
 case "$listener" in
   *wayhop*|*velinx*|*wakeroute*) info "port :$PORT held by WayHop itself (upgrade) -- will restart it" ;;
@@ -347,6 +357,9 @@ sleep 2
 PROBE_TOOL=""
 if command -v curl >/dev/null 2>&1; then PROBE_TOOL=curl
 elif command -v wget >/dev/null 2>&1; then PROBE_TOOL=wget; fi
+# Only a probe that RAN and failed justifies a rollback -- a router with no curl/wget must not
+# trigger a false rollback of a good upgrade (the daemon's own fail-safe + watchdog cover runtime).
+HEALTH_CHECKED=0; [ -n "$PROBE_TOOL" ] && HEALTH_CHECKED=1
 HEALTHY=0
 i=0
 while [ "$i" -lt 5 ]; do
@@ -357,6 +370,37 @@ while [ "$i" -lt 5 ]; do
   esac
   i=$((i+1)); sleep 1
 done
+
+# Transactional rollback: an UPGRADE whose new binary failed its health check is restored to the
+# previous binary, so a bad update never strands the router. Gated on HEALTH_CHECKED so a missing
+# curl/wget can't force a false rollback. The preserved config is untouched (upgrades never rewrite it).
+ROLLED_BACK=0
+if [ "$HEALTHY" != 1 ] && [ "${HEALTH_CHECKED:-0}" = 1 ] && [ "$UPGRADE" = 1 ] && [ -f "$SBIN/wayhop.bak" ]; then
+  warn "new version did not answer on :$PORT within the timeout -- rolling back to the previous binary"
+  "$INITD/wayhop" stop 2>/dev/null || true
+  for _p in $(pgrep -f "$ETC/singbox.json" 2>/dev/null); do kill "$_p" 2>/dev/null || true; done
+  sleep 1
+  if cp "$SBIN/wayhop.bak" "$SBIN/wayhop"; then
+    ok "restored the previous binary from $SBIN/wayhop.bak"
+    "$INITD/wayhop" start 2>/dev/null || true
+    sleep 2
+    ROLLED_BACK=1
+    i=0
+    while [ "$i" -lt 5 ]; do
+      case "$PROBE_TOOL" in
+        curl) [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$PORT/" 2>/dev/null)" = 200 ] && { HEALTHY=1; break; } ;;
+        wget) wget -q -O /dev/null --timeout=3 "http://127.0.0.1:$PORT/" 2>/dev/null && { HEALTHY=1; break; } ;;
+        *) break ;;
+      esac
+      i=$((i+1)); sleep 1
+    done
+    if [ "$HEALTHY" = 1 ]; then warn "rolled back -- the PREVIOUS version is running on :$PORT; the update did NOT apply. Check logs (logread -e wayhop), then retry."
+    else warn "rolled back, but the previous version is not answering on :$PORT either -- check: logread -e wayhop"; fi
+  else
+    die "ROLLBACK FAILED: could not restore $SBIN/wayhop.bak. Restore by hand: cp $SBIN/wayhop.bak $SBIN/wayhop && $INITD/wayhop restart"
+  fi
+fi
+
 INSTALLED_VER="$("$SBIN/wayhop" --version 2>/dev/null | head -1)"
 IP="$(guess_lan_ip)"; [ -z "$IP" ] && IP="$(uname -n 2>/dev/null)"
 hdr "Done"
@@ -372,3 +416,14 @@ echo "  status: $INITD/wayhop status   |   logs: logread -e wayhop"
 if [ -f "$ETC/uninstall.sh" ]; then echo "  uninstall: sh $ETC/uninstall.sh   (add --purge to also delete config)"
 elif [ -f "$SRC/uninstall.sh" ]; then echo "  uninstall: sh ./uninstall.sh   (add --purge to also delete config)"
 else warn "uninstall.sh not found -- re-download the tarball to remove WayHop later"; fi
+
+# Exit status reflects the real outcome so the bootstrap / automation can tell success from failure.
+if [ "${ROLLED_BACK:-0}" = 1 ]; then
+  warn "UPDATE FAILED -- rolled back to the previous version (running on :$PORT). Nothing else changed."
+  exit 1
+fi
+if [ "$UPGRADE" = 1 ] && [ "$HEALTHY" != 1 ] && [ "${HEALTH_CHECKED:-0}" = 1 ]; then
+  warn "UPGRADE did not come up on :$PORT and no rollback was possible -- check: logread -e wayhop"
+  exit 1
+fi
+exit 0

@@ -77,6 +77,13 @@ func (s *Server) handlePBRPreview(w http.ResponseWriter, r *http.Request) {
 // (nftables + ip rules/routes) without touching the sing-box config. Use when only
 // routing lists changed, or after fw4 reload flushed the nft table.
 func (s *Server) handlePBRApply(w http.ResponseWriter, r *http.Request) {
+	// Serialize against handleApply (and the fail-safe rollback) — both write the kernel plane from a
+	// fresh compile, so without applyMu this endpoint could interleave: a concurrent Apply's applyPBR
+	// could overwrite the plan we just installed (lost update; reconcilePBR only probes table
+	// existence, so it never heals it), or a mode-transition teardown could land after Apply's plane
+	// op and desync the kernel plane vs the sing-box TUN. Lock order applyMu→pbrMu matches handleApply.
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
 	c := s.config()
 	p := s.store.Profile()
 	mode := s.routingMode(c)
@@ -121,6 +128,10 @@ func (s *Server) handlePBRApply(w http.ResponseWriter, r *http.Request) {
 // handlePBRTeardown removes the kernel PBR plane (nft table + ip rules/routes).
 // The plan tears down best-effort (errors ignored per Teardown contract).
 func (s *Server) handlePBRTeardown(w http.ResponseWriter, r *http.Request) {
+	// applyMu for the same reason as handlePBRApply: a teardown racing an in-flight Apply's applyPBR
+	// would leave the kernel plane in a nondeterministic state. applyMu→pbrMu preserves the lock order.
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
 	s.pbrMu.Lock()
 	plan := s.pbrPlan
 	s.pbrPlan = nil

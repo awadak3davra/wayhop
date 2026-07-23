@@ -21,7 +21,7 @@ permissions:
 env:
   # Both the quality gates here and the release builds in build.yml run on the same
   # Go 1.26 (patched stdlib); go.mod's `go 1.22` is only the language-version floor.
-  GO_VERSION: '1.26'
+  GO_VERSION: '1.26.5'  # >= 1.26.5: GO-2026-5856 (crypto/tls ECH privacy leak) fixed here
   # Run the JS-based actions on the runner's bundled Node 24 (Node 20 is
   # deprecated). The self-hosted runner ships node24; this opts in now.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
@@ -182,7 +182,7 @@ jobs:
       # so there is nothing in this repo for setup-go to cache, and a stale module-cache
       # tarball on the self-hosted runner was failing the restore (tar exit 2).
       - uses: actions/setup-go@v6
-        with: { go-version: '1.26', cache: false }   # olcRTC go.mod requires go 1.26.3; amneziawg-go builds on it too
+        with: { go-version: '1.26.5', cache: false }   # olcRTC go.mod requires go 1.26.3; amneziawg-go builds on it too; 1.26.5 fixes GO-2026-5856
       - name: amneziawg-go binary cross-builds (arm64)
         run: |
           set -euo pipefail

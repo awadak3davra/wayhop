@@ -478,6 +478,13 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 			} else {
 				reloaded = true
 			}
+		} else if !c.Demo {
+			// No sing-box binary at all (non-demo, non-native-only): the config was written but
+			// NOTHING runs it. Record it as a soft error so applied_ok flips false and the applied
+			// revision does not advance — otherwise the UI would toast success + clear "pending"
+			// for a config no engine reflects. (Demo has no core by design; native-only handled below.)
+			reloadErr = "sing-box binary not found (" + c.SingBox.Bin + ") — config written but nothing is running it"
+			log.Printf("handleApply: %s", reloadErr)
 		}
 	} else if !s.failsafe.Status().Pending {
 		// Native-only: do NOT write/check/rename singbox.json or reload the core (the kernel

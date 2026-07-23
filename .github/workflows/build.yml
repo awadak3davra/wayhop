@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.26'
+          go-version: '1.26.5'  # >= 1.26.5: GO-2026-5856 (crypto/tls ECH leak) fixed here
           cache: false
       - run: go vet ./...
       - run: go test -race ./...   # race detector (host build, CGO default on)
@@ -55,7 +55,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.26'
+          go-version: '1.26.5'  # >= 1.26.5: GO-2026-5856 (crypto/tls ECH leak) fixed here
           cache: false
       - name: Cross-compile + package ${{ matrix.name }}
         env:
@@ -97,8 +97,19 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.26'
+          go-version: '1.26.5'  # >= 1.26.5: GO-2026-5856 (crypto/tls ECH leak) fixed here
           cache: false
+      # Release gate: the installer/uninstaller scripts + maintainer hooks run as root on user
+      # routers — a ShellCheck regression must block the release, not just ci.yml (which does not
+      # gate publishing). Cheapest possible: lint only the shipped shell, fail the release on any finding.
+      - name: shellcheck packaging scripts (release gate)
+        run: |
+          set -euo pipefail
+          command -v shellcheck >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y shellcheck; }
+          shellcheck packaging/*.sh packaging/openwrt/*.sh packaging/S99wayhop packaging/openwrt/wayhop.init
+          shellcheck -s sh packaging/feed/*.sh \
+                     packaging/feed/postinst packaging/feed/postinst.apk packaging/feed/postinst.entware \
+                     packaging/feed/prerm packaging/feed/prerm.apk packaging/feed/prerm.entware packaging/feed/postupgrade.apk
       - name: Build every arch + package
         env:
           CGO_ENABLED: '0'

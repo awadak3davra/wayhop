@@ -505,9 +505,18 @@ function detectLang() {
 }
 const lang = () => { const v = localStorage.getItem(LANG_KEY); return v && hasDict(v) ? v : detectLang(); };
 function setLang(v) {
+  // route() below re-renders the current page, which silently discards unsaved form edits — the same
+  // hazard the SPA nav guard covers for hash navigation. Consult the shared registry first; on cancel,
+  // return false so the caller can revert the language <select>.
+  const h = location.hash || "#dashboard";
+  if (typeof hasUnsavedPageEdits === "function" && hasUnsavedPageEdits(h)) {
+    if (!confirm(t("You have unsaved changes on this page. Leave without saving?"))) return false;
+    discardPageEdits(h);
+  }
   if (v === "auto" || !hasDict(v)) localStorage.removeItem(LANG_KEY); else localStorage.setItem(LANG_KEY, v);
   translateChrome();
   if (typeof route === "function") route();
+  return true;
 }
 function t(s, ...args) {
   const d = DICTS[lang()];
@@ -3630,8 +3639,8 @@ function openAddConnection() {
     const confirm = el("div", {});
     async function parse() {
       const link = ta.value.trim();
-      if (!link) return;
-      confirm.innerHTML = ""; confirm.appendChild(el("div", { class: "hint" }, "parsing…"));
+      if (!link) { confirm.innerHTML = ""; confirm.appendChild(friendlyImportError("", null)); ta.focus(); return; }
+      confirm.innerHTML = ""; confirm.appendChild(el("div", { class: "hint" }, t("parsing…")));
       try {
         const parsed = await api.post("/api/import", { link });
         confirm.innerHTML = "";
@@ -3639,7 +3648,7 @@ function openAddConnection() {
         const saveBtn = el("button", { class: "btn btn-primary", onclick: async (ev) => {
           const e = form.collect(); if (!e.server || !e.port) return toast("Server and port required", "err");
           const b = ev.currentTarget; if (b.disabled) return; b.disabled = true; // guard against double-submit firing two POSTs before done() removes the modal
-          try { await api.post("/api/endpoints", e); done(t("Added {0}", e.name || e.id)); } catch (err) { b.disabled = false; toast(err.message, "err"); }
+          try { await api.post("/api/endpoints", e); done(t("Added {0}", e.name || e.id)); } catch (err) { b.disabled = false; toast(redactSecrets(err.message), "err"); }
         } }, "Save connection");
         const detProto = String(parsed.protocol || "?").toUpperCase();
         const detEng = parsed.engine && parsed.engine !== "singbox" ? parsed.engine : "";
@@ -3679,7 +3688,7 @@ function openAddConnection() {
     const importBtn = el("button", { class: "btn btn-primary", disabled: "true", onclick: async () => {
       const chosen = $$("input[type=checkbox]:checked", list).map(c => found[+c.value]);
       if (!chosen.length) return toast("Nothing selected", "err");
-      try { const r = await api.post("/api/endpoints/bulk", { endpoints: chosen }); done(t("Imported {0} connection(s)", r.saved) + (r.duplicates ? t(", {0} duplicate(s) skipped", r.duplicates) : "") + (r.errors && r.errors.length ? t(", {0} failed", r.errors.length) : "")); } catch (e) { toast(e.message, "err"); }
+      try { const r = await api.post("/api/endpoints/bulk", { endpoints: chosen }); done(t("Imported {0} connection(s)", r.saved) + (r.duplicates ? t(", {0} duplicate(s) skipped", r.duplicates) : "") + (r.errors && r.errors.length ? t(", {0} failed", r.errors.length) : "")); } catch (e) { toast(redactSecrets(e.message), "err"); }
     } }, "Import selected");
     const fetchBtn = el("button", { class: "btn", onclick: async () => {
       list.innerHTML = ""; importBtn.setAttribute("disabled", "true");
@@ -3691,7 +3700,7 @@ function openAddConnection() {
         found.forEach((e, i) => list.appendChild(el("label", { class: "check" }, el("input", { type: "checkbox", value: String(i), checked: "true" }), el("span", {}, (e.name || e.id) + "  "), el("span", { class: "badge" }, e.protocol))));
         if (r.errors && r.errors.length) list.appendChild(el("div", { class: "hint" }, r.errors.length + " line(s) skipped"));
         importBtn.removeAttribute("disabled");
-      } catch (e) { list.appendChild(el("div", { class: "hint", style: "color:var(--err)" }, e.message)); }
+      } catch (e) { list.appendChild(el("div", { class: "hint", style: "color:var(--err)" }, redactSecrets(e.message))); }
     } }, "Fetch / Parse");
     return el("div", {}, el("div", { class: "field" }, el("label", {}, "Subscription URL"), url),
       el("div", { class: "field" }, el("label", {}, "or paste text / base64"), ta),
@@ -6416,7 +6425,7 @@ async function renderSettings(view) {
   const langSel = el("select", {},
     ...I18N_LANGS.map(l => el("option", { value: l.code }, l.code === "auto" ? t("Auto (browser)") : l.name)));
   langSel.value = localStorage.getItem(LANG_KEY) || "auto";
-  langSel.addEventListener("change", () => setLang(langSel.value));
+  langSel.addEventListener("change", () => { if (setLang(langSel.value) === false) langSel.value = localStorage.getItem(LANG_KEY) || "auto"; });
   view.appendChild(el("div", { class: "card" },
     el("div", { class: "card-title", style: "margin-bottom:12px" }, t("Appearance")),
     el("div", { style: "display:flex;gap:16px;flex-wrap:wrap" },

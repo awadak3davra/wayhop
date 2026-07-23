@@ -10,8 +10,9 @@
 /servers.json.tmp
 /singbox.json
 # feed signing PRIVATE keys — the .pub halves ARE committed; the private halves live only in the
-# GitHub Actions secrets (WAYHOP_USIGN_SEC / WAYHOP_APK_SEC_PEM) and your local Drive backup. Losing
-# them forces a key rotation (every device must re-trust), so keep the backup.
+# GitHub Actions secrets (WAYHOP_USIGN_SEC / WAYHOP_APK_SEC_PEM) and a LOCAL-ONLY backup
+# (%LOCALAPPDATA%\wayhop-keys — never inside a cloud-synced tree like Google Drive). Losing them
+# forces a key rotation (every device must re-trust), so keep that local backup.
 /packaging/feed/keys/*.sec
 /packaging/feed/keys/*.pem
 
