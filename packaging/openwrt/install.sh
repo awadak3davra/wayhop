@@ -283,7 +283,7 @@ for _OLD in velinx wakeroute; do
   # tears the old-named table down, and the old daemon doesn't tear its PBR plane down on stop.
   # Without this, BOTH the stale ${_OLD}_pbr and the new wayhop_pbr prerouting-mangle chains
   # mark packets on a live (un-rebooted) cutover -> double-marking / mis-routing. Best-effort.
-  command -v nft >/dev/null 2>&1 && nft delete table inet "${_OLD}_pbr" 2>/dev/null || true
+  if command -v nft >/dev/null 2>&1; then nft delete table inet "${_OLD}_pbr" 2>/dev/null || true; fi
 done
 # Reap a sing-box orphaned by a prior crash (holds the cache.db lock + clash/TUN
 # ports) so the new core starts clean. The wayhop daemon's ReapStrays covers this too.

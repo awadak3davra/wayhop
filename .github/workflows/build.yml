@@ -106,8 +106,11 @@ jobs:
         run: |
           set -euo pipefail
           command -v shellcheck >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y shellcheck; }
-          shellcheck packaging/*.sh packaging/openwrt/*.sh packaging/S99wayhop packaging/openwrt/wayhop.init
-          shellcheck -s sh packaging/feed/*.sh \
+          # --severity=warning: block real defects (unquoted expansions, rm-rf risks, …) but not
+          # info-level style notes (e.g. SC2015 on an intentional `A && B || true`), which vary by
+          # shellcheck version across runners and would make the gate flaky.
+          shellcheck -S warning packaging/*.sh packaging/openwrt/*.sh packaging/S99wayhop packaging/openwrt/wayhop.init
+          shellcheck -S warning -s sh packaging/feed/*.sh \
                      packaging/feed/postinst packaging/feed/postinst.apk packaging/feed/postinst.entware \
                      packaging/feed/prerm packaging/feed/prerm.apk packaging/feed/prerm.entware packaging/feed/postupgrade.apk
       - name: Build every arch + package

@@ -496,7 +496,7 @@ for _OLD in velinx wakeroute; do
   rm -f "$OLD_BIN" "$OLD_BIN.bak"
   # Flush the OLD kernel-PBR nft table (renamed ${_OLD}_pbr -> wayhop_pbr; the daemon never
   # tears the old-named table down). No-op where nft is absent (Keenetic NDM-native). Best-effort.
-  command -v nft >/dev/null 2>&1 && nft delete table inet "${_OLD}_pbr" 2>/dev/null || true
+  if command -v nft >/dev/null 2>&1; then nft delete table inet "${_OLD}_pbr" 2>/dev/null || true; fi
 done
 # Reap a sing-box orphaned by a prior WAYHOP crash, matched by OUR config path (the same match the
 # daemon's own ReapStrays uses) — so a PassWall/HomeProxy/other sing-box running ITS own config is
