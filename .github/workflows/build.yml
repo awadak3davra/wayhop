@@ -158,7 +158,10 @@ jobs:
           # --- apk (OpenWrt 25.12+) — BEST-EFFORT (apk-tools v3 lives only in an Alpine-edge container).
           #     Wrapped so it can never fail the release; the opkg/Entware .ipk above are the guaranteed set.
           ( set +e
-            command -v docker >/dev/null 2>&1 || { echo "::notice::no docker — apk packages skipped (best-effort)"; exit 0; }
+            # Gate on actual daemon ACCESS, not just the binary: a runner with docker installed but
+            # an unreadable /var/run/docker.sock (permission denied) would otherwise reach `docker run`
+            # and fail the release — apk is best-effort, the .ipk + tarballs are the guaranteed set.
+            { command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; } || { echo "::notice::docker unavailable (absent or socket not accessible) — apk packages skipped (best-effort)"; exit 0; }
             docker run --rm -v "$PWD:/w" -w /w alpine:edge sh -euc '
               apk add --no-cache apk-tools >/dev/null 2>&1 || true
               apk mkpkg --help >/dev/null 2>&1 || { echo "apk-tools v3 unavailable — apk skipped"; exit 0; }
