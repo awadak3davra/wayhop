@@ -5,7 +5,7 @@ name: ci
 # add the checks build.yml lacks: format/vet, fuzzing, the real sing-box config
 # validation for every protocol, source-builds of the engine binaries WayHop
 # orchestrates (so a broken/upgraded olcRTC or amneziawg-go is caught in CI), and
-# informational static analysis (golangci-lint / govulncheck / shellcheck).
+# static analysis: golangci-lint (informational) + govulncheck / shellcheck / gitleaks (BLOCKING).
 on:
   push:
     branches: [main]
@@ -47,8 +47,7 @@ jobs:
         continue-on-error: true
         uses: golangci/golangci-lint-action@v8
         with: { version: v2.12.2 }
-      - name: govulncheck (informational)
-        continue-on-error: true
+      - name: govulncheck (blocking)
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           "$(go env GOPATH)/bin/govulncheck" ./...
@@ -86,14 +85,15 @@ jobs:
           for f in web/dist/*.js; do node --check "$f"; echo "  ok: $f"; done
       - name: i18n completeness (every language has every IPTV key, placeholders preserved)
         run: node scripts/check-i18n.mjs
+      - name: a11y contract (burger aria-expanded, apply-banner live region, nav guard, redaction)
+        run: node scripts/check-a11y.mjs
 
-  # --- shellcheck the install / init scripts (informational until clean) ---
+  # --- shellcheck the install / init scripts (BLOCKING) ---
   scripts:
     runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v6
       - name: shellcheck packaging scripts
-        continue-on-error: true
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck
           shellcheck packaging/*.sh packaging/openwrt/*.sh \
@@ -112,7 +112,6 @@ jobs:
       - uses: actions/checkout@v6
         with: { fetch-depth: 0 }   # full history so a secret in an OLD commit is caught too
       - name: gitleaks (tree + history)
-        continue-on-error: true
         run: |
           set -euo pipefail
           ver='8.21.2'

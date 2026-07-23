@@ -101,6 +101,13 @@ func (s *Server) armFailSafe(nativeOnly bool) {
 		// restored sing-box config's bind_interface/SOCKS targets are actually up — else
 		// the restored config runs a dead tunnel. Best-effort.
 		s.restorePluginBaseline()
+		// The engine now runs the PRE-window config again, so revert the persisted applied
+		// revision too — /api/state must go back to "pending", not keep claiming the rolled-
+		// back changes are active. Covers the automatic window AND the manual RollbackNow
+		// endpoint (both drive this closure). Done even if sbErr != nil ("rollback_failed"):
+		// the new config is not verifiably active either way, and after the reboot escalation
+		// the router boots the committed baseline — which IS the pre-window revision.
+		s.restorePrevApplied()
 		return sbErr
 	}
 	reboot := func() {

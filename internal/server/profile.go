@@ -566,8 +566,20 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 		s.armFailSafe(nativeOnly)
 	}
 
+	// Advance the PERSISTED applied revision so the UI's "unapplied changes" clears — but ONLY on a
+	// genuinely successful apply. A reload/commit/PBR error means the engine may not reflect the
+	// saved profile, so the applied revision is left as-is and the UI stays "pending" (Apply failed;
+	// previous configuration is still active).
+	applyOK := reloadErr == "" && commitErr == "" && pbrErr == nil
+	if applyOK {
+		// Record the (config, profile) snapshot THIS apply materialized — not a fresh store
+		// read — so an edit racing the apply can never be falsely marked applied.
+		s.recordApplied(c, p)
+	}
+
 	resp := map[string]any{
 		"applied":     true,
+		"applied_ok":  applyOK, // true only when the engine now reflects the saved profile (no soft errors)
 		"saved":       body.Save,
 		"checked":     checked,
 		"reloaded":    reloaded,

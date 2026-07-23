@@ -123,9 +123,11 @@ fi
 
 detect_arch() {
   case "$(uname -m)" in
-    armv7l|armv6l|arm) echo arm ;;
-    aarch64|arm64)     echo arm64 ;;
-    x86_64|amd64)      echo amd64 ;;
+    armv7l|armv7)                     echo arm ;;            # the published 'arm' build is GOARM=7
+    armv6l|armv6|armv5l|armv5|armv4l) echo armv6-unsupported ;;  # would SIGILL on the ARMv7 build
+    arm)                              echo arm-ambiguous ;;  # bare 'arm' — can't tell v6 from v7
+    aarch64|arm64)                    echo arm64 ;;
+    x86_64|amd64)                     echo amd64 ;;
     mips|mips64)
       bb="$(command -v busybox 2>/dev/null || echo /bin/busybox)"
       d="$(dd if="$bb" bs=1 skip=5 count=1 2>/dev/null | od -t u1 | head -n1 | tr -s ' ' | cut -d' ' -f2)"
@@ -134,7 +136,11 @@ detect_arch() {
   esac
 }
 ARCH="${FORCE_ARCH:-$(detect_arch)}"
-[ "$ARCH" = unknown ] && die "could not detect arch (uname -m=$(uname -m)); pass one explicitly"
+case "$ARCH" in
+  armv6-unsupported) die "ARMv6/ARMv5 CPU ($(uname -m)) is not supported -- the 'arm' build is ARMv7 and would crash. No armv6 build is shipped." ;;
+  arm-ambiguous)     die "uname reports a bare 'arm' -- cannot tell ARMv6 from ARMv7. If genuinely ARMv7, re-run with: sh ./install.sh arm" ;;
+  unknown)           die "could not detect arch (uname -m=$(uname -m)); pass one explicitly" ;;
+esac
 BIN="$SRC/wayhop-$ARCH"
 [ -f "$BIN" ] || BIN="$SRC/wayhop"
 [ -f "$BIN" ] || die "binary not found -- expected $SRC/wayhop-$ARCH or $SRC/wayhop (wrong arch tarball?)"

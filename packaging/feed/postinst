@@ -14,8 +14,8 @@ for _OLD in velinx wakeroute; do
     "/etc/init.d/$_OLD" disable 2>/dev/null
     rm -f "/etc/init.d/$_OLD"
   fi
-  [ -d "/etc/$_OLD" ] && [ ! -d /etc/wayhop ] && { mv "/etc/$_OLD" /etc/wayhop 2>/dev/null || { cp -a "/etc/$_OLD" /etc/wayhop && rm -rf "/etc/$_OLD"; }; }
-  [ -d "/var/lib/$_OLD" ] && [ ! -d /var/lib/wayhop ] && { mv "/var/lib/$_OLD" /var/lib/wayhop 2>/dev/null || { cp -a "/var/lib/$_OLD" /var/lib/wayhop && rm -rf "/var/lib/$_OLD"; }; }
+  [ -d "/etc/$_OLD" ] && [ ! -d /etc/wayhop ] && { mv "/etc/$_OLD" /etc/wayhop 2>/dev/null || { cp -a "/etc/$_OLD" /etc/wayhop && rm -rf "/etc/${_OLD:?}"; }; }
+  [ -d "/var/lib/$_OLD" ] && [ ! -d /var/lib/wayhop ] && { mv "/var/lib/$_OLD" /var/lib/wayhop 2>/dev/null || { cp -a "/var/lib/$_OLD" /var/lib/wayhop && rm -rf "/var/lib/${_OLD:?}"; }; }
   # Rewrite old paths in EVERY text config -- incl singbox.json's cache_file.path, which the daemon
   # loads as-is (a stale path crash-loops sing-box on "initialize cache-file"). Never sed cache.db.
   for _f in /etc/wayhop/config.json /etc/wayhop/singbox.json /etc/wayhop/singbox.json.bak /etc/wayhop/singbox.json.good /etc/wayhop/plugins/*.conf; do
@@ -24,7 +24,8 @@ for _OLD in velinx wakeroute; do
   command -v nft >/dev/null 2>&1 && nft delete table inet "${_OLD}_pbr" 2>/dev/null || true
   rm -f "/usr/sbin/$_OLD" "/usr/sbin/$_OLD.bak"
 done
-for _p in $(pgrep -f 'sing-box run' 2>/dev/null); do kill "$_p" 2>/dev/null || true; done
+# Reap only a WayHop-orphaned sing-box (matched by OUR config path), NEVER every sing-box on the box.
+for _p in $(pgrep -f '/etc/wayhop/singbox.json' 2>/dev/null); do kill "$_p" 2>/dev/null || true; done
 
 # Seed a minimal config when absent (mirrors install.sh): wayhop.init deliberately refuses to
 # start without /etc/wayhop/config.json (anti-respawn-loop guard), so a FRESH feed install would

@@ -36,13 +36,14 @@
 
   <main class="main">
     <header class="topbar">
-      <label for="navtoggle" class="nav-burger" aria-label="Menu">&#9776;</label>
+      <button type="button" class="nav-burger" aria-controls="navtoggle" aria-expanded="false" aria-label="Menu">&#9776;</button>
       <div class="title" id="pagetitle">Dashboard</div>
       <div class="spacer"></div>
       <span class="pill muted" id="statuspill"><span class="dot"></span><span id="statustext">…</span></span>
       <button class="btn btn-ghost" id="applybtn" title="Apply live — not saved, reverts on reboot or if connectivity drops">Apply</button>
       <button class="btn btn-primary" id="applysavebtn" title="Apply and persist as the saved baseline">Apply &amp; Save</button>
     </header>
+    <div id="apply-banner" class="apply-banner" hidden></div>
     <div id="failsafe-banner" role="alert" aria-live="assertive" style="display:none"></div>
     <div id="apply-error" role="alert" aria-live="assertive" style="display:none"></div>
     <div class="content" id="view"></div>

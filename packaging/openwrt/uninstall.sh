@@ -108,6 +108,38 @@ else
 fi
 
 # ===========================================================================
+# 1b. NETWORK RULES: tear down ONLY WayHop's own kernel routing (its nft table +
+#     its fwmark ip rules). Never touches a foreign table/rule. Idempotent.
+# ===========================================================================
+hdr "Network rules"
+CLEANED=0
+if command -v nft >/dev/null 2>&1 && nft list table inet wayhop_pbr >/dev/null 2>&1; then
+  if nft delete table inet wayhop_pbr 2>/dev/null; then ok "removed nft table inet wayhop_pbr"; CLEANED=1; fi
+fi
+if command -v ip >/dev/null 2>&1; then
+  # WayHop marks its traffic with fwmark <N>/0x00ff0000 — one mark PER egress, so a multi-tunnel
+  # failover setup has several (0x10000, 0x20000, 0x30000, …), each routed via its OWN table. The
+  # 0xff0000 mask is WayHop's signature: remove EVERY rule carrying it (not just 0x20000) and flush
+  # the tables those rules pointed at, so no orphaned routes survive. Parse-act one at a time, with
+  # a guard cap against any loop.
+  _tables=""; _n=0
+  while [ "$_n" -lt 64 ]; do
+    _line="$(ip rule show 2>/dev/null | grep -m1 '/0xff0000')"
+    [ -z "$_line" ] && break
+    _mark="$(printf '%s\n' "$_line" | grep -oE '0x[0-9a-f]+/0xff0000' | head -n1)"
+    [ -z "$_mark" ] && break
+    _tbl="$(printf '%s\n' "$_line" | grep -oE 'lookup [0-9]+' | grep -oE '[0-9]+' | head -n1)"
+    ip rule del fwmark "$_mark" 2>/dev/null || break
+    CLEANED=1; _n=$((_n+1))
+    case " $_tables " in *" $_tbl "*) ;; *) [ -n "$_tbl" ] && _tables="$_tables $_tbl" ;; esac
+  done
+  for _t in $_tables; do
+    ip route flush table "$_t" 2>/dev/null && CLEANED=1
+  done
+fi
+if [ "$CLEANED" = 1 ]; then ok "WayHop routing rules cleared"; else info "no WayHop routing rules present (already clean)"; fi
+
+# ===========================================================================
 # 2. REMOVE binary, procd init script and the single rolling backup.
 #    Each removal is guarded so a partial/re-run never errors.
 # ===========================================================================

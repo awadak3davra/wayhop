@@ -71,6 +71,30 @@ button { font-family:inherit; }
    inline) so the mobile rule below (max-width:760px) can narrow it — an inline padding would outrank it. */
 #failsafe-banner { padding:14px 24px 0; }
 
+/* Persistent Apply / pending-changes banner — the primary state signal (not toast-only). */
+.apply-banner { margin:14px 24px 0; border:1px solid var(--divider); border-left-width:4px; border-radius:8px; background:var(--card-2); }
+.apply-banner[hidden] { display:none; }
+.apply-banner .ab-row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:11px 15px; }
+.apply-banner .ab-msg { font-size:var(--fs-small); font-weight:500; color:inherit; flex:1 1 220px; min-width:0; }
+.apply-banner .ab-actions { display:flex; gap:8px; flex-wrap:wrap; }
+.apply-banner.ab-warn { border-left-color:var(--warn); background:var(--warn-tint); }
+.apply-banner.ab-info { border-left-color:var(--accent); background:var(--accent-tint); }
+.apply-banner.ab-ok   { border-left-color:var(--ok);   background:var(--ok-tint); }
+.apply-banner.ab-err  { border-left-color:var(--err);  background:var(--err-tint); }
+.apply-banner .ab-spin { width:15px; height:15px; border:2px solid var(--divider); border-top-color:var(--accent); border-radius:50%; animation:ab-spin .8s linear infinite; flex:0 0 auto; }
+@keyframes ab-spin { to { transform:rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .apply-banner .ab-spin { animation:none; } }
+@media (max-width:640px) { .apply-banner { margin:12px 14px 0; } .apply-banner .ab-actions { width:100%; } .apply-banner .ab-actions .btn { flex:1 1 auto; } }
+
+/* Friendly import-error card (raw parser messages hidden inside "Technical details"). */
+.import-error { border:1px solid var(--err); border-left-width:4px; border-radius:8px; background:var(--err-tint); padding:12px 14px; }
+.import-error .ie-msg { font-weight:600; color:inherit; margin-bottom:10px; }
+.import-error .ie-msg::before { content:"\26A0  "; }
+.import-error .ie-actions { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:4px; }
+.import-error .ie-tech { margin-top:8px; }
+.import-error .ie-tech summary { cursor:pointer; color:var(--muted); font-size:var(--fs-small); }
+.import-error .ie-raw { background:var(--card); border:1px solid var(--divider); border-radius:6px; padding:8px 10px; margin:8px 0; font-size:var(--fs-small); white-space:pre-wrap; word-break:break-word; overflow-x:auto; }
+
 /* pills + badges */
 .pill { display:inline-flex; align-items:center; gap:8px; padding:4px 11px; border-radius:var(--radius-sm);
   font-size:var(--fs-caption); font-weight:600; letter-spacing:.3px; text-transform:uppercase;
@@ -389,6 +413,24 @@ input:disabled, select:disabled, textarea:disabled { opacity:.6; cursor:not-allo
 .empty-ico { font-size:24px; opacity:.5; line-height:1; }
 .empty-title { font-size:var(--fs-body); font-weight:600; color:var(--ink-2); }
 .empty-hint { font-size:var(--fs-small); color:var(--ink-3); max-width:42ch; line-height:1.5; }
+/* First-run experience (Connections empty state): a named primary action + a 3-step
+   orientation so a new, non-technical user is never left staring at a blank card. */
+.firstrun { display:flex; flex-direction:column; align-items:center; text-align:center;
+  gap:var(--sp-3); padding:var(--sp-7) var(--sp-4); }
+.fr-ico { font-size:34px; line-height:1; color:var(--accent); }
+.fr-title { font-size:var(--fs-xl); font-weight:650; color:var(--ink); }
+.fr-hint { font-size:var(--fs-body); color:var(--ink-2); max-width:48ch; line-height:1.55; }
+.fr-cta { margin-top:var(--sp-1); }
+.fr-steps { list-style:none; margin:var(--sp-4) 0 0; padding:0; display:grid; gap:var(--sp-3);
+  width:100%; max-width:520px; text-align:left; }
+.fr-step { display:flex; align-items:flex-start; gap:var(--sp-3); }
+.fr-num { flex:0 0 auto; width:24px; height:24px; border-radius:50%; background:var(--accent);
+  color:#fff; font-size:var(--fs-small); font-weight:700; line-height:24px; text-align:center; }
+.fr-step-body { display:flex; flex-direction:column; gap:2px; min-width:0; }
+.fr-step-t { font-size:var(--fs-control); font-weight:600; color:var(--ink); }
+.fr-step-d { font-size:var(--fs-small); color:var(--ink-3); line-height:1.5; }
+.fr-alt { margin-top:var(--sp-2); }
+@media (max-width:560px) { .fr-steps { max-width:100%; } }
 .row-between { display:flex; align-items:center; justify-content:space-between; }
 /* Section header — echoes a panel block-header: prominent title + muted
    description + right-aligned side actions. */
@@ -573,7 +615,8 @@ input:disabled, select:disabled, textarea:disabled { opacity:.6; cursor:not-allo
   /* hamburger trigger in the topbar */
   .nav-burger { display:inline-flex; align-items:center; justify-content:center; flex:none;
     width:44px; height:44px; margin-left:-8px; font-size:22px; color:var(--ink);
-    cursor:pointer; border-radius:var(--radius-sm); }
+    cursor:pointer; border-radius:var(--radius-sm);
+    background:none; border:none; padding:0; font-family:inherit; -webkit-appearance:none; appearance:none; }
   .nav-burger:active { background:var(--card-2); }
 
   /* topbar: compact + wraps; title truncates */

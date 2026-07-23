@@ -123,6 +123,7 @@ function reflectDirty() {
   if (ab) ab.title = profileDirty
     ? t("Unsaved changes — Apply to activate them (live, reverts on reboot)")
     : t("Apply live — not saved, reverts on reboot or if connectivity drops");
+  renderApplyBanner();
 }
 function updateDirty() {
   const snap = profileSnapshot();
@@ -131,6 +132,61 @@ function updateDirty() {
   reflectDirty();
 }
 function clearDirty() { _appliedSnapshot = profileSnapshot(); profileDirty = false; reflectDirty(); }
+
+// --- backend-sourced applied-state (the SOURCE OF TRUTH; survives a reload) + the Apply banner ---
+// profileDirty above is an INSTANT optimistic hint. /api/state is authoritative: it compares the
+// SAVED profile hash against the last-APPLIED one (persisted on the backend), so a hard reload can
+// never falsely show "all applied" when saved edits were never pushed to the engine.
+state.applyState = { pending: false, applied_at: 0 };
+state.applyPhase = ""; // "" | "applying" | "applied" | "failed" | "failed-attention"
+let _applyPhaseTimer = null;
+async function refreshApplyState() {
+  try {
+    const r = await api.get("/api/state");
+    state.applyState = (r && typeof r.pending === "boolean") ? r : { pending: false };
+    profileDirty = !!state.applyState.pending; // backend overrides the optimistic snapshot
+    if (profileDirty) _appliedSnapshot = null;  // keep the local hint in sync for this session
+    else _appliedSnapshot = profileSnapshot();
+  } catch (e) { /* transient error — keep the last known state, don't flip to a wrong value */ }
+  reflectDirty();
+}
+function setApplyPhase(p, autoClearMs) {
+  if (_applyPhaseTimer) { clearTimeout(_applyPhaseTimer); _applyPhaseTimer = null; }
+  state.applyPhase = p;
+  renderApplyBanner();
+  if (autoClearMs) _applyPhaseTimer = setTimeout(() => { if (state.applyPhase === p) { state.applyPhase = ""; renderApplyBanner(); } }, autoClearMs);
+}
+function renderApplyBanner() {
+  const host = document.getElementById("apply-banner");
+  if (!host) return;
+  const phase = state.applyPhase, pending = profileDirty;
+  let cls = "", role = "status", msg = "", acts = [];
+  if (phase === "applying")            { cls = "ab-info"; msg = t("Applying changes…"); }
+  else if (phase === "validating")     { cls = "ab-info"; msg = t("Validating configuration…"); }
+  else if (phase === "applied")        { cls = "ab-ok";   msg = t("Changes applied successfully."); }
+  else if (phase === "failed")         { cls = "ab-err"; role = "alert"; msg = t("Apply failed — the previous configuration is still active."); acts = ["apply"]; }
+  else if (phase === "failed-attention"){ cls = "ab-err"; role = "alert"; msg = t("Apply failed and the service needs attention. Open Diagnostics."); acts = ["apply", "diag"]; }
+  else if (pending)                    { cls = "ab-warn"; msg = t("You have unapplied changes. Apply them to activate."); acts = ["apply", "review"]; }
+  else { host.hidden = true; host.textContent = ""; host.removeAttribute("role"); host.removeAttribute("aria-live"); return; }
+  host.hidden = false;
+  host.className = "apply-banner " + cls;
+  host.setAttribute("role", role);
+  host.setAttribute("aria-live", role === "alert" ? "assertive" : "polite");
+  host.textContent = "";
+  const row = el("div", { class: "ab-row" });
+  if (phase === "applying" || phase === "validating") row.appendChild(el("span", { class: "ab-spin", "aria-hidden": "true" }));
+  row.appendChild(el("span", { class: "ab-msg" }, msg));
+  if (acts.length) {
+    const bx = el("div", { class: "ab-actions" });
+    acts.forEach(a => {
+      if (a === "apply")       bx.appendChild(el("button", { class: "btn btn-primary btn-sm", type: "button", onclick: () => applyConfig(false) }, t("Apply changes")));
+      else if (a === "review") bx.appendChild(el("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: () => { location.hash = "#connections"; } }, t("Review changes")));
+      else if (a === "diag")   bx.appendChild(el("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: () => { location.hash = "#diagnostics"; } }, t("Open Diagnostics")));
+    });
+    row.appendChild(bx);
+  }
+  host.appendChild(row);
+}
 const findEndpoint = id => state.profile.endpoints.find(e => e.id === id);
 const findGroup = id => state.profile.groups.find(g => g.id === id);
 const nameOf = id => (findEndpoint(id) || findGroup(id) || {}).name || id;
@@ -1502,6 +1558,46 @@ async function reviewIptvList(l) {
   });
 }
 
+// --- SPA navigation guard: warn before leaving a page with UNSAVED FORM edits. This is DISTINCT
+// from "saved but unapplied" config (the Apply banner) — saved config is safe to navigate away from,
+// so it does NOT warn. Covers sidebar + mobile nav, browser Back/Forward, and internal links (all
+// change the hash), plus browser reload/close via the shared beforeunload hook below. Native
+// confirm() is synchronous, so it can block before the new page renders (an async dialog cannot). ---
+let _navGuardHash = location.hash || "#dashboard";
+let _navGuardSkip = false;
+// Registry: ANY page with unsaved-form state registers { check, discard } from its render —
+//   registerDirtyCheck("settings", () => _settingsDirty, () => { _settingsDirty = false; })
+// The guard consults the checker of the page being LEFT; a re-render simply overwrites its
+// own entry, so registration is idempotent per page.
+const _dirtyChecks = {};
+function registerDirtyCheck(page, check, discard) { _dirtyChecks[page] = { check, discard }; }
+function hasUnsavedPageEdits(hash) {
+  const d = _dirtyChecks[(hash || "").slice(1)];
+  try { return !!(d && d.check()); } catch (_) { return false; }
+}
+function discardPageEdits(hash) {
+  const d = _dirtyChecks[(hash || "").slice(1)];
+  try { if (d && d.discard) d.discard(); } catch (_) {}
+}
+function onHashChange() {
+  const to = location.hash || "#dashboard";
+  if (_navGuardSkip) { _navGuardSkip = false; _navGuardHash = to; route(); return; }
+  if (to !== _navGuardHash && hasUnsavedPageEdits(_navGuardHash)) {
+    if (!confirm(t("You have unsaved changes on this page. Leave without saving?"))) {
+      _navGuardSkip = true;
+      location.hash = _navGuardHash; // revert; the resulting hashchange is skipped above
+      return;
+    }
+    discardPageEdits(_navGuardHash); // user chose to leave without saving → clear so re-entry is clean
+  }
+  _navGuardHash = to;
+  route();
+}
+// Browser reload/close protection for ANY page with unsaved form edits — one hook, same registry.
+window.addEventListener("beforeunload", e => {
+  if (hasUnsavedPageEdits(location.hash || "#dashboard")) { e.preventDefault(); e.returnValue = ""; }
+});
+
 async function route() {
   // Close any open modal when navigating: modals are appended to <body>, so
   // clearing #view alone would leave the dialog floating over the new page.
@@ -2222,6 +2318,29 @@ async function toggleEndpoint(e, sw) {
   } finally { if (sw) sw._busy = false; }
 }
 
+// firstRunConnections is the empty-state / first-run experience for the Connections
+// page. Instead of a bare "nothing here" line, it names the primary action and gives
+// a 3-step orientation (add → route → apply) so a first-time, non-technical user knows
+// exactly what to do next. All copy is localized via t().
+function firstRunConnections() {
+  const step = (n, title, detail) =>
+    el("li", { class: "fr-step" },
+      el("span", { class: "fr-num", "aria-hidden": "true" }, String(n)),
+      el("div", { class: "fr-step-body" },
+        el("div", { class: "fr-step-t" }, title),
+        el("div", { class: "fr-step-d" }, detail)));
+  return el("div", { class: "firstrun" },
+    el("div", { class: "fr-ico", "aria-hidden": "true" }, "⇄"),
+    el("div", { class: "fr-title" }, t("Add your first connection")),
+    el("div", { class: "fr-hint" }, t("A connection is a VPN or proxy tunnel your router sends traffic through. Add one to get started.")),
+    el("button", { class: "btn btn-primary fr-cta", onclick: openAddConnection }, "+ " + t("Add your first connection")),
+    el("ol", { class: "fr-steps" },
+      step(1, t("Paste a link or import a config"), t("Works with vless://, vmess://, trojan://, hysteria2://, tuic:// links and WireGuard / AmneziaWG configs.")),
+      step(2, t("Choose what routes through it"), t("Send specific sites or devices through the tunnel — or route everything.")),
+      step(3, t("Apply to activate"), t("Changes go live on the router only when you press Apply."))),
+    el("button", { class: "btn btn-ghost btn-sm fr-alt", onclick: openSubscription }, t("Import a subscription instead")));
+}
+
 async function renderConnections(view) {
   await loadProfile();
   const head = el("div", { class: "block-head" },
@@ -2235,7 +2354,7 @@ async function renderConnections(view) {
 
   const card = el("div", { class: "card" });
   if (!state.profile.endpoints.length) {
-    card.appendChild(emptyState("No connections yet", "Paste a vless:// / hysteria2:// link or a WireGuard config to add one."));
+    card.appendChild(firstRunConnections());
   } else {
     state.profile.endpoints.forEach(e => {
       const tog = switchEl(e.enabled, (s) => toggleEndpoint(e, s), (e.name || e.id) + " enabled");
@@ -3458,6 +3577,47 @@ function openEditEndpoint(ep) {
     footer: [el("button", { class: "btn btn-ghost", onclick: () => back.remove() }, "Cancel"), el("button", { class: "btn btn-primary", onclick: save }, "Save")] });
 }
 
+// Map a raw importer/parser error (e.g. `unsupported scheme ""`) to a friendly category, with an
+// expandable Technical details section + recovery actions. The pasted link (which may hold secrets)
+// is never shown — only the parser's own message goes into the details.
+// redactSecrets masks credential-like material in a raw error string before it is shown in
+// "Technical details" or copied to the clipboard: URL userinfo (the uuid/password before @),
+// full UUIDs, and long base64/key-ish runs. The user pasted their own link, but the details
+// end up in screenshots and support logs — never echo whole secrets back. Over-redaction is
+// safe here (it is a diagnostics box, not the data path).
+function redactSecrets(raw) {
+  let s = String(raw == null ? "" : raw);
+  s = s.replace(/(\w[\w+.-]*:\/\/)([^/@\s]{5,})@/g, (m, p, u) => p + u.slice(0, 4) + "…@");
+  s = s.replace(/\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g, u => u.slice(0, 4) + "…");
+  s = s.replace(/\b[A-Za-z0-9+/=_-]{20,}\b/g, r => r.slice(0, 4) + "…" + r.slice(-2));
+  return s;
+}
+
+function friendlyImportError(raw, onRetry) {
+  raw = String(raw == null ? "" : raw);
+  const low = raw.toLowerCase();
+  let msg;
+  if (low.includes("unsupported scheme") || low.includes("unknown scheme") || (low.includes("unsupported") && low.includes("type"))) msg = t("This connection format is not supported.");
+  else if (low.includes("decode") || low.includes("base64")) msg = t("The link could not be decoded.");
+  else if (low.includes("missing") || low.includes("required")) msg = t("Required connection information is missing.");
+  else if (low.includes("incomplete") || low.includes("no host") || low.includes("no port") || low.includes("invalid port")) msg = t("The link appears incomplete.");
+  else if (!raw.trim()) msg = t("The link is empty — paste a share link or a config.");
+  else msg = t("The imported configuration is invalid.");
+  const box = el("div", { class: "import-error", role: "alert" });
+  box.appendChild(el("div", { class: "ie-msg" }, msg));
+  const acts = el("div", { class: "ie-actions" });
+  if (onRetry) acts.appendChild(el("button", { class: "btn btn-sm", type: "button", onclick: onRetry }, t("Paste another link")));
+  acts.appendChild(el("button", { class: "btn btn-sm", type: "button", onclick: () => toast(t("Supported: VLESS · VMess · Trojan · Shadowsocks · Hysteria2 · TUIC · WireGuard · AmneziaWG · olcRTC"), "info") }, t("View supported formats")));
+  box.appendChild(acts);
+  const det = el("details", { class: "ie-tech" });
+  const safe = redactSecrets(raw); // both the display AND the clipboard get the redacted form
+  det.appendChild(el("summary", {}, t("Technical details")));
+  det.appendChild(el("pre", { class: "ie-raw" }, safe));
+  det.appendChild(el("button", { class: "btn btn-sm", type: "button", onclick: () => { if (navigator.clipboard) { navigator.clipboard.writeText(safe); toast(t("Copied"), "ok"); } } }, t("Copy technical details")));
+  box.appendChild(det);
+  return box;
+}
+
 function openAddConnection() {
   const content = el("div", { id: "addconn-panel", role: "tabpanel", tabindex: "0" }); // the tabs' panel (aria-controls target)
   const tabEls = {};
@@ -3489,7 +3649,10 @@ function openAddConnection() {
             : t("Detected {0} — review below and fix the type if it's wrong, then save.", detProto)));
         confirm.appendChild(form.el);
         confirm.appendChild(el("div", { style: "margin-top:10px" }, saveBtn));
-      } catch (e) { confirm.innerHTML = ""; confirm.appendChild(el("div", { class: "hint", style: "color:var(--err)" }, e.message)); }
+      } catch (e) {
+        confirm.innerHTML = "";
+        confirm.appendChild(friendlyImportError(e.message, () => { ta.value = ""; ta.focus(); confirm.innerHTML = ""; }));
+      }
     }
     const parseBtn = el("button", { class: "btn btn-primary", onclick: parse }, "Parse");
     const file = el("input", { type: "file", accept: ".conf,.json,.txt,.yaml,.yml", style: "display:none",
@@ -3792,17 +3955,29 @@ async function applyConfig(save) {
   btn.classList.add("working");
   const stop = applyProgress(btn);
   applyInFlight = true; // freeze staging toggles until this Apply settles (see the guards in toggleEndpoint/toggleRoutingList/dnsToggleRow)
+  setApplyPhase("applying");
   try {
     const r = await api.post("/api/apply", { save: !!save });
-    let msg = save ? "Applied & saved" : "Applied (live, not saved)";
-    if (r.checked) msg += " · check OK";
-    if (r.reloaded) msg += " · reloaded";
     hideApplyError();
-    toast(msg, "ok");
+    if (r.applied_ok === false) {
+      // Config was written but the engine did not come up cleanly (reload/PBR/commit error). The
+      // backend did NOT advance the applied revision, so /api/state stays pending — never report
+      // success. ("Apply failed and service state requires attention.")
+      setApplyPhase("failed-attention");
+      toast(t("Apply had problems — the service may need attention."), "err");
+    } else {
+      toast(save ? t("Applied and saved as the baseline.") : t("Applied live (reverts on reboot unless saved)."), "ok");
+      setApplyPhase("applied", 3500);
+    }
     if (!save && r.failsafe && r.failsafe.pending) startFailsafeBanner();
     else hideFailsafeBanner();
-    clearDirty(); // the staged profile is now the live baseline
-  } catch (e) { showApplyError(e.message, save); }
+    await refreshApplyState(); // backend truth — clears "pending" only if the backend confirms the apply
+  } catch (e) {
+    // The POST itself failed → the previous configuration is still active + running.
+    setApplyPhase("failed");
+    showApplyError(e.message, save);
+    try { await refreshApplyState(); } catch (_) {}
+  }
   finally {
     applyInFlight = false;
     stop();
@@ -3823,10 +3998,10 @@ function startFailsafeBanner() {
     try { st = await api.get("/api/apply/status"); } catch (_) { return; }
     if (!st.pending) {
       hideFailsafeBanner();
-      if (st.phase === "rolled_back") toast("Connectivity lost — config rolled back", "err");
+      if (st.phase === "rolled_back") toast(t("Connectivity lost — config rolled back."), "err");
       else if (st.phase === "rollback_failed") toast(t("Connectivity lost AND the rollback failed — {0}", st.last_error || t("restore the config manually")), "err");
-      else if (st.phase === "reboot") toast("Fail-safe couldn't restore connectivity (escalated to reboot)", "err");
-      else if (st.phase === "live_unsaved") toast("Config is live (not saved). Use Apply & Save to keep it.", "info");
+      else if (st.phase === "reboot") toast(t("Fail-safe couldn't restore connectivity (escalated to reboot)."), "err");
+      else if (st.phase === "live_unsaved") toast(t("Config is live but not saved. Use Apply & Save to keep it after a reboot."), "info");
       return;
     }
     renderFailsafeBanner(st);
@@ -6213,10 +6388,9 @@ function validateSettingsClient(next) {
   return errs;
 }
 
-// Module-scoped so the single beforeunload guard (added once) can see the live
-// dirty state without re-binding on every Settings render.
+// Module-scoped so the nav-guard registry's checker (registered per render) always
+// reads the live dirty state.
 let _settingsDirty = false;
-let _settingsUnloadHooked = false;
 
 async function renderSettings(view) {
   const loadingCfg = el("div", { class: "hint", style: "margin:18px 0" }, t("loading settings…"));
@@ -6409,14 +6583,9 @@ async function renderSettings(view) {
   view._wrDirty = markDirty;
   view.addEventListener("input", markDirty);
   view.addEventListener("change", markDirty);
-  if (!_settingsUnloadHooked) {
-    _settingsUnloadHooked = true;
-    // Fires only while ON Settings with unsaved edits (in-app nav re-fetches config,
-    // so leaving simply discards — the badge is the warning there).
-    window.addEventListener("beforeunload", e => {
-      if (_settingsDirty && (location.hash || "#dashboard").slice(1) === "settings") { e.preventDefault(); e.returnValue = ""; }
-    });
-  }
+  // Nav-guard registration: the SPA hash guard + the global beforeunload hook both
+  // consult this (see registerDirtyCheck) — no page-local beforeunload needed.
+  registerDirtyCheck("settings", () => _settingsDirty, () => { _settingsDirty = false; });
 
   save.addEventListener("click", async () => {
     const next = collectSettings();
@@ -6449,6 +6618,9 @@ async function renderSettings(view) {
       lastSavedRouteMode = next.routing_mode || "";
       lastSavedOffload = offloadNow;
       baseline = JSON.stringify(collectSettings()); _settingsDirty = false; dirtyBadge.style.display = "none";
+      // Config now feeds the canonical applied-state (routing mode / TUN / offload…), so a
+      // config-only save can flip the backend to "pending" — refresh the Apply banner NOW.
+      refreshApplyState();
       toast(r.restart_needed ? t("Saved — restart WayHop for all changes to take effect.") : t("Saved."), "ok");
       if (routeModeChanged) toast(t("Routing mode changed — press Apply (top bar) to activate it."), "info");
       else if (offloadChanged) toast(t("Flow offload changed — press Apply (top bar) to activate it."), "info");
@@ -6608,33 +6780,29 @@ async function loadProfile() {
   p.groups.forEach(g => { g.members = g.members || []; });
   state.profile = p;
   updateDirty();
+  refreshApplyState(); // authoritative pending from the backend — runs on load + after every mutation
 }
 async function loadHealth() { state.health = await api.get("/api/health"); updateStatusPill(); }
 
 /* ---------- init ---------- */
 async function init() {
   $$(".nav-item").forEach(wireNavItem); // keyboard-operable nav (role/tabindex/Enter-Space); see wireNavItem
-  // Mobile nav drawer: the burger is a <label> (not keyboard-focusable) driving an aria-hidden checkbox
-  // that is itself in the tab order. Make the burger a real button (role/tabindex/Enter-Space + aria-expanded)
-  // and drop the hidden checkbox out of the tab order, so keyboard/AT users can open the drawer.
-  const burger = $(".nav-burger"), navToggle = $("#navtoggle");
+  // Mobile nav drawer: the burger is a real <button> (index.html) and nav.js owns its
+  // click→checkbox toggle + aria-expanded sync (single owner — a second keydown handler
+  // here would double-toggle with the button's native Enter/Space activation). Here we
+  // only drop the hidden CSS-toggle checkbox out of the tab order so keyboard users land
+  // on the button, not on an aria-hidden checkbox.
+  const navToggle = $("#navtoggle");
   if (navToggle) navToggle.tabIndex = -1;
-  if (burger) {
-    burger.setAttribute("role", "button");
-    burger.setAttribute("tabindex", "0");
-    burger.setAttribute("aria-expanded", "false");
-    if (navToggle) {
-      const syncExpanded = () => burger.setAttribute("aria-expanded", navToggle.checked ? "true" : "false");
-      navToggle.addEventListener("change", syncExpanded);
-      burger.addEventListener("keydown", ev => {
-        if (ev.key === "Enter" || ev.key === " " || ev.key === "Spacebar") { ev.preventDefault(); navToggle.checked = !navToggle.checked; syncExpanded(); }
-      });
-    }
-  }
   const ab = $("#applybtn"), asb = $("#applysavebtn");
   if (ab) ab.addEventListener("click", () => applyConfig(false));
   if (asb) asb.addEventListener("click", () => applyConfig(true));
-  window.addEventListener("hashchange", route);
+  window.addEventListener("hashchange", onHashChange);
+  // Cold-load: fetch the authoritative pending state NOW, whatever the first page is.
+  // Without this the Apply banner only appeared after some page happened to call
+  // loadProfile() — a reload landing on Diagnostics/Settings showed no banner while
+  // changes were in fact pending. refreshApplyState() swallows transient errors itself.
+  refreshApplyState();
   try { await loadHealth(); } catch (_) {}
   checkFailsafe(); // re-arm the rollback countdown if a reload landed mid-Apply-window
   await pollTraffic();

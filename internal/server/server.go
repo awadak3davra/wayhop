@@ -86,6 +86,16 @@ type Server struct {
 	updErrs  map[string]string // engine id -> last install-failure reason, so the Updater can show WHY it failed after the toast fades / a reload
 
 	allowInternalFetch bool // test-only: skip the subscription-fetch SSRF dial guard so httptest (loopback) servers can be used
+
+	// Applied-revision state: the canonical hash of ALL applied inputs (profile + gen/pbr-relevant
+	// config) last successfully pushed to the engine, PERSISTED so the UI's "unapplied changes"
+	// survives a reload / restart — plus the revision the last Apply replaced, so a fail-safe
+	// rollback can restore the truth (see applystate.go, GET /api/state).
+	applyStateMu    sync.Mutex
+	appliedHash     string
+	appliedAt       int64
+	prevAppliedHash string
+	prevAppliedAt   int64
 }
 
 // New builds a Server.
@@ -103,6 +113,7 @@ func New(cfg *config.Config, hub *traffic.Hub, cl *clash.Client, sb *core.SingBo
 	// the fail-safe rollback/reboot alerts. No-op when no URL is configured.
 	wd.SetNotify(s.alert)
 	s.watchdog = wd
+	s.loadAppliedState() // load/bootstrap the persisted applied revision (survives reload)
 	return s
 }
 
@@ -172,6 +183,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/apply/confirm", s.handleApplyConfirm)
 	mux.HandleFunc("POST /api/apply/rollback", s.handleApplyRollback)
 	mux.HandleFunc("GET /api/apply/status", s.handleApplyStatus)
+	mux.HandleFunc("GET /api/state", s.handleState) // saved vs applied vs pending (survives reload)
 	mux.HandleFunc("POST /api/speedtest", s.handleSpeedtest)
 	mux.HandleFunc("GET /api/plugins", s.handlePlugins)
 	mux.HandleFunc("GET /api/watchdog", s.handleWatchdog)

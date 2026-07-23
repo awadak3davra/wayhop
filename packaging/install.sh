@@ -64,8 +64,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -y|--yes)    ASSUME=yes ;;
     -n|--no)     ASSUME=no ;;
-    --port)      shift; PORT="$1" ;;
-    --port=*)    PORT="${1#*=}" ;;
+    --port)      shift; PORT="$1"; PORT_EXPLICIT=1 ;;
+    --port=*)    PORT="${1#*=}"; PORT_EXPLICIT=1 ;;
     --arch)      shift; FORCE_ARCH="$1" ;;
     --arch=*)    FORCE_ARCH="${1#*=}" ;;
     --no-start)  NO_START=1 ;;
@@ -185,9 +185,11 @@ fi
 
 detect_arch() {
   case "$(uname -m)" in
-    armv7l|armv6l|arm) echo arm ;;
-    aarch64|arm64)     echo arm64 ;;
-    x86_64|amd64)      echo amd64 ;;
+    armv7l|armv7)                     echo arm ;;            # the published 'arm' build is GOARM=7
+    armv6l|armv6|armv5l|armv5|armv4l) echo armv6-unsupported ;;  # would SIGILL on the ARMv7 build
+    arm)                              echo arm-ambiguous ;;  # bare 'arm' — can't tell v6 from v7
+    aarch64|arm64)                    echo arm64 ;;
+    x86_64|amd64)                     echo amd64 ;;
     mips|mips64)
       # endianness from the ELF EI_DATA byte (offset 5: 1=LE, 2=BE) of busybox.
       # busybox has no `od -A`; `od -t u1 | head -n1` keeps the address column,
@@ -200,7 +202,11 @@ detect_arch() {
   esac
 }
 ARCH="${FORCE_ARCH:-$(detect_arch)}"
-[ "$ARCH" = unknown ] && die "could not detect arch (uname -m=$(uname -m)); pass one explicitly, e.g. 'sh ./install.sh mipsle'"
+case "$ARCH" in
+  armv6-unsupported) die "ARMv6/ARMv5 CPU ($(uname -m)) is not supported -- the published 'arm' build is ARMv7 and would crash (illegal instruction). No armv6 build is shipped." ;;
+  arm-ambiguous)     die "uname reports a bare 'arm' -- cannot tell ARMv6 from ARMv7. If this CPU is genuinely ARMv7, re-run with: sh ./install.sh arm" ;;
+  unknown)           die "could not detect arch (uname -m=$(uname -m)); pass one explicitly, e.g. 'sh ./install.sh mipsle'" ;;
+esac
 
 BIN="$SRC/wayhop-$ARCH"
 [ -f "$BIN" ] || BIN="$SRC/wayhop"
@@ -351,6 +357,17 @@ UPGRADE=0
 if [ -x "$INITD/S99wayhop" ] || [ -x /opt/sbin/wayhop ]; then
   UPGRADE=1
   ok "existing WayHop install detected -- this will upgrade it in place"
+fi
+
+# 4a'. Port persistence: adopt the port the existing config already listens on UNLESS the user
+# passed --port explicitly. Without this an upgrade run with no --port defaults to 8088 and would
+# (a) health-check the WRONG port -> a needless rollback of a perfectly good upgrade, and (b) offer
+# to rewrite a previously-relocated listen port back to 8088. Runs BEFORE the port-occupant checks.
+if [ "${PORT_EXPLICIT:-0}" != 1 ] && [ -f "$ETC/config.json" ]; then
+  _cfg_port="$(grep -oE '"listen"[[:space:]]*:[[:space:]]*":[0-9]+"' "$ETC/config.json" 2>/dev/null | grep -oE '[0-9]+' | tail -n1)"
+  if [ -n "$_cfg_port" ] && [ "$_cfg_port" != "$PORT" ]; then
+    PORT="$_cfg_port"; ok "keeping the configured UI port :$PORT (pass --port to change it)"
+  fi
 fi
 
 # 4b. UI port occupant
@@ -572,6 +589,11 @@ sleep 2
 PROBE_TOOL=""
 if command -v curl >/dev/null 2>&1; then PROBE_TOOL=curl
 elif command -v wget >/dev/null 2>&1; then PROBE_TOOL=wget; fi
+# HEALTH_CHECKED distinguishes "probed and failed" from "could not probe (no curl/wget)". Only the
+# former justifies a rollback — rolling back a good upgrade just because the router lacks an HTTP
+# client is worse than trusting it (the daemon's own fail-safe + watchdog cover runtime failures).
+HEALTH_CHECKED=0
+[ -n "$PROBE_TOOL" ] && HEALTH_CHECKED=1
 HEALTHY=0
 i=0
 while [ "$i" -lt 5 ]; do
@@ -584,6 +606,37 @@ while [ "$i" -lt 5 ]; do
   i=$((i+1)); sleep 1
 done
 
+# --- transactional rollback: if this was an UPGRADE and the new binary failed its health check,
+#     restore the previous binary and restart it, so a bad update never strands the router. The
+#     preserved config is untouched (upgrades never rewrite it), so only the binary is reverted. ---
+ROLLED_BACK=0
+if [ "$HEALTHY" != 1 ] && [ "${HEALTH_CHECKED:-0}" = 1 ] && [ "$UPGRADE" = 1 ] && [ -f "$SBIN/wayhop.bak" ]; then
+  warn "new version did not answer on :$PORT within the timeout -- rolling back to the previous binary"
+  [ "$HAVE_INIT" = 1 ] && "$INITD/S99wayhop" stop 2>/dev/null
+  for _p in $(pgrep_f "$ETC/singbox.json" 2>/dev/null); do kill "$_p" 2>/dev/null || true; done
+  sleep 1
+  if cp "$SBIN/wayhop.bak" "$SBIN/wayhop"; then
+    ok "restored the previous binary from $SBIN/wayhop.bak"
+    if [ "$HAVE_INIT" = 1 ]; then "$INITD/S99wayhop" start 2>/dev/null || true
+    else ( "$SBIN/wayhop" --config "$ETC/config.json" >/dev/null 2>&1 & ); fi
+    sleep 2
+    ROLLED_BACK=1
+    i=0
+    while [ "$i" -lt 5 ]; do
+      case "$PROBE_TOOL" in
+        curl) [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$PORT/" 2>/dev/null)" = 200 ] && { HEALTHY=1; break; } ;;
+        wget) wget -q -O /dev/null --timeout=3 "http://127.0.0.1:$PORT/" 2>/dev/null && { HEALTHY=1; break; } ;;
+        *) break ;;
+      esac
+      i=$((i+1)); sleep 1
+    done
+    if [ "$HEALTHY" = 1 ]; then warn "rolled back -- the PREVIOUS version is running on :$PORT; the update did NOT apply. Check the logs, then retry."
+    else warn "rolled back, but the previous version is not answering on :$PORT either -- check: logread 2>/dev/null | grep wayhop"; fi
+  else
+    die "ROLLBACK FAILED: could not restore $SBIN/wayhop.bak. Restore by hand: cp $SBIN/wayhop.bak $SBIN/wayhop && $INITD/S99wayhop restart"
+  fi
+fi
+
 IP="$(guess_lan_ip)"
 [ -z "$IP" ] && IP="$(uname -n 2>/dev/null)"
 
@@ -591,7 +644,8 @@ INSTALLED_VER="$("$SBIN/wayhop" --version 2>/dev/null | head -1)"
 hdr "Done"
 [ -n "$INSTALLED_VER" ] && ok "version:  $INSTALLED_VER"
 if [ "$HEALTHY" = 1 ]; then ok "UI is up (HTTP 200 on :$PORT)"
-else warn "UI not answering yet on :$PORT -- give it a few seconds, then check: logread 2>/dev/null | grep wayhop"; fi
+elif [ "${HEALTH_CHECKED:-0}" = 1 ]; then warn "UI not answering yet on :$PORT -- give it a few seconds, then check: logread 2>/dev/null | grep wayhop"
+else info "UI health not verified (no curl/wget on this router) -- open the URL below to confirm"; fi
 say "open  ->  http://${IP:-<router-ip>}:$PORT"
 native_summary
 echo ""
@@ -601,3 +655,14 @@ echo "    2. add a connection in the UI (paste a vless:// / hysteria2:// link or
 echo "    3. create a Failover group and hit Apply (it auto-reverts if connectivity drops)"
 if [ -f "$ETC/uninstall.sh" ]; then echo "    uninstall:  sh $ETC/uninstall.sh   (add --purge to also delete config)"
 else echo "    uninstall:  sh ./uninstall.sh   (add --purge to also delete config; re-extract the tarball if it's gone)"; fi
+
+# Exit status reflects the real outcome so the bootstrap / automation can tell success from failure.
+if [ "${ROLLED_BACK:-0}" = 1 ]; then
+  warn "UPDATE FAILED -- rolled back to the previous version (running on :$PORT). Nothing else changed."
+  exit 1
+fi
+if [ "$UPGRADE" = 1 ] && [ "$HEALTHY" != 1 ] && [ "${HEALTH_CHECKED:-0}" = 1 ]; then
+  warn "UPGRADE did not come up on :$PORT and no rollback was possible -- check: logread 2>/dev/null | grep wayhop"
+  exit 1
+fi
+exit 0

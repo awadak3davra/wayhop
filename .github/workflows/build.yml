@@ -103,9 +103,18 @@ jobs:
         env:
           CGO_ENABLED: '0'
           GOOS: linux
+          # Release manifest is signed with the same usign key as the package feed (its .pub is
+          # embedded in bootstrap.sh + committed at packaging/feed/keys/wayhop.pub). Reusing the
+          # feed secret means no extra provisioning; point this at a dedicated secret to split them.
+          WAYHOP_RELEASE_SIGN_KEY: ${{ secrets.VELINX_USIGN_SEC }}
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
+          # SINGLE SOURCE OF TRUTH: the release tag must equal internal/version/version.go's Version.
+          gover="$(sed -n 's/.*Version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' internal/version/version.go | head -n1)"
+          if [ "$gover" != "$version" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} (v$version) does not match version.go ($gover) — bump version.go to the release version and re-tag"; exit 1
+          fi
           mkdir -p dist
           build_one() {  # name goarch [gomips] [goarm]
             local name="$1" stage owstage
@@ -128,17 +137,89 @@ jobs:
           build_one arm    arm    ''        7
           build_one arm64  arm64
           build_one amd64  amd64
-          ( cd dist && sha256sum *.tar.gz > SHA256SUMS.txt )
+          # --- native packages for the release: opkg .ipk (one per OpenWrt CPU-family token) + Entware
+          #     .ipk (one per Entware token), via the SAME pack scripts the signed feed uses, so a
+          #     release .ipk is byte-for-byte a feed .ipk (offline `opkg install ./wayhop_*.ipk`). ---
+          export SOURCE_DATE_EPOCH=0
+          mkdir -p bins pkgs
+          for n in mipsle mips arm arm64 amd64; do cp "wayhop-${n}-pkg/wayhop-${n}" "bins/wayhop-${n}"; done
+          while IFS= read -r line; do
+            case "$line" in ''|\#*) continue ;; esac
+            ow="${line%%|*}"; ew="${line##*|}"
+            # shellcheck disable=SC2086
+            set -- $ow; goname="$1"; shift; owtokens="$*"
+            ewtoken="$(printf '%s' "$ew" | tr -d ' ')"
+            # shellcheck disable=SC2086
+            sh packaging/feed/pack-ipk.sh     "bins/wayhop-$goname" "${version}" 1 pkgs/ipk     $owtokens
+            sh packaging/feed/pack-entware.sh "bins/wayhop-$goname" "${version}" 1 pkgs/entware "$ewtoken"
+          done < packaging/feed/arch-map.txt
+          find pkgs -name '*.ipk' -exec cp {} dist/ \;
+          echo "packages built:"; ls -1 dist/*.ipk
+          # --- apk (OpenWrt 25.12+) — BEST-EFFORT (apk-tools v3 lives only in an Alpine-edge container).
+          #     Wrapped so it can never fail the release; the opkg/Entware .ipk above are the guaranteed set.
+          ( set +e
+            command -v docker >/dev/null 2>&1 || { echo "::notice::no docker — apk packages skipped (best-effort)"; exit 0; }
+            docker run --rm -v "$PWD:/w" -w /w alpine:edge sh -euc '
+              apk add --no-cache apk-tools >/dev/null 2>&1 || true
+              apk mkpkg --help >/dev/null 2>&1 || { echo "apk-tools v3 unavailable — apk skipped"; exit 0; }
+              v="'"${version}"'"
+              while IFS= read -r line; do
+                case "$line" in ""|\#*) continue ;; esac
+                ow="${line%%|*}"; set -- $ow; goname="$1"; shift; owtokens="$*"
+                sh packaging/feed/pack-apk.sh "bins/wayhop-$goname" "$v" 1 pkgs $owtokens || true
+              done < packaging/feed/arch-map.txt
+            '
+            find pkgs -name '*.apk' -exec cp {} dist/ \;
+          ) || echo "::warning::apk build skipped (best-effort) — opkg + Entware .ipk still shipped"
+          ( cd dist && for f in *.tar.gz *.ipk *.apk; do [ -e "$f" ] && sha256sum "$f"; done > SHA256SUMS.txt )
           # Online one-command installer. Unversioned asset name so the copy-paste
           # `releases/latest/download/bootstrap.sh` one-liner always resolves; kept out
           # of SHA256SUMS.txt (which lists only the tarballs the bootstrap verifies).
           cp packaging/bootstrap.sh dist/bootstrap.sh
+          # Sign the manifest so a mirror can't swap the binary and its checksum together. Uses usign
+          # (Ed25519, openssl-free) so routers verify it natively with usign/signify — see bootstrap.sh.
+          # Secret-gated: with no signing key the manifest ships unsigned (bootstrap still enforces the
+          # SHA-256 over the GitHub-HTTPS download). See docs/RELEASE_SIGNING.md.
+          if [ -n "${WAYHOP_RELEASE_SIGN_KEY:-}" ]; then
+            printf '%s' "$WAYHOP_RELEASE_SIGN_KEY" > "$RUNNER_TEMP/relsign.sec"
+            go build -trimpath -o "$RUNNER_TEMP/usigntool" ./packaging/feed/usigntool
+            "$RUNNER_TEMP/usigntool" sign -sec "$RUNNER_TEMP/relsign.sec" -m dist/SHA256SUMS.txt -out dist/SHA256SUMS.txt.sig
+            rm -f "$RUNNER_TEMP/relsign.sec"
+            echo "signed SHA256SUMS.txt -> SHA256SUMS.txt.sig (usign/Ed25519)"
+          else
+            echo "::notice::no WAYHOP_RELEASE_SIGN_KEY secret set — shipping an unsigned manifest"
+          fi
+      - name: Verify the release is complete (no partial publish)
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          missing=0
+          for name in mipsle mips arm arm64 amd64; do
+            for suffix in "" "-openwrt"; do
+              f="dist/wayhop-${version}-${name}${suffix}.tar.gz"
+              [ -f "$f" ] || { echo "::error::missing release asset: $f"; missing=1; }
+            done
+          done
+          # the Entware .ipk set is deterministic (no docker); requiring all five proves the pack loop
+          # ran (the opkg .ipk are built in the same loop). apk stays best-effort and is not gated.
+          for tok in aarch64-3.10 armv7sf-k3.2 mipselsf-k3.4 mips-3.4 x86-64-3.2; do
+            f="dist/wayhop_${version}-1_${tok}.ipk"
+            [ -f "$f" ] || { echo "::error::missing Entware package: $f"; missing=1; }
+          done
+          for f in dist/SHA256SUMS.txt dist/bootstrap.sh; do
+            [ -f "$f" ] || { echo "::error::missing release asset: $f"; missing=1; }
+          done
+          [ "$missing" = 0 ] || { echo "release is INCOMPLETE — refusing to publish"; exit 1; }
+          echo "all required assets present:"; ls -1 dist
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release create "${GITHUB_REF_NAME}" dist/*.tar.gz dist/SHA256SUMS.txt dist/bootstrap.sh \
+          extra="dist/*.ipk"
+          [ -f dist/SHA256SUMS.txt.sig ] && extra="$extra dist/SHA256SUMS.txt.sig"
+          ls dist/*.apk >/dev/null 2>&1 && extra="$extra dist/*.apk"
+          gh release create "${GITHUB_REF_NAME}" dist/*.tar.gz dist/SHA256SUMS.txt dist/bootstrap.sh $extra \
             --repo "${GITHUB_REPOSITORY}" \
             --title "WayHop ${GITHUB_REF_NAME}" \
             --generate-notes

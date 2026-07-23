@@ -5,7 +5,7 @@
 **Run any modern VPN/proxy protocol on your router — from one clean web panel, with automatic failover.**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-22a06b?style=flat-square)](LICENSE)
-[![Release](https://img.shields.io/badge/release-v0.5.2-0097dc?style=flat-square)](../../releases/latest)
+[![Release](https://img.shields.io/badge/release-v0.5.3-0097dc?style=flat-square)](../../releases/latest)
 [![Go](https://img.shields.io/badge/go-1.22+-00ADD8?style=flat-square&logo=go&logoColor=white)](go.mod)
 [![Platforms](https://img.shields.io/badge/router-OpenWrt%20%C2%B7%20Keenetic%20%C2%B7%20Entware-151c28?style=flat-square)](#install)
 [![Arches](https://img.shields.io/badge/arch-mipsle%20%C2%B7%20mips%20%C2%B7%20arm%20%C2%B7%20arm64%20%C2%B7%20amd64-555?style=flat-square)](#install)
@@ -75,57 +75,83 @@ Subscriptions auto-detect base64 vs. plain text, import each link independently 
 
 ## 🚀 Install
 
-WayHop runs on **OpenWrt** (native `procd`) and on **Keenetic / generic Entware** (busybox `/opt`) — CPU: MIPS (little/big-endian), ARMv7, ARM64, or x86-64.
+WayHop runs on **OpenWrt** (`opkg` ≤24.10, `apk` 25.12+, native `procd`) and on **Keenetic / generic Entware** (busybox `/opt`). CPUs: `mipsle` · `mips` · `arm` (ARMv7) · `arm64` · `amd64`. *(ARMv6/ARMv5 are refused rather than handed an ARMv7 build that would crash.)*
 
-### Quick install — one command
+### One command
 
-SSH into the router and run. This auto-detects your CPU arch + platform, downloads the latest release, **verifies its SHA-256**, and launches the interactive installer:
+SSH into the router (you're usually `root`) and run:
 
 ```sh
-curl -fsSLO https://github.com/awadak3davra/wayhop/releases/latest/download/bootstrap.sh && sh bootstrap.sh
+curl -fsSL https://github.com/awadak3davra/wayhop/releases/latest/download/bootstrap.sh | sh
 ```
 
-No `curl` on the router? Swap in `wget -qO bootstrap.sh https://github.com/awadak3davra/wayhop/releases/latest/download/bootstrap.sh && sh bootstrap.sh` — the script uses whichever downloader you have. Forward installer flags after a `--` (e.g. `sh bootstrap.sh -- -y --port 8089`); if auto-detect guesses wrong, override with `--arch mipsle` or `--openwrt` / `--entware`.
+The bootstrap auto-detects your arch + platform, downloads the matching build from the latest release, **verifies its SHA-256 (mandatory — it refuses to install anything it can't verify)**, and runs the installer, which moves WayHop to a free port if `:8088` is taken and starts the service. Nothing to fill in — no `<version>`, `<arch>`, or `<package>`.
 
-The installer is **interactive and safe to run on a live router** — it pre-flights everything before touching anything:
+No `curl`? `wget -qO- <same-url> | sh` works too. It ends with roughly:
 
-- ✅ **System & router status** — arch (incl. MIPS endianness), free flash space, RAM, uptime, internet reachability, and clock/NTP (Reality/TLS need an accurate clock).
-- ✅ **Dependencies** — `ip` / `ipset` / `iptables` / `opkg` / `sing-box`, with an offer to `opkg install` what's missing.
-- ✅ **Conflict detection + one-tap fixes** — it finds whatever already holds the UI port (**lighttpd** on stock Keenetic firmware is the usual culprit), an existing **selective-routing tool**, a stray sing-box, or a previous install, and **asks before disabling each one** (or just moves WayHop to a free port).
-- ✅ **Atomic install** — staged binary swap with a single rolling backup, then a health check on the UI.
+```
+  == Done ==
+  + version:  wayhop 0.5.x
+  + UI is up (HTTP 200 on :8088)
+  open  ->  http://192.168.1.1:8088
+```
 
-Then open **`http://<router-ip>:8088`**. To remove it later: `sh /opt/etc/wayhop/uninstall.sh` (add `--purge` to delete the config too) — the installer saves the uninstaller there so it survives reboots.
+Open that URL. Options (env vars, or flags after a literal `--` on the download-then-run form):
+- `WAYHOP_VERSION=v0.5.3 curl … | sh` — pin a specific version · `WAYHOP_PRERELEASE=1 …` — allow a pre-release.
+- Custom UI port / other installer flags: download first, then pass them — `curl -fsSLO <url>/bootstrap.sh && sh bootstrap.sh -- --port 8089`.
+- `--arch mipsle` · `--openwrt` · `--entware` — override auto-detect if it guesses wrong.
+
+### Update
+
+Re-run the same one command. On an upgrade the installer **keeps your existing config and UI port**, backs up the current binary, atomically swaps in the new one, and health-checks it — and if the new version doesn't come up, it **automatically rolls back** to the previous binary, restarts it, and exits non-zero. A foreign `sing-box` is never touched; only WayHop's own instance is stopped.
+
+### Uninstall
+
+The installer saves the uninstaller next to your config (path printed at the end). Run:
+
+```sh
+sh /opt/etc/wayhop/uninstall.sh            # OpenWrt: sh /etc/wayhop/uninstall.sh
+```
+
+It stops **only** WayHop, tears down **only** WayHop's own kernel routing (its `nft` table + fwmark `ip` rules — never a foreign one), and removes the binary + service. Your config + saved connections are **kept** by default; add `--purge` to delete them too. It reports what it kept.
+
+### Offline / air-gapped
+
+On a machine with internet, grab two files for your arch from the [**Releases**](../../releases/latest) page — `wayhop-<ver>-<arch>[-openwrt].tar.gz` and `SHA256SUMS.txt` — copy both to the router, then verify and install:
+
+```sh
+grep " wayhop-" SHA256SUMS.txt | sha256sum -c -            # MUST print "OK"
+mkdir -p wr && tar -xzf wayhop-*.tar.gz -C wr && cd wr && sh ./install.sh
+```
 
 <details>
-<summary><b>Manual install — pick your own tarball</b></summary>
+<summary><b>Manual tarball / package feed</b></summary>
 
-Grab the tarball for your router from the [**Releases**](../../releases/latest) page — each CPU arch ships in two flavours:
+Each CPU arch ships in two flavours on the [Releases](../../releases/latest) page:
 
-| Your router's `uname -m` | Arch | Entware / Keenetic | OpenWrt |
+| `uname -m` | Arch | Entware / Keenetic | OpenWrt |
 |---|---|---|---|
-| `mips` (little-endian, most MT7621) | `mipsle` | `wayhop-<ver>-mipsle.tar.gz` | `…-mipsle-openwrt.tar.gz` |
+| `mipsel` (little-endian, most MT7621) | `mipsle` | `wayhop-<ver>-mipsle.tar.gz` | `…-mipsle-openwrt.tar.gz` |
 | `mips` (big-endian) | `mips` | `wayhop-<ver>-mips.tar.gz` | `…-mips-openwrt.tar.gz` |
 | `armv7l` | `arm` | `wayhop-<ver>-arm.tar.gz` | `…-arm-openwrt.tar.gz` |
 | `aarch64` | `arm64` | `wayhop-<ver>-arm64.tar.gz` | `…-arm64-openwrt.tar.gz` |
 | `x86_64` | `amd64` | `wayhop-<ver>-amd64.tar.gz` | `…-amd64-openwrt.tar.gz` |
 
-**Keenetic / Entware** (`/opt`, SSH) — download the tarball for your arch into `/tmp`, then:
+Download the tarball for your arch into `/tmp`, then `mkdir -p wr && tar -xzf wayhop-*.tar.gz -C wr && cd wr && sh ./install.sh`.
 
-```sh
-cd /tmp
-mkdir -p wr && tar -xzf wayhop-*.tar.gz -C wr && cd wr
-sh ./install.sh
-```
-
-Useful flags: `--dry-run` (run every check, change nothing), `-y` (assume yes), `--port 8089` (use a different UI port), `--arch mipsle` (force arch), `--no-start`.
-
-**OpenWrt** (`procd`) — the one-liner above works on-device; if you'd rather push from a workstation, busybox has no `scp`, so stream the `-openwrt` tarball in over SSH:
-
-```sh
-ssh root@192.168.1.1 "cat > /tmp/wr.tgz" < wayhop-<ver>-<arch>-openwrt.tar.gz
-ssh root@192.168.1.1 "mkdir -p /tmp/wr && tar -xzf /tmp/wr.tgz -C /tmp/wr && cd /tmp/wr && sh ./install.sh"
-```
+**Native packages.** There is a signed **opkg/apk feed** (`opkg install wayhop` / `apk add wayhop`) — see the [feed page](https://awadak3davra.github.io/wayhop-feed/). For **offline package install**, every release also attaches the packages directly: the OpenWrt/Entware `.ipk` (`opkg install ./wayhop_<ver>-1_<arch>.ipk`) and, best-effort, the OpenWrt-24.10+ `.apk` (`apk add --allow-untrusted ./wayhop-*.apk`).
 </details>
+
+### Troubleshooting
+
+| Message you see | What to do |
+|---|---|
+| `ARMv6/ARMv5 … not supported` | Your CPU predates the ARMv7 build and no armv6 build is shipped — nothing was changed. |
+| `SHA-256 MISMATCH` / `refusing to install` | The download was corrupt or tampered; re-run. If it persists, your network/proxy may be altering downloads. |
+| `:8088` in use | The installer auto-moves WayHop to a free port (it never disables a foreign web server unless you confirm). Or set one: `sh bootstrap.sh -- --port 8089`. |
+| `could not resolve … no internet` | Check connectivity/DNS, or pin `WAYHOP_VERSION=vX.Y.Z`. |
+| `UI not answering on :PORT` | Give it a few seconds, then `logread 2>/dev/null \| grep wayhop`. |
+| An upgrade failed | It auto-rolls-back to the previous binary and exits non-zero; the old version keeps running — check logs and retry. |
 
 <details>
 <summary><b>Build from source</b></summary>
@@ -143,7 +169,7 @@ Single-arch, by hand:
 
 ```sh
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
-  -ldflags "-s -w -X wayhop/internal/version.Version=0.5.2" \
+  -ldflags "-s -w -X wayhop/internal/version.Version=0.5.3" \
   -o wayhop-arm64 ./cmd/wayhop
 ```
 
