@@ -1,0 +1,4 @@
+{
+ "note": "Gates the runner requires and no workflow runs, with the reason. An entry here is a hole in CI that someone decided to keep, so it must state why and is checked for staleness: an exemption for a gate CI now runs, or for a gate the runner no longer has, fails. Empty is the goal.",
+ "exempt": {}
+}

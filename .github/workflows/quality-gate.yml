@@ -1,0 +1,313 @@
+name: quality-gate
+
+# Single source of truth for the BLOCKING release-readiness checks. Called three ways:
+#   - ci.yml            → runs on every push to main + every PR (fast feedback)
+#   - build.yml release → a v* tag cannot publish a GitHub Release unless this passes
+#   - feed.yml          → a v* tag cannot publish the package feed unless this passes
+# so a red check now blocks the tag from shipping, instead of only annotating a PR.
+#
+# Scope is deliberately the checks with NO external network dependency, so this gate fails
+# ONLY on a real regression and can never block a release on a flaky CDN fetch: gofmt/vet/
+# govulncheck, ShellCheck of the root-run installer/maintainer scripts, gitleaks over tree +
+# history, the embedded-UI syntax/i18n/a11y/docs contracts, the untrusted-parser fuzz smoke,
+# and the browser-driven UI contracts against a local demo daemon (ui-dynamic). That last job
+# reaches nothing beyond 127.0.0.1: the daemon is the zero-config demo and the browser is the
+# runner's own Chrome.
+# The download-dependent core-validation checks (real sing-box / mihomo config checks) and the
+# self-hosted engine source-builds stay in ci.yml — they validate every push to main, but are
+# kept off the release path so a mirror outage cannot wedge a release.
+on:
+  workflow_call:
+    inputs:
+      ui_scope:
+        description: >
+          Which UI contracts to run against the live demo daemon. `min` is the fast subset a pull
+          request gets; `full` is every UI gate and is what main and a release tag must pass. A
+          release may not be green on the smaller set — the whole point of the contract is that the
+          thing about to ship was measured, not that a cheaper stand-in was.
+        type: string
+        default: min
+
+permissions:
+  contents: read
+
+env:
+  # Same patched Go the release builds use; go.mod's `go 1.22` is only the language floor.
+  GO_VERSION: '1.26.6'  # >= 1.26.6: GO-2026-6218 / 6090 / 6089 / 5972 / 5942 (net/url, crypto/tls, net/http, encoding/asn1, net) fixed here
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  SHELLCHECK_IMAGE: koalaman/shellcheck@sha256:bb596a0d169b85ddd81d8b6d3a2ff6d5baf5fca10b97f575ebc647c3dff62b3d
+
+jobs:
+  # --- format + vet + golangci-lint + govulncheck, all blocking ---
+  # golangci-lint was informational while a baseline of findings was being cleared. The baseline is
+  # empty and the step blocks, so this line no longer gets to say otherwise: a header describing a
+  # gate as advisory is how an advisory gate stays advisory after someone made it real.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with: { go-version: '${{ env.GO_VERSION }}', cache: false }
+      - name: gofmt
+        run: |
+          set -euo pipefail
+          # Same file set the runner uses, spelled the same way. `--others --exclude-standard` adds
+          # files that exist but are not added yet; on a fresh checkout that is nothing, and the
+          # point is that the two commands cannot mean different things. They already did: this one
+          # covered the whole tree and not a new file, while the runner covered `internal` and `cmd`
+          # and so never saw packaging/feed/usigntool.
+          unformatted="$(git ls-files -z --cached --others --exclude-standard '*.go' | xargs -0 -r gofmt -l)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: release source refusal contract
+        run: node scripts/check-release-source.mjs --self-test
+      - name: immutable action and container dependencies
+        run: node scripts/check-dependency-pins.mjs
+      # Blocking, and run for BOTH targets. A single run only ever type-checks one platform's files,
+      # so a finding in a _linux.go / _windows.go file is invisible to the other — which is how a var
+      # used solely by exitips_linux.go read as dead code on every Windows run and as nothing at all
+      # on the ubuntu runner. Two GOOS passes are the matrix that makes the answer complete; the
+      # alternative was excluding the finding, which would have hidden the platform gap instead.
+      - name: golangci-lint (linux)
+        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8
+        with: { version: v2.12.2 }
+        env: { GOOS: linux }
+      - name: golangci-lint (windows)
+        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8
+        with: { version: v2.12.2 }
+        env: { GOOS: windows }
+      - name: govulncheck (blocking)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+  # --- shellcheck the install / init / maintainer scripts (BLOCKING) ---
+  # -S warning: the installer/maintainer scripts run as ROOT on user routers, so real
+  # warnings+errors must block; info/style notes (e.g. SC2015) are advisory and vary by
+  # ShellCheck version across runners, so they are not release-blocking.
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: shellcheck packaging scripts
+        run: |
+          docker run --rm --network none --read-only -v "$PWD:/repo:ro" -w /repo "$SHELLCHECK_IMAGE" \
+            -S warning packaging/*.sh packaging/openwrt/*.sh \
+            packaging/S99wayhop packaging/openwrt/wayhop.init \
+            packaging/test/bootstrap_harness.sh packaging/test/s99wayhop_harness.sh
+          # the feed pack scripts + maintainer scripts run as ROOT on user routers — lint them too
+          docker run --rm --network none --read-only -v "$PWD:/repo:ro" -w /repo "$SHELLCHECK_IMAGE" \
+            -S warning -s sh packaging/feed/*.sh \
+            packaging/feed/preinst packaging/feed/preinst.entware \
+            packaging/feed/postinst packaging/feed/postinst.apk packaging/feed/postinst.entware \
+            packaging/feed/prerm packaging/feed/prerm.apk packaging/feed/prerm.entware \
+            packaging/feed/postupgrade.apk scripts/check-apk-signing.sh
+      # Linting proves the packaging shell parses; these prove it decides correctly. Each is a set of
+      # fault cases whose point is what the script must REFUSE to do.
+      - name: packaging behaviour (installer identity, feed completeness, retired data)
+        run: |
+          set -euo pipefail
+          # Stops an installer reporting success while a stale daemon still holds the port.
+          sh scripts/check-installer-identity.sh
+          # The feed claims a set of apk architectures; this refuses a run that ships fewer.
+          sh scripts/check-feed-completeness.sh
+          # A retired feature's data directory is set aside, never deleted.
+          sh scripts/check-retire-iptv.sh
+          # The package guarantees an operator's config depends on, and the fault cases that prove
+          # the audit can see a broken one.
+          sh scripts/check-package-manifests.sh
+          sh scripts/check-package-manifests-faults.sh
+      # The audits above read the packaging; this one RUNS it. The shipped packer's own .ipk goes to a
+      # real opkg inside an OpenWrt rootfs — which is how it was discovered that every .ipk this
+      # project published was the wrong container format and had never been installed by anyone.
+      # Needs Go (it builds the binary) and Docker (both images); the runner has both.
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with: { go-version: '${{ env.GO_VERSION }}', cache: false }
+      - name: package lifecycle on a real opkg (install, upgrade, remove)
+        run: sh scripts/check-package-install.sh
+      - name: package lifecycle on a real apk (OpenWrt 25.x, the apk-only release)
+        run: sh scripts/check-package-install-apk.sh
+      - name: bootstrap trust and pre-install refusal matrix
+        run: sh packaging/test/bootstrap_harness.sh
+      - name: Keenetic init lifecycle and native log sink
+        run: sh packaging/test/s99wayhop_harness.sh
+      # Both lifecycle steps are HANDED a package; neither asks how a client would find it. The
+      # index is that answer, and its builder READS the .ipk container — so correcting the packer
+      # broke it, silently, on the one path (feed.yml) no gate covered.
+      - name: feed index over a real packed .ipk (metadata, signature, refusals)
+        run: sh scripts/check-feed-index.sh
+      - name: apk index signing boundary (real crypto, pinned offline signer)
+        run: sh scripts/check-apk-signing.sh
+
+  # --- secret scanning over tree + full history (BLOCKING) ---
+  # The feed SIGNING keys live only in GitHub secrets + off-repo backup; this backstop fails
+  # if a *.sec / PEM / token ever lands in the tree OR an old commit. The .gitleaks.toml
+  # allowlist is proven quiet (labelled placeholder + shipped public keys only).
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: { fetch-depth: 0 }   # full history so a secret in an OLD commit is caught too
+      - name: gitleaks (tree + history)
+        run: |
+          set -euo pipefail
+          ver='8.21.2'
+          archive="$(mktemp)"
+          bindir="$(mktemp -d)"
+          cleanup() { rm -f "$archive"; rm -rf "$bindir"; }
+          trap cleanup EXIT
+          asset="gitleaks_${ver}_linux_x64.tar.gz"
+          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${ver}/${asset}" -o "$archive"
+          printf '%s  %s\n' '5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba' "$archive" \
+            | sha256sum -c -
+          tar -xzf "$archive" -C "$bindir" gitleaks
+          "$bindir/gitleaks" detect --source . --config .gitleaks.toml --redact --verbose --exit-code 1
+
+  # --- validate the embedded vanilla-JS UI (build.yml embeds web/dist into the binary but never
+  # exercises the JS, so a SyntaxError or a broken i18n dict would ship a broken UI on a green build) ---
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: node --check every embedded dist script
+        run: |
+          set -euo pipefail
+          for f in web/dist/*.js web/dist/i18n/*.js; do node --check "$f"; echo "  ok: $f"; done
+      - name: i18n completeness (core dictionaries + the files the browser downloads)
+        run: node scripts/check-i18n.mjs
+      - name: a11y contract (burger aria-expanded, apply-banner live region, nav guard, redaction)
+        run: node scripts/check-a11y.mjs
+      - name: focused interaction regressions (copy, diagnostics history, language switching)
+        run: node scripts/check-interaction-fixes.mjs
+      - name: perf budget (initial compressed payload <= 250 KB; lazy assets excluded)
+        run: node scripts/check-perf-budget.mjs
+      # The audit and deliverables documents are deliverables, and until now nothing in CI read them:
+      # every numeric claim, every `Pass` that outran its evidence and every listed string that had
+      # left the source was checked only when somebody ran the gate by hand. A green badge over an
+      # unrun contract is the failure this whole audit is about.
+      - name: docs contracts (no row claims more than its evidence; listed strings still exist)
+        run: node scripts/check-docs.mjs
+      - name: authentication routes are explicitly classified and default-deny
+        run: node scripts/check-auth-routes.mjs
+      - name: headless UI authentication is explicit, confirmed, and redacted
+        run: node scripts/check-ui-auth.mjs
+      # The three below were in scripts/verify.mjs and in no workflow: the local suite required them
+      # and CI did not, so a green badge covered a smaller set than the runner defines.
+      - name: i18n dictionaries are reproducible from web/i18n/
+        run: node scripts/i18n-generate.mjs --check
+      - name: chunk refs (a helper called across route chunks throws for a direct arrival)
+        run: node scripts/check-chunks.mjs
+      - name: dom nulls (a null into appendChild breaks the page it is on)
+        run: node scripts/check-dom.mjs
+      # The published tree keeps the code and drops the design notes the code cites by path. Every
+      # such pointer has to say where the document lives, so a public reader is told rather than
+      # left to conclude the project's own comments are stale.
+      - name: published pointers (nothing shipped points at a path the public tree drops)
+        run: node scripts/check-published-refs.mjs
+      # The scrub rewrites Go source, not just prose, so the tree the public receives is not the one
+      # every other job just proved. This applies the substitutions to a scratch copy and compiles,
+      # vets and tests that.
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with: { go-version: '${{ env.GO_VERSION }}', cache: false }
+      - name: scrub output (the published tree still builds and passes)
+        run: node scripts/check-scrub-output.mjs
+      # The scrub gate proves the KNOWN personal strings are rewritten. This one asks whether anything
+      # with the SHAPE of personal data survives - an address, hostname, key, token, MAC or email that
+      # nobody thought to add to the deny list.
+      - name: pii shapes (nothing personal survives into the publishable tree)
+        run: node scripts/check-pii.mjs
+      # And this is what stops them drifting apart again.
+      - name: gate parity (the local runner and CI require the same node gates)
+        run: node scripts/check-gate-parity.mjs
+
+  # --- drive the real UI in a real browser against a real daemon ---
+  #
+  # Everything above reads the UI as text. None of it can see a page that renders empty, a control
+  # that never gets a name, or a chunk that throws on a direct arrival — and those are the failures
+  # that reach a user. The gates for them existed and ran only on one Windows dev box, which is the
+  # same "green badge over an unrun contract" this workflow keeps having to close.
+  #
+  # The daemon is the zero-config demo: `--demo` with no --config writes to a throwaway temp dir, so
+  # no repository config file is needed (dev-config.json and rd-demo/ are gitignored and absent from
+  # a CI checkout). It is a demo instance end to end — it configures nothing and reaches no router.
+  ui-dynamic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with: { go-version: '${{ env.GO_VERSION }}', cache: false }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: '24' }   # the CDP gates use the global WebSocket, which needs >= 22
+      - name: Resolve a browser
+        run: |
+          set -euo pipefail
+          CHROME=$(command -v google-chrome || command -v google-chrome-stable \
+            || command -v chromium-browser || command -v chromium || true)
+          # Failing here rather than letting 20 gates each spawn a path that does not exist: a missing
+          # browser must not be reportable as a UI contract that passed.
+          [ -n "$CHROME" ] || { echo "no Chrome on this runner — the UI contracts cannot run"; exit 1; }
+          echo "CHROME=$CHROME" >> "$GITHUB_ENV"
+          "$CHROME" --version
+      # The port is not arbitrary. scripts/ui-controls.mjs keys its control-preservation baseline
+      # by the exact instance URL, because different instances legitimately expose different
+      # controls — the Keenetic panel draws no Remove for an opkg-owned sing-box, the demo does. The
+      # recorded demo instance is 127.0.0.1:8097; on any other port that gate exits 2 with "no
+      # baseline recorded", so a full run would have been red on every release forever.
+      - name: Build and start the demo daemon
+        run: |
+          set -euo pipefail
+          go build -o /tmp/wayhop ./cmd/wayhop
+          /tmp/wayhop --demo --listen 127.0.0.1:8097 > /tmp/wayhop-demo.log 2>&1 &
+          for _ in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8097/api/health 2>/dev/null | grep -q '"demo":true'; then
+              echo "demo daemon answering on 127.0.0.1:8097"; exit 0
+            fi
+            sleep 0.5
+          done
+          echo "the demo daemon never answered; the UI gates would have measured nothing"
+          cat /tmp/wayhop-demo.log; exit 1
+      # --ui-only keeps exactly the gates that need a live instance, derived from scripts/verify.mjs
+      # rather than copied into this file — a hand-written list here is how CI fell four gates behind
+      # the runner in the first place. The suite's own first gate, `target is this build`, re-checks
+      # that the daemon is serving THIS checkout, so a process that died between steps fails loudly
+      # instead of letting the rest measure nothing.
+      - name: UI contracts (${{ inputs.ui_scope }})
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.ui_scope }}" = "full" ]; then
+            # --apply adds the fault injection on the APPLY path: a 5xx, an applied_ok:false, a POST
+            # that never answers, a double click, and a failing rollback with the fail-safe window
+            # armed. It is the harness for the one action with real consequences, and it had run in
+            # no workflow at all — the gate exists only when --apply is passed, and nothing passed
+            # it. The url is this job's own demo daemon, which the harness re-checks is local before
+            # it breaks anything.
+            node scripts/verify.mjs --ui http://127.0.0.1:8097/ --apply http://127.0.0.1:8097/ --ui-only
+          else
+            node scripts/verify.mjs --ui http://127.0.0.1:8097/ --ui-only \
+              --only 'target is this build,demo seeded,page sweep,button names,page structure'
+          fi
+      - name: Daemon log
+        if: always()
+        run: tail -n 100 /tmp/wayhop-demo.log || true
+
+  # --- fuzz the untrusted-input parsers (each target a short smoke run; no external fetch) ---
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with: { go-version: '${{ env.GO_VERSION }}', cache: false }
+      - name: Fuzz smoke (untrusted-input parsers)
+        run: |
+          set -euo pipefail
+          go test -run=^$ -fuzz=^FuzzParse$             -fuzztime=25s ./internal/importer/
+          go test -run=^$ -fuzz=^FuzzParseSubscription$ -fuzztime=25s ./internal/importer/
+          # The other pasted-config importers (their doc-contract is "never panic/hang on untrusted input").
+          go test -run=^$ -fuzz=^FuzzParseClash$        -fuzztime=25s ./internal/importer/
+          go test -run=^$ -fuzz=^FuzzParseConf$         -fuzztime=25s ./internal/importer/
+          go test -run=^$ -fuzz=^FuzzParseSingbox$      -fuzztime=25s ./internal/importer/
+          go test -run=^$ -fuzz=^FuzzExportRoundTrip$   -fuzztime=25s ./internal/exporter/
+          go test -run=^$ -fuzz=^FuzzExportOddParams$   -fuzztime=25s ./internal/exporter/

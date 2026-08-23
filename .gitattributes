@@ -1,0 +1,11 @@
+# Normalize line endings to LF in the repo (this is a Go project built on Linux
+# routers); shell scripts + the init.d service MUST stay LF.
+* text=auto eol=lf
+*.go text eol=lf
+*.sh text eol=lf
+S99kx text eol=lf
+*.png binary
+*.exe binary
+*.gz binary
+# signing keys are exact blobs — never touch their line endings (avoids CRLF normalize warnings)
+packaging/feed/keys/* -text

@@ -1,0 +1,80 @@
+interface GigabitEthernet0
+!
+interface GigabitEthernet0/0
+!
+interface GigabitEthernet0/1
+!
+interface GigabitEthernet0/Vlan1
+!
+interface GigabitEthernet0/Vlan3
+!
+interface GigabitEthernet0/Vlan4
+!
+interface GigabitEthernet0/2
+!
+interface GigabitEthernet1
+!
+interface GigabitEthernet1/0
+!
+interface WifiMaster0
+!
+interface WifiMaster0/AccessPoint0
+!
+interface WifiMaster0/AccessPoint1
+!
+interface WifiMaster0/AccessPoint2
+!
+interface WifiMaster0/AccessPoint3
+!
+interface WifiMaster0/AccessPoint4
+!
+interface WifiMaster0/AccessPoint5
+!
+interface WifiMaster0/AccessPoint6
+!
+interface WifiMaster0/WifiStation0
+!
+interface WifiMaster1
+!
+interface WifiMaster1/AccessPoint0
+!
+interface WifiMaster1/AccessPoint1
+!
+interface WifiMaster1/AccessPoint2
+!
+interface WifiMaster1/AccessPoint3
+!
+interface WifiMaster1/AccessPoint4
+!
+interface WifiMaster1/AccessPoint5
+!
+interface WifiMaster1/AccessPoint6
+!
+interface WifiMaster1/WifiStation0
+!
+interface Bridge0
+!
+interface Bridge1
+!
+interface PPPoE0
+!
+interface Wireguard0
+    wireguard asc 3 41 03 41 03 410341034-103410341 034103410-341034103 410341034-103410341 034103410-341034103 41 03 "" "" "" "" ""
+!
+interface Wireguard1
+    wireguard asc 4 10 34 10 34 103410341 034103410 341034103 410341034
+!
+interface Wireguard2
+    wireguard asc 1 03 410 34 103 4103410341 034103410 3410341034 1034103410
+!
+interface Wireguard3
+    wireguard asc 3 41 03 41 03 410341034-103410341 034103410-341034103 410341034-103410341 034103410-341034103 41 03 "" "" "" "" ""
+!
+interface Wireguard4
+    wireguard asc 4 10 34 10 34 103410341-034103410 341034103-410341034 103410341-034103410 341034103-410341034 10 34 "" "" "" "" ""
+!
+interface Wireguard5
+    wireguard asc 1 03 410 34 103 4103410341 034103410 3410341034 1034103410
+!
+interface Home
+!

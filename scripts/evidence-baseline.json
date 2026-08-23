@@ -1,0 +1,33 @@
+{
+  "recorded": "2026-08-09",
+  "gates": 49,
+  "counts": {
+    "i18n reproducible": 16,
+    "chunk refs": 272,
+    "gate parity": 18,
+    "installer identity": 7,
+    "apk lifecycle": 15,
+    "package lifecycle": 60,
+    "package guarantees": 49,
+    "package manifests": 19,
+    "iptv retirement": 13,
+    "feed completeness": 9,
+    "feed index": 17,
+    "published pointers": 29,
+    "button names": 139,
+    "page density": 2074,
+    "control preservation": 127,
+    "kernel-carried": 36,
+    "density at scale": 9285,
+    "narrow viewport": 117036,
+    "language fit": 15,
+    "wide viewport": 54,
+    "line wrapping": 275,
+    "contrast": 4814,
+    "rtl layout": 16859,
+    "keyboard": 733,
+    "stylesheet parses": 811,
+    "column tracks": 8,
+    "injection": 36
+  }
+}

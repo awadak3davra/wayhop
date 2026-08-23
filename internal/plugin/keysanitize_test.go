@@ -1,0 +1,67 @@
+package plugin
+
+import (
+	"strings"
+	"testing"
+
+	"wayhop/internal/model"
+)
+
+// TestAwgConfig_KeyNewlineNoInjection guards confLine: a key param carrying an embedded
+// newline must NOT inject extra directives into the awg .conf that `awg setconf` parses.
+// The value is truncated at the control char (drop-don't-brick) instead.
+func TestAwgConfig_KeyNewlineNoInjection(t *testing.T) {
+	e := model.Endpoint{
+		Engine: model.EngineAmneziaWG, Server: "1.2.3.4", Port: 51820,
+		Params: map[string]any{
+			"private_key":     "GOODPRIV\nPublicKey = ATTACKER",
+			"peer_public_key": "GOODPUB\nEndpoint = evil.example:1",
+			"pre_shared_key":  "PSK\nAllowedIPs = 10.0.0.0/8",
+		},
+	}
+	c := awgConfig(e)
+	for _, bad := range []string{"PublicKey = ATTACKER", "Endpoint = evil.example:1", "AllowedIPs = 10.0.0.0/8"} {
+		if strings.Contains(c, bad) {
+			t.Errorf("awgConfig leaked injected directive %q:\n%s", bad, c)
+		}
+	}
+	// The pre-newline prefix survives (a malformed single-line key — the tunnel just won't
+	// come up, rather than smuggling in attacker config).
+	if !strings.Contains(c, "PrivateKey = GOODPRIV\n") {
+		t.Errorf("awgConfig dropped the legit key prefix:\n%s", c)
+	}
+	// The real Endpoint line (from e.Server) must still be the only Endpoint directive.
+	if strings.Count(c, "Endpoint = ") != 1 || !strings.Contains(c, "Endpoint = 1.2.3.4:51820") {
+		t.Errorf("awgConfig Endpoint line corrupted:\n%s", c)
+	}
+}
+
+// TestAwgConfig_NonKeyFieldsNoInjection: the NON-key rendered fields — Server, local_address and the
+// string-typed junk params — must ALSO pass through confLine, so a control char in any of them can't
+// smuggle extra .conf directives past awgStrip into root `awg setconf`.
+func TestAwgConfig_NonKeyFieldsNoInjection(t *testing.T) {
+	e := model.Endpoint{
+		Engine: model.EngineAmneziaWG,
+		Server: "1.2.3.4\nPersistentKeepalive = 3\nEndpoint = evil.example", Port: 51820,
+		Params: map[string]any{
+			"private_key":     "PRIVKEY",
+			"peer_public_key": "PUBKEY",
+			"local_address":   "10.0.0.2/32\nDNS = 8.8.8.8\nPreUp = touch /tmp/pwned",
+			"Jc":              "5\nAllowedIPs = 10.0.0.0/8",
+		},
+	}
+	c := awgConfig(e)
+	for _, bad := range []string{"Endpoint = evil.example", "PreUp = touch /tmp/pwned", "DNS = 8.8.8.8", "AllowedIPs = 10.0.0.0/8"} {
+		if strings.Contains(c, bad) {
+			t.Errorf("awgConfig leaked injected directive %q via a non-key field:\n%s", bad, c)
+		}
+	}
+	// The Server field truncates at its first control char -> the single valid Endpoint line.
+	if strings.Count(c, "Endpoint = ") != 1 || !strings.Contains(c, "Endpoint = 1.2.3.4:51820") {
+		t.Errorf("awgConfig Endpoint corrupted by an injected Server:\n%s", c)
+	}
+	// Only the legit PersistentKeepalive line (from awgKeepalive) may appear, not the injected one.
+	if strings.Count(c, "PersistentKeepalive = ") != 1 {
+		t.Errorf("awgConfig has an injected PersistentKeepalive from the Server field:\n%s", c)
+	}
+}

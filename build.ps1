@@ -1,0 +1,92 @@
+# build.ps1 - cross-compile wayhop for every router arch and package per-arch tarballs.
+# Windows-friendly (the Makefile covers Unix build hosts).
+# Output: dist\wayhop-<ver>-<arch>.tar.gz          (Entware /opt sysvinit)
+#         dist\wayhop-<ver>-<arch>-openwrt.tar.gz  (OpenWrt native procd)
+$ErrorActionPreference = "Stop"
+
+$go = (Get-Command go -ErrorAction SilentlyContinue).Source
+if (-not $go) { $go = "$env:USERPROFILE\go-toolchain\go\bin\go.exe" }
+if (-not (Test-Path $go)) { throw "Go toolchain not found (install Go or unzip it to ~\go-toolchain)" }
+$env:GOTOOLCHAIN = "local"; $env:CGO_ENABLED = "0"
+
+$root = $PSScriptRoot
+Set-Location $root
+# Single source of truth: read the version from internal/version/version.go so a local build never
+# reports a stale hardcoded version (CI overrides it from the git tag on a release).
+$verFile = Join-Path $root "internal/version/version.go"
+$verMatch = Select-String -Path $verFile -Pattern 'Version\s*=\s*"([^"]+)"' | Select-Object -First 1
+$ver = if ($verMatch) { $verMatch.Matches[0].Groups[1].Value } else { "0.0.0-dev" }
+# Same identity the sh path stamps (scripts/buildinfo.sh): a local Windows cross-build that says
+# (unknown, unknown) is how a router ended up running code nobody could trace back to a commit.
+$commit = (& git rev-parse HEAD 2>$null)
+$gitOK = $?
+$bdate = if ($gitOK) { (& git show -s --format=%cI HEAD 2>$null) } else { "unknown" }
+$dirty = "unknown"
+if ($gitOK) {
+  $porcelain = (& git status --porcelain 2>$null)
+  $dirty = if ([string]::IsNullOrWhiteSpace($porcelain)) { "false" } else { "true" }
+} else { $commit = "unknown" }
+$vp = "wayhop/internal/version"
+$ld = "-s -w -X $vp.Version=$ver -X $vp.Commit=$commit -X $vp.Date=$bdate -X $vp.Dirty=$dirty"
+$dist = Join-Path $root "dist"
+New-Item -ItemType Directory -Force $dist | Out-Null
+
+$targets = @(
+  @{ n = "mipsle"; arch = "mipsle"; mips = "softfloat" },
+  @{ n = "mips";   arch = "mips";   mips = "softfloat" },
+  @{ n = "arm";    arch = "arm";    arm  = "7" },
+  @{ n = "arm64";  arch = "arm64" },
+  @{ n = "amd64";  arch = "amd64" }
+)
+
+# Copy a file converting CRLF -> LF (busybox sh chokes on CR).
+function CopyLF($src, $dst) {
+  $t = [System.IO.File]::ReadAllText($src) -replace "`r`n", "`n"
+  [System.IO.File]::WriteAllText($dst, $t)
+}
+
+foreach ($t in $targets) {
+  $env:GOOS = "linux"; $env:GOARCH = $t.arch
+  $env:GOMIPS = $(if ($t.mips) { $t.mips } else { "" })
+  $env:GOARM  = $(if ($t.arm)  { $t.arm }  else { "" })
+
+  $stage = Join-Path $dist "wayhop-$($t.n)-pkg"
+  Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+  New-Item -ItemType Directory -Force $stage | Out-Null
+
+  $bin = Join-Path $stage "wayhop-$($t.n)"
+  & $go build -ldflags $ld -o $bin ./cmd/wayhop
+  if ($LASTEXITCODE -ne 0) { throw "build $($t.n) failed" }
+
+  # --- Entware tarball: binary + install/uninstall + sysvinit S99 script ---
+  CopyLF (Join-Path $root "packaging\install.sh")   (Join-Path $stage "install.sh")
+  CopyLF (Join-Path $root "packaging\uninstall.sh") (Join-Path $stage "uninstall.sh")
+  CopyLF (Join-Path $root "packaging\S99wayhop")        (Join-Path $stage "S99wayhop")
+  CopyLF (Join-Path $root "packaging\identity-match.sh") (Join-Path $stage "identity-match.sh")
+  CopyLF (Join-Path $root "packaging\retire-iptv.sh") (Join-Path $stage "retire-iptv.sh")
+  CopyLF (Join-Path $root "packaging\harden-state.sh") (Join-Path $stage "harden-state.sh")
+
+  $tar = Join-Path $dist "wayhop-$ver-$($t.n).tar.gz"
+  tar -C $stage -czf $tar .
+  Write-Output ("packaged {0}  ({1} KB)" -f (Split-Path $tar -Leaf), [math]::Round((Get-Item $tar).Length / 1KB))
+
+  # --- OpenWrt tarball: same binary + native procd install/uninstall + procd init ---
+  $owstage = Join-Path $dist "wayhop-$($t.n)-openwrt-pkg"
+  Remove-Item -Recurse -Force $owstage -ErrorAction SilentlyContinue
+  New-Item -ItemType Directory -Force $owstage | Out-Null
+  Copy-Item $bin (Join-Path $owstage "wayhop-$($t.n)")
+  CopyLF (Join-Path $root "packaging\openwrt\install.sh")    (Join-Path $owstage "install.sh")
+  CopyLF (Join-Path $root "packaging\openwrt\uninstall.sh")  (Join-Path $owstage "uninstall.sh")
+  CopyLF (Join-Path $root "packaging\openwrt\wayhop.init") (Join-Path $owstage "wayhop.init")
+  CopyLF (Join-Path $root "packaging\identity-match.sh") (Join-Path $owstage "identity-match.sh")
+  CopyLF (Join-Path $root "packaging\retire-iptv.sh") (Join-Path $owstage "retire-iptv.sh")
+  CopyLF (Join-Path $root "packaging\harden-state.sh") (Join-Path $owstage "harden-state.sh")
+
+  $owtar = Join-Path $dist "wayhop-$ver-$($t.n)-openwrt.tar.gz"
+  tar -C $owstage -czf $owtar .
+  Remove-Item -Recurse -Force $owstage
+  Write-Output ("packaged {0}  ({1} KB)" -f (Split-Path $owtar -Leaf), [math]::Round((Get-Item $owtar).Length / 1KB))
+
+  Remove-Item -Recurse -Force $stage
+}
+Write-Output "done -> $dist"

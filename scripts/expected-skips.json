@@ -1,0 +1,126 @@
+{
+  "note": "Tests that do not run, and the condition under which that is expected. `when` is checked by scripts/check-skips.mjs against this host, so the manifest is true anywhere rather than only on the machine it was written on: a skip where the condition says the test should RUN is a failure, and so is a test that runs while its condition says it should be inert. Regenerate deliberately, never automatically.",
+  "skips": {
+    "TestAllProtocolsGenerate": {
+      "why": "WR_SINGBOX not set — ran generation-only (set it to a sing-box binary for a real `check`)",
+      "when": "env:WR_SINGBOX"
+    },
+    "TestClashExportMihomo": {
+      "why": "WR_MIHOMO not set — exported + structurally checked only (set it to a mihomo binary for a real -t check)",
+      "when": "env:WR_MIHOMO"
+    },
+    "TestClashSubscriptionGenerate": {
+      "why": "WR_SINGBOX not set — ran clash-import+generate only",
+      "when": "env:WR_SINGBOX"
+    },
+    "TestGeneratorTransportMatrix": {
+      "why": "WR_SINGBOX not set — ran import+generate only (set it for a real sing-box check)",
+      "when": "env:WR_SINGBOX"
+    },
+    "TestGracefulStop_DeliversSIGTERMFirst": {
+      "why": "no SIGTERM on windows; Stop() force-kills instead",
+      "when": "os:win32"
+    },
+    "TestHybridSingBoxCheck": {
+      "why": "WR_SINGBOX not set — set it to a sing-box binary for a real hybrid `check`",
+      "when": "env:WR_SINGBOX"
+    },
+    "TestPing_LoopbackRanAndOk": {
+      "why": "no usable ping on this host — the case under test cannot be exercised",
+      "when": "tool:ping"
+    },
+    "TestReal_AdoptRoundTrip": {
+      "why": "set WR_NATIVEDNS_FIXTURE to a dir with captured device output",
+      "when": "env:WR_NATIVEDNS_FIXTURE"
+    },
+    "TestRenderNft_NftCheck": {
+      "why": "nft not on PATH, or nft -c cannot initialize its netlink cache here (an unprivileged runner) - either way this host cannot syntax-check a ruleset",
+      "when": "cap:nft",
+      "reason_re": "nft not in PATH.*|nft -c can.t initialize in this environment.*"
+    },
+    "TestSourceRuleSingBoxCheck": {
+      "why": "WR_SINGBOX not set — generation-only",
+      "when": "env:WR_SINGBOX"
+    },
+    "TestTraceroute_LoopbackSucceeds": {
+      "why": "traceroute binary not installed in this environment: \"traceroute unavailable: exec: \\\"traceroute\\\": executable file not found in $PATH\"",
+      "when": "tool:traceroute|tracert"
+    },
+    "TestTraceroute_MaxHopsClamping/hops=0": {
+      "why": "traceroute binary not installed in this environment: \"traceroute unavailable: exec: \\\"traceroute\\\": executable file not found in $PATH\"",
+      "when": "tool:traceroute|tracert"
+    },
+    "TestTraceroute_MaxHopsClamping/hops=-1": {
+      "why": "traceroute binary not installed in this environment: \"traceroute unavailable: exec: \\\"traceroute\\\": executable file not found in $PATH\"",
+      "when": "tool:traceroute|tracert"
+    },
+    "TestTraceroute_MaxHopsClamping/hops=31": {
+      "why": "traceroute binary not installed in this environment: \"traceroute unavailable: exec: \\\"traceroute\\\": executable file not found in $PATH\"",
+      "when": "tool:traceroute|tracert"
+    },
+    "TestTraceroute_MaxHopsClamping/hops=99": {
+      "why": "traceroute binary not installed in this environment: \"traceroute unavailable: exec: \\\"traceroute\\\": executable file not found in $PATH\"",
+      "when": "tool:traceroute|tracert"
+    },
+    "TestWGKeyEncodingsSingBoxCheck": {
+      "why": "WR_SINGBOX not set — set it to a sing-box binary for a real `check`",
+      "when": "env:WR_SINGBOX"
+    },
+    "TestWireGuardConfGenerate": {
+      "why": "WR_SINGBOX not set — ran WG-.conf import+generate only",
+      "when": "env:WR_SINGBOX"
+    },
+    "TestWrite_HonorsExecPermViaCreateTemp": {
+      "why": "unix exec bit not meaningful on windows",
+      "when": "os:win32"
+    },
+    "TestProbeExecutionToolPathIdentityBindsExactBytes": {
+      "why": "router executable identity contract is Linux-only",
+      "when": "os:win32"
+    },
+    "TestExactKernelToolRunnerUsesCapturedAbsolutePath": {
+      "why": "router executable identity contract is Linux-only",
+      "when": "os:win32"
+    },
+    "TestBusyBoxIPIdentityAndRunnerUseExplicitApplet": {
+      "why": "router executable identity contract is Linux-only",
+      "when": "os:win32"
+    },
+    "TestExactKernelToolRunnerRetainsBoundedStderrForAbsentClassification": {
+      "why": "router executable identity contract is Linux-only",
+      "when": "os:win32"
+    },
+    "TestProbeConfiguredCoreUsesContentIdentityNotOnlyVersion": {
+      "why": "test uses a POSIX executable script",
+      "when": "os:win32"
+    },
+    "TestProbeConfiguredCoreDistinguishesMissingAndNotExecutable": {
+      "why": "test asserts POSIX executable permissions",
+      "when": "os:win32"
+    },
+    "TestProbeConfiguredCoreSanitizesPathResolutionFailure": {
+      "why": "test uses a POSIX symlink loop",
+      "when": "os:win32"
+    },
+    "TestProbeConfiguredCoreRejectsMutationDuringVersionProbe": {
+      "why": "test uses a POSIX self-modifying executable script",
+      "when": "os:win32"
+    },
+    "TestProbeConfiguredCoreBoundsVersionOutput": {
+      "why": "test uses a POSIX executable script",
+      "when": "os:win32"
+    },
+    "TestProbeConfiguredCoreRejectsNonSingBoxIdentity": {
+      "why": "test uses a POSIX executable script",
+      "when": "os:win32"
+    },
+    "TestProbeConfiguredCoreWaitDelayBoundsInheritedPipes": {
+      "why": "test uses a POSIX child process",
+      "when": "os:win32"
+    },
+    "TestProbeKernelPBRFreshExecutesReadOnlyCapabilityCheck": {
+      "why": "test uses a POSIX nft fixture",
+      "when": "os:win32"
+    }
+  }
+}

@@ -1,0 +1,13 @@
+# WayHop feed arch map — one line per Go build:  <goname>  <openwrt tokens...>  |  <entware token>
+#
+# A portable static Go binary is re-stamped into one package per OpenWrt CPU-FAMILY token: a device
+# only ACCEPTS a package whose Architecture is in its own list (`opkg print-architecture` / the apk
+# arch). So from each Go binary we emit several tiny packages that differ ONLY in that field. Add
+# subtargets here as you meet them; exotic ones use the documented --force-architecture escape hatch.
+#
+# goname  openwrt-tokens                                          | entware-token
+arm64     aarch64_cortex-a53 aarch64_cortex-a72 aarch64_generic   | aarch64-3.10
+arm       arm_cortex-a7 arm_cortex-a9 arm_cortex-a15_neon-vfpv4   | armv7sf-k3.2
+mipsle    mipsel_24kc                                             | mipselsf-k3.4
+mips      mips_24kc                                               | mips-3.4
+amd64     x86_64                                                  | x86-64-3.2

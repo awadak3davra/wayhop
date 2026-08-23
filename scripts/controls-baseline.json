@@ -1,0 +1,409 @@
+{
+ "renamed": {
+  "Edit": "Edit <object>",
+  "Set as default route": "Set as default route for <object>",
+  "Panel": "<removed: declared>",
+  "Routing & core": "<removed: declared>",
+  "Reliability": "<removed: declared>",
+  "Maintenance": "<removed: declared>",
+  "⛓ Subscription": "<removed: declared>",
+  "Adopted": "Adopted <object>",
+  "Check all": "Check updates",
+  "Updater mirrors": "Component download mirrors",
+  "Copy": "Copy <object>"
+ },
+ "sources": {
+  "http://127.0.0.1:8097": {
+   "routes": {
+    "dashboard": [
+     "Connections",
+     "Failover",
+     "Live connections"
+    ],
+    "server": [
+     "+ Add server",
+     "+ Add your first server"
+    ],
+    "connections": [
+     "+ Add connection",
+     "<object> enabled",
+     "Check config <object>",
+     "Delete <object>",
+     "Edit <object>",
+     "Inspect <object>",
+     "Test <object>",
+     "⛓ Subscription"
+    ],
+    "failover": [
+     "+ New group",
+     "Delete <object>",
+     "Edit <object>",
+     "Set as default route for <object>",
+     "Test <object>"
+    ],
+    "routing": [
+     "+ Custom list",
+     "<object> enabled",
+     "Delete <object>",
+     "Device groups",
+     "Download the list via",
+     "Edit <object>",
+     "Move down <object>",
+     "Move up <object>",
+     "Preset lists",
+     "Route matching traffic via",
+     "↻ Refresh sources"
+    ],
+    "dns": [
+     "+ Add resolver",
+     "+ Add rule",
+     "Default resolver (unmatched queries)",
+     "Delete <object>",
+     "Edit <object>",
+     "Enable DNS management",
+     "FakeIP domain routing",
+     "IP strategy",
+     "Leak protection (encrypted-only)",
+     "Move down <object>",
+     "Move up <object>",
+     "Preview dns{}",
+     "Run test",
+     "Secure defaults"
+    ],
+    "updater": [
+     "Check all",
+     "Check updates for <component>"
+    ],
+    "diagnostics": [
+     "Analyze",
+     "Analyze log text",
+     "Ask",
+     "Ask the router",
+     "Copy report",
+     "Domain",
+     "Egress",
+     "Full",
+     "Load sing-box log",
+     "Mask IPs",
+     "Ping",
+     "Resolve (DNS)",
+     "Run all checks",
+     "Scan",
+     "Speedtest",
+     "Target",
+     "Test <object>",
+     "Trace",
+     "Traceroute"
+    ],
+    "settings": [
+     "Allow auto-reboot as a last resort",
+     "Clash API",
+     "Clash controller",
+     "Clash secret",
+     "Connectivity-check target",
+     "DNS",
+     "Demo mode (synthesize traffic when sing-box is absent)",
+     "Download backup",
+     "Download full backup",
+     "Filter: browser only",
+     "Filter: can lock you out",
+     "Filter: changed by you",
+     "Filter: needs a restart",
+     "Filter: not default",
+     "Flow offload",
+     "Host allow-list",
+     "Include secrets",
+     "Language",
+     "Listen host",
+     "Mixed (socks+http)",
+     "Mode",
+     "Notify webhook URL",
+     "Offload devices",
+     "Reset to defaults",
+     "Restart service",
+     "Restore from file…",
+     "Restore full backup…",
+     "Save settings",
+     "Search settings",
+     "Show <object>",
+     "Theme",
+     "Try a direct connection first",
+     "Updater mirrors",
+     "Web UI",
+     "sing-box binary",
+     "sing-box config"
+    ]
+   },
+   "renamed": {
+    "+ Add your first server": "<state-gated: declared>"
+   }
+  },
+  "http://192.168.50.1:8088": {
+   "routes": {
+    "dashboard": [
+     "Connections",
+     "Failover",
+     "Live connections"
+    ],
+    "server": [
+     "+ Add server",
+     "+ Add your first server"
+    ],
+    "connections": [
+     "+ Add connection",
+     "<object> enabled",
+     "Check config <object>",
+     "Delete <object>",
+     "Edit <object>",
+     "Inspect <object>",
+     "Test <object>",
+     "⛓ Subscription"
+    ],
+    "failover": [
+     "+ New group",
+     "Delete <object>",
+     "Edit <object>",
+     "Set as default route for <object>",
+     "Test <object>"
+    ],
+    "routing": [
+     "+ Custom list",
+     "<object> enabled",
+     "Delete <object>",
+     "Device groups",
+     "Download the list via",
+     "Edit <object>",
+     "Move down <object>",
+     "Move up <object>",
+     "Preset lists",
+     "Route matching traffic via",
+     "↻ Refresh sources"
+    ],
+    "dns": [
+     "+ Add resolver",
+     "Enable DNS management",
+     "FakeIP domain routing",
+     "IP strategy",
+     "Leak protection (encrypted-only)",
+     "Preview dns{}",
+     "Preview write-back",
+     "Run test",
+     "Secure defaults"
+    ],
+    "updater": [
+     "Auto-update WayHop",
+     "Check all",
+     "Check updates for <component>",
+     "Remove <object>"
+    ],
+    "diagnostics": [
+     "Adopt as exit <object>",
+     "Adopted <object>",
+     "Analyze",
+     "Analyze log text",
+     "Ask",
+     "Ask the router",
+     "Copy report",
+     "Domain",
+     "Egress",
+     "Full",
+     "Load sing-box log",
+     "Mask IPs",
+     "Ping",
+     "Resolve (DNS)",
+     "Run all checks",
+     "Scan",
+     "Speedtest",
+     "Target",
+     "Test <object>",
+     "Trace",
+     "Traceroute"
+    ],
+    "settings": [
+     "Allow auto-reboot as a last resort",
+     "Clash API",
+     "Clash controller",
+     "Clash secret",
+     "Connectivity-check target",
+     "DNS",
+     "Demo mode (synthesize traffic when sing-box is absent)",
+     "Download backup",
+     "Download full backup",
+     "Filter: browser only",
+     "Filter: can lock you out",
+     "Filter: changed by you",
+     "Filter: needs a restart",
+     "Filter: not default",
+     "Flow offload",
+     "Host allow-list",
+     "Include secrets",
+     "Language",
+     "Listen host",
+     "Mixed (socks+http)",
+     "Mode",
+     "Notify webhook URL",
+     "Offload devices",
+     "Reset to defaults",
+     "Restart service",
+     "Restore from file…",
+     "Restore full backup…",
+     "Save settings",
+     "Search settings",
+     "Show <object>",
+     "Theme",
+     "Try a direct connection first",
+     "Updater mirrors",
+     "Web UI",
+     "sing-box binary",
+     "sing-box config"
+    ]
+   },
+   "renamed": {
+    "Remove <object>": "<removed: declared>"
+   }
+  },
+  "http://192.168.2.1:8088": {
+   "routes": {
+    "dashboard": [
+     "Connections",
+     "Failover",
+     "Live connections"
+    ],
+    "server": [
+     "+ Add server",
+     "+ Add your first server"
+    ],
+    "connections": [
+     "+ Add connection",
+     "<object> enabled",
+     "Check config <object>",
+     "Delete <object>",
+     "Edit <object>",
+     "Inspect <object>",
+     "Test <object>",
+     "⛓ Subscription"
+    ],
+    "failover": [
+     "+ New group",
+     "Delete <object>",
+     "Edit <object>",
+     "Set as default route for <object>",
+     "Test <object>"
+    ],
+    "routing": [
+     "+ Custom list",
+     "<object> enabled",
+     "Delete <object>",
+     "Device groups",
+     "Download the list via",
+     "Edit <object>",
+     "Move down <object>",
+     "Move up <object>",
+     "Preset lists",
+     "RU heavy platforms (Yandex/VK/Mail.ru/markets/streaming) ena",
+     "Route matching traffic via",
+     "↻ Refresh sources"
+    ],
+    "dns": [
+     "+ Add resolver",
+     "Enable DNS management",
+     "FakeIP domain routing",
+     "IP strategy",
+     "Leak protection (encrypted-only)",
+     "Preview dns{}",
+     "Preview write-back",
+     "Run test",
+     "Secure defaults"
+    ],
+    "updater": [
+     "Auto-update WayHop",
+     "Check all"
+    ],
+    "diagnostics": [
+     "Adopted",
+     "Analyze",
+     "Analyze log text",
+     "Ask",
+     "Ask the router",
+     "Copy report",
+     "Domain",
+     "Egress",
+     "Full",
+     "Load sing-box log",
+     "Mask IPs",
+     "Ping",
+     "Resolve (DNS)",
+     "Run all checks",
+     "Scan",
+     "Speedtest",
+     "Target",
+     "Test <object>",
+     "Trace",
+     "Traceroute"
+    ],
+    "settings": [
+     "Allow auto-reboot as a last resort",
+     "Clash API",
+     "Clash controller",
+     "Clash secret",
+     "Connectivity-check target",
+     "DNS",
+     "Demo mode (synthesize traffic when sing-box is absent)",
+     "Download backup",
+     "Download full backup",
+     "Filter: browser only",
+     "Filter: can lock you out",
+     "Filter: changed by you",
+     "Filter: needs a restart",
+     "Filter: not default",
+     "Flow offload",
+     "Host allow-list",
+     "Include secrets",
+     "Language",
+     "Listen host",
+     "Mixed (socks+http)",
+     "Mode",
+     "Notify webhook URL",
+     "Offload devices",
+     "Reset to defaults",
+     "Restart service",
+     "Restore from file…",
+     "Restore full backup…",
+     "Save settings",
+     "Search settings",
+     "Show <object>",
+     "Theme",
+     "Try a direct connection first",
+     "Updater mirrors",
+     "Web UI",
+     "sing-box binary",
+     "sing-box config"
+    ]
+   }
+  }
+ },
+ "history": [
+  {
+   "note": "Pre-redesign snapshot, kept for the record. Every one of these controls was verified present on every iteration of the redesign; the two renames and four removals below are the only differences, and each was reviewed. Re-captured after the ninth page so the gate also guards the controls the redesign ADDED — it was protecting 72 of 101, which is a narrower promise than its name makes.",
+   "captured_totals": {
+    "http://127.0.0.1:8097/": 72,
+    "http://192.168.50.1:8088/": 88,
+    "http://192.168.2.1:8088/": 88
+   }
+  },
+  {
+   "date": "2026-08-15",
+   "source": "all tracked targets",
+   "control": "⛓ Subscription",
+   "decision": "removed",
+   "why": "The client-export subscription action was intentionally retired. Connection import remains available through Add connection, but the panel no longer publishes a client subscription URL. The historical entry stays in each target capture and this global declaration makes the reviewed removal explicit without weakening checks for the remaining Connections controls."
+  },
+  {
+   "date": "2026-07-29",
+   "source": "http://192.168.50.1:8088/",
+   "control": "Remove <object>",
+   "decision": "removed",
+   "why": "This router's only installed engine (sing-box) is owned by opkg, and the panel refuses to remove a package-manager-owned binary — UninstallPrecheck returns a 409 before anything is stopped. Offering the button could only ever produce that refusal. It flickered in and out before the ownership-unknown fix because a locked opkg was being read as 'not owned'; it is now consistently absent here and still present on any router where a removal would succeed."
+  }
+ ]
+}
