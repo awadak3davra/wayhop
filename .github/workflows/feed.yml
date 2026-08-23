@@ -1,0 +1,322 @@
+name: feed
+
+# Build + sign + publish the native package feed (opkg .ipk + Entware + apk .apk) to the
+# awadak3davra/wayhop-feed GitHub Pages site. Runs on a v* release tag, or manually for validation.
+# Both opkg/Entware and apk are mandatory: the latter is the only native package format on the newest
+# supported OpenWrt release and is built with the digest-pinned apk-tools image below.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'existing immutable vMAJOR.MINOR.PATCH[-rN] tag; dispatch this workflow from the same tag'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  # Contains apk-tools 3.0.7-r0. Both package construction and secret-bearing signing run with
+  # --network none against this immutable digest; no `apk add` executes during publication.
+  APK_TOOLS_IMAGE: alpine:edge@sha256:d77617aef5805191da75fbbfe2f9dc2043582ecad0f4d381b27c151034765a76
+
+jobs:
+  # Refuse a branch/manual mismatch on a disposable GitHub-hosted runner before any repository code
+  # can reach the persistent signing runner. Downstream jobs consume only these verified outputs.
+  source:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.verify.outputs.tag }}
+      base_version: ${{ steps.verify.outputs.base_version }}
+      package_release: ${{ steps.verify.outputs.package_release }}
+      artifact_version: ${{ steps.verify.outputs.artifact_version }}
+      commit: ${{ steps.verify.outputs.commit }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify immutable release source
+        id: verify
+        env:
+          WAYHOP_RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+          WAYHOP_GITHUB_REF_TYPE: ${{ github.ref_type }}
+          WAYHOP_GITHUB_REF_NAME: ${{ github.ref_name }}
+          WAYHOP_EXPECTED_SHA: ${{ github.sha }}
+        run: node scripts/check-release-source.mjs
+
+  # Same blocking checks CI + the release run — a red check blocks the feed from publishing too.
+  gate:
+    needs: source
+    uses: ./.github/workflows/quality-gate.yml
+    with:
+      ui_scope: full   # the feed ships the same build a release does
+
+  # quality-gate covers static, packaging, fuzz and UI contracts. The feed also has to prove the
+  # ordinary/race suite for THIS event SHA; a passing test in another workflow or another commit is
+  # not release evidence.
+  test:
+    needs: source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.source.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.6'
+          cache: false
+      - name: full race suite (no inert green tests)
+        run: |
+          set -euo pipefail
+          go test -race ./... -v > "$RUNNER_TEMP/gotest.log" 2>&1 \
+            || { tail -n 120 "$RUNNER_TEMP/gotest.log"; exit 1; }
+          grep -E '^(ok|FAIL|---)' "$RUNNER_TEMP/gotest.log" || true
+      - name: inert tests
+        run: node scripts/check-skips.mjs
+        env:
+          WAYHOP_GOTEST_LOG: ${{ runner.temp }}/gotest.log
+
+  feed:
+    needs: [source, gate, test]   # sign only the exact SHA that passed every contract
+    runs-on: [self-hosted, Linux, X64]
+    # Signing/deploy runs ONLY on the trusted self-hosted runner (PR jobs are ubuntu-latest, so no
+    # PR code shares this machine). The environment gate is defence-in-depth: add required reviewers
+    # to the 'feed' environment in repo settings to require human approval before the usign/apk/deploy
+    # secrets are exposed. Non-breaking until reviewers are configured.
+    environment: feed
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.source.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.6'  # match the release toolchain (go.mod's 'go 1.22' is only the language floor); 1.26.6 closes five standard-library advisories
+          cache: false
+
+      - name: Build per-arch binaries
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          WAYHOP_ARTIFACT_VERSION: ${{ needs.source.outputs.artifact_version }}
+        run: |
+          set -eu
+          v="$WAYHOP_ARTIFACT_VERSION"
+          mkdir -p bins
+          # The feed ships the same binaries a release does, so it refuses the same untraceable build:
+          # a package an operator installs must be tied to an exact commit.
+          info="$(sh scripts/buildinfo.sh "$v")"
+          case "$info" in
+            *Commit=unknown*|*Date=unknown*|*Dirty=true*|*Dirty=unknown*)
+              echo "::error::refusing to publish a feed built with no traceable identity: ${info}"; exit 1 ;;
+          esac
+          ld="-s -w $info"
+          build() { GOARCH="$2" GOMIPS="${3:-}" GOARM="${4:-}" go build -trimpath \
+            -ldflags "$ld" -o "bins/wayhop-$1" ./cmd/wayhop; }
+          build mipsle mipsle softfloat
+          build mips   mips   softfloat
+          build arm    arm    ''        7
+          build arm64  arm64
+          build amd64  amd64
+          signer_dir="$(mktemp -d "$RUNNER_TEMP/wayhop-feed-signer.XXXXXX")"
+          signer="$signer_dir/usigntool"
+          go build -trimpath -o "$signer" ./packaging/feed/usigntool
+          if [ ! -x "$signer" ] || [ -L "$signer" ]; then
+            echo "::error::feed signer build is not a regular executable"; exit 1
+          fi
+          printf 'WAYHOP_FEED_SIGNER=%s\nWAYHOP_FEED_SIGNER_DIR=%s\n' \
+            "$signer" "$signer_dir" >> "$GITHUB_ENV"
+          ls -la bins
+
+      - name: Pack opkg (.ipk) + Entware
+        env:
+          WAYHOP_BASE_VERSION: ${{ needs.source.outputs.base_version }}
+          WAYHOP_PACKAGE_RELEASE: ${{ needs.source.outputs.package_release }}
+        run: |
+          set -eu
+          v="$WAYHOP_BASE_VERSION"
+          rel="$WAYHOP_PACKAGE_RELEASE"
+          export SOURCE_DATE_EPOCH=0
+          mkdir -p feed
+          # arch-map lines:  goname  openwrt-tokens...  |  entware-token
+          while IFS= read -r line; do
+            case "$line" in ''|\#*) continue ;; esac
+            ow="${line%%|*}"; ew="${line##*|}"
+            # shellcheck disable=SC2086
+            set -- $ow
+            goname="$1"; shift; owtokens="$*"
+            ewtoken="$(printf '%s' "$ew" | tr -d ' ')"
+            # shellcheck disable=SC2086
+            sh packaging/feed/pack-ipk.sh     "bins/wayhop-$goname" "$v" "$rel" feed/ipk     $owtokens
+            sh packaging/feed/pack-entware.sh "bins/wayhop-$goname" "$v" "$rel" feed/entware "$ewtoken"
+          done < packaging/feed/arch-map.txt
+
+      - name: Sign and verify opkg indexes (usign)
+        env:
+          WAYHOP_FEED_SIGN_KEY: ${{ secrets.VELINX_USIGN_SEC }}
+        run: |
+          set -euo pipefail
+          [ -n "${WAYHOP_FEED_SIGN_KEY:-}" ] || { echo "::error::VELINX_USIGN_SEC is required to publish the feed"; exit 1; }
+          umask 077
+          key="$(mktemp "$RUNNER_TEMP/wayhop-feed.XXXXXX")"
+          if [ ! -f "$key" ] || [ -L "$key" ] || [ "$(stat -c %a "$key")" != 600 ]; then
+            echo "::error::opkg signing key file is not a private regular file"; exit 1
+          fi
+          printf 'WAYHOP_FEED_KEY_FILE=%s\n' "$key" >> "$GITHUB_ENV"
+          cleanup() { rm -f "$key"; }
+          trap cleanup EXIT
+          trap 'exit 129' HUP
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          printf '%s' "$WAYHOP_FEED_SIGN_KEY" > "$key"
+          unset WAYHOP_FEED_SIGN_KEY
+          sh packaging/feed/make-index.sh feed "$key" packaging/feed/keys/wayhop.pub "$WAYHOP_FEED_SIGNER"
+
+      - name: Remove opkg signing material
+        if: always()
+        run: |
+          [ -z "${WAYHOP_FEED_KEY_FILE:-}" ] || rm -f -- "$WAYHOP_FEED_KEY_FILE"
+          [ -z "${WAYHOP_FEED_SIGNER:-}" ] || rm -f -- "$WAYHOP_FEED_SIGNER"
+          [ -z "${WAYHOP_FEED_SIGNER_DIR:-}" ] || rmdir -- "$WAYHOP_FEED_SIGNER_DIR"
+
+      # OpenWrt 25.x is apk-only, so every claimed architecture is mandatory. This step has no
+      # signing secret and cannot use the network; it produces packages plus unsigned indexes.
+      - name: Pack apk packages + unsigned indexes (pinned, offline)
+        id: apk
+        env:
+          WAYHOP_BASE_VERSION: ${{ needs.source.outputs.base_version }}
+          WAYHOP_PACKAGE_RELEASE: ${{ needs.source.outputs.package_release }}
+        run: |
+          set -euo pipefail
+          command -v docker >/dev/null 2>&1 || { echo "::error::docker is required for the supported apk feed"; exit 1; }
+          docker info >/dev/null 2>&1 || { echo "::error::docker daemon unavailable — apk feed was not built"; exit 1; }
+          docker run --rm --network none --read-only --user "$(id -u):$(id -g)" \
+            --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=256m \
+            --env WAYHOP_BASE_VERSION --env WAYHOP_PACKAGE_RELEASE \
+            -v "$PWD:/w:ro" -v "$PWD/feed:/out" -w /w "$APK_TOOLS_IMAGE" sh -euc '
+            apk mkpkg --help 2>&1 | grep -q "Usage: apk mkpkg" || { echo "apk-tools v3 mkpkg is unavailable" >&2; exit 3; }
+            v="$WAYHOP_BASE_VERSION"
+            rel="$WAYHOP_PACKAGE_RELEASE"
+            while IFS= read -r line; do
+              case "$line" in ""|\#*) continue ;; esac
+              ow="${line%%|*}"
+              # shellcheck disable=SC2086
+              set -- $ow
+              goname="$1"; shift; owtokens="$*"
+              # shellcheck disable=SC2086
+              sh packaging/feed/pack-apk.sh "bins/wayhop-$goname" "$v" "$rel" /out $owtokens
+            done < packaging/feed/arch-map.txt
+            for d in /out/apk/*/; do
+              [ -d "$d" ] || continue
+              # Packages are authenticated by the signed index + its recorded digests. They are
+              # intentionally unsigned at this stage; only the isolated next step receives a key.
+              ( cd "$d" && apk --allow-untrusted mkndx -o packages.adb ./*.apk )
+            done
+          '
+          sh packaging/feed/verify-apk-feed.sh feed packaging/feed/arch-map.txt --require-index
+
+      # The key enters only this step and only a pinned, network-disabled apk executable. The source
+      # checkout is not mounted. Each signed index is immediately verified against the public key
+      # that devices receive before the next architecture is processed.
+      - name: Sign and verify apk indexes (offline)
+        env:
+          WAYHOP_APK_SIGN_KEY: ${{ secrets.VELINX_APK_SEC_PEM }}
+        run: |
+          set -euo pipefail
+          [ -n "${WAYHOP_APK_SIGN_KEY:-}" ] || { echo "::error::VELINX_APK_SEC_PEM is required for the apk feed"; exit 1; }
+          umask 077
+          key="$(mktemp "$RUNNER_TEMP/wayhop-apk-sign.XXXXXX")"
+          if [ ! -f "$key" ] || [ -L "$key" ] || [ "$(stat -c %a "$key")" != 600 ]; then
+            echo "::error::apk signing key file is not a private regular file"; exit 1
+          fi
+          printf 'WAYHOP_APK_KEY_FILE=%s\n' "$key" >> "$GITHUB_ENV"
+          cleanup() { rm -f "$key"; }
+          trap cleanup EXIT
+          trap 'exit 129' HUP
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          printf '%s' "$WAYHOP_APK_SIGN_KEY" > "$key"
+          unset WAYHOP_APK_SIGN_KEY
+          signed=0
+          for adb in feed/apk/*/packages.adb; do
+            [ -s "$adb" ] || continue
+            dir="${adb%/*}"
+            docker run --rm --network none --read-only --user "$(id -u):$(id -g)" \
+              --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=32m \
+              -v "$PWD/$dir:/repo" -v "$key:/keys/wayhop.pem:ro" \
+              "$APK_TOOLS_IMAGE" apk --allow-untrusted adbsign --sign-key /keys/wayhop.pem /repo/packages.adb
+            docker run --rm --network none --read-only --user "$(id -u):$(id -g)" \
+              --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=32m \
+              -v "$PWD/$dir:/repo:ro" -v "$PWD/packaging/feed/keys/wayhop-apk.pem.pub:/keys/wayhop.pem:ro" \
+              "$APK_TOOLS_IMAGE" apk --keys-dir /keys verify /repo/packages.adb
+            signed=$((signed + 1))
+          done
+          [ "$signed" -gt 0 ] || { echo "::error::no apk index was signed"; exit 1; }
+          sh packaging/feed/verify-apk-feed.sh feed packaging/feed/arch-map.txt --require-index
+
+      - name: Remove apk signing material
+        if: always()
+        run: |
+          [ -z "${WAYHOP_APK_KEY_FILE:-}" ] || rm -f -- "$WAYHOP_APK_KEY_FILE"
+
+      - name: Assemble feed root (keys + landing page)
+        env:
+          WAYHOP_ARTIFACT_VERSION: ${{ needs.source.outputs.artifact_version }}
+        run: |
+          set -eu
+          rm -f "$PWD/.apk-sign.pem" 2>/dev/null || true
+          cp packaging/feed/keys/wayhop.pub          feed/wayhop.pub
+          cp packaging/feed/keys/wayhop-apk.pem.pub  feed/wayhop-apk.pem.pub
+          touch feed/.nojekyll
+          BASE="https://awadak3davra.github.io/wayhop-feed"
+          {
+            echo "<!doctype html><meta charset=utf-8><title>WayHop package feed</title>"
+            echo "<style>body{font:15px/1.5 system-ui,sans-serif;max-width:820px;margin:2rem auto;padding:0 1rem;color:#1a2230}"
+            echo "h1{margin:.2rem 0}h2{margin-top:1.6rem}code,pre{background:#0b0e13;color:#e6edf3;border-radius:6px}"
+            echo "pre{padding:.8rem 1rem;overflow:auto}code{padding:.1rem .35rem}a{color:#0097dc}.v{color:#6b7684}</style>"
+            echo "<h1>WayHop package feed</h1>"
+            echo "<p class=v>Native OpenWrt / Entware / Keenetic packages for <a href=https://github.com/awadak3davra/wayhop>WayHop</a>"
+            echo " &mdash; <b>${WAYHOP_ARTIFACT_VERSION}</b>. Prefer a one-shot install instead? See the"
+            echo " <a href=https://github.com/awadak3davra/wayhop#install>README install guide</a>.</p>"
+            echo "<h2>OpenWrt 25.12+ &middot; apk</h2>"
+            echo "<pre>wget -O /etc/apk/keys/wayhop.pem $BASE/wayhop-apk.pem.pub"
+            echo "echo \"$BASE/apk/\$(cat /etc/apk/arch)\" &gt;&gt; /etc/apk/repositories.d/wayhop.list"
+            echo "apk update &amp;&amp; apk add wayhop</pre>"
+            echo "<h2>OpenWrt 21.02&ndash;24.10 &middot; opkg</h2>"
+            echo "<pre>wget -O /tmp/wayhop.pub $BASE/wayhop.pub &amp;&amp; opkg-key add /tmp/wayhop.pub"
+            echo "echo \"src/gz wayhop $BASE/ipk/\$(opkg print-architecture | awk '\$1==\"arch\" && \$2!=\"all\" && \$2!=\"noarch\"{print \$2; exit}')\" &gt;&gt; /etc/opkg/customfeeds.conf"
+            echo "opkg update &amp;&amp; opkg install wayhop</pre>"
+            echo "<h2>Entware / Keenetic &middot; opkg (installs under /opt)</h2>"
+            echo "<pre>wget -O /tmp/wayhop.pub $BASE/wayhop.pub &amp;&amp; opkg-key add /tmp/wayhop.pub"
+            echo "echo \"src/gz wayhop $BASE/entware/\$(opkg print-architecture | awk '\$1==\"arch\" && \$2!=\"all\" && \$2!=\"noarch\"{print \$2; exit}')\" &gt;&gt; /opt/etc/opkg/customfeeds.conf"
+            echo "opkg update &amp;&amp; opkg install wayhop</pre>"
+            echo "<p class=v>Then open <code>http://&lt;router-ip&gt;:8088</code>. Upgrades: <code>opkg upgrade wayhop</code> (or <code>apk add -u wayhop</code> on 25.12+)."
+            echo " Your config contents are never overwritten or deleted on upgrade/removal; upgrades only repair WayHop state to owner-only permissions.</p>"
+          } > feed/index.html
+          echo "feed tree:"; find feed -maxdepth 3 -type f | sort
+
+      # peaceiris/actions-gh-pages hard-codes ssh-agent's socket at /tmp/ssh-auth.sock. On a
+      # PERSISTENT self-hosted runner that path survives between jobs, so a prior feed run leaves a
+      # stale socket and the next deploy dies on "cannot bind ... Address already in use". Clear any
+      # stale agent + socket first so the deploy is idempotent across runs on the same runner.
+      - name: Clear stale ssh-agent socket (self-hosted runner hygiene)
+        run: |
+          pkill -f 'ssh-agent -a /tmp/ssh-auth.sock' 2>/dev/null || true
+          rm -f /tmp/ssh-auth.sock || true
+
+      - name: Deploy to wayhop-feed Pages
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4
+        with:
+          deploy_key: ${{ secrets.FEED_DEPLOY_KEY }}
+          external_repository: awadak3davra/wayhop-feed
+          publish_branch: gh-pages
+          publish_dir: ./feed
+          force_orphan: true
+          commit_message: "WayHop feed ${{ needs.source.outputs.tag }}"

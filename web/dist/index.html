@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" type="image/svg+xml" href="favicon.svg" />
+<title>WayHop</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<!-- Mobile nav drawer toggle (CSS-only): the hamburger label flips this checkbox,
+     which CSS uses (body:has(.nav-toggle:checked)) to slide the sidebar in. -->
+<input type="checkbox" id="navtoggle" class="nav-toggle" aria-hidden="true">
+<label for="navtoggle" class="nav-scrim" aria-hidden="true"></label>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo">WH</div>
+      <div>
+        <div class="bt">WayHop</div>
+        <div class="bs">proxy control</div>
+      </div>
+    </div>
+    <div class="nav-item" data-page="dashboard"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="3" width="7.5" height="7.5" rx="1.6"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.6"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.6"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.6"/></svg> Dashboard</div>
+    <div class="nav-item" data-page="server"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="4" y="4.5" width="16" height="6" rx="1.7"/><rect x="4" y="13.5" width="16" height="6" rx="1.7"/><path d="M7.2 7.5h.01M7.2 16.5h.01"/></svg> Set up Server</div>
+    <div class="nav-item" data-page="connections"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 8.5h15"/><path d="M16 5.5l3 3-3 3"/><path d="M20 15.5H5"/><path d="M8 12.5l-3 3 3 3"/></svg> Connections</div>
+    <div class="nav-item" data-page="failover"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 7.5h7"/><path d="M12.2 5.7l3.4 3.6M15.6 5.7l-3.4 3.6"/><path d="M6.5 7.5v8.5h11"/><path d="M14.5 13l3 3-3 3"/></svg> Failover</div>
+    <div class="nav-item" data-page="routing"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M2.5 12h5"/><circle cx="9.3" cy="12" r="1.9"/><path d="M11.2 12h2.6l4.4-6.5"/><path d="M11.2 12h10.3"/><path d="M11.2 12h2.6l4.4 6.5"/><path d="M18.2 4.2l2.6 1.3-1.3 2.6"/><path d="M19.5 15.9l1.3 2.6-2.6 1.3"/></svg> Routing</div>
+    <div class="nav-item" data-page="dns"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8"/><path d="M4 12h16"/><path d="M12 4c2.4 2.8 3.6 5.6 3.6 8s-1.2 5.2-3.6 8c-2.4-2.8-3.6-5.6-3.6-8S9.6 6.8 12 4z"/></svg> DNS</div>
+    <div class="nav-item" data-page="updater"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 3v10.5"/><path d="M8.4 10.2l3.6 3.6 3.6-3.6"/><path d="M4 16.4V19a2 2 0 002 2h12a2 2 0 002-2v-2.6"/></svg> Components</div>
+    <div class="nav-item" data-page="diagnostics"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M2.2 12.6h3.4l2.2-7.4 4.4 13.6 2.4-6.2h3.2"/><path d="M18.6 12.6h3.2"/><circle cx="12" cy="12" r="9.6" opacity=".28"/></svg> Diagnostics</div>
+    <div class="nav-item" data-page="settings"><svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 8.6h16M4 15.4h16"/><circle cx="9.2" cy="8.6" r="2.4"/><circle cx="14.8" cy="15.4" r="2.4"/></svg> Settings</div>
+    <div class="grow"></div>
+    <div class="foot" id="foot">wayhop —</div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <button type="button" class="nav-burger" aria-controls="navtoggle" aria-expanded="false" aria-label="Menu">&#9776;</button>
+      <div class="title" id="pagetitle">Dashboard</div>
+      <div class="spacer"></div>
+      <span class="pill muted" id="statuspill"><span class="dot"></span><span id="statustext">…</span></span>
+      <button class="btn btn-primary" id="applybtn" hidden
+        title="Review pending changes before applying them">Review &amp; Apply</button>
+    </header>
+    <div id="apply-banner" class="apply-banner" hidden></div>
+    <div id="failsafe-banner" role="alert" aria-live="assertive" style="display:none"></div>
+    <div id="apply-error" role="alert" aria-live="assertive" style="display:none"></div>
+    <div class="content" id="view"></div>
+  </main>
+</div>
+
+<div class="toasts" id="toasts" role="status" aria-live="polite" aria-atomic="false"></div>
+<!-- i18n: load METADATA always, then ONLY the selected language's dictionary (§2.2). The monolithic
+     i18n.js shipped all 15 dictionaries (690 KB gzipped, 73% of the whole payload) to every visitor.
+     document.write is deliberate here: as a parser-inserted script it executes synchronously and in
+     order, so the dictionary is present before app.js binds window.WR_DICTS - no flash of English
+     and no re-render. English needs no file at all (English literals ARE the dictionary keys), and
+     an unknown/missing language simply 404s and falls back to English. -->
+<script src="i18n-meta.js"></script>
+<script src="i18n-loader.js"></script>
+<script src="nav.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

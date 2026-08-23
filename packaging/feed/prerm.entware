@@ -1,0 +1,6 @@
+#!/bin/sh
+# Entware/Keenetic opkg pre-remove: stop the service on a live device (no-op on a build host).
+# opkg removes the S99wayhop init file itself; this just stops the running instance first.
+[ -n "${IPKG_INSTROOT:-}" ] && exit 0
+[ -x /opt/etc/init.d/S99wayhop ] && /opt/etc/init.d/S99wayhop stop 2>/dev/null
+exit 0

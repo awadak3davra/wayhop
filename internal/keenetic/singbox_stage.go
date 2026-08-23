@@ -1,0 +1,117 @@
+package keenetic
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"wayhop/internal/atomicfile"
+)
+
+// singbox_stage.go atomically swaps the sing-box config for the cutover, with a snapshot for
+// rollback. The device's S99sing-box runs `sing-box run -C /opt/etc/sing-box` — DIRECTORY
+// mode, which merges EVERY *.json in the dir (the red-team's hole). So WayHop overwrites
+// the single config.json, snapshots the original bytes (to a non-*.json sidecar so sing-box
+// won't merge it), and refuses to stage if a stray *.json would also load.
+
+// SingboxStageOptions configure the staged swap.
+type SingboxStageOptions struct {
+	ConfigPath   string // default /opt/etc/sing-box/config.json
+	SnapshotPath string // default <ConfigPath>.wr-orig (NOT *.json → sing-box ignores it)
+}
+
+func (o *SingboxStageOptions) defaults() {
+	if o.ConfigPath == "" {
+		o.ConfigPath = "/opt/etc/sing-box/config.json"
+	}
+	if o.SnapshotPath == "" {
+		o.SnapshotPath = o.ConfigPath + ".wr-orig"
+	}
+}
+
+// strayJSON returns the *.json files in dir other than `keep` — any of these would be merged
+// by sing-box's directory mode and silently corrupt the cutover config.
+func strayJSON(dir, keep string) ([]string, error) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var stray []string
+	for _, e := range ents {
+		if e.IsDir() {
+			continue
+		}
+		n := e.Name()
+		if strings.HasSuffix(n, ".json") && n != keep {
+			stray = append(stray, n)
+		}
+	}
+	return stray, nil
+}
+
+// StageSingboxConfig snapshots the original config.json (once) and atomically writes the new
+// one. It does NOT restart sing-box — the orchestrator does that after the rest of the plane
+// is staged. Re-staging keeps the FIRST snapshot (the true pre-WayHop config). ⚠️
+// DEVICE-WRITING; cutover only.
+func StageSingboxConfig(cfg map[string]any, opt SingboxStageOptions) error {
+	opt.defaults()
+	dir := filepath.Dir(opt.ConfigPath)
+
+	if stray, err := strayJSON(dir, filepath.Base(opt.ConfigPath)); err != nil {
+		return fmt.Errorf("scan %s: %w", dir, err)
+	} else if len(stray) > 0 {
+		return fmt.Errorf("refusing to stage: stray *.json in %s would also load in directory mode: %v", dir, stray)
+	}
+
+	// Snapshot the ORIGINAL only once (never snapshot a WayHop config as "original"). Distinguish
+	// "absent" from "unreadable" on BOTH the Stat and the ReadFile: a non-ENOENT error (transient
+	// flash I/O, EACCES) must ABORT staging, never fall through to overwrite the original with no
+	// rollback snapshot — a failed cutover could then never restore it (the original config, with its
+	// endpoint credentials, would be permanently lost and RestoreSingboxConfig a silent no-op).
+	if _, serr := os.Stat(opt.SnapshotPath); serr != nil && !os.IsNotExist(serr) {
+		return fmt.Errorf("stat snapshot %s: %w", opt.SnapshotPath, serr)
+	} else if os.IsNotExist(serr) { // no snapshot yet
+		orig, rerr := os.ReadFile(opt.ConfigPath)
+		switch {
+		case rerr == nil:
+			if werr := atomicfile.Write(opt.SnapshotPath, orig, 0o600); werr != nil {
+				return fmt.Errorf("snapshot original config: %w", werr)
+			}
+		case os.IsNotExist(rerr):
+			// no config.json yet → nothing to snapshot; Restore becomes a no-op
+		default:
+			return fmt.Errorf("read original config for snapshot: %w", rerr)
+		}
+	}
+
+	b, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal sing-box config: %w", err)
+	}
+	// 0o600: the sing-box config embeds endpoint credentials (WG/VLESS keys, SS/TUIC
+	// passwords), so keep it root-only — matching the snapshot above and the OpenWrt datapath.
+	if err := atomicfile.Write(opt.ConfigPath, b, 0o600); err != nil {
+		return fmt.Errorf("write sing-box config: %w", err)
+	}
+	return nil
+}
+
+// RestoreSingboxConfig restores the snapshot over config.json and removes the snapshot (the
+// cutover rollback for the sing-box plane). No snapshot → no-op. ⚠️ DEVICE-WRITING.
+func RestoreSingboxConfig(opt SingboxStageOptions) error {
+	opt.defaults()
+	orig, err := os.ReadFile(opt.SnapshotPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read snapshot: %w", err)
+	}
+	if err := atomicfile.Write(opt.ConfigPath, orig, 0o600); err != nil {
+		return fmt.Errorf("restore sing-box config: %w", err)
+	}
+	_ = os.Remove(opt.SnapshotPath)
+	return nil
+}

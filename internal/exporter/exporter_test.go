@@ -1,0 +1,172 @@
+package exporter
+
+import (
+	"strings"
+	"testing"
+
+	"wayhop/internal/importer"
+	"wayhop/internal/model"
+)
+
+func TestRoundTripShareLinks(t *testing.T) {
+	cases := []model.Endpoint{
+		{
+			Name: "Reality", Engine: model.EngineSingBox, Protocol: model.ProtoVLESS,
+			Server: "203.0.113.10", Port: 443,
+			Params: map[string]any{"uuid": "11111111-2222-3333-4444-555555555555", "flow": "xtls-rprx-vision"},
+			TLS:    &model.TLS{Enabled: true, Type: "reality", SNI: "www.microsoft.com", Fingerprint: "chrome", PublicKey: "PUBKEYabc", ShortID: "ab12"},
+		},
+		{
+			Name: "Trojan WS", Engine: model.EngineSingBox, Protocol: model.ProtoTrojan,
+			Server: "1.2.3.4", Port: 443, Params: map[string]any{"password": "s3cret"},
+			Transport: &model.Transport{Type: "ws", Path: "/tj", Host: "cdn.example.com"},
+			TLS:       &model.TLS{Enabled: true, Type: "tls", SNI: "cdn.example.com"},
+		},
+		{
+			Name: "HY2", Engine: model.EngineSingBox, Protocol: model.ProtoHysteria2,
+			Server: "5.6.7.8", Port: 8443,
+			Params: map[string]any{"password": "hpass", "obfs": "salamander", "obfs_password": "ob"},
+			TLS:    &model.TLS{Enabled: true, Type: "tls", SNI: "example.org"},
+		},
+		{
+			Name: "SS", Engine: model.EngineSingBox, Protocol: model.ProtoShadowsocks,
+			Server: "9.9.9.9", Port: 8388,
+			Params: map[string]any{"method": "aes-256-gcm", "password": "sspw"},
+		},
+	}
+	for _, e := range cases {
+		link, ok := ShareLink(e)
+		if !ok {
+			t.Fatalf("%s: ShareLink not ok", e.Name)
+		}
+		got, err := importer.Parse(link)
+		if err != nil {
+			t.Fatalf("%s: re-import failed: %v\nlink=%s", e.Name, err, link)
+		}
+		if got.Protocol != e.Protocol || got.Server != e.Server || got.Port != e.Port {
+			t.Errorf("%s: core mismatch: %+v (link=%s)", e.Name, got, link)
+		}
+		for k, v := range e.Params {
+			if gv, ok := got.Params[k]; !ok || gv != v {
+				t.Errorf("%s: param %q = %v, want %v", e.Name, k, gv, v)
+			}
+		}
+		if e.TLS != nil {
+			if got.TLS == nil || got.TLS.Type != e.TLS.Type {
+				t.Errorf("%s: tls type mismatch: %+v", e.Name, got.TLS)
+			} else if e.TLS.Type == "reality" && (got.TLS.PublicKey != e.TLS.PublicKey || got.TLS.ShortID != e.TLS.ShortID) {
+				t.Errorf("%s: reality keys lost: %+v", e.Name, got.TLS)
+			}
+		}
+		if e.Transport != nil && (got.Transport == nil || got.Transport.Type != e.Transport.Type || got.Transport.Path != e.Transport.Path) {
+			t.Errorf("%s: transport mismatch: %+v", e.Name, got.Transport)
+		}
+	}
+}
+
+// TestExportMultiPeerConf: a multi-[Peer] WireGuard mesh must export EVERY peer, not just the
+// first. The peers live in Params["peers"]; the legacy first-peer keys only carry peer #1.
+func TestExportMultiPeerConf(t *testing.T) {
+	e := model.Endpoint{
+		Name: "mesh", Engine: model.EngineSingBox, Protocol: model.ProtoWireGuard,
+		Server: "203.0.113.7", Port: 51820,
+		Params: map[string]any{
+			"private_key":     "PRIV=",
+			"peer_public_key": "PUB1=", // legacy first-peer keys (peer #1)
+			"local_address":   []string{"10.0.0.2/32"},
+			"peers": []map[string]any{
+				{"server": "203.0.113.7", "port": 51820, "public_key": "PUB1=", "allowed_ips": []string{"10.0.0.0/24"}},
+				{"server": "198.51.100.9", "port": 51821, "public_key": "PUB2=", "allowed_ips": []string{"10.0.1.0/24"}, "persistent_keepalive": 25},
+			},
+		},
+	}
+	r, ok := Export(e)
+	if !ok || r.Kind != "conf" {
+		t.Fatalf("export = %+v ok=%v", r, ok)
+	}
+	if strings.Count(r.Text, "[Peer]") != 2 {
+		t.Errorf("multi-peer .conf must emit 2 [Peer] blocks, got %d:\n%s", strings.Count(r.Text, "[Peer]"), r.Text)
+	}
+	for _, want := range []string{"PUB1=", "PUB2=", "198.51.100.9:51821", "10.0.1.0/24", "PersistentKeepalive = 25"} {
+		if !strings.Contains(r.Text, want) {
+			t.Errorf("multi-peer .conf missing %q:\n%s", want, r.Text)
+		}
+	}
+}
+
+// TestClashWireGuardKeepalive: the clash export must carry persistent-keepalive (from the typed
+// field or Params), else a mihomo WG proxy behind NAT silently dies when its idle UDP mapping
+// expires. Parity with the .conf and sing-box export paths.
+func TestClashWireGuardKeepalive(t *testing.T) {
+	// typed field.
+	typed := model.Endpoint{
+		Name: "WGk", Engine: model.EngineSingBox, Protocol: model.ProtoWireGuard,
+		Server: "203.0.113.7", Port: 51820, PersistentKeepalive: 25,
+		Params: map[string]any{"private_key": "PRIV=", "peer_public_key": "PUB=", "local_address": []string{"10.0.0.2/32"}},
+	}
+	if yaml, skipped := ClashConfig([]model.Endpoint{typed}); len(skipped) != 0 || !strings.Contains(yaml, "persistent-keepalive: 25") {
+		t.Errorf("clash WG export missing persistent-keepalive (typed): skipped=%v\n%s", skipped, yaml)
+	}
+	// Params fallback (un-migrated config).
+	legacy := model.Endpoint{
+		Name: "WGk2", Engine: model.EngineSingBox, Protocol: model.ProtoWireGuard,
+		Server: "203.0.113.7", Port: 51820,
+		Params: map[string]any{"private_key": "PRIV=", "peer_public_key": "PUB=", "local_address": []string{"10.0.0.2/32"}, "persistent_keepalive": 30},
+	}
+	if yaml, skipped := ClashConfig([]model.Endpoint{legacy}); len(skipped) != 0 || !strings.Contains(yaml, "persistent-keepalive: 30") {
+		t.Errorf("clash WG export missing persistent-keepalive (Params): skipped=%v\n%s", skipped, yaml)
+	}
+}
+
+func TestRoundTripAmneziaWGConf(t *testing.T) {
+	e := model.Endpoint{
+		Name: "AWG", Engine: model.EngineAmneziaWG, Protocol: model.ProtoAmneziaWG,
+		Server: "198.51.100.20", Port: 51820,
+		Params: map[string]any{
+			"private_key": "PRIV=", "peer_public_key": "PUB=", "local_address": []string{"10.13.13.2/32"},
+			"jc": 4, "jmin": 40, "jmax": 70, "h1": 1, "h2": 2, "h3": 3, "h4": 4,
+		},
+	}
+	r, ok := Export(e)
+	if !ok || r.Kind != "conf" {
+		t.Fatalf("export = %+v ok=%v", r, ok)
+	}
+	if !strings.Contains(r.Text, "Endpoint = 198.51.100.20:51820") || !strings.Contains(r.Text, "Jc = 4") {
+		t.Errorf("awg conf missing fields:\n%s", r.Text)
+	}
+	got, err := importer.Parse(r.Text)
+	if err != nil {
+		t.Fatalf("re-import conf: %v", err)
+	}
+	if got.Server != e.Server || got.Port != e.Port {
+		t.Errorf("conf round-trip host/port: %s:%d", got.Server, got.Port)
+	}
+}
+
+// TestExportTypedMTUKeepalive: MTU + PersistentKeepalive set on the TYPED Endpoint fields
+// (as the UI now writes them, dropping the legacy Params copy on edit) must still appear in
+// the exported .conf — else a UI-edited tunnel would export without them.
+func TestExportTypedMTUKeepalive(t *testing.T) {
+	e := model.Endpoint{
+		Name: "WG", Engine: model.EngineSingBox, Protocol: model.ProtoWireGuard,
+		Server: "203.0.113.7", Port: 51820,
+		MTU: 1280, PersistentKeepalive: 25,
+		Params: map[string]any{"private_key": "PRIV=", "peer_public_key": "PUB="},
+	}
+	r, ok := Export(e)
+	if !ok || r.Kind != "conf" {
+		t.Fatalf("export = %+v ok=%v", r, ok)
+	}
+	if !strings.Contains(r.Text, "MTU = 1280") {
+		t.Errorf("typed MTU not exported:\n%s", r.Text)
+	}
+	if !strings.Contains(r.Text, "PersistentKeepalive = 25") {
+		t.Errorf("typed PersistentKeepalive not exported:\n%s", r.Text)
+	}
+}
+
+func TestExportUnsupported(t *testing.T) {
+	if _, ok := Export(model.Endpoint{Protocol: model.ProtoOlcRTC}); ok {
+		t.Error("olcrtc should not be exportable as a link/conf")
+	}
+}

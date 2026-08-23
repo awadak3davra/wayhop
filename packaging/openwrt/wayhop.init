@@ -1,0 +1,64 @@
+#!/bin/sh /etc/rc.common
+# OpenWrt procd init script for WayHop (wayhop).
+#
+# Install to /etc/init.d/wayhop (chmod 0755), then:
+#   /etc/init.d/wayhop enable    # create the rc.d S95 symlink (boot start)
+#   /etc/init.d/wayhop start
+#
+# Modelled on the standard OpenWrt procd service style (USE_PROCD=1,
+# procd_open_instance / procd_close_instance). Logs go to logd via
+# procd stdout/stderr, so view them with:  logread -e wayhop
+#
+# Verified against OpenWrt 25.12.2 (procd, apk, nftables) on Xiaomi AX3000T.
+
+# START/STOP/USE_PROCD are consumed by OpenWrt's sourced /etc/rc.common, not this
+# file, so shellcheck's SC2034 "appears unused" is a false positive here.
+# shellcheck disable=SC2034
+# START must be >= networking so the UI binds after the interface is up.
+START=95
+# STOP early so the daemon is torn down before the network goes away.
+STOP=01
+
+USE_PROCD=1
+
+PROG=/usr/sbin/wayhop
+CONF=/etc/wayhop/config.json
+
+start_service() {
+	# Don't try to start if the binary or config is missing; procd would just
+	# respawn-loop. Fail loudly into the log instead.
+	[ -x "$PROG" ] || { echo "wayhop: $PROG not found or not executable" >&2; return 1; }
+	[ -f "$CONF" ] || { echo "wayhop: config $CONF missing" >&2; return 1; }
+
+	procd_open_instance
+	procd_set_param command "$PROG" --config "$CONF"
+
+	# Supervision: restart on crash. respawn <threshold> <timeout> <retry>:
+	# threshold 60s means a restart only counts as a "fast crash" if the daemon
+	# died within 60s of starting, so transient crashes after stable uptime never
+	# accumulate — the panel self-heals indefinitely. procd only gives up on a
+	# genuine tight crash-loop (10 deaths each <60s after start), which is when
+	# hammering the binary is pointless anyway. 5s between restarts.
+	procd_set_param respawn 60 5 10
+
+	# Route the daemon's stdout/stderr into the system log (logd).
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+
+	# Re-exec on config change (paired with service_triggers below).
+	procd_set_param file "$CONF"
+
+	procd_close_instance
+}
+
+# `reload`/config-change handling. WayHop reloads its own config at runtime
+# via the web UI, so a service-level reload just restarts the instance to pick
+# up edits made to config.json by hand.
+service_triggers() {
+	: # no UCI config — procd_set_param file in start_service handles config-change restarts
+}
+
+reload_service() {
+	stop
+	start
+}

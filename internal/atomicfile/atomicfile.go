@@ -1,0 +1,119 @@
+// Package atomicfile writes a file atomically and durably: temp file in the same
+// directory, fsync the contents, rename over the target, then fsync the directory
+// so the rename survives a power loss. This matters on a router, which can lose
+// power mid-write — without the fsyncs a crash can leave a zero-length or torn
+// config that bricks the panel (sing-box won't start, the daemon panics at boot).
+package atomicfile
+
+import (
+	"log"
+	"os"
+	"path/filepath"
+	"runtime"
+)
+
+// Write atomically and durably replaces path with data (mode perm). It is the
+// single audited write path shared by every JSON store in the daemon.
+func Write(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	// Which directory levels does MkdirAll have to CREATE? Compute before creating them, so after the
+	// write we can make each new level durable: a new directory's entry lives in its PARENT, and only
+	// SyncDir(dir) below (the leaf) is otherwise fsync'd — a power loss right after a first write into a
+	// freshly-created tree could then lose the new directories (and the 'durably'-written file in them).
+	created := dirsMissing(dir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	// UNIQUE temp name (not a fixed path+".tmp"): two goroutines writing the SAME target concurrently
+	// (e.g. a manual "refresh now" racing the scheduled refresh of one IPTV list) must not share one
+	// temp file — a shared O_TRUNC temp would interleave their bytes into a torn file before rename.
+	tf, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := tf.Name()
+	_ = tf.Close() // WriteSynced re-opens it (O_TRUNC) and fsyncs the contents
+	if err := WriteSynced(tmp, data, perm); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	SyncDir(dir) // make the file's entry in the leaf directory durable
+	// Make each newly-CREATED directory durable by fsyncing the parent that now holds its entry (walking
+	// up the chain MkdirAll built). Empty for the common case where the directory already existed.
+	for _, d := range created {
+		SyncDir(filepath.Dir(d))
+	}
+	return nil
+}
+
+// dirsMissing returns the ancestor directories of (and including) dir that do NOT currently exist,
+// leaf-first — the levels MkdirAll will create and that must be made durable afterward. Any Stat error
+// (including permission) is treated conservatively as "missing" so the parent is fsynced anyway (an
+// fsync of an already-durable directory is harmless); it stops at the first existing ancestor and at
+// the filesystem root.
+func dirsMissing(dir string) []string {
+	var missing []string
+	for d := dir; ; {
+		if _, err := os.Stat(d); err == nil {
+			break // this ancestor exists — so do all further ancestors
+		}
+		missing = append(missing, d)
+		parent := filepath.Dir(d)
+		if parent == d {
+			break // reached the root
+		}
+		d = parent
+	}
+	return missing
+}
+
+// WriteSynced writes data to path and fsyncs the file contents to stable storage
+// (it does NOT rename). Use it when the caller must validate the temp file before
+// committing it with a rename (see server.handleApply, which runs `sing-box check`
+// on the temp config first).
+func WriteSynced(path string, data []byte, perm os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	// OpenFile's perm is IGNORED when the file already EXISTS — and atomicfile.Write re-opens a
+	// CreateTemp file that is already 0600 — so set the mode explicitly. Without this, a caller
+	// asking for an executable 0755 (e.g. a Keenetic firewall hook) silently gets 0600 and the
+	// hook never runs. (On Windows only the writable bit is honored; Chmod still succeeds.)
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// SyncDir fsyncs a directory so a prior rename into it is durable. Directory
+// fsync is a no-op / unsupported on some platforms (e.g. Windows); best-effort.
+func SyncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		// A durability failure is invisible if swallowed; log so a missing
+		// directory fsync (e.g. permission/IO error) shows up in the router log.
+		log.Printf("atomicfile: open dir %q for fsync: %v", dir, err)
+		return
+	}
+	if err := d.Sync(); err != nil && runtime.GOOS != "windows" {
+		// Directory fsync is unsupported on Windows (Sync on a dir handle returns
+		// "Access is denied") — that's expected, not an error, so don't scare a
+		// Windows dev running the demo. On the real (Linux) router it's meaningful.
+		log.Printf("atomicfile: fsync dir %q: %v", dir, err)
+	}
+	_ = d.Close()
+}

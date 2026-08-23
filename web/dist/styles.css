@@ -1,0 +1,2119 @@
+:root {
+  color-scheme:dark;
+  /* Calm Keenetic-like shell: one canvas, one content surface and one quieter
+     control surface. Borders carry structure; shadows are reserved for layers. */
+  --bg:#111821; --card:#182230; --card-2:#202C3B; --divider:#2B394A; --divider-strong:#405067;
+  --surface-hover:#263446; --control-bg:#1D2938; --plot:#34455A;
+  --sidebar-bg:#141E2A; --sidebar-ink:#EEF4FA; --sidebar-muted:#91A0B3;
+  --sidebar-hover:#1E2B3B; --sidebar-active:rgba(0,157,220,.14);
+  /* Keenetic blue remains the only general-purpose accent. */
+  --accent:#0099D8; --accent-solid:#007AB3; --accent-600:#006F9F; --accent-active:#005C87; --accent-light:#62C4EA;
+  --accent-tint:rgba(0,153,216,.13); --accent-glow:rgba(0,153,216,.23);
+  --ok:#45C98A; --warn:#F0AE4E; --err:#FF6B6B;
+  --ok-tint:rgba(69,201,138,.12); --warn-tint:rgba(240,174,78,.13); --err-tint:rgba(255,107,107,.12);
+  --ink:#F1F5F9; --ink-2:#A7B3C3; --ink-3:#909DAE;
+  --rx:#6FAFE8; --tx:#45C98A;
+  /* Themeable surfaces (overridden by [data-theme=light]). The console stays a
+     dark terminal in both themes, so it carries its own ink var. */
+  --topbar-bg:#182230; --backdrop:rgba(5,9,14,.66);
+  --console-bg:#0C131C; --console-ink:#A7B3C3;
+  --radius:10px; --radius-sm:6px; --radius-pill:999px;
+  --shadow:0 1px 2px rgba(0,0,0,.16);
+  --shadow-active:0 0 0 3px var(--accent-tint);
+  --shadow-elevated:0 18px 48px rgba(0,0,0,.42);
+  --t:.12s;
+  --font:"Segoe UI","Roboto","Inter",system-ui,-apple-system,sans-serif;
+  --mono:ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
+  /* Spacing scale (4px base) — replaces the ad-hoc 3..32px margins/padding/gaps.
+     --card-pad / --content-pad stay composite literals so card width never reflows. */
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:20px; --sp-6:24px; --sp-7:32px;
+  --card-pad:18px 20px; --content-pad:24px 28px;
+  /* The sticky topbar's height, in one place: anything that sticks BELOW it offsets by this, and a
+     second copy of the number would drift the moment the bar changes. */
+  --topbar-h:60px;
+  /* Type scale — 6(+1) semantic sizes replacing ~14 raw font-sizes (half-px removed). */
+  --fs-caption:11px; --fs-small:12px; --fs-control:13px; --fs-body:14px;
+  --fs-lg:16px; --fs-xl:18px; --fs-stat:20px; --fs-display:22px;
+  /* Letter-spacing: uppercase eyebrows/badges vs large headings. */
+  --ls-caps:.65px; --ls-tight:.1px;
+}
+* { box-sizing:border-box; }
+/* The `hidden` attribute has to win, and only the UA stylesheet was making it win. That rule is
+   `[hidden]{display:none}` at author-origin-zero specificity, so ANY explicit `display` in this file
+   beats it. The diagnostics filter is where that finally showed: it correctly set `hidden` on the
+   21 checks that did not match what you typed, and all 21 stayed on screen, because `.health-row`
+   carries `display:flex`. Typing a check's name looked like a field that does nothing.
+   The same defeat had already been patched twice one selector at a time (`.apply-banner[hidden]`,
+   `.topbar #applybtn[hidden]`), which is the tell that a per-selector fix does not hold: the next
+   flex or grid container to be toggled brings the bug back. One global rule ends the class. */
+[hidden] { display:none !important; }
+html,body { height:100%; }
+/* Reserve the vertical-scrollbar gutter so the centered layout (sidebar + content) doesn't jump between a
+   tall page and a short one. Re-measured at 1920x1000 against a dense profile: Dashboard, Connections,
+   Failover, DNS and Diagnostics scroll and take a 15px bar; Routing, Updater, Settings and Server do not.
+   With this rule `.app` holds left=93 width=1720 on all nine. Graceful no-op where unsupported. */
+html { scrollbar-gutter:stable; }
+body { margin:0; background:var(--bg); color:var(--ink); font-family:var(--font); font-size:var(--fs-body);
+  line-height:1.45; font-synthesis:none; -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  transition:background .15s linear, color .15s linear; }
+a { color:var(--accent-light); text-decoration:none; text-underline-offset:2px; }
+a:hover { text-decoration:underline; }
+button { color:inherit; font-family:inherit; }
+
+/* layout */
+/* The interface is centred, but the column has to follow the window rather than sit at a fixed
+   1280px. On a 1920 screen that cap left a 300px dead band on EACH side while the routing and
+   settings tables — the two densest pages — were squeezed into the middle; measured at 1883px of
+   viewport, content ended at 1582 and 302px stayed empty.
+   1720px keeps the old intent (a column, not edge-to-edge sprawl, so a line of prose still ends
+   somewhere readable) while giving the tables the width they were short of. Below that the cap
+   does not bind and the layout simply fills the viewport, as before. */
+.app { display:flex; min-height:100vh; max-width:1720px; margin:0 auto; }
+.sidebar { position:sticky; top:0; width:220px; height:100vh; flex:none; overflow-y:auto;
+  background:var(--sidebar-bg); border-right:1px solid var(--divider);
+  display:flex; flex-direction:column; padding:18px 12px 14px; gap:2px; }
+.brand { display:flex; align-items:center; gap:11px; padding:5px 10px 19px; color:var(--sidebar-ink); }
+.brand .logo { width:30px; height:30px; border-radius:8px; background:linear-gradient(145deg,var(--accent-solid),var(--accent-active));
+  display:grid; place-items:center; color:#fff; font-weight:700; font-size:13px;
+  box-shadow:0 4px 12px rgba(0,111,159,.24); }
+.brand .bt { font-weight:650; font-size:15px; letter-spacing:var(--ls-tight); }
+.brand .bs { font-size:var(--fs-caption); color:var(--sidebar-muted); }
+.nav-item { display:flex; align-items:center; gap:11px; min-height:40px; padding:9px 12px; border-radius:var(--radius-sm);
+  color:var(--sidebar-muted); cursor:pointer; border-left:2px solid transparent; user-select:none;
+  font-size:var(--fs-control);
+  transition:background var(--t) linear, color var(--t) linear; }
+.nav-item:hover { background:var(--sidebar-hover); color:var(--sidebar-ink); }
+.nav-item.active { background:var(--sidebar-active); color:var(--sidebar-ink); border-left-color:var(--accent); font-weight:600; }
+.nav-item .ico { width:18px; text-align:center; opacity:.85; }
+.sidebar .grow { flex:1; }
+.sidebar .foot { font-size:var(--fs-caption); color:var(--sidebar-muted); padding:12px; }
+
+.main { flex:1; min-width:0; display:flex; flex-direction:column; }
+.topbar { position:sticky; top:0; z-index:40; height:var(--topbar-h); flex:none; display:flex; align-items:center; gap:12px;
+  padding:0 24px; border-bottom:1px solid var(--divider); background:var(--topbar-bg); }
+.topbar .title { font-size:var(--fs-lg); font-weight:650; letter-spacing:var(--ls-tight); }
+.topbar .spacer { flex:1; }
+.content { padding:var(--content-pad); width:100%; }
+/* Fail-safe / apply banners sit above .content and align to its horizontal padding. Kept in CSS (not
+   inline) so the mobile rule below (max-width:760px) can narrow it — an inline padding would outrank it. */
+#failsafe-banner { padding:14px 24px 0; }
+#apply-error { padding:14px 24px 0; }
+/* Fail-safe (Test) window card: the phase is carried by the title text; the edge colour only echoes it. */
+#failsafe-banner .fs-card { margin:0; border-left:3px solid var(--warn); }
+#failsafe-banner .fs-card.fs-degraded { border-left-color:var(--err); }
+#failsafe-banner .fs-text { min-width:0; display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 10px; }
+#failsafe-banner .acts { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+/* Apply failure card: the server's own message, the cause verbatim, the consequence, and only the
+   actions that can help (Retry is offered only where retrying can change the outcome). */
+#apply-error .ae-card { margin:0; border-left:3px solid var(--err); }
+#apply-error .ae-head { align-items:flex-start; gap:10px; }
+#apply-error .ae-x { cursor:pointer; color:var(--ink-2); font-size:18px; line-height:1; padding:0 4px; flex:none; }
+#apply-error .ae-msg { margin-top:6px; overflow-wrap:anywhere; }
+#apply-error .ae-detail { margin:8px 0 0; padding:8px 10px; max-height:30vh; overflow:auto; white-space:pre-wrap;
+  overflow-wrap:anywhere; font-family:var(--mono, ui-monospace, monospace); font-size:12px; line-height:1.5;
+  background:var(--card-2); border:1px solid var(--divider); border-radius:var(--radius-sm); }
+#apply-error .ae-note { margin-top:6px; }
+#apply-error .ae-acts { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
+
+/* Persistent Apply / pending-changes banner — the primary state signal (not toast-only). */
+.apply-banner { margin:14px 28px 0; border:1px solid var(--divider); border-left-width:3px;
+  border-radius:var(--radius); background:var(--card); box-shadow:var(--shadow); }
+.apply-banner[hidden] { display:none; }
+.apply-banner .ab-row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:11px 15px; }
+.apply-banner .ab-msg { font-size:var(--fs-control); font-weight:500; color:inherit; flex:1 1 220px; min-width:0; }
+.apply-banner .ab-actions { display:flex; gap:8px; flex-wrap:wrap; }
+.apply-banner.ab-warn { border-left-color:var(--warn); background:var(--warn-tint); }
+.apply-banner.ab-info { border-left-color:var(--accent); background:var(--accent-tint); }
+.apply-banner.ab-ok   { border-left-color:var(--ok);   background:var(--ok-tint); }
+.apply-banner.ab-err  { border-left-color:var(--err);  background:var(--err-tint); }
+.apply-banner .ab-stage { font-weight:400; color:var(--ink-2); }
+/* Soft problems after an Apply that went through (ok:false): message + remedy per line. */
+.apply-banner .ab-problems { flex-basis:100%; margin:0; padding:0 0 0 18px; font-size:var(--fs-small); line-height:1.5; }
+.apply-banner .ab-problems li { overflow-wrap:anywhere; }
+.apply-banner .ab-spin { width:15px; height:15px; border:2px solid var(--divider); border-top-color:var(--accent); border-radius:50%; animation:ab-spin .8s linear infinite; flex:0 0 auto; }
+@keyframes ab-spin { to { transform:rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .apply-banner .ab-spin { animation:none; } }
+@media (max-width:640px) { .apply-banner { margin:12px 14px 0; } .apply-banner .ab-actions { width:100%; } .apply-banner .ab-actions .btn { flex:1 1 auto; } }
+
+/* Friendly import-error card (raw parser messages hidden inside "Technical details"). */
+.import-error { border:1px solid var(--err); border-left-width:4px; border-radius:8px; background:var(--err-tint); padding:12px 14px; }
+.import-error .ie-msg { font-weight:600; color:inherit; margin-bottom:10px; }
+.import-error .ie-msg::before { content:"\26A0  "; }
+.import-error .ie-actions { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:4px; }
+.import-error .ie-tech { margin-top:8px; }
+.import-error .ie-tech summary { cursor:pointer; color:var(--ink-2); font-size:var(--fs-small); }
+.import-error .ie-raw { background:var(--card); border:1px solid var(--divider); border-radius:6px; padding:8px 10px; margin:8px 0; font-size:var(--fs-small); white-space:pre-wrap; word-break:break-word; overflow-x:auto; }
+
+/* pills + badges */
+/* A pill is a compact chip, but updStatePill("error", err.message) puts arbitrary text in one, and an
+   updater failure carries a mirror URL — "Get https://mirror.ghproxy.com/..." with no break
+   opportunity anywhere in it. With no width cap and no wrapping the chip grows to whatever the
+   message needs. In LTR that overflow runs right, into the margin body{overflow-x:hidden} quietly
+   eats; in RTL it runs LEFT and a quarter of the pill sits off-screen at x=-235. The defect is the
+   same in both directions — RTL is only what made it visible. Cap it and let long tokens break. */
+.pill { display:inline-flex; align-items:center; gap:7px; padding:4px 10px; border-radius:var(--radius-pill);
+  font-size:var(--fs-caption); font-weight:650; letter-spacing:.25px;
+  max-width:100%; min-width:0; overflow-wrap:anywhere; word-break:break-word;
+  transition:background var(--t) linear, color var(--t) linear; }
+/* Status indicator: a small 6px round dot ahead of the label. */
+.pill .dot { width:6px; height:6px; border-radius:50%; background:currentColor; }
+.pill.ok { color:var(--ok); background:var(--ok-tint); }
+.pill.err { color:var(--err); background:var(--err-tint); }
+.pill.warn { color:var(--warn); background:var(--warn-tint); }
+.pill.muted { color:var(--ink-2); background:var(--card-2); }
+.badge { display:inline-block; padding:2px 8px; border-radius:var(--radius-pill); background:var(--card-2);
+  color:var(--ink-2); font-size:var(--fs-caption); font-weight:650; letter-spacing:.35px; text-transform:uppercase; }
+/* success badge (set on the green --ok background by app.js): dark ink reads against the DARK theme's
+   bright green (--ok #45C98A). */
+.badge-ok { background:var(--ok); color:#04240f; }
+/* The light theme's --ok is a dark green (#177D4B) chosen for text and borders, and the same dark ink
+   on it measures 3.22:1 — under the 4.5:1 AA line for this 11px/650 label. White is 5.15:1. The
+   badge only renders when an update EXISTS, so in demo nothing ever drew it and the contrast gate had
+   never seen this pair: it surfaced the moment release data started arriving offline. */
+[data-theme="light"] .badge-ok { color:#FFFFFF; }
+
+/* buttons */
+.btn { min-height:34px; padding:7px 13px; border-radius:var(--radius-sm); border:1px solid var(--divider);
+  background:var(--card-2); color:var(--ink); cursor:pointer; font-size:var(--fs-control); font-weight:600;
+  line-height:1.25;
+  transition:background var(--t) linear, border-color var(--t) linear, box-shadow var(--t) linear; }
+.btn:hover { background:var(--surface-hover); border-color:var(--divider-strong); }
+.btn-primary { background:var(--accent-solid); border-color:var(--accent-solid); color:#fff; }
+.btn-primary:hover { background:var(--accent-600); border-color:var(--accent-600); box-shadow:var(--shadow-active); }
+.btn-primary:active { background:var(--accent-active); border-color:var(--accent-active); box-shadow:none; }
+.btn-ghost { background:transparent; border-color:transparent; color:var(--ink-2); }
+.btn-ghost:hover { background:var(--card-2); border-color:var(--divider); color:var(--ink); }
+.btn-danger { background:transparent; border-color:transparent; color:var(--err); }
+.btn-danger:hover { background:var(--err-tint); }
+.btn-sm { min-height:28px; padding:5px 10px; font-size:var(--fs-small); }
+.btn:disabled { opacity:.5; cursor:not-allowed; }
+/* Pending-Apply attention: the topbar Apply buttons get an amber cue while the staged profile has
+   unsaved changes (reflectDirty()). A leading dot + amber outline points the user at the action
+   their edit needs to go live. A brief pulse on first appearance, then static (respects reduced-motion). */
+.btn.dirty { border-color:var(--warn); box-shadow:0 0 0 1px var(--warn) inset; animation:dirtyPulse 2s ease-in-out 2; }
+.btn.dirty::before { content:"● "; color:var(--warn); }
+.btn-primary.dirty { box-shadow:0 0 0 2px var(--warn-tint); }
+@keyframes dirtyPulse { 0%,100% { box-shadow:0 0 0 1px var(--warn) inset; } 50% { box-shadow:0 0 0 3px var(--warn-tint), 0 0 0 1px var(--warn) inset; } }
+@media (prefers-reduced-motion: reduce) { .btn.dirty { animation:none; } }
+/* First-paint skeleton (route() inserts it while a page awaits its data) — fills the blank pane on
+   a slow router link with a shimmering placeholder instead of the 'is it broken?' void. rgba so it
+   reads on both themes without theme-specific vars. */
+.skeleton-page { padding:4px 0; }
+.skel { border-radius:8px; margin:0 0 14px; background:linear-gradient(90deg, rgba(140,140,150,.09) 25%, rgba(140,140,150,.20) 37%, rgba(140,140,150,.09) 63%); background-size:400% 100%; animation:skelShimmer 1.4s ease infinite; }
+.skel-title { height:22px; width:190px; margin-bottom:20px; }
+.skel-line { height:12px; } .skel-line.short { width:55%; }
+.skel-card { height:74px; margin-bottom:12px; }
+@keyframes skelShimmer { 0% { background-position:100% 0; } 100% { background-position:0 0; } }
+@media (prefers-reduced-motion: reduce) { .skel { animation:none; } }
+/* a11y: visible keyboard focus on all interactive controls. Mouse clicks don't
+   trigger :focus-visible, so this never shows on pointer use; the existing
+   input/select/textarea border+ring in the forms section stays intact.
+   The accent ring is consistent across both themes (both define --accent-tint). */
+.btn:focus-visible, .btn-icon:focus-visible, .tab:focus-visible, .rm-th:focus-visible,
+.nav-item:focus-visible, .modal-head .x:focus-visible, .toggle:focus-visible,
+.nav-burger:focus-visible, .check:focus-visible, .check input:focus-visible,
+input[type=checkbox]:focus-visible, input[type=radio]:focus-visible, a:focus-visible {
+  outline:none; box-shadow:0 0 0 3px var(--accent-tint); border-radius:var(--radius-sm);
+}
+
+/* cards */
+.card { background:var(--card); border:1px solid var(--divider); border-radius:var(--radius); box-shadow:var(--shadow);
+  padding:var(--card-pad); margin-bottom:var(--sp-4); }
+/* space-between with no gap means the title and whatever sits opposite it TOUCH as soon as the pair
+   fills the card. On Connections that read as one run-on string — "Live connections686 active · …" —
+   with the summary's tail orphaned onto a second line. A gap costs nothing when there is room. */
+.card-head { display:flex; align-items:center; justify-content:space-between; gap:var(--sp-3); margin-bottom:var(--sp-4); }
+.card-title { font-size:var(--fs-caption); letter-spacing:var(--ls-caps); font-weight:700; color:var(--ink-2); text-transform:uppercase; }
+.dots { color:var(--ink-3); letter-spacing:2px; cursor:grab; }
+/* Action-button cluster in a card-head (e.g. the failover group card): a spaced,
+   right-aligned row. This bare .acts is NOT the .conn/.rlrow-scoped one, so it needs
+   its own flex base. */
+.card-head > .acts { display:flex; gap:6px; align-items:center; }
+/* On phones the failover card-head's 4-button cluster overflows beside the name;
+   stack the name full-width and let the buttons wrap below. Scoped via :has(> .acts)
+   so title-only card-heads are unaffected. */
+@media (max-width:760px){
+  .card-head:has(> .acts){ flex-wrap:wrap; gap:12px; }
+  .card-head:has(> .acts) > div:first-child{ width:100%; }
+  .card-head > .acts{ width:100%; flex-wrap:wrap; }
+}
+
+/* connection / endpoint rows */
+.conn { display:flex; align-items:flex-start; gap:var(--sp-3); padding:14px 2px; border-top:1px solid var(--divider); }
+.conn:first-child { border-top:none; }
+.toggle { width:34px; height:20px; border-radius:12px; background:var(--ink-3); position:relative; flex:none;
+  margin-top:3px; cursor:pointer; transition:background .15s; }
+.toggle.on { background:var(--accent); }
+/* A routing list's switch doubles as its status light: green when its source answers, red when it
+   does not. Only meaningful while the list is ON — off, the switch is grey because the list routes
+   nothing and the state of its feed is not the fact worth colouring. */
+.toggle.on.src-ok { background:var(--ok); }
+.toggle.on.src-err { background:var(--err); }
+.toggle::after { content:""; position:absolute; top:2px; left:2px; width:16px; height:16px; border-radius:50%;
+  background:#fff; transition:left .15s; }
+.toggle.on::after { left:16px; }
+/* A switch that cannot act until another one is on. Reads as unavailable rather than as off: off is a
+   state the operator chose, unavailable is one they have to fix somewhere else. */
+.toggle[aria-disabled="true"] { opacity:.45; cursor:not-allowed; }
+.conn .body { flex:1; min-width:0; }
+.conn .name { font-size:var(--fs-lg); font-weight:600; display:flex; align-items:center; gap:9px; min-width:0; word-break:break-word; }
+.conn .sub { display:flex; align-items:center; flex-wrap:wrap; gap:8px; font-size:var(--fs-small); color:var(--ink-2); margin-top:6px; }
+.conn .sub .addr { color:var(--ink-2); letter-spacing:.2px; min-width:0; word-break:break-word; }
+/* flex:none keeps the button cluster at its natural width so it never shrinks or
+   wraps; the body (flex:1, min-width:0) absorbs any squeeze instead. */
+.conn .acts { display:flex; gap:6px; align-items:center; flex:none; }
+/* The preset picker's two facts — what the list matches, and which plane runs it — as a right-hand
+   column of fixed width, so thirty rows read down two straight edges instead of ending wherever each
+   name does. Wraps under the name on a phone, where a third column would squeeze all three. */
+.conn .preset-tags { display:flex; gap:6px; align-items:center; flex:none; justify-content:flex-end;
+  min-width:190px; }
+/* A feed that has not been downloaded yet holds nothing. It reads as a warning because that is what
+   it is: the list is in the plan, in position order, matching not one address. */
+.rl-unfetched { color:var(--warn); }
+@media (max-width:560px) { .conn .preset-tags { min-width:0; } }
+/* inline "suggested fix" line under a down tunnel's cause (was a toast-only link) */
+.cause-fix { color:var(--ink-2); font-size:var(--fs-small); margin-top:3px; line-height:1.45; word-break:break-word; }
+/* live per-tunnel ↓/↑ throughput shown inline on the row, right-aligned in the name line —
+   replaces the old standalone "Interfaces" card. Painted by paintIfaceList from /api/system. */
+.conn .conn-rate { margin-left:auto; flex:none; padding-left:10px; font-size:12px;
+  font-weight:500; font-variant-numeric:tabular-nums; white-space:nowrap; color:var(--ink-2); }
+.conn .conn-rate:empty { display:none; }
+.conn .conn-rate .rx { color:var(--rx); }
+.conn .conn-rate .tx { color:var(--tx); }
+/* live-connections table (host · chain · rule · up/down · age) */
+.conns-list { display:flex; flex-direction:column; }
+.conn-item { display:flex; align-items:baseline; justify-content:space-between; gap:12px; padding:10px 0; border-top:1px solid var(--divider); }
+.conn-item:first-child { border-top:none; }
+.conn-main { flex:1; min-width:0; }
+.conn-host { font-weight:600; font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.conn-sub { font-size:var(--fs-small); color:var(--ink-2); margin-top:3px; word-break:break-word; }
+.conn-age { flex:none; font-size:var(--fs-small); color:var(--ink-2); white-space:nowrap; }
+/* by-IP summary: each remote IP groups its used ports beneath the aggregate row */
+.conn-group { border-top:1px solid var(--divider); padding-bottom:9px; }
+.conn-group:first-child { border-top:none; }
+.conn-group .conn-item { border-top:none; padding:9px 0 0; }
+.conn-ports { display:flex; flex-wrap:wrap; gap:5px; padding:6px 0 0 2px; }
+.conn-port { font-size:var(--fs-caption); padding:1px 7px; border-radius:5px; background:var(--divider); color:var(--ink-2); font-variant-numeric:tabular-nums; white-space:nowrap; }
+/* collapsible Live-connections card: collapsed by default, the header stays a live summary
+   (count + per-exit split) and a click toggles the list. */
+.conns-head { cursor:pointer; margin-bottom:0; user-select:none; }
+.conns-head-l { display:flex; align-items:center; gap:8px; min-width:0; }
+.conns-head .chev { color:var(--ink-3); font-size:11px; width:11px; flex:none; display:inline-block; }
+.conns-card .conns-list { display:none; }
+.conns-card.open .conns-list { display:flex; }
+.conns-card.open .conns-head { margin-bottom:var(--sp-4); }
+.conns-head:focus-visible { outline:2px solid var(--accent); outline-offset:3px; border-radius:var(--radius-sm); }
+/* top talkers: ranked hosts by total bytes with a proportional bar */
+.talkers-list { display:flex; flex-direction:column; gap:11px; }
+.talker-row { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
+.talker-host { font-weight:600; font-size:var(--fs-control); min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.talker-bytes { flex:none; font-size:var(--fs-small); color:var(--ink-2); }
+.talker-bar { margin-top:5px; height:6px; border-radius:4px; background:var(--card-2); overflow:hidden; }
+.talker-bar-fill { display:block; height:100%; background:var(--accent); border-radius:4px; }
+/* dashboard "proxy core not running" notice (graceful degradation when sing-box is down) */
+.notice-core { display:flex; align-items:flex-start; gap:12px; border-left:3px solid var(--warn); }
+.notice-core-ico { flex:none; color:var(--ink-2); font-size:20px; line-height:1.25; }
+
+/* status hero: the "am I protected / which exit?" verdict band at the top of the dashboard */
+.hero { display:flex; align-items:center; gap:16px; background:var(--card); border:1px solid var(--divider);
+  border-radius:var(--radius); box-shadow:var(--shadow); padding:16px 20px; margin-bottom:var(--sp-4); }
+.hero-pill { display:inline-flex; align-items:center; gap:8px; flex:none; padding:8px 14px; border-radius:var(--radius-pill); font-weight:700; font-size:var(--fs-control); letter-spacing:.4px; }
+.hero-pill .hero-ico { font-size:15px; line-height:1; }
+.hero-pill.hero-ok { color:var(--ok); background:var(--ok-tint); }
+.hero-pill.hero-warn { color:var(--warn); background:var(--warn-tint); }
+.hero-pill.hero-err { color:var(--err); background:var(--err-tint); }
+.hero-pill.hero-muted { color:var(--ink-2); background:var(--card-2); }
+.hero-text { min-width:0; }
+.hero-verdict { font-size:var(--fs-xl); font-weight:650; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.hero-sub { margin-top:2px; }
+.hero-ip { margin-top:4px; font-size:var(--fs-small); color:var(--ink-2); }
+.hero-ip b { color:var(--ink); font-family:ui-monospace,Menlo,Consolas,monospace; font-weight:600; }
+.dashboard-hero .hero-text { flex:1 1 260px; }
+.dashboard-facts { display:flex; flex-wrap:wrap; gap:5px 14px; margin-top:7px;
+  color:var(--ink-2); font-size:var(--fs-small); }
+.dashboard-facts span + span::before { content:"•"; margin-right:14px; color:var(--ink-3); }
+.dashboard-hero-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; margin-left:auto; }
+.dashboard-hero-actions .btn { display:inline-flex; align-items:center; }
+/* Top talkers and Live connections stack, one under the other, at every width.
+   They were side by side, and the pair never fit: the connections card carries a four-reading
+   summary ("686 active · 2% of 32768 · direct 495.7 GB · grp-all-vpn 11.5 KB") and a table of rows
+   whose host names are full domains, in half the page. Two rules further down this file exist only
+   to stop that half-width column breaking its own heading mid-phrase — the layout was being propped
+   up rather than fixed. Full width gives each the room its content actually needs, and reading them
+   in sequence matches how they are used: who is talking, then what those connections are. */
+.dashboard-activity { display:grid; grid-template-columns:1fr; align-items:start; gap:var(--sp-4); }
+.dashboard-activity > .card { margin-bottom:0; }
+@media (max-width:760px){
+  .hero { align-items:flex-start; gap:11px; padding:15px 16px; }
+  .dashboard-hero { flex-wrap:wrap; }
+  .hero-verdict { white-space:normal; }
+  .dashboard-hero-actions { width:100%; margin-left:0; justify-content:flex-start; }
+  .dashboard-hero-actions .btn { flex:1 1 130px; justify-content:center; }
+  .dashboard-facts span + span::before { content:none; }
+}
+
+/* system-health strip: RAM / CPU load / uptime / CPU temp / WAN now (5 tiles) */
+.sys-strip { display:grid; grid-template-columns:repeat(5,1fr); gap:var(--sp-3); margin-bottom:var(--sp-4); }
+.sys-tile .sys-v { font-size:var(--fs-stat); font-weight:600; margin-top:6px; }
+.sys-tile .sys-v small { font-size:var(--fs-small); color:var(--ink-2); font-weight:400; }
+.sys-bar { margin-top:9px; height:6px; border-radius:4px; background:var(--card-2); overflow:hidden; }
+.sys-bar-fill { display:block; height:100%; width:0; background:var(--ok); border-radius:4px; transition:width .3s ease; }
+@media (max-width:760px){ .sys-strip { grid-template-columns:repeat(3,1fr); gap:10px; } }
+@media (max-width:480px){ .sys-strip { grid-template-columns:repeat(2,1fr); } }
+/* Exit cards: one per tunnel — name (top), WAN exit IP beside its country flag (center), provider
+   (bottom). A wrapping flex surface lets every line use the available width while centring a partial
+   final line; this is the piece CSS grid's auto-fill cannot do without placeholder cells. */
+.exit-grid { display:flex; flex-wrap:wrap; justify-content:center; gap:var(--sp-3); margin-bottom:var(--sp-4); }
+.exit-tile { background:var(--card); border:1px solid var(--divider); border-radius:var(--radius);
+  padding:12px; box-shadow:var(--shadow); min-width:0; box-sizing:border-box;
+  /* The 2180px Keenetic screenshot is a scaled 1280-CSS-pixel viewport and leaves 947.33px for
+     this grid. Five 176px cards plus four 12px gaps need 928px, so all five fit there at about
+     179.87px each. The 300px cap keeps wide screens compact and a partial final row centred. */
+  flex:1 1 176px; max-width:300px; }
+.exit-tile .exit-name { font-size:var(--fs-small); color:var(--ink-2); text-transform:uppercase; letter-spacing:.4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* Fixed row heights so every tile is the SAME height regardless of which fields are present (a flag,
+   a provider name…) — the grid row no longer "floats" with content. */
+.exit-tile .exit-mid { display:flex; align-items:center; gap:7px; margin-top:7px; min-height:22px; }
+.exit-tile .exit-flag { width:24px; font-size:20px; line-height:1; flex:none; text-align:center; overflow:hidden; }
+/* The exit ADDRESS is what this card exists to show, so it must fit the card it is in - and the card
+   is a fixed ~180px when five sit across a 947px dashboard, no matter how wide the screen is.
+   Sizing it off the VIEWPORT therefore grew the text while its box stayed still: measured at 947px
+   the string had exactly zero pixels of headroom on this machine's font, so a wider window or a
+   wider font (a Linux desktop's DejaVu against Windows' Segoe UI) truncated the last octet of an
+   address the operator is reading to tell two exits apart. cqw sizes it off the card instead: a
+   compact card gets ~14px, and a card with room keeps the full stat size. */
+.exit-tile { container-type:inline-size; }
+/* The 13.5px comes first on purpose: a browser without container-query units drops the clamp as
+   unparseable, and without something valid before it the address would fall back to inherited
+   size - larger than the card, which is the bug this rule exists to prevent. */
+.exit-tile .exit-ip { font-size:13.5px; font-size:clamp(13px,8.5cqw,var(--fs-stat)); font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.exit-tile .exit-prov { font-size:var(--fs-small); color:var(--ink-2); margin-top:6px; min-height:calc(var(--fs-small) + 3px); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* On a five-across card the flag and its gap take a quarter of the row from the address itself.
+   Measured across the sans-serifs this stack falls back to, the same string is 11% wider in Arial,
+   27% in DejaVu Sans (what a Linux desktop picks) and 42% in Verdana than in Segoe UI - so the
+   address needs both a smaller size and that space back to survive all of them. Wider cards keep
+   the full-size flag. */
+@container (max-width: 220px) {
+  .exit-tile .exit-flag { width:18px; font-size:16px; }
+  .exit-tile .exit-mid { gap:5px; }
+}
+
+/* Live throughput row (folded-in graph legend): colour-dot matching the tile's graph line + its rate. */
+.exit-tile .exit-rate { display:flex; align-items:center; gap:7px; margin-top:9px; font-size:var(--fs-small); color:var(--ink); }
+.exit-tile .exit-rate .dot { display:inline-block; width:8px; height:8px; border-radius:50%; flex:none; }
+.exit-tile .exit-rate-v { font-weight:600; font-variant-numeric:tabular-nums; }
+/* Health ring: a quiet 1px hairline (muted toward the card, not full-saturation) so "up/down" reads
+   without shouting — green when the exit's endpoint is up, red when it's down. Inset = no layout shift;
+   derived from --ok/--err via color-mix so it retints correctly in the light theme too. */
+.exit-tile.ok { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ok) 55%, transparent), var(--shadow); }
+.exit-tile.down { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--err) 55%, transparent), var(--shadow); }
+@media (max-width:480px){
+  .exit-grid { gap:10px; }
+  .exit-tile { flex-basis:150px; max-width:none; }
+}
+/* narrow screens: drop the actions onto their own full-width row so the name +
+   stats get the full width instead of being squeezed beside the buttons. */
+@media (max-width:760px) {
+  .conn { flex-wrap:wrap; }
+  .conn .acts { width:100%; justify-content:flex-start; margin-top:8px; }
+}
+.muted { color:var(--ink-2); }
+
+/* status light next to the name = a bare colored dot (latency lives in the stats line below) */
+.pill--dot { padding:0; background:none !important; }
+.pill--dot .dot { width:9px; height:9px; }
+/* protocol type chip, shown under the name in accent blue */
+.badge.proto { color:var(--accent-light); background:var(--accent-tint); }
+/* light theme: --accent-light is too pale on the tint → use the stronger accent for readable contrast */
+[data-theme="light"] .badge.proto { color:var(--accent); }
+/* per-tunnel stats line — brighter than a plain hint, with emphasized values */
+/* stats line = flex-wrapping row of nowrap chips, so values never split mid-phrase
+   (e.g. "322.3 MB transferred", "12 restarts") and rows stay tidy when present. */
+.stats { display:flex; flex-wrap:wrap; align-items:baseline; column-gap:8px; row-gap:3px; font-size:var(--fs-control); color:var(--ink-2); margin-top:8px; }
+.stat { white-space:nowrap; }
+.stats b { color:var(--ink); font-weight:600; }
+.stats .sep { margin-left:8px; color:var(--ink-3); }
+/* In these baseline-aligned rows, round status dots/pills would otherwise hang
+   their bottom edge on the text baseline (sitting visibly low). Center them on
+   the line instead, leaving the text itself on its baseline. */
+.stats .pill, .stats .dot, .conn-item .pill, .conn-item .dot { align-self:center; }
+
+/* traffic graph */
+.graphwrap { position:relative; margin-top:4px; }
+.ymax { position:absolute; right:2px; top:-2px; font-size:var(--fs-small); color:var(--ink-3); }
+canvas.graph { width:100%; height:200px; display:block; background:var(--card-2);
+  border:1px solid var(--divider); border-radius:var(--radius-sm); }
+.legend { display:flex; justify-content:center; gap:26px; font-size:var(--fs-control); color:var(--ink-2); margin-top:9px; }
+.legend b { color:var(--ink); font-weight:600; }
+.legend .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:7px; vertical-align:middle; }
+.axis { display:flex; justify-content:space-between; font-size:var(--fs-small); color:var(--ink-3); margin-top:6px; }
+/* Graph hover readout: time + each interface's rate at the hovered sample. Positioned by drawGraph. */
+.g-tip { position:absolute; top:4px; transform:translateX(-50%); pointer-events:none; z-index:5;
+  background:var(--card); border:1px solid var(--divider); border-radius:var(--radius); box-shadow:var(--shadow);
+  padding:7px 9px; font-size:var(--fs-small); color:var(--ink); white-space:nowrap; max-width:80%; }
+.g-tip .g-tip-t { color:var(--ink-3); margin-bottom:4px; }
+.g-tip .g-tip-r { display:flex; align-items:center; gap:6px; line-height:1.7; }
+.g-tip .g-tip-r .dot { display:inline-block; width:8px; height:8px; border-radius:50%; flex:none; }
+.g-tip .g-tip-n { color:var(--ink-2); }
+.g-tip .g-tip-r b { margin-left:auto; padding-left:16px; color:var(--ink); font-weight:600; font-variant-numeric:tabular-nums; }
+
+/* stat tiles */
+.tiles { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:var(--sp-4); }
+.tile { background:var(--card); border:1px solid var(--divider); border-radius:var(--radius);
+  padding:15px 17px; box-shadow:var(--shadow); min-height:82px; box-sizing:border-box; }
+.tile .k { font-size:var(--fs-small); color:var(--ink-2); }
+/* fixed value-row height so a tile with a sub-line (or a pill) is the same height as a plain one */
+.tile .v { font-size:var(--fs-display); font-weight:600; margin-top:6px; min-height:calc(var(--fs-display) + 4px); }
+.tile .v small { font-size:var(--fs-control); color:var(--ink-2); font-weight:400; }
+@media (max-width:760px){ .tiles { grid-template-columns:repeat(2,1fr); } }
+
+/* dashboard routing-list reachability strip: a wrap of compact status chips */
+.rl-strip { display:flex; flex-wrap:wrap; gap:8px 10px; margin-top:6px; }
+.rl-chip { display:inline-flex; align-items:center; gap:6px; max-width:100%; padding:6px 11px; background:var(--card-2); border-radius:999px; font-size:var(--fs-control); }
+.rl-chip .rl-ico { flex:none; font-weight:700; }
+.rl-chip .rl-chip-name { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:170px; }
+/* The chip NAME was capped with an ellipsis and the destination was not, so a long outbound name
+   (a group can be called anything, and an endpoint name can arrive from a subscription) grew the chip
+   without limit. At 375px that put it 10px past the screen edge, where body{overflow-x:hidden} hid
+   it. Same treatment for both halves, and min-width:0 so the flex chip may actually shrink. */
+.rl-chip .rl-chip-via { color:var(--ink-2); white-space:nowrap; overflow:hidden;
+  text-overflow:ellipsis; max-width:170px; min-width:0; }
+.rl-chip .rl-note { color:var(--err); font-size:var(--fs-small); }
+.rl-chip .rl-note:empty { display:none; }
+.rl-chip-off { opacity:.55; }
+
+/* forms */
+/* Form fields are bounded so a single labelled input never spans the full-width
+   content area (a port/SNI box stretched to ~1600px on a wide monitor). Full-width
+   components (the traffic graph, connection rows, tables, routing selects) are not
+   .field, so they keep filling the width — matching Keenetic, where the page is
+   full-width but form controls stay a readable size. Textarea fields (paste a
+   link/config, manual routing list) get more room. */
+.field { margin-bottom:14px; max-width:480px; }
+.field:has(textarea) { max-width:780px; }
+.field label { display:block; font-size:var(--fs-small); font-weight:600; color:var(--ink-2); margin-bottom:6px; }
+input[type=text], input[type=password], input[type=number], input[type=search], select, textarea {
+  width:100%; min-height:36px; background:var(--control-bg); border:1px solid var(--divider);
+  border-radius:var(--radius-sm); color:var(--ink); padding:8px 11px;
+  font-size:var(--fs-control); font-family:inherit;
+  transition:background var(--t) linear, border-color var(--t) linear, box-shadow var(--t) linear; }
+/* A select carries a dropdown arrow the shared padding above does not account for: 11px on the right, and
+   Chrome's arrow is about 16px whatever the font size, so a long option is painted underneath it. Shown by
+   choosing one — the tun mode's label needs 488px of the 456px the control gives it and the chevron lands
+   on the letters. Only `select` gets this: an input has no arrow and would just lose 15px of room. */
+select { padding-right:26px; text-overflow:ellipsis; }
+textarea { min-height:90px; resize:vertical; }
+input:hover:not(:disabled), select:hover:not(:disabled), textarea:hover:not(:disabled) { border-color:var(--divider-strong); }
+input:focus, select:focus, textarea:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-tint); }
+input:disabled, select:disabled, textarea:disabled { opacity:.6; cursor:not-allowed; }
+input::placeholder, textarea::placeholder { color:var(--ink-3); opacity:1; }
+input[type=checkbox], input[type=radio] { accent-color:var(--accent); }
+.kv { display:grid; grid-template-columns:repeat(2,1fr); gap:10px 18px; }
+.kv .k { font-size:var(--fs-small); color:var(--ink-2); }
+.kv .v { font-size:14px; word-break:break-all; }
+.checks { display:flex; flex-direction:column; gap:8px; max-height:200px; overflow:auto; }
+/* The failover member list is the part of that dialog you actually work in — pick members, order
+   them — and at 200px it showed three of six rows while three paragraphs of prose around it had all
+   the room they wanted. Those notes moved to the footer (.foot-notes); the list gets the space. */
+.checks-members { max-height:min(52vh, 480px); }
+/* Member row: the name takes the slack, its live state sits right of it, and the protocol pill is
+   pinned to the right edge so a column of rows reads down one straight edge instead of wherever each
+   name happens to end. The ▲/▼ pair stays outermost — it is a control, not information.
+   The display:flex is restated here because these rows are <label>s inside a .field, and
+   `.field label { display:block }` (line 441) outranks the plain .check rule — which is why the row
+   used to carry it as an inline style. Two classes outrank that one class + one element. */
+.check.member-row { display:flex; align-items:center; }
+.member-n { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.member-m { flex:0 0 auto; font-size:var(--fs-caption); color:var(--ink-3); font-variant-numeric:tabular-nums; }
+.member-p { flex:0 0 auto; min-width:92px; text-align:center; }
+.member-ord { display:flex; gap:4px; flex:none; }
+/* Footer status line: one note at a time, for whatever the operator is focused on or pointing at.
+   Its height is fixed at three lines and it scrolls inside that: notes differ in length, and letting
+   the tallest one set the footer means the dialog grows and shrinks under the pointer. */
+.foot-notes { display:flex; align-items:center; gap:16px; width:100%; }
+.foot-note { flex:1 1 auto; min-width:0; margin:0; height:4.4em; overflow-y:auto; }
+.foot-actions { display:flex; gap:8px; flex:0 0 auto; }
+/* A dialog whose frame does not move. The body becomes the scroller and the head/footer stay put, so
+   picking a member, hovering a note or opening the same dialog against a longer list changes what is
+   INSIDE the box and never the box itself — which is what made this one feel like it was breathing. */
+/* Wider and taller than the 560px default: this is a working dialog — a list you order, tuning you
+   set — not a question, and on any real screen the default left most of the room unused while the
+   member list scrolled inside 200px. The vw/vh halves keep it honest on a phone. */
+.modal.modal-fixed { width:min(760px, 94vw); height:min(88vh, 820px);
+  display:flex; flex-direction:column; overflow:hidden; }
+.modal.modal-fixed .modal-body { flex:1 1 auto; overflow-y:auto; scrollbar-gutter:stable; }
+.modal.modal-fixed .modal-foot { flex:0 0 auto; position:static; }
+.check { display:flex; align-items:center; gap:9px; padding:8px 10px; background:var(--card-2);
+  border:1px solid transparent; border-radius:var(--radius-sm); cursor:pointer; }
+.check:hover { border-color:var(--divider); }
+.check input { width:auto; }
+/* Init Server — protocol picker cards + action bar */
+.install-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:12px; }
+.proto-card { display:flex; gap:10px; align-items:flex-start; padding:12px 14px; background:var(--card-2);
+  border:1px solid var(--divider); border-radius:var(--radius-sm); cursor:pointer;
+  transition:border-color var(--t) linear, background var(--t) linear; }
+.proto-card:hover { border-color:var(--ink-3); }
+.proto-card:has(input:checked) { border-color:var(--accent); background:var(--accent-tint); }
+.proto-card input { width:auto; margin-top:2px; flex:none; }
+.proto-card .pt { font-weight:600; font-size:var(--fs-control); }
+.proto-card .pd { font-size:var(--fs-small); color:var(--ink-2); margin-top:3px; line-height:1.45; }
+.server-actions { display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; margin-top:20px; }
+.hint.lock { color:var(--ink-2); }
+@media (max-width:680px){ .install-grid { grid-template-columns:1fr; } }
+.opt-details { margin:8px 0 0; padding-left:16px; color:var(--ink-3); font-size:var(--fs-caption); line-height:1.55; }
+.opt-details li { margin:2px 0; }
+.tag-ok { display:inline-block; margin-left:8px; padding:1px 7px; border-radius:var(--radius-sm);
+  background:var(--ok-tint); color:var(--ok); font-size:var(--fs-caption); font-weight:600; text-transform:none; vertical-align:middle; }
+/* smart console: step list + verbose log */
+.wr-steps { display:flex; flex-direction:column; gap:7px; margin:4px 0 10px; }
+.wr-step { display:flex; gap:10px; align-items:flex-start; font-size:var(--fs-control); }
+.wr-step .ic { width:18px; text-align:center; flex:none; font-weight:700; }
+.wr-step.ok .ic { color:var(--ok); }
+.wr-step.err .ic { color:var(--err); }
+.wr-step.run .ic { color:var(--accent); }
+.wr-step.muted .ic { color:var(--ink-3); }
+.wr-step .nm { font-weight:500; }
+.wr-step.muted .nm { color:var(--ink-2); }
+.wr-step .err-hint { color:var(--warn); margin-top:2px; font-size:var(--fs-small); }
+.wr-logbox { margin-top:6px; }
+.wr-console { background:var(--console-bg); border:1px solid var(--divider); border-radius:var(--radius-sm);
+  padding:10px 12px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:var(--fs-small); color:var(--console-ink);
+  max-height:240px; overflow:auto; white-space:pre-wrap; margin-top:8px; word-break:break-all; }
+/* QR display — white plate so the code scans against the dark theme */
+.qr-wrap { display:flex; justify-content:center; align-items:center; padding:14px; background:#fff;
+  border-radius:var(--radius-sm); min-height:160px; max-width:100%; }
+/* a fixed-px QR image must scale down inside a narrow (mobile) modal rather than overflow */
+.qr-img { display:block; image-rendering:pixelated; max-width:100%; height:auto; }
+/* Settings — secret reveal row, validation errors, unsaved badge */
+.secret-row { display:flex; gap:8px; align-items:stretch; }
+.secret-row input { flex:1; min-width:0; }
+.secret-row .reveal { flex:none; }
+.settings-errors { background:var(--err-tint); border-left:3px solid var(--err); border-radius:var(--radius-sm);
+  padding:10px 12px; margin:6px 0 12px; font-size:var(--fs-control); display:flex; flex-direction:column; gap:7px; align-items:flex-start; }
+.settings-errors:empty { display:none; }
+.settings-errors .err-row { color:var(--err); }
+
+/* Authentication is a blocking first-run/login state, not another panel page. The same bounded
+   modal geometry works on desktop and collapses to the existing mobile bottom-sheet rules. */
+.auth-gate { z-index:100; }
+.auth-card { width:min(460px,92vw); }
+.auth-card .modal-head h2 { margin:0; font-size:20px; }
+.auth-form { display:grid; gap:14px; }
+.auth-form .field { margin:0; }
+.auth-form .btn { width:100%; min-height:42px; }
+.auth-intro { margin:0 0 18px; }
+.auth-http-warning { padding:10px 12px; border:1px solid var(--warn); border-radius:var(--radius-sm);
+  background:var(--warn-tint); color:var(--ink); font-size:13px; line-height:1.45; }
+.dirty-badge { font-size:var(--fs-small); color:var(--warn); margin-right:12px; white-space:nowrap; }
+.dirty-badge::before { content:"● "; }
+/* Settings — restart-needed tag + ports grid */
+.tag-restart { display:inline-block; margin-left:8px; padding:1px 7px; border-radius:var(--radius-sm);
+  background:var(--warn-tint); color:var(--warn); font-size:var(--fs-caption); font-weight:600; letter-spacing:.3px;
+  text-transform:none; vertical-align:middle; }
+.kv-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+@media (max-width:680px){ .kv-grid { grid-template-columns:repeat(2,1fr); } }
+
+/* modal */
+.modal-backdrop { position:fixed; inset:0; background:var(--backdrop); display:grid; place-items:center; z-index:50; }
+/* Same reasoning as `html { scrollbar-gutter:stable }` above, applied to the other container that scrolls
+   on its own. Measured: a trojan form is 1313px of content in an 878px box and takes a 17px scrollbar,
+   a socks form is 608px and takes none, so changing the protocol moved every field 15px sideways. */
+.modal { width:min(560px,92vw); max-height:88vh; max-height:88dvh; overflow:auto; scrollbar-gutter:stable;
+  background:var(--card); border-radius:var(--radius);
+  box-shadow:var(--shadow-elevated); border:1px solid var(--divider); }
+.modal-head { display:flex; align-items:center; justify-content:space-between; min-height:58px;
+  padding:15px 20px; border-bottom:1px solid var(--divider); }
+.modal-head .x { display:grid; place-items:center; width:32px; height:32px; margin:-5px -7px -5px 8px;
+  cursor:pointer; color:var(--ink-2); font-size:20px; line-height:1; border-radius:var(--radius-sm); }
+.modal-head .x:hover { color:var(--ink); background:var(--card-2); }
+.modal-body { padding:20px; }
+/* The 480px and 780px field caps exist so a control cannot stretch across the settings column. A dialog
+   body is 503px wide, so inside one they cap nothing worth capping and instead split the form into two
+   right edges: thirteen fields stopping at 480 while the Server/Port row — a bare flex wrapper, not a
+   .field — and every textarea field run the full width. Two classes here outrank both `.field` rules. */
+.modal-body .field { max-width:none; }
+/* Sticky at every width, not just on phones. With the inner panels no longer capping themselves the
+   dialog is the only scroller, and the change-review dialog is 15550px of content: a footer that scrolls
+   with it puts Apply & Save sixteen screens below the fold. The phone rule below still adds the stacked
+   layout and the safe-area padding; this is only about the bar staying reachable. */
+.modal-foot { display:flex; justify-content:flex-end; gap:8px; padding:14px 20px;
+  border-top:1px solid var(--divider); position:sticky; bottom:0; z-index:1; background:var(--card); }
+/* Underlined tabs create one clear navigation layer without another row of pills/cards. */
+.tabs { display:flex; gap:18px; margin-bottom:var(--sp-4); border-bottom:1px solid var(--divider); }
+.tab { position:relative; padding:9px 1px 10px; border-radius:0; background:transparent;
+  color:var(--ink-2); cursor:pointer; font-size:var(--fs-control); font-weight:600;
+  transition:color var(--t) linear; }
+.tab::after { content:""; position:absolute; left:0; right:0; bottom:-1px; height:2px;
+  background:transparent; border-radius:2px 2px 0 0; }
+.tab:hover { color:var(--ink); }
+.tab.active { background:transparent; color:var(--accent-light); }
+.tab.active::after { background:var(--accent); }
+
+/* toast */
+.toasts { position:fixed; bottom:22px; right:22px; display:flex; flex-direction:column; gap:10px; z-index:80; }
+.toast { padding:12px 16px; border-radius:var(--radius); background:var(--card); border:1px solid var(--divider);
+  box-shadow:var(--shadow-elevated); font-size:var(--fs-control); max-width:360px; animation:slidein .2s ease; }
+.toast.ok { border-left:3px solid var(--ok); }
+.toast.err { border-left:3px solid var(--err); }
+.toast.info { border-left:3px solid var(--accent); }
+@keyframes slidein { from { opacity:0; transform:translateY(8px);} to {opacity:1; transform:none;} }
+
+/* Empty states: a centered column. Backward-compatible — a single text child still
+   renders centered; the emptyState() helper adds a bold title + a muted how-to hint. */
+.empty { display:flex; flex-direction:column; align-items:center; text-align:center; gap:var(--sp-2);
+  color:var(--ink-3); padding:var(--sp-6) var(--sp-4); }
+.empty-ico { font-size:24px; opacity:.5; line-height:1; }
+.empty-title { font-size:var(--fs-body); font-weight:600; color:var(--ink-2); }
+.empty-hint { font-size:var(--fs-small); color:var(--ink-3); max-width:42ch; line-height:1.5; }
+/* First-run experience (Connections empty state): a named primary action + a 3-step
+   orientation so a new, non-technical user is never left staring at a blank card. */
+.firstrun { display:flex; flex-direction:column; align-items:center; text-align:center;
+  gap:var(--sp-3); padding:var(--sp-7) var(--sp-4); }
+.fr-ico { font-size:34px; line-height:1; color:var(--accent); }
+.fr-title { font-size:var(--fs-xl); font-weight:650; color:var(--ink); }
+.fr-hint { font-size:var(--fs-body); color:var(--ink-2); max-width:48ch; line-height:1.55; }
+.fr-cta { margin-top:var(--sp-1); }
+.fr-steps { list-style:none; margin:var(--sp-4) 0 0; padding:0; display:grid; gap:var(--sp-3);
+  width:100%; max-width:520px; text-align:left; }
+.fr-step { display:flex; align-items:flex-start; gap:var(--sp-3); }
+.fr-num { flex:0 0 auto; width:24px; height:24px; border-radius:50%; background:var(--accent-solid);
+  color:#fff; font-size:var(--fs-small); font-weight:700; line-height:24px; text-align:center; }
+.fr-step-body { display:flex; flex-direction:column; gap:2px; min-width:0; }
+.fr-step-t { font-size:var(--fs-control); font-weight:600; color:var(--ink); }
+.fr-step-d { font-size:var(--fs-small); color:var(--ink-3); line-height:1.5; }
+.fr-alt { margin-top:var(--sp-2); }
+@media (max-width:560px) { .fr-steps { max-width:100%; } }
+.row-between { display:flex; align-items:center; justify-content:space-between; }
+/* Section header — echoes a panel block-header: prominent title + muted
+   description + right-aligned side actions. */
+.block-head { display:flex; align-items:flex-start; justify-content:space-between; gap:var(--sp-4); margin-bottom:var(--sp-4); }
+.block-head .ttl { font-size:var(--fs-xl); font-weight:650; color:var(--ink); letter-spacing:var(--ls-tight); }
+.block-head .desc { font-size:var(--fs-control); color:var(--ink-2); margin-top:4px; max-width:64ch; line-height:1.45; }
+/* flex-wrap because the cluster is flex:none and its buttons do not shrink: four of them fit one
+   line in English and do not in German, where "+ Eigene Liste" and "Gerätegruppen" pushed the
+   Routing page 90px past a 375px screen. Measured per language once the narrow gate stopped
+   inheriting the host locale: de +90, es +82, pt +75, fr +68, ru +17, uk +8, and ar/fa too; en, be,
+   hi, ja, ko, tr, vi and zh fit. Wrapping costs nothing where they already fit — a flex row only
+   breaks when it must — and the alternative, shrinking the buttons, truncates their labels. */
+.block-head .side { flex:none; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+/* The .side action cluster is flex:none (its buttons can't shrink); on the Routing/DNS pages that
+   cluster is wide enough that between ~761px and the desktop breakpoint — with the sidebar still
+   present — it can't sit beside the title and the whole page overflows horizontally (iPad portrait
+   768px hits this). Wrap the cluster below the title from here up to 980px (the mobile <=760px block
+   repeats this for its own layout reset). */
+@media (max-width:980px) {
+  .block-head { flex-wrap:wrap; }
+  .block-head .side { width:100%; }
+}
+/* hint was --ink-3 (the dimmest ink) which fell below comfortable contrast at 12px
+   in both themes; --ink-2 reads clearly while still staying quieter than body ink,
+   so the muted-helper hierarchy is preserved. */
+.hint { font-size:var(--fs-small); color:var(--ink-2); margin-top:6px; }
+.protocol-dot { width:8px; height:8px; border-radius:2px; display:inline-block; }
+/* Routing page — fixed-column "table" so the Route via / Download via dropdowns
+   align in their own columns on every row, instead of flowing inline after the
+   variable-width source text (which drifted them left/right by ~200px per row). */
+/* `overflow-x:auto` here is what stops a sticky column heading from tracking the page scroll, because a
+   scroll container becomes the scrollport its sticky children answer to. Measured across sixteen widths
+   with 65 lists: the grid exceeds its box only at 1240px (by 8px) and below 480px (25px at 414, 64px at
+   375). So the horizontal scroller is kept exactly where it earns its place, and above that the table is
+   an ordinary block whose heading can stick to the viewport. */
+.rltable { display:flex; flex-direction:column; }
+@media (max-width:1240px) { .rltable { overflow-x:auto; } }
+/* The fixed-column grid rows have a ~700px min-content width (46px + 180 + 150 + 150 + actions);
+   above lets the table scroll horizontally instead of overflowing the page on tablet widths (761–950px)
+   where the content column is narrower than that minimum. */
+/* .rlhead and .rlrow are two INDEPENDENT grids, not two rows of one, so a track sized by content
+   resolves differently in each. The last track was `auto`: empty in the header, "1 ↑↓ Edit Delete" in
+   a row. That left the header a different amount of space to share among its fr columns, and the
+   headings drifted right of the data they name — measured at -99px on "Route via", -146 on "Download
+   via" and -192 on "Matched", which is exactly the width of the actions cluster. "Matched" ended up
+   sitting over the move arrows while the match text below it had no heading at all.
+
+   Every track is definite now — a length minimum and an fr maximum — so both grids resolve from the
+   container width alone and cannot disagree. Content can no longer widen a track.
+
+   Definite tracks are only half of it: fr resolves against each grid's own CONTENT box, so the two
+   must also be inset identically. They were not — the header had no horizontal padding and the row
+   had 4px — and the remaining 8px went straight into the fr column. The column gate caught the
+   leftover as "left spread 4px, right spread 8px" after the fix above had already landed, which is
+   the whole reason it measures rather than trusting the declaration. Keep these paddings in step. */
+/* The two `via` tracks were 1fr each — the same width for two columns whose contents are nothing
+   alike. Measured at 1920px over 64 rows, both on 231px: "Route via" holds exit names wanting up to
+   352px and truncated 32 of its 64 selects, while "Download via" truncated none and wanted 149px of
+   the same 231. The pair sat side by side, one cut off and one a third empty, which is what the
+   operator was looking at.
+   Rebalanced from the idle measured in the other tracks rather than by eye: "Matched" inked at most
+   143px of 162, and the actions cluster 191px of 254. The fr TOTAL is unchanged at 5.4, so the fr
+   unit stays 231.1px and no other column moves.
+   The widths below come from what CHROME says each control needs, not from re-deriving text width
+   from the computed font — that reconstruction ran about 23px low and reported everything as fitting
+   while the capture plainly showed a cut label. Measured by cloning each select down to its selected
+   option and letting it size itself: route via wants up to 352px and now gets 354; download via wants
+   149px and now gets 162. Truncated selects went 32 -> 0 of 128 across the two steps.
+   The download-via MINIMUM stays 150px, and that is not a spare digit. Dropping it to 120 alongside
+   the fr change looked harmless at 1920px, where fr governs and the minimum never binds — but below
+   about 1800px the tracks fall back to their minimums, and 120px is less than the 149px that
+   "Direct (no tunnel)" needs. The result was the most common value on the page rendering as
+   "Direct (no…" on every row at 1440px, a regression introduced by a fix and caught only by sweeping
+   widths afterwards. The fr ratio is what buys the wide-screen improvement; the minimum is what the
+   narrow screens actually run on, and the two have to be reasoned about separately. */
+.rlhead, .rlrow { display:grid;
+  grid-template-columns:28px 46px minmax(170px,1.6fr) minmax(176px,1.53fr) minmax(176px,0.70fr) minmax(96px,0.68fr) minmax(184px,0.89fr);
+  gap:12px; align-items:center; padding-left:4px; padding-right:4px; }
+.rlhead { padding-top:4px; padding-bottom:10px; font-size:var(--fs-caption); text-transform:uppercase; letter-spacing:.6px; color:var(--ink-3); border-bottom:1px solid var(--divider); }
+.rlrow { padding-top:14px; padding-bottom:14px; border-bottom:1px solid var(--divider); }
+/* The list's own state is the ROW's border, not a dot beside its name. A dot had to sit somewhere,
+   and with a name long enough to wrap it sat wherever the text ended — different x and y on every
+   row, which is exactly where the eye cannot scan. A 1px frame is the same information on an edge
+   that is already there: green reachable, red failing, grey switched off. */
+.rlrow.framed { border:1px solid var(--divider); border-radius:var(--radius-sm);
+  padding-left:12px; padding-right:12px; margin-bottom:8px; }
+.rlrow.framed.off { border-color:var(--ink-3); opacity:.65; }
+/* The header's columns must keep lining up with rows that now carry 12px of their own padding. */
+.rlhead.framed { padding-left:13px; padding-right:13px; }
+/* Those seven track MINIMUMS add up: 28+46+170+176+176+96+184 = 876px, plus six 12px gaps and 8px of
+   padding = 956px that the row cannot go below. The `via` rebalance above changes the fr ratios only;
+   The two `via` tracks were 150px until a runner measured them under a different font. The
+   stack is "Segoe UI","Roboto","Inter",system-ui: Windows resolves the first, a stock Linux
+   resolves none of them and falls back to DejaVu Sans, about 16% wider — "Direct (no tunnel)"
+   goes from 93px to 108px, and the select showing it asks for 163px once its padding and
+   arrow count. 150px gave it 150. 176px leaves 13px of headroom on the widest face the stack
+   can reach IN ENGLISH, and that is the limit of what this number was sized against. Measured
+   afterwards against the translated labels in the same face: de and fr need 175 (one pixel spare),
+   tr needs 185, uk 195, ru 210, vi 235. Four of the shipped languages do not fit here, so this
+   track is correct for English and known-short for them; the select ellipsises and its title
+   attribute carries the full text, which is a fallback and not a fit. Raising it to clear vi costs
+   2x59px on the row minimum and moves the breakpoint again, so it is a decision to take
+   deliberately rather than a number to nudge.
+   the minimums are deliberately left exactly as they were, so this figure and the 1280px breakpoint
+   derived from it still hold. The compact layout was gated at 760px, so between
+   761px and ~1280px of viewport the grid needed more room than the content column had and simply ran
+   off the right edge — measured on a 1024x768 tablet, `.acts` ending at x=1169 in a 1009px viewport,
+   which puts Edit and Delete past the screen with no way to scroll to them (the page has no
+   horizontal scrollbar; body overflow is visible, so it just spills).
+   The threshold is the width at which the content column stops being able to hold 904px: viewport
+   minus the 220px sidebar and the content padding. 956px puts that at ~1252px, so 1280px is the first round number above it; it was 1200px while the row needed 904px.
+   The compact layout is FIVE rules, not two. Redeclaring only the template and the hidden header —
+   which is what the first attempt at this did — leaves the row's other five children to auto-place
+   into implicit columns: measured at 1200px, both `via` selects came out about 50px wide showing
+   "Direv" for "Direct", and Delete was chopped to "lete" and thrown onto its own line. `grid-column:3`
+   is what stacks them into the one real column, and the `::before` labels are what replaces the
+   column names now that the header is gone. Keep this set in step with the 760px block below. */
+@media (max-width:1280px) {
+  .rlhead { display:none; }
+  .rlrow { grid-template-columns:28px 46px 1fr; row-gap:8px; }
+  .rl-list, .rl-cell, .rlrow .acts { grid-column:3; }
+  .rl-cell::before { content:attr(data-col); display:block; font-size:var(--fs-caption); text-transform:uppercase; letter-spacing:.5px; color:var(--ink-3); margin-bottom:3px; }
+  .rlrow .acts { justify-content:flex-start; }
+}
+.rl-list { min-width:0; }
+.rl-list .name { font-size:var(--fs-lg); font-weight:600; display:flex; align-items:center; gap:9px; }
+.rl-list .sub { display:flex; align-items:center; flex-wrap:wrap; gap:8px; font-size:var(--fs-small); color:var(--ink-2); margin-top:5px; min-width:0; }
+.rl-list .sub .addr { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.rl-cell { min-width:0; }
+/* 8px on the right is not enough for the native dropdown arrow, so a long exit name was painted straight
+   under the chevron: measured at 1920 with 65 lists, 18 of 130 selects overran the room they had, 40 at
+   1440 and 49 at 1280, the worst by 163px. Reserving the arrow's own width and ellipsizing means a name
+   that still does not fit ENDS somewhere visible instead of sliding beneath the control's furniture. */
+.rl-sel { width:100%; min-width:0; max-width:100%; font-size:var(--fs-small); padding:5px 26px 5px 8px;
+  text-overflow:ellipsis; }
+.rlrow .acts { display:flex; gap:6px; align-items:center; justify-content:flex-end; }
+.rl-ta { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:var(--fs-small); }
+/* ---------- DNS section (dedicated layout: tidy, column-aligned, no inline-style hacks) ---------- */
+.dns-tog { padding:11px 0; border-bottom:1px solid var(--divider); }
+.dns-tog:last-child { border-bottom:none; }
+.dns-tog .top { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+.dns-tog .top label { margin:0; font-size:var(--fs-body); color:var(--ink); }
+.dns-tog .hint { margin-top:5px; max-width:64ch; }
+/* The third instance of AUD-114's defect, and the only one the demo could never show: the last track
+   was `auto`, so it took the width of that row's source label — `https-dns-proxy[0]` is 123px and
+   `dnsmasq.doh_backup_server` is 174px — and the 51px difference came out of the address column, so
+   eight rows put their addresses in eight… two different places. Every demo row carries the same
+   source string, so every local run resolved one identical track and saw nothing; it took running the
+   gate against the OpenWrt to produce rows that disagreed. Source labels are config identifiers with
+   no length bound, so the track is sized from the container and the label truncates (with the full
+   text on the element's title) rather than being allowed to set the layout. */
+.dns-row { display:grid; grid-template-columns:64px minmax(0,1fr) minmax(120px,.24fr); gap:14px; align-items:center; padding:13px 0; border-bottom:1px solid var(--divider); }
+.dns-row .acts { min-width:0; }
+/* Scoped: .pill is flex:0 0 auto globally (AUD-112) so a chip keeps its natural width. Here it is the
+   thing being bounded, so it may shrink — in this row only. */
+.dns-row .acts .pill { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+/* Detected native tunnels. These were `row-between` flex rows, so the right-hand cluster was as wide
+   as that row's own button label — "Adopted" on five rows and "Adopt as exit" on one — which pushed
+   that row's status pill 62px left of the five above it. Six rows, six interfaces, one ragged edge:
+   the same defect as AUD-114/116/118 in a flex costume.
+
+   A middle track of `auto` for the status pill would have reintroduced the same fault one column
+   over, since "active" and "idle" are not the same width. The right-hand cluster is one definite
+   track instead, packed to its end with a fixed-width button, so the button's edges AND the pill's
+   right edge are the same on every row no matter what either says. */
+.nt-row { display:grid; grid-template-columns:minmax(0,1fr) 236px; gap:var(--sp-3);
+  align-items:center; margin-bottom:var(--sp-2); }
+.nt-row .nt-name { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:var(--fs-small);
+  min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.nt-row .nt-acts { display:flex; align-items:center; justify-content:flex-end; gap:var(--sp-2); min-width:0; }
+.nt-row .nt-acts .btn { flex:0 0 140px; justify-content:center; }
+.dns-row:last-child { border-bottom:none; }
+.dns-row .badge { justify-self:start; white-space:nowrap; }
+.dns-row .main { min-width:0; }
+.dns-row .name { font-size:var(--fs-lg); font-weight:600; display:flex; align-items:center; gap:9px; min-width:0; }
+.dns-row .name .tag { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dns-row .sub { font-size:var(--fs-small); color:var(--ink-2); margin-top:4px; display:flex; align-items:center; flex-wrap:wrap; gap:4px 8px; overflow-wrap:anywhere; }
+.dns-row .acts, .dns-rule .acts { display:flex; gap:6px; align-items:center; justify-content:flex-end; }
+.dns-rule { display:grid; grid-template-columns:auto minmax(0,1fr) auto auto; gap:12px; align-items:center; padding:7px 0; border-bottom:1px solid var(--divider); }
+.dns-rule:last-child { border-bottom:none; }
+.dns-rule .match { min-width:0; }
+.dns-rule .match .m { font-size:var(--fs-small); color:var(--ink-2); overflow-wrap:anywhere; }
+.dns-rule .via { display:flex; align-items:center; gap:8px; white-space:nowrap; }
+@media (max-width:640px) {
+  .dns-row { grid-template-columns:64px minmax(0,1fr); }
+  .dns-row .acts { grid-column:1 / -1; justify-content:flex-start; margin-top:2px; }
+  /* minmax(0,1fr) to match this rule's own desktop template above, which already writes
+     minmax(0,1fr) for its flexible track — a bare fr here would give that track an automatic minimum
+     of min-content, the defect fixed in .upd-row and .qp-br.
+     Scope note, because the measurement that prompted this was of something else: the query-path rows
+     carry BOTH classes (page-dns.js gives them `qp-br dns-rule` so the reorder gate can assert on
+     them), so a probe selecting `.dns-rule` returns a .qp-br row. The 279px -> 1359px growth recorded
+     at .qp-br was that row, not this one. This change is consistency with its own desktop rule; it is
+     not a measured defect, and is written down that way rather than borrowing the other one's proof. */
+  .dns-rule { grid-template-columns:auto minmax(0,1fr); }
+  .dns-rule .acts { justify-content:flex-start; margin-top:2px; }
+}
+/* Diagnostics streamed output — terminal-like, scrolls, wraps long lines live. */
+.diag-out { font-family:var(--mono); font-size:var(--fs-small); line-height:1.55; background:var(--console-bg);
+  color:var(--console-ink); border:1px solid var(--divider); border-radius:var(--radius-sm);
+  padding:11px 13px; max-height:360px; overflow:auto; white-space:pre-wrap; word-break:break-word; }
+.diag-line { min-height:1.15em; }
+/* Diagnostics "Run all checks" health battery */
+.health-rows { display:flex; flex-direction:column; }
+.health-row { display:flex; align-items:center; gap:12px; padding:11px 2px; border-top:1px solid var(--divider); }
+/* The label is the row's identity; the RESULT gives way. `flex:1; min-width:0` said the opposite —
+   basis 0 — so on a live Keenetic a check answering with a sentence rendered its label 17px
+   wide, one word per line, beside 903px of result. No demo state produces a result that long, which
+   is why every viewport gate passed over it. */
+.health-row .lbl { flex:1 1 auto; min-width:9rem; font-weight:600; }
+.health-row .res { color:var(--ink-2); font-variant-numeric:tabular-nums; text-align:right; font-size:var(--fs-control);
+  flex:0 1 auto; min-width:0; max-width:60%; }
+.spin { width:10px; height:10px; border-radius:50%; border:2px solid var(--ink-3); border-top-color:var(--accent); display:inline-block; vertical-align:middle; animation:wr-spin .7s linear infinite; }
+@keyframes wr-spin { to { transform:rotate(360deg); } }
+/* Apply button mid-flight: fixed width so the rotating phase label doesn't jitter the toolbar. */
+.btn.working { min-width:12.5em; text-align:center; cursor:progress; }
+@media (prefers-reduced-motion: reduce) { .spin { animation-duration:1.6s; } }
+/* per-row re-check button */
+.btn-icon { background:transparent; border:1px solid transparent; color:var(--ink-2); width:28px; height:28px;
+  flex:none; padding:0; border-radius:var(--radius-sm); cursor:pointer; font-size:14px; line-height:1;
+  transition:color var(--t), border-color var(--t), background var(--t); }
+.btn-icon:hover:not(:disabled) { color:var(--ink); background:var(--card-2); border-color:var(--divider); }
+.btn-icon:disabled { opacity:.35; cursor:default; }
+/* daemon-unreachable auto-reconnect banner (shown on any daemon-down render) */
+.wr-reconnect { position:fixed; top:0; left:0; right:0; z-index:9999; display:flex; justify-content:center; padding:12px; pointer-events:none; }
+.wr-reconnect-box { display:flex; gap:12px; align-items:center; background:var(--card); border:1px solid var(--accent);
+  border-radius:var(--radius); padding:12px 18px; box-shadow:var(--shadow-elevated); pointer-events:auto; max-width:92vw; }
+/* Light mode: the near-white box on the light bg with a thin accent border reads as
+   low-contrast; a subtle accent-tint fill + brighter border makes it a clear surface. */
+[data-theme="light"] .wr-reconnect-box { background:var(--accent-tint); border-color:var(--accent-600); }
+/* Narrow: the result drops to its own line under the label, so the 60% cap that keeps it off the
+   label on a wide row would only make it needlessly narrow here. */
+@media (max-width:560px){ .health-row{ flex-wrap:wrap } .health-row .res{ order:10; flex-basis:100%; max-width:none; text-align:left; margin-left:30px } }
+/* reachability matrix — sortable semantic table, stacks to cards <=480px */
+.rm-table { width:100%; border-collapse:collapse; font-size:var(--fs-control); }
+.rm-table td { padding:8px 10px; text-align:left; border-bottom:1px solid var(--divider); }
+.rm-table th { padding:0; border-bottom:1px solid var(--divider); }
+.rm-table .rm-r { text-align:right; font-variant-numeric:tabular-nums; }
+.rm-th { width:100%; background:none; border:0; color:var(--ink-2); font:inherit; font-weight:600; cursor:pointer; padding:8px 10px; display:flex; gap:4px; align-items:center; }
+.rm-table th.rm-r .rm-th { justify-content:flex-end; }
+.rm-th:hover { color:var(--ink); }
+.rm-th.active { color:var(--accent); }
+.rm-arr { font-size:var(--fs-caption); }
+.rm-table .lat-ok { color:var(--ok); }
+.rm-table .lat-warn { color:var(--warn); }
+.rm-table .lat-err { color:var(--err); }
+/* Stack at 760px — the app's mobile-layout breakpoint (see below) — not 480px, else the 481–760px
+   range (large phones/foldables, where the page is already in mobile/full-width mode) shows a cramped
+   4-column table inside the modal. */
+@media (max-width:760px){
+  .rm-table, .rm-table tbody, .rm-table tr, .rm-table td { display:block; width:100%; }
+  .rm-table thead { display:none; }
+  .rm-table tr { border:1px solid var(--divider); border-radius:8px; margin-bottom:8px; padding:2px 0; }
+  .rm-table td { border:0; display:flex; justify-content:space-between; align-items:center; gap:12px; }
+  .rm-table td::before { content:attr(data-label); color:var(--ink-3); font-size:var(--fs-small); flex:none; }
+  .rm-table .rm-r { text-align:right; }
+  /* the data-label pseudo stays put; the cell's own text (exit name etc.) truncates
+     so a long exit identifier can't blow out the stacked card width */
+  .rm-table td { min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+}
+/* external-interface chip — muted so it never reads as a vless protocol badge */
+.badge.proto.external { color:var(--ink-2); background:var(--card-2); }
+/* narrow screens: hide the header, stack each row, and label the dropdowns inline */
+@media (max-width:760px) {
+  .rlhead { display:none; }
+  .rlrow { grid-template-columns:28px 46px 1fr; row-gap:8px; }
+  .rl-list, .rl-cell, .rlrow .acts { grid-column:3; }
+  .rl-cell::before { content:attr(data-col); display:block; font-size:var(--fs-caption); text-transform:uppercase; letter-spacing:.5px; color:var(--ink-3); margin-bottom:3px; }
+  .rlrow .acts { justify-content:flex-start; }
+}
+
+/* ---------- light theme ---------- */
+/* Override the palette only; every surface/text color is a var, so the whole UI
+   re-tints. The console stays a dark terminal (its own bg/ink vars), and the QR
+   plate + accent-on-white text remain literal white where that's correct. */
+[data-theme="light"] {
+  color-scheme:light;
+  --bg:#F2F5F8; --card:#FFFFFF; --card-2:#F5F7FA; --divider:#DCE3EA; --divider-strong:#BAC6D2;
+  --surface-hover:#EDF2F6; --control-bg:#FAFBFC; --plot:#C6D0DB;
+  /* The navigation remains a stable dark landmark in either content theme. */
+  --sidebar-bg:#1A2634; --sidebar-ink:#F4F7FA; --sidebar-muted:#A4B0C0;
+  --sidebar-hover:#243345; --sidebar-active:rgba(0,153,216,.18);
+  --accent:#0074A7; --accent-solid:#007AB3; --accent-600:#006E9F; --accent-active:#005C87; --accent-light:#006F9F;
+  --accent-tint:rgba(0,127,184,.10); --accent-glow:rgba(0,127,184,.17);
+  --ok:#177D4B; --warn:#955800; --err:#C43C3C;
+  --ok-tint:rgba(24,133,80,.10); --warn-tint:rgba(166,99,0,.10); --err-tint:rgba(198,61,61,.09);
+  --ink:#172331; --ink-2:#566579; --ink-3:#5A687A;
+  --rx:#2E6FAE; --tx:#188550;
+  --shadow:0 1px 2px rgba(20,32,48,.06);
+  --shadow-active:0 0 0 3px var(--accent-tint);
+  --shadow-elevated:0 18px 48px rgba(24,36,52,.20);
+  --topbar-bg:#FFFFFF; --backdrop:rgba(20,28,40,.48);
+  --console-bg:#101821; --console-ink:#C9D2DE;
+}
+
+/* ---------- RTL (Arabic / Persian) — engine sets <html dir="rtl"> ---------- */
+[dir="rtl"] .sidebar { border-right:none; border-left:1px solid var(--divider); }
+[dir="rtl"] .nav-item { border-left:none; border-right:2px solid transparent; }
+[dir="rtl"] .nav-item.active { border-right-color:var(--accent); }
+[dir="rtl"] .nav-item .ico { margin-left:0; }
+[dir="rtl"] .toasts { right:auto; left:22px; }
+[dir="rtl"] .toast { border-left:none; }
+
+/* ======================= MOBILE (<=760px) =======================
+   Phone layout: the 220px sidebar becomes an off-canvas drawer (CSS-only,
+   driven by the #navtoggle checkbox + hamburger label in index.html), the
+   content goes full-width, the two Apply actions become a thumb-reachable
+   sticky bottom bar, all inputs hit 16px (no iOS focus-zoom) and controls
+   reach the 44px touch-target minimum. */
+
+/* drawer machinery is inert on desktop */
+.nav-toggle { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
+.nav-burger { display:none; }
+.nav-scrim { display:none; }
+
+@media (max-width:760px) {
+  html, body { overflow-x:hidden; }                 /* guard against any stray overflow */
+
+  /* shell: single column, full width (no desktop centering / flex sidebar) */
+  .app { display:block; max-width:none; margin:0; }
+  .main { width:100%; min-width:0; }
+
+  /* sidebar -> slide-in drawer */
+  .sidebar { position:fixed; top:0; left:0; bottom:0; width:80vw; max-width:300px; z-index:60;
+    transform:translateX(-100%); transition:transform .22s ease;
+    box-shadow:0 0 44px rgba(0,0,0,.55); overflow-y:auto;
+    padding-top:max(18px, env(safe-area-inset-top)); }
+  body:has(.nav-toggle:checked) .sidebar { transform:none; }
+
+  /* dimmed backdrop (tap to close) */
+  .nav-scrim { display:block; position:fixed; inset:0; z-index:55; background:var(--backdrop);
+    opacity:0; pointer-events:none; transition:opacity .22s ease; }
+  body:has(.nav-toggle:checked) .nav-scrim { opacity:1; pointer-events:auto; }
+
+  /* hamburger trigger in the topbar */
+  .nav-burger { display:inline-flex; align-items:center; justify-content:center; flex:none;
+    width:44px; height:44px; margin-left:-8px; font-size:22px; color:var(--ink);
+    cursor:pointer; border-radius:var(--radius-sm);
+    background:none; border:none; padding:0; font-family:inherit; -webkit-appearance:none; appearance:none; }
+  .nav-burger:active { background:var(--card-2); }
+
+  /* topbar: compact + wraps; title truncates */
+  .topbar { height:auto; min-height:54px; padding:8px 12px; gap:8px; flex-wrap:wrap; }
+  .topbar .title { font-size:15px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+  /* A single pending-change action stays thumb-reachable and disappears when clean. */
+  .topbar #applybtn { position:fixed; left:0; right:0; bottom:0; z-index:45;
+    display:flex; align-items:center; justify-content:center; margin:0; border:none; border-radius:0;
+    border-top:1px solid var(--divider); font-size:15px; font-weight:600;
+    height:calc(52px + env(safe-area-inset-bottom, 0px)); padding-bottom:env(safe-area-inset-bottom, 0px); }
+  .topbar #applybtn[hidden] { display:none; }
+
+  /* content fills width; reserve bottom space only while the action is present */
+  .content { padding:16px 14px 20px; }
+  body:has(.topbar #applybtn:not([hidden])) .content { padding-bottom:84px; }
+  #failsafe-banner { padding:12px 14px 0; }
+  #apply-error { padding:12px 14px 0; }
+
+  /* drawer nav items: bigger tap targets */
+  .nav-item { padding:13px 14px; font-size:15px; }
+
+  /* touch targets >=44px */
+  .btn { min-height:44px; padding:11px 16px; }
+  .btn-sm { min-height:40px; padding:8px 13px; }
+  .btn-icon { width:44px; height:44px; font-size:16px; }
+  .rm-th { min-height:44px; padding:11px 10px; }
+
+  /* inputs >=16px so iOS doesn't auto-zoom on focus; comfortable padding */
+  input[type=text], input[type=number], input[type=password], select, textarea { font-size:16px; padding:11px 12px; }
+  .rl-sel { font-size:16px; padding:10px 10px; min-height:44px; }
+
+  /* cards/forms a touch tighter, single-column key/value */
+  .card { padding:16px 15px; margin-bottom:14px; }
+  .kv, .kv-grid { grid-template-columns:1fr; }
+
+  /* dashboard: stack instead of overflowing */
+  .legend { flex-wrap:wrap; gap:8px 18px; justify-content:flex-start; }
+  .row-between { flex-direction:column; align-items:stretch; gap:8px; }
+
+  /* connection row actions: roomy + wrapping */
+  .conn .acts { flex-wrap:wrap; gap:8px; }
+  .conn .acts .btn { min-height:44px; }
+
+  /* section header: side actions drop below the title, full width */
+  .block-head { flex-wrap:wrap; }
+  .block-head .side { width:100%; }
+
+  /* modal -> bottom sheet, full-width, sticky footer */
+  .modal-backdrop { place-items:end center; }
+  .modal { width:100vw; max-width:none; max-height:92vh; max-height:92dvh; border-radius:14px 14px 0 0; }
+  .tabs { display:grid; grid-auto-flow:column; grid-auto-columns:1fr; gap:6px; }
+  /* column-per-tab (not a fixed 3-col grid) so blocks with 2 tabs — e.g. the SSH-credentials
+     Paste-key/Password pair — split full width evenly instead of leaving a dead 3rd column.
+     compact font/padding so 3 labels (incl. long "Subscription") still fit on a 320px modal
+     while keeping the >=44px tap height */
+  .tab { min-height:44px; display:flex; align-items:center; justify-content:center; text-align:center;
+    padding:0 6px; font-size:var(--fs-small); line-height:1.2; }
+  .modal .btn { min-height:44px; }
+  /* sticky footer clears the home indicator on notched phones (mirrors the Apply bar) */
+  .modal-foot { position:sticky; bottom:0; background:var(--card); flex-direction:column; gap:10px;
+    padding-bottom:max(16px, env(safe-area-inset-bottom, 0px)); }
+  .modal-foot .btn { width:100%; }
+  /* a lone primary CTA inside the modal body (e.g. the manual-form "Add" submit, which
+     app.js renders in an unclassed wrapper rather than a .modal-foot) goes full-width */
+  .modal-body button.btn:only-child { width:100%; margin-top:6px; }
+
+  /* toasts span the width, sit above the action bar */
+  .toasts { left:12px; right:12px; bottom:calc(64px + env(safe-area-inset-bottom, 0px)); }
+  .toast { max-width:none; }
+}
+
+/* RTL: drawer slides in from the right, action bar mirrors */
+@media (max-width:760px) {
+  [dir="rtl"] .sidebar { left:auto; right:0; transform:translateX(100%); }
+  [dir="rtl"] body:has(.nav-toggle:checked) .sidebar { transform:none; }
+  [dir="rtl"] .nav-burger { margin-left:0; margin-right:-8px; }
+  [dir="rtl"] .topbar #applybtn { left:0; right:0; }
+}
+[dir="rtl"] .toast.ok { border-right:3px solid var(--ok); }
+[dir="rtl"] .toast.err { border-right:3px solid var(--err); }
+[dir="rtl"] .toast.info { border-right:3px solid var(--accent); }
+[dir="rtl"] .ymax { right:auto; left:2px; }
+[dir="rtl"] .stats .sep { margin-left:0; margin-right:8px; }
+[dir="rtl"] .legend .dot { margin-right:0; margin-left:7px; }
+[dir="rtl"] .tag-ok, [dir="rtl"] .tag-restart { margin-left:0; margin-right:8px; }
+[dir="rtl"] .opt-details { padding-left:0; padding-right:16px; }
+[dir="rtl"] .toggle::after { left:auto; right:2px; }
+[dir="rtl"] .toggle.on::after { left:auto; right:16px; }
+/* Keep code/links/inputs that hold IPs, URLs, keys left-to-right inside RTL pages. */
+[dir="rtl"] input, [dir="rtl"] textarea, [dir="rtl"] .mono, [dir="rtl"] code, [dir="rtl"] pre,
+[dir="rtl"] .console, [dir="rtl"] .out { direction:ltr; text-align:left; }
+
+/* ---------- §1.4 change-review panel ----------
+   Diff rows must stay readable in light, dark and high-contrast, and on a narrow phone WITHOUT
+   horizontal scrolling — so before/after wraps instead of sitting in fixed columns, and every state
+   is carried by an icon + text label (see CS_ACTION_META), never by colour alone. */
+/* One scroll region per dialog, and the dialog owns it. This panel used to cap itself at 60vh and scroll,
+   with `.cs-preflight-list` capping itself again inside that — measured at 1920x1080: the panel showed
+   1577px through a 648px window and the list 4254px through a 220px one, so 4034px of the very entries the
+   operator is being asked to acknowledge sat behind a second and third scrollbar. `.modal` already scrolls
+   at max-height:88vh with a stable gutter; letting it do the scrolling is the same correction made on
+   Routing and Settings, in the dialog where the stakes are highest. */
+.cs-panel { display:flex; flex-direction:column; gap:14px; }
+.cs-review-loading { display:flex; align-items:center; gap:14px; min-height:72px; }
+.cs-review-loading-title { font-weight:650; margin-bottom:5px; }
+.cs-review-spinner { width:22px; height:22px; flex:0 0 auto; border:3px solid var(--divider);
+  border-top-color:var(--accent); border-radius:50%; animation:ab-spin .8s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .cs-review-spinner { animation:none; } }
+.cs-summary { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+
+/* Apply decisions: one compact status, then one plain-language card per fixed finding category.
+   State is always carried by text as well as colour; technical identifiers stay folded. */
+.cs-preflight { border:1px solid var(--divider); border-left-width:3px; border-radius:var(--radius-sm);
+  padding:0 12px 12px; display:flex; flex-direction:column; gap:12px; background:var(--card-2); }
+.cs-preflight.err { border-left-color:var(--danger, #e5534b); }
+.cs-preflight.warn { border-left-color:var(--warn, #d29922); }
+.cs-preflight-head { font-weight:600; }
+.cs-decision { margin:0 -12px; padding:11px 12px; border-bottom:1px solid var(--divider);
+  background:color-mix(in srgb, var(--card-2) 86%, var(--warn, #d29922) 14%); }
+.cs-preflight.err .cs-decision {
+  background:color-mix(in srgb, var(--card-2) 86%, var(--danger, #e5534b) 14%); }
+.cs-preflight-row { display:flex; flex-direction:column; gap:7px; }
+.cs-preflight-row > .pill { align-self:flex-start; }
+/* Each decision is its own block. Without a separator a list of them ran together into one column
+   of sentences with no visible boundary, which is half of why a long one read as noise. */
+.cs-preflight-row + .cs-preflight-row { border-top:1px solid var(--divider); padding-top:10px; }
+.cs-preflight-hd { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+.cs-preflight-title { font-weight:600; color:var(--ink); }
+.cs-preflight-scope { color:var(--ink-3); font-size:12px; }
+.cs-preflight-reason { font-size:13px; line-height:1.45; }
+.cs-preflight-remedy { font-size:13px; opacity:.8; }
+.cs-preflight-fix { padding:8px 10px; border-radius:var(--radius-sm); background:var(--card);
+  color:var(--ink-2); font-size:13px; line-height:1.45; }
+.cs-preflight-nav { align-self:flex-start; }
+.cs-preflight-tech { color:var(--ink-3); font-size:12px; }
+.cs-preflight-tech > summary { cursor:pointer; user-select:none; }
+.cs-preflight-tech code { display:block; margin-top:5px; overflow-wrap:anywhere; }
+/* An engine-check error is unbounded text inside a status chip. Bounded to one line, full string on
+   the title — the alternative, replacing it with a generic label, drops the one detail that says why.
+   The clamp belongs to the CHIP and is scoped to it. The same class is worn by seven PROSE messages
+   in a row's detail area — the persisted install failure, the blocked-plan explanations, the failed
+   preconditions — and one ellipsised line is exactly wrong for those: the AX3000T's free-space
+   refusal is 180 characters and the half saying what to do about it comes last. They wrapped before
+   this was scoped, but only because `.hint`'s `text-wrap:pretty` further down happens to outrank the
+   wrap component of `white-space:nowrap` — an accident, not a decision, and one that a tidy-up of
+   that unrelated declaration would have silently reversed. Measured: 921px of refusal in a 360px
+   box. The measure limit stays for both; only the chip clamps. */
+.upd-err { max-width:min(360px, 100%); }
+.pill.upd-err { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+/* The reachable half of a failed check. The chip above stays one line because it now carries a short
+   label; everything that used to be crushed into it — and into a hover-only title — lives here, where
+   it wraps. `overflow-wrap:anywhere` is deliberate: a host has no spaces to break at, so without it a
+   long one would push the panel wider than a 320px phone. */
+.upd-err-det { margin-top:6px; max-width:100%; }
+.upd-err-det > summary { cursor:pointer; color:var(--err); font-size:12px; }
+.upd-err-body { display:flex; flex-direction:column; gap:6px; margin-top:6px; }
+.upd-err-att { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 8px; font-size:12px; }
+.upd-err-src { color:var(--muted); text-transform:uppercase; letter-spacing:.04em; font-size:11px; }
+.upd-err-host { overflow-wrap:anywhere; }
+.upd-err-meta { color:var(--muted); font-variant-numeric:tabular-nums; }
+.upd-err-why { flex-basis:100%; color:var(--muted); overflow-wrap:anywhere; }
+.upd-err-copy { align-self:flex-start; }
+
+.cs-group { border:1px solid var(--divider); border-radius:var(--radius-sm); overflow:hidden; }
+.cs-group-head { display:flex; align-items:center; justify-content:space-between; gap:8px;
+  padding:8px 12px; background:var(--card-2); border-bottom:1px solid var(--divider); }
+
+.cs-row { display:flex; align-items:flex-start; justify-content:space-between; gap:10px;
+  padding:10px 12px; border-bottom:1px solid var(--divider); }
+.cs-row:last-child { border-bottom:0; }
+.cs-main { min-width:0; flex:1; }              /* min-width:0 lets long values wrap, not overflow */
+.cs-head { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+.cs-obj { font-weight:600; }
+.cs-field { color:var(--ink-2); }
+
+/* Action badge: icon + word. The border keeps it distinguishable when colours are overridden. */
+.cs-badge { display:inline-flex; align-items:center; gap:4px; padding:2px 8px; font-size:12px;
+  border-radius:var(--radius-sm); border:1px solid currentColor; }
+.cs-added { color:var(--ok); }
+.cs-removed { color:var(--err); }
+.cs-modified { color:var(--accent); }
+.cs-reordered { color:var(--warn); }
+.cs-externally_changed { color:var(--warn); }
+
+/* before → after wraps onto as many lines as it needs; values may be long URLs or lists. */
+.cs-diff { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px; margin-top:4px;
+  font-family:var(--mono, ui-monospace, monospace); font-size:12px; overflow-wrap:anywhere; }
+.cs-before { text-decoration:line-through; color:var(--ink-2); }
+.cs-after { font-weight:600; }
+.cs-arrow { color:var(--ink-2); }
+.cs-secret { margin-left:4px; }
+.cs-impact { margin-top:4px; }
+.cs-flags { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+.cs-footer { display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; }
+
+@media (max-width:560px) {
+  .cs-row { flex-direction:column; }            /* undo button drops below the text on a phone */
+  .cs-row > .btn { align-self:flex-start; }
+}
+/* High-contrast / forced-colours: keep the badge + strike-through meaningful without our palette. */
+@media (forced-colors: active) {
+  .cs-badge { border:1px solid CanvasText; }
+  .cs-before { text-decoration:line-through; }
+}
+
+/* ---------- Failover: shared endpoint pool ----------
+   The old page reprinted every group's member list in full, so four identical groups produced four
+   identical stat blocks. Groups are now compact "which exit is live?" cards; each endpoint is drawn
+   once in a traffic-ranked pool and carries its membership as chips. Every state is signalled by
+   text as well as colour (LIVE / STANDBY / DOWN), never colour alone. */
+/* The track minimum comes from what a card must hold, not from a round number: the four actions measure
+   59+128+43+57 with three 6px gaps = 305px, plus the card's own 2x16px padding = 337. At 260px the grid
+   kept three cards on a 1280px window, giving each 322px — 17px short — so `Delete`, the destructive one,
+   wrapped alone under the other three in exactly that band. At 340px the same window drops to two cards
+   and the row fits; 1440 and wider still show three. */
+.fo-strip { display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:var(--sp-3); margin-bottom:var(--sp-4); }
+/* Server cards, same shape as the failover strip and for the same reason — but a wider track floor.
+   A server card carries an action cluster that is 260px of buttons and cannot shrink (`.conn .acts`
+   is flex:none), so at the failover's 340px minimum the body would be left about 40px and the name
+   would wrap to one word a line. 520px is the actions plus a body that can still hold a hostname,
+   which puts two columns on a 1444px content width and falls back to one below ~1090px — the same
+   single column the page has today, so nothing regresses on a laptop.
+   The grid owns the spacing; the card's own bottom margin would otherwise add a second gap between
+   rows and none between columns. */
+/* `min(520px,100%)`, not a bare 520px. A track floor is a floor even when the container is smaller
+   than it, so `minmax(520px,1fr)` lays a 520px column inside a 375px phone and the page scrolls
+   sideways — the exact defect `ui-narrow` exists to catch, and it would have been introduced by a
+   fix for the opposite problem. `min()` lets the floor collapse to the container on a narrow screen. */
+.srv-strip { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(520px,100%),1fr)); gap:var(--sp-4); align-items:start; }
+.srv-strip > .card { margin-bottom:0; }
+/* The card is a query container so the chain inside it can answer to the CARD's width rather than the
+   window's. Three cards share a row at every desktop size, so a 473px card holds a chain that needs 665px
+   — and the chain is not a set of boxes but a joined, direction-carrying row, so wrapping it produced a
+   second line starting mid-sequence with no rounded edge and a notch pointing nowhere. */
+.fo-g { padding:var(--sp-4); display:flex; flex-direction:column; gap:var(--sp-3); margin:0;
+  container-type:inline-size; }
+.fo-g-head { display:flex; align-items:flex-start; justify-content:space-between; gap:var(--sp-2); flex-wrap:wrap; }
+.fo-g-name { font-size:var(--fs-lg); font-weight:600; min-width:0; word-break:break-word;
+  display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+
+/* The elected exit is the one fact the old design never showed. Give it its own panel. */
+.fo-g-exit { border:1px solid var(--accent-active); background:var(--accent-tint);
+  border-radius:var(--radius-sm); padding:var(--sp-2) var(--sp-3); }
+.fo-g-exit-lbl { font-size:var(--fs-caption); letter-spacing:var(--ls-caps); text-transform:uppercase;
+  color:var(--ink-2); display:flex; align-items:center; gap:6px; }
+.fo-g-exit-name { font-size:var(--fs-lg); font-weight:600; word-break:break-word; }
+.fo-g-exit-name small { color:var(--ink-2); font-weight:400; }
+.fo-g-exit-name.muted { color:var(--ink-3); font-weight:400; font-size:var(--fs-body); }
+
+.fo-g-roster { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:2px; }
+.fo-g-mem { display:flex; align-items:center; gap:var(--sp-2); font-size:var(--fs-small); min-width:0; }
+.fo-g-mem .n { color:var(--ink-3); width:1.2em; flex:none; font-variant-numeric:tabular-nums; }
+.fo-g-mem .nm { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.fo-g-mem .nm.muted { color:var(--ink-3); }
+.fo-g-mem .role { margin-left:auto; font-size:var(--fs-caption); letter-spacing:var(--ls-caps);
+  color:var(--ink-3); flex:none; }
+.fo-g-mem.live .nm { font-weight:600; }
+.fo-g-mem.live .role { color:var(--ok); }
+.fo-g-mem.down { opacity:.55; }
+.fo-g-mem.down .role { color:var(--err); }
+
+.fo-warn { border-left:3px solid var(--warn); background:var(--warn-tint); margin-bottom:var(--sp-4); }
+.fo-warn-t { font-weight:600; color:var(--warn); margin-bottom:2px; }
+
+.fo-pool-head { margin-top:var(--sp-2); }
+.fo-pool { display:flex; flex-direction:column; gap:var(--sp-3); }
+.fo-e { padding:var(--sp-4); margin:0; display:flex; flex-direction:column; gap:6px; }
+.fo-e.live { border-left:3px solid var(--accent); }
+.fo-e-head { display:flex; align-items:baseline; justify-content:space-between; gap:var(--sp-3); flex-wrap:wrap; }
+.fo-e-name { font-size:var(--fs-lg); font-weight:600; min-width:0; word-break:break-word;
+  display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.fo-e-share { font-size:var(--fs-small); color:var(--ink-2); flex:none; font-variant-numeric:tabular-nums; }
+
+/* Membership, inverted: the groups that use this endpoint, and whether it is their live exit. */
+.fo-e-used { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:2px;
+  padding-top:var(--sp-2); border-top:1px solid var(--divider); }
+.fo-e-used .lbl { font-size:var(--fs-caption); letter-spacing:var(--ls-caps); text-transform:uppercase;
+  color:var(--ink-3); flex:none; }
+.fo-e-used .chip { display:inline-flex; align-items:center; gap:6px; font-size:var(--fs-small);
+  border:1px solid var(--divider); border-radius:999px; padding:2px 10px; color:var(--ink-2); }
+.fo-e-used .chip.live { border-color:var(--accent); background:var(--accent-tint); color:var(--ink); font-weight:600; }
+.fo-e-used .chip.none { border-style:dashed; }
+/* The state and its position are one token: a chip whose group name is long used to shrink this until it
+   broke between them, leaving "LIVE ·" above "#1". The name is prose and may wrap; this may not. */
+.fo-e-used .chip .sub { font-size:var(--fs-caption); letter-spacing:var(--ls-caps); color:var(--ink-3);
+  white-space:nowrap; flex:none; }
+.fo-e-used .chip.live .sub { color:var(--accent-light); }
+
+@media (max-width:640px) {
+  .fo-strip { grid-template-columns:1fr; }
+  .fo-e-used .lbl { width:100%; }
+}
+
+/* Group actions live at the card foot: four buttons between the title and the live-exit panel
+   wrapped to two rows and out-shouted the one fact the card exists to show. */
+.fo-g-acts { display:flex; flex-wrap:wrap; gap:6px; margin-top:auto; padding-top:var(--sp-2);
+  border-top:1px solid var(--divider); }
+.fo-g-acts .btn { flex:0 0 auto; }
+.fo-warn-names { margin-top:2px; color:var(--ink-3); font-size:var(--fs-small); }
+
+/* Acknowledgement for a degradation. Only degradations get one: offering a checkbox next to a hard
+   blocker would imply an override that deliberately does not exist. */
+.cs-preflight-ack { display:flex; align-items:center; gap:var(--sp-2); margin-top:6px;
+  font-size:var(--fs-small); color:var(--ink-2); cursor:pointer; min-height:32px; }
+.cs-preflight-ack input { width:16px; height:16px; flex:none; cursor:pointer; }
+.cs-apply-note { padding:9px 11px; border:1px solid var(--divider); border-radius:var(--radius-sm);
+  background:var(--card-2); color:var(--ink-2); font-size:var(--fs-small); }
+.cs-apply-note.err { border-color:color-mix(in srgb, var(--danger, #e5534b) 55%, var(--divider)); }
+/* Notice at the top of the panel: a stale review (the configuration moved), a refused Apply
+   (blocked findings), or acknowledgements the router still wants. Words carry the state. */
+.cs-notice { padding:9px 12px; border:1px solid var(--divider); border-left-width:3px; border-radius:var(--radius-sm);
+  font-size:var(--fs-control); background:var(--card-2); }
+.cs-notice.warn { border-left-color:var(--warn); }
+.cs-notice.err { border-left-color:var(--err); }
+/* The plan could not be loaded: an inline error with its own Retry, never a stranded loading state. */
+.cs-review-error { display:flex; flex-direction:column; align-items:flex-start; gap:10px; }
+.cs-review-error-msg { font-weight:600; overflow-wrap:anywhere; }
+/* Findings: a hard blocker is edged; the pill text ("Blocks Apply") is what says so. */
+.cs-preflight-row.cs-blocked { box-shadow:inset 3px 0 0 var(--err); padding-left:10px; }
+.cs-preflight-items { font-size:13px; color:var(--ink-2); overflow-wrap:anywhere; }
+.cs-preflight-items > summary { cursor:pointer; user-select:none; }
+.cs-preflight-items ul { margin:6px 0 0; padding:0 0 0 18px; }
+.cs-preflight-probe { display:flex; flex-wrap:wrap; align-items:center; gap:6px; font-size:13px; color:var(--ink-2); }
+.cs-preflight-ack .pill { margin-left:6px; }
+/* Informational findings fold away: they change nothing about whether Apply can run. */
+.cs-notes { font-size:13px; }
+.cs-notes > summary { cursor:pointer; user-select:none; font-weight:600; color:var(--ink-2); padding:4px 0; }
+.cs-notes > .cs-preflight-row { margin-top:10px; padding-top:10px; border-top:1px solid var(--divider); }
+.cs-nobase { overflow-wrap:anywhere; }
+
+/* Settings section navigator — one group of cards at a time, so the page opens at about one
+   screen instead of 3.5. Segmented rather than underlined (like .tab) because these switch a
+   whole region of the page, not a view of one card, and the heavier control says so. */
+.settings-nav { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 16px;
+  padding:5px; border:1px solid var(--divider); border-radius:var(--radius); background:var(--card); }
+.settings-nav-item { display:inline-flex; align-items:center; gap:7px; padding:8px 14px;
+  border:0; border-radius:calc(var(--radius) - 4px); background:transparent; color:var(--ink-2);
+  cursor:pointer; font-size:var(--fs-control); font-weight:600;
+  transition:background var(--t) linear, color var(--t) linear; }
+.settings-nav-item:hover { color:var(--ink); background:var(--divider); }
+.settings-nav-item.active { background:var(--accent); color:#fff; }
+.settings-nav-item.active:hover { background:var(--accent); }
+.settings-nav-count { min-width:18px; padding:1px 5px; border-radius:9px; font-size:11px;
+  font-weight:700; background:var(--divider); color:var(--ink-2); text-align:center; }
+.settings-nav-item.active .settings-nav-count { background:rgba(255,255,255,.24); color:#fff; }
+.settings-body { display:flex; flex-direction:column; gap:16px; }
+@media (max-width:560px) {
+  .settings-nav { gap:4px; padding:4px; }
+  .settings-nav-item { flex:1 1 auto; justify-content:center; padding:8px 10px; }
+}
+
+/* Page group heading — separates cards you ACT on from cards that REPORT, without hiding either.
+   Used where a tab navigator would cost a click on the page's primary job (Diagnostics). */
+.page-group { margin:22px 0 -2px; }
+.page-group:first-child { margin-top:4px; }
+.page-group-title { font-size:var(--fs-control); font-weight:700; color:var(--ink);
+  letter-spacing:.01em; }
+.page-group-hint { margin-top:2px; font-size:12px; color:var(--ink-2); }
+
+/* A live figure that stopped refreshing. The values stay — they were true when they arrived — but
+   they must not keep reading as current. Dimmed plus a stated reason, not colour alone. */
+.sys-strip[data-stale] .sys-v { opacity:.55; }
+.sys-stale { flex-basis:100%; margin-top:6px; font-size:12px; color:var(--warn, var(--ink-2)); }
+
+/* Health data that stopped being confirmed. Same principle as the system strip: keep the states,
+   stop them reading as live. Stated in words, not conveyed by dimming alone. */
+.health-stale { padding:8px 18px; font-size:12px; background:var(--warn-tint, var(--card));
+  border-bottom:1px solid var(--divider); color:var(--warn, var(--ink)); }
+body[data-health-stale] [data-health] { opacity:.55; }
+
+/* A plot that stopped being fed. The line stays — it happened — but it must not read as current. */
+/* The exit tiles live in the same card and are fed from the same series: when the plot goes stale
+   their per-exit rates are frozen too (updateExitRates only overwrites while samples arrive), so
+   they must dim with it rather than sit bright beside a "not current" notice. */
+[data-graph-stale] .graph,
+[data-graph-stale] .exit-rate-v { opacity:.5; }
+.graph-stale { margin-top:6px; font-size:12px; color:var(--warn, var(--ink-2)); }
+
+/* Evaluation-order controls. The number is the rule's position, which is its meaning: the first
+   matching rule wins, so this is data, not decoration. */
+.ord { display:inline-flex; align-items:center; gap:2px; margin-right:8px; }
+.ord-n { min-width:20px; padding:1px 5px; border-radius:5px; background:var(--divider);
+  color:var(--ink-2); font-size:11px; font-weight:700; text-align:center; font-variant-numeric:tabular-nums; }
+.ord-btn { padding:2px 7px; line-height:1.1; font-size:13px; }
+.ord-btn[disabled] { opacity:.35; cursor:default; }
+.dns-rule .ord { margin-right:10px; }
+
+/* An unreadable failover state. Not an error state — an ABSENCE of knowledge, styled as neither
+   healthy nor failed so it cannot be read as either. */
+.fo-g-exit[data-failover-unknown] .fo-g-exit-lbl { color:var(--warn, var(--ink-2)); }
+.fo-g-exit-note { margin-top:3px; font-size:11px; color:var(--ink-2); }
+
+/* ── Exit inspector (Connections) ──────────────────────────────────────────────
+   A narrow attention-ordered list beside one detail panel. The list is the index,
+   the panel is the answer; neither scrolls the other off the screen, so comparing
+   two exits is a click rather than a scroll back and forth. */
+/* The list's upper bound is a SHARE of the row, not a constant. At 280px flat, every pixel the window
+   gained went to the panel — which at 38 exits is 293px tall against a 1476px list, so 1148x1183px of it
+   sat empty while 11 of 38 names were ellipsized in the column that had none to spare. A percentage sends
+   the surplus to the side that needs it. The bound is `max(280px,26%)` and not the bare share, because a
+   plain 26% is LESS than the old flat 280px on a 1280px window — measuring after the first attempt showed
+   exactly that: the column fell to 257px and clipped 17 names where it had clipped 11. The share can only
+   ADD width now; below ~1075px it resolves to the old 280px, and under 820px the media query further down
+   drops to a single column anyway. */
+.inspector { display:grid; grid-template-columns:minmax(220px,max(280px,26%)) 1fr; gap:var(--sp-4); align-items:start; }
+.insp-list { background:var(--card); border:1px solid var(--divider); border-radius:var(--radius);
+  overflow:hidden; }
+.insp-list-h { display:flex; justify-content:space-between; align-items:center; gap:var(--sp-2);
+  padding:10px var(--sp-3); border-bottom:1px solid var(--divider); background:var(--card-2);
+  font-size:var(--fs-caption); text-transform:uppercase; letter-spacing:var(--ls-caps); color:var(--ink-3); }
+.insp-list-warn { color:var(--warn); }
+.insp-list-ok { color:var(--ok); }
+.insp-row { display:flex; align-items:center; gap:var(--sp-2); padding:9px var(--sp-3); cursor:pointer;
+  border-bottom:1px solid var(--divider); border-left:3px solid transparent; min-width:0; }
+.insp-row:last-child { border-bottom:0; }
+.insp-row:hover { background:var(--surface-hover); }
+.insp-row:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.insp-row.sel { background:var(--accent-tint); border-left-color:var(--accent); }
+.insp-dot { width:8px; height:8px; border-radius:50%; flex:0 0 auto; background:var(--ink-3); }
+.insp-dot.ok { background:var(--ok); } .insp-dot.warn { background:var(--warn); }
+.insp-dot.err { background:var(--err); } .insp-dot.muted { background:var(--ink-3); opacity:.55; }
+/* A tunnel the router runs but WayHop does not route through is not a health state — it is a
+   different KIND of row, and a solid green dot said it was a working exit. A ring in the accent
+   colour reads as "available, not adopted", and leaves filled dots meaning health and nothing else;
+   .idle is the same ring for a tunnel that is not currently up. */
+.insp-dot.native { background:transparent; box-shadow:inset 0 0 0 2px var(--accent); }
+.insp-dot.native.idle { box-shadow:inset 0 0 0 2px var(--ink-3); opacity:.55; }
+.insp-row.native .insp-row-n { color:var(--ink-2); }
+.insp-row-n { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  font-size:var(--fs-control); }
+.insp-row-m { flex:0 0 auto; font-size:var(--fs-caption); color:var(--ink-3);
+  font-variant-numeric:tabular-nums; }
+
+/* Sticky, so the answer stays beside the index. The comment above claims neither pane scrolls the other
+   off the screen; measured at 38 exits that was not true — at scrollY 699 the panel was entirely gone and
+   the right 1053px of the row was blank while the list ran on. The grid already sets align-items:start,
+   which is what a sticky grid item needs; a stretched one cannot stick. */
+.insp-panel { background:var(--card); border:1px solid var(--divider); border-radius:var(--radius);
+  padding:var(--card-pad); min-width:0; position:sticky; top:var(--topbar-h); }
+.insp-empty { color:var(--ink-3); font-size:var(--fs-control); padding:var(--sp-5) 0; text-align:center; }
+.insp-head { display:flex; justify-content:space-between; align-items:flex-start; gap:var(--sp-3);
+  margin-bottom:var(--sp-2); }
+.insp-title { display:flex; align-items:center; gap:var(--sp-1); font-size:var(--fs-lg); font-weight:600;
+  min-width:0; word-break:break-word; }
+.insp-pills { display:flex; align-items:center; gap:var(--sp-2); flex:0 0 auto; }
+.insp-sub { display:flex; align-items:center; gap:var(--sp-2); flex-wrap:wrap; }
+.insp-note { margin-top:var(--sp-2); font-size:var(--fs-small); color:var(--ink-2); }
+
+.insp-deps { margin-top:var(--sp-4); padding-top:var(--sp-3); border-top:1px solid var(--divider); }
+.insp-deps-t { font-size:var(--fs-caption); text-transform:uppercase; letter-spacing:var(--ls-caps);
+  color:var(--ink-3); margin-bottom:var(--sp-2); }
+.insp-deps-none { font-size:var(--fs-small); color:var(--ink-3); }
+.insp-dep { display:flex; align-items:baseline; gap:var(--sp-2); padding:4px 0; font-size:var(--fs-control); }
+.insp-dep.weak { opacity:.62; }
+.insp-dep-i { flex:0 0 auto; color:var(--ink-3); width:14px; text-align:center; }
+.insp-dep-l { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.insp-dep-n { flex:1 1 auto; font-size:var(--fs-caption); color:var(--ink-3); }
+.insp-deps-sum { margin-top:var(--sp-2); font-size:var(--fs-small); color:var(--ink-2); }
+
+.insp-acts { display:flex; flex-wrap:wrap; gap:var(--sp-2); margin-top:var(--sp-4);
+  padding-top:var(--sp-3); border-top:1px solid var(--divider); }
+
+/* Under ~820px the two columns stop being two columns: the list becomes a short
+   scrollable index above the panel rather than a 200px-wide squeeze beside it. */
+@media (max-width:820px) {
+  .inspector { grid-template-columns:1fr; }
+  /* The cap that used to live here showed 5 of 38 exits through a 220px window with 1256px behind its own
+     scrollbar — and at 390 and 480 the page scrolls too, so it was a scroller inside a scroller, the same
+     shape reported on Routing and Settings. At 768 and 820 the page did NOT scroll, which made the box the
+     only way down. It was dismissed once by reading the rule's comment about "a short scrollable index"
+     rather than the result. The list flows; the page scrolls; the panel above already sticks. */
+}
+
+/* ── Failure chain, readiness bands and switch log (Failover) ──────────────────
+   The chain reads left to right: what carries traffic, where it falls, and what
+   is left at the end. The terminus is deliberately styled as an end-stop rather
+   than another hop, because "nothing left to fall to" is not a hop. */
+.fo-chain { display:flex; flex-wrap:wrap; align-items:stretch; gap:0; list-style:none;
+  margin:var(--sp-3) 0 0; padding:0; }
+.fo-hop { display:flex; flex-direction:column; gap:2px; padding:8px var(--sp-3) 8px var(--sp-4);
+  border:1px solid var(--divider); border-right:0; background:var(--card-2); min-width:0;
+  position:relative; }
+.fo-hop:first-child { border-radius:var(--radius-sm) 0 0 var(--radius-sm); }
+.fo-hop:last-child { border-right:1px solid var(--divider); border-radius:0 var(--radius-sm) var(--radius-sm) 0; }
+/* The notch that makes the row read as a direction rather than a set of boxes. */
+.fo-hop + .fo-hop::before { content:""; position:absolute; left:-1px; top:50%; width:9px; height:9px;
+  transform:translateY(-50%) rotate(45deg); background:var(--card-2);
+  border-top:1px solid var(--divider); border-right:1px solid var(--divider); }
+
+/* Too narrow for the sequence to read across: stack it, and turn the direction with it. Top to bottom is
+   still a direction; a row broken in half is not. `.fo-g` above declares the query container so this
+   answers to the CARD's width, not the window's — three cards share every desktop row, so a 473px card
+   held a chain needing 665px.
+   This block MUST sit after the rules it overrides. Written next to `.fo-g` first, it changed only
+   flex-direction — the one property `.fo-chain` does not already set — while the borders, the radii and
+   the notch kept their original values, because at equal specificity the later rule wins and those live
+   here. Measured, not assumed: `left` still read -1px and the first hop still had 6px 0 0 6px. */
+@container (max-width:680px) {
+  .fo-chain { flex-direction:column; }
+  .fo-hop { border-right:1px solid var(--divider); border-bottom:0; }
+  .fo-hop:first-child { border-radius:var(--radius-sm) var(--radius-sm) 0 0; }
+  .fo-hop:last-child { border-bottom:1px solid var(--divider);
+    border-radius:0 0 var(--radius-sm) var(--radius-sm); }
+  /* The notch moves to the top edge and points down instead of right. */
+  .fo-hop + .fo-hop::before { left:50%; top:-1px;
+    transform:translateX(-50%) rotate(135deg); }
+}
+/* A hop must never be wider than the chain that holds it. Measured at 375px with the stress seed:
+   the chain was 287px and a hop inside it 465px — the content was pushing the box out through its
+   own container, and because the page clips with overflow-x:hidden there was no scrollbar to reveal
+   it. It surfaced when a role word grew ("alternative" for a group that does not switch by itself),
+   but the shape was already there: min-width:0 on .fo-hop lets the HOP shrink as an item of the
+   chain, and says nothing about its children refusing to. */
+.fo-hop { max-width:100%; }
+.fo-hop > * { min-width:0; max-width:100%; }
+.fo-hop-r { font-size:var(--fs-caption); text-transform:uppercase; letter-spacing:var(--ls-caps);
+  color:var(--ink-3); overflow-wrap:anywhere; }
+.fo-hop-n { font-size:var(--fs-control); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.fo-hop-l { font-size:var(--fs-caption); color:var(--ink-3); font-variant-numeric:tabular-nums; }
+.fo-hop.now { background:var(--ok-tint); border-color:var(--ok); }
+.fo-hop.now + .fo-hop::before { background:var(--card-2); }
+.fo-hop.now .fo-hop-r { color:var(--ok); }
+.fo-hop.now.guess { background:var(--warn-tint); border-color:var(--warn); }
+.fo-hop.now.guess .fo-hop-r { color:var(--warn); }
+.fo-hop.dead { opacity:.5; }
+.fo-hop.dead .fo-hop-n { text-decoration:line-through; }
+.fo-hop.end { background:transparent; border-style:dashed; }
+.fo-hop.end.thin { border-color:var(--err); }
+.fo-hop.end.thin .fo-hop-r { color:var(--err); }
+
+/* The chain reads down, as rows, not across as a strip. As a strip five hops needed ~1100px in a card
+   that is 470-950 wide, so the tail wrapped under the head and the "show all hops" fold floated over
+   what was left. Rows also buy the column that makes the order explicable: #N is where the member
+   sits in the SAVED list, next to the role the election actually gave it. */
+.fo-g-order { margin-top:var(--sp-2); }
+.fo-g-stopped { border-color:var(--warn); background:var(--warn-tint); }
+.fo-g-stopped.err { border-color:var(--err); background:var(--err-tint, var(--warn-tint)); }
+.fo-chain.rows { flex-direction:column; gap:0; margin-top:var(--sp-2); }
+.fo-chain.rows .fo-hop { display:grid; grid-template-columns:2.4em 8px 7.5em minmax(0,1fr) 5em;
+  align-items:baseline; gap:var(--sp-2); padding:8px var(--sp-3);
+  border:1px solid var(--divider); border-bottom:0; border-radius:0; }
+.fo-chain.rows .fo-hop:first-child { border-radius:var(--radius-sm) var(--radius-sm) 0 0; }
+.fo-chain.rows .fo-hop:last-child { border-bottom:1px solid var(--divider);
+  border-radius:0 0 var(--radius-sm) var(--radius-sm); }
+/* The notch belonged to the strip: between stacked rows it is a diamond sitting on a shared edge. */
+.fo-chain.rows .fo-hop + .fo-hop::before { display:none; }
+.fo-chain.rows .fo-hop-p { font-size:var(--fs-caption); color:var(--ink-3); font-variant-numeric:tabular-nums; }
+.fo-chain.rows .fo-hop-l { text-align:right; }
+.fo-chain.rows .fo-hop-more { border:1px solid var(--divider); border-top:0; padding:6px var(--sp-3); }
+/* The dot sits on the text baseline like the numbers beside it, not on its own line. */
+.fo-chain.rows .fo-hop > .insp-dot { align-self:center; }
+@container (max-width:520px) {
+  .fo-chain.rows .fo-hop { grid-template-columns:2.4em 8px minmax(0,1fr) 5em; }
+  .fo-chain.rows .fo-hop-r { grid-column:3 / -1; grid-row:2; }
+}
+
+.fo-bands { display:flex; flex-direction:column; gap:var(--sp-3); }
+.fo-band { border:1px solid var(--divider); border-radius:var(--radius); overflow:hidden;
+  background:var(--card); }
+.fo-band-h { display:flex; align-items:baseline; gap:var(--sp-2); padding:8px var(--sp-4);
+  background:var(--card-2); border-bottom:1px solid var(--divider); }
+.fo-band-t { font-size:var(--fs-caption); text-transform:uppercase; letter-spacing:var(--ls-caps); }
+.fo-band-n { font-size:var(--fs-caption); color:var(--ink-3); font-variant-numeric:tabular-nums; }
+.fo-band-d { font-size:var(--fs-caption); color:var(--ink-3); }
+.fo-band.ready .fo-band-t { color:var(--ok); }
+.fo-band.standby .fo-band-t { color:var(--ink-2); }
+.fo-band.out .fo-band-t { color:var(--err); }
+.fo-band-row { display:grid; grid-template-columns:minmax(150px,1.1fr) minmax(0,2fr) minmax(160px,1fr);
+  gap:var(--sp-3); align-items:start; padding:10px var(--sp-4); border-bottom:1px solid var(--divider); }
+.fo-band-row:last-child { border-bottom:0; }
+.fo-band-name { display:flex; align-items:center; gap:var(--sp-1); font-size:var(--fs-control);
+  min-width:0; word-break:break-word; }
+.fo-band-meta { min-width:0; }
+.fo-band-right { display:flex; flex-direction:column; align-items:flex-end; gap:var(--sp-1); }
+
+.fo-log-box { margin-top:var(--sp-4); }
+.fo-log-t { font-size:var(--fs-caption); text-transform:uppercase; letter-spacing:var(--ls-caps);
+  color:var(--ink-3); margin-bottom:var(--sp-2); }
+.fo-log { display:flex; flex-direction:column; }
+.fo-log-row { display:flex; align-items:baseline; gap:var(--sp-2); padding:5px 0;
+  border-bottom:1px solid var(--divider); font-size:var(--fs-control); }
+.fo-log-row:last-child { border-bottom:0; }
+.fo-log-i { width:14px; text-align:center; flex:0 0 auto; }
+.fo-log-row.down .fo-log-i { color:var(--err); }
+.fo-log-row.up .fo-log-i { color:var(--ok); }
+.fo-log-row.switch .fo-log-i { color:var(--accent-light); }
+.fo-log-x { flex:1 1 auto; min-width:0; }
+.fo-log-l, .fo-log-w { flex:0 0 auto; font-size:var(--fs-caption); color:var(--ink-3);
+  font-variant-numeric:tabular-nums; }
+.fo-log-since { margin-top:var(--sp-2); }
+
+@media (max-width:860px) {
+  .fo-band-row { grid-template-columns:1fr; }
+  .fo-band-right { align-items:flex-start; }
+}
+
+/* ── Ordered ruleset (Routing) ─────────────────────────────────────────────────
+   The position is part of the rule, not decoration: the first list that matches
+   decides the route, so it is set in the same tabular figures as the counters
+   beside it and stays legible when a row is switched off. */
+.rl-num { font-variant-numeric:tabular-nums; font-size:var(--fs-control); color:var(--ink-3);
+  text-align:right; }
+.rl-num.off { opacity:.45; text-decoration:line-through; }
+.rlrow.off .rl-list .name { opacity:.6; }
+.rl-order-note { margin-top:var(--sp-3); }
+
+.rl-traffic { display:flex; align-items:baseline; gap:5px; flex-wrap:wrap;
+  font-variant-numeric:tabular-nums; }
+.rl-tr-n { font-size:var(--fs-control); font-weight:600; }
+.rl-tr-u { font-size:var(--fs-caption); color:var(--ink-3); }
+.rl-tr-b { font-size:var(--fs-caption); color:var(--ink-2); }
+.rl-tr-live { font-size:var(--fs-caption); color:var(--ok); }
+/* "nothing yet" is a measurement; "kernel-routed" and "not read" are refusals to measure.
+   They are deliberately styled alike and unlike a number, so neither is skimmed as a count. */
+.rl-tr-zero, .rl-tr-none { font-size:var(--fs-caption); color:var(--ink-3); font-style:italic; }
+
+/* ── Query path (DNS) ──────────────────────────────────────────────────────────
+   Two halves, drawn differently on purpose. The stages across the top are RUNTIME
+   facts that need the device; the branch table below is the CONFIGURED path, which
+   is always knowable. An unmeasured or unreadable stage is dashed and muted so it
+   can never be skimmed as a confirmed clean path. */
+.qp .card-title { margin-bottom:var(--sp-3); }
+.qp-head { display:flex; flex-wrap:wrap; gap:0; margin-bottom:var(--sp-4); }
+.qp-stage { flex:0 1 auto; min-width:0; padding:8px var(--sp-4); border:1px solid var(--divider);
+  border-right:0; background:var(--card-2); position:relative; }
+.qp-stage:first-child { border-radius:var(--radius-sm) 0 0 var(--radius-sm); }
+.qp-stage:last-child { border-right:1px solid var(--divider);
+  border-radius:0 var(--radius-sm) var(--radius-sm) 0; }
+.qp-stage + .qp-stage::before { content:""; position:absolute; left:-1px; top:50%; width:9px; height:9px;
+  transform:translateY(-50%) rotate(45deg); background:var(--card-2);
+  border-top:1px solid var(--divider); border-right:1px solid var(--divider); }
+.qp-stage-l { font-size:var(--fs-caption); text-transform:uppercase; letter-spacing:var(--ls-caps);
+  color:var(--ink-3); }
+.qp-stage-v { font-size:var(--fs-control); font-weight:600; }
+.qp-stage-s { font-size:var(--fs-caption); color:var(--ink-2); }
+.qp-stage.ok { background:var(--ok-tint); border-color:var(--ok); }
+.qp-stage.ok .qp-stage-l { color:var(--ok); }
+.qp-stage.warn { background:var(--warn-tint); border-color:var(--warn); }
+.qp-stage.warn .qp-stage-l { color:var(--warn); }
+.qp-stage.unknown { background:transparent; border-style:dashed; }
+.qp-stage.unknown .qp-stage-v { color:var(--ink-3); font-style:italic; }
+
+.qp-branches { display:flex; flex-direction:column; }
+/* The same defect the Routing table had, found here by the gate rather than by eye: .qp-brhead and
+   .qp-br are separate grids and the last track was `auto` — empty in the header, the row actions in a
+   branch — so the headings drifted right of their data by up to 188px. Every track definite, so both
+   resolve from the container width alone. */
+.qp-brhead, .qp-br { display:grid; grid-template-columns:22px minmax(0,1.4fr) minmax(84px,.7fr)
+  minmax(110px,.9fr) minmax(104px,.8fr) minmax(120px,.8fr); gap:var(--sp-3); align-items:center; }
+.qp-brhead { padding-bottom:6px; border-bottom:1px solid var(--divider); font-size:var(--fs-caption);
+  text-transform:uppercase; letter-spacing:var(--ls-caps); color:var(--ink-3); }
+.qp-br { padding:7px 0; border-bottom:1px solid var(--divider); font-size:var(--fs-control); }
+.qp-br:last-child { border-bottom:0; }
+.qp-br.off { opacity:.5; }
+.qp-br.off .qp-br-m { text-decoration:line-through; }
+.qp-br.final { border-top:1px dashed var(--divider-strong); }
+.qp-br-n { color:var(--ink-3); font-variant-numeric:tabular-nums; text-align:right; }
+.qp-br-m, .qp-br-r, .qp-br-e { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.qp-br-t { display:flex; align-items:center; gap:6px; flex-wrap:wrap; font-size:var(--fs-caption); }
+.qp-plain { color:var(--warn); }
+.qp-wan { color:var(--warn); }
+.badge.proto.enc { border-color:var(--ok); color:var(--ok); }
+.qp-foot { margin-top:var(--sp-3); padding-top:var(--sp-3); border-top:1px solid var(--divider); }
+.qp-ok { color:var(--ok); } .qp-warn { color:var(--warn); } .qp-unknown { color:var(--ink-2); }
+
+@media (max-width:900px) {
+  .qp-brhead { display:none; }
+  /* minmax(0,1fr), not 1fr: a bare fr track's automatic minimum is min-content, and this rule stacks
+     five cells into one column, so the track ends up as wide as the widest cell's longest unbreakable
+     run. Measured: a 160-character token took the track from 279px to 1359px inside a 315px row. The
+     desktop rule above already uses minmax(0,...) for the same reason. */
+  .qp-br { grid-template-columns:24px minmax(0,1fr); row-gap:4px; }
+  .qp-br-r, .qp-br-t, .qp-br-e, .qp-br-a { grid-column:2; }
+}
+.qp-br-a { display:flex; align-items:center; gap:5px; justify-content:flex-end; }
+.qp-norules { padding-top:var(--sp-3); }
+
+/* ── Update sweep (Updater) ────────────────────────────────────────────────────
+   One verdict, then one row per component. The verdict's colour is the page's
+   only loud element, because "something is behind" is the only state that needs
+   acting on — and "not checked" is deliberately quiet-but-present rather than
+   absent, so it cannot be mistaken for "fine". */
+.upd-verdict { border:1px solid var(--divider); border-left-width:3px; border-radius:var(--radius);
+  padding:10px var(--sp-4); margin-bottom:var(--sp-4); background:var(--card); }
+.upd-verdict-w { font-size:var(--fs-lg); font-weight:600; }
+.upd-verdict-s { font-size:var(--fs-small); color:var(--ink-2); }
+.upd-verdict.ok { border-left-color:var(--ok); } .upd-verdict.ok .upd-verdict-w { color:var(--ok); }
+.upd-verdict.warn { border-left-color:var(--warn); } .upd-verdict.warn .upd-verdict-w { color:var(--warn); }
+.upd-verdict.err { border-left-color:var(--err); } .upd-verdict.err .upd-verdict-w { color:var(--err); }
+.upd-verdict.muted { border-left-color:var(--divider-strong); }
+
+/* Install target — the facts an operator needs BEFORE pressing Install: the path, the device behind
+   it, and how much room is left. Quiet by default (it is context, not an alarm); only the
+   little-room-on-internal-flash case raises its voice, because that is the one that bricks routers. */
+.upd-target { padding:10px var(--sp-4); margin-bottom:var(--sp-4); }
+.upd-target-line { display:flex; flex-direction:column; gap:6px; }
+.upd-target-main { display:flex; align-items:center; gap:8px; flex-wrap:wrap; min-width:0; }
+.upd-target-where code { font-size:var(--fs-small); }
+.upd-target-dev { color:var(--ink-2); font-size:var(--fs-small); }
+.upd-target-free { color:var(--ink-2); font-size:var(--fs-small); white-space:nowrap; }
+.upd-target-note, .upd-target-pm { font-size:var(--fs-small); }
+.upd-target-warn { display:flex; flex-direction:column; gap:2px; border-left:3px solid var(--warn);
+  padding:6px var(--sp-3); border-radius:var(--radius-sm); background:var(--surface-2); font-size:var(--fs-small); }
+.upd-target-warn strong { color:var(--warn); }
+
+.upd-table { display:flex; flex-direction:column; }
+/* Header and rows are separate grids, so an `auto` action track resolves to 0 in the empty header
+   and to the button width in each row. That shifted Installed/Latest/State by hundreds of pixels.
+   Every track is definite so the labels and data share one geometry. */
+.upd-head, .upd-row { display:grid; grid-template-columns:minmax(0,1.5fr) minmax(80px,.7fr)
+  minmax(80px,.7fr) minmax(150px,1fr) minmax(118px,.8fr); gap:var(--sp-3); align-items:center; }
+.upd-head { padding-bottom:8px; border-bottom:1px solid var(--divider); font-size:var(--fs-caption);
+  text-transform:uppercase; letter-spacing:var(--ls-caps); color:var(--ink-3); }
+.upd-item { border-bottom:1px solid var(--divider); padding:10px 0; }
+.upd-item:last-child { border-bottom:0; }
+.upd-name { display:flex; flex-direction:column; min-width:0; }
+.upd-n { font-size:var(--fs-control); font-weight:600; overflow:hidden; text-overflow:ellipsis;
+  white-space:nowrap; }
+.upd-r { font-size:var(--fs-caption); color:var(--ink-3); }
+.upd-inst, .upd-latest { font-size:var(--fs-control); font-variant-numeric:tabular-nums;
+  min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.upd-state { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.upd-unchecked { font-style:italic; }
+.upd-acts { display:flex; gap:6px; justify-content:flex-end; }
+.upd-detail:empty { display:none; }
+.upd-detail { margin-top:8px; display:flex; flex-direction:column; gap:6px; }
+.upd-err { color:var(--err); }
+.upd-pick { display:flex; gap:10px; align-items:center; flex-wrap:wrap; max-width:420px; }
+.upd-auto { align-items:center; gap:var(--sp-3); }
+.upd-pkg-note { max-width:72ch; }
+.upd-remedy { display:flex; flex-direction:column; gap:2px; max-width:72ch;
+  padding:9px 11px; border:1px solid var(--warn); border-radius:var(--radius-sm);
+  background:var(--warn-bg); color:var(--ink-2); font-size:var(--fs-small); }
+.upd-remedy strong { color:var(--ink-1); font-size:var(--fs-control); }
+.upd-auto-note { padding-top:2px; }
+.upd-foot { margin-top:var(--sp-3); }
+.upd-adv { margin-top:var(--sp-4); }
+.upd-adv > summary { cursor:pointer; font-weight:600; padding:8px 0; }
+.upd-adv-note { margin:2px 0 12px; max-width:60ch; }
+
+@media (max-width:860px) {
+  .upd-head { display:none; }
+  /* minmax(0,1fr), not 1fr. A bare `fr` track has an automatic minimum of min-content, and collapsing
+     five cells into one column makes that track as wide as the WIDEST cell's min-content — here 896px
+     inside a 315px row, overflowing a 375px viewport by 551px. The desktop rule above already says
+     minmax(0,...) for exactly this reason; the mobile one did not, and the difference only shows once
+     a cell with a long unbreakable run lands in that column. */
+  .upd-row { grid-template-columns:minmax(0,1fr); row-gap:6px; }
+  .upd-acts { justify-content:flex-start; }
+}
+
+/* ── Ask the router + Flight recorder (Diagnostics) ────────────────────────────
+   The input is the page's front door, so it is the widest thing on it. Answers
+   stack newest-first with the interpretation stated on every one — a guess that
+   silently ran the wrong tool would be worse than no guess. */
+.ask-hint { margin:4px 0 var(--sp-3); }
+.ask-row { display:flex; gap:var(--sp-2); align-items:center; }
+.ask-in { flex:1 1 auto; min-width:0; }
+.ask-feed { display:flex; flex-direction:column; gap:var(--sp-3); margin-top:var(--sp-4); }
+.ask-feed:empty { display:none; }
+.ask-entry { border:1px solid var(--divider); border-radius:var(--radius-sm); padding:10px var(--sp-3);
+  background:var(--card-2); }
+.ask-head { display:flex; align-items:baseline; gap:var(--sp-2); flex-wrap:wrap; }
+.ask-q { font-size:var(--fs-control); font-weight:600; min-width:0; overflow-wrap:anywhere; }
+.ask-read { font-size:var(--fs-caption); color:var(--ink-3); }
+.ask-chips { display:flex; gap:4px; flex-wrap:wrap; margin-left:auto; }
+.ask-body { margin-top:var(--sp-2); }
+.ask-part + .ask-part { margin-top:var(--sp-3); padding-top:var(--sp-3);
+  border-top:1px solid var(--divider); }
+.ask-err { color:var(--err); }
+.ask-verdict { font-size:var(--fs-control); font-weight:600; }
+.ask-verdict.ok { color:var(--ok); } .ask-verdict.err { color:var(--err); }
+
+/* One cell per probe, oldest left. Deliberately not stretched to a wall clock: the
+   monitor stores outcomes, not timestamps, and spacing them by time would invent
+   precision — and hide any gap where the daemon was not running. */
+.fr-scale { margin-bottom:var(--sp-2); }
+.fr-row { display:flex; align-items:center; gap:var(--sp-2); padding:3px 0; }
+.fr-name { flex:0 0 auto; width:132px; min-width:0; overflow:hidden; text-overflow:ellipsis;
+  white-space:nowrap; font-size:var(--fs-control); }
+.fr-band { flex:1 1 auto; display:flex; gap:1px; min-width:0; }
+.fr-cell { flex:1 1 auto; height:16px; border-radius:1px; min-width:2px; }
+.fr-cell.ok { background:var(--ok); opacity:.75; }
+.fr-cell.bad { background:var(--err); }
+.fr-pct { flex:0 0 auto; width:40px; text-align:right; font-size:var(--fs-caption);
+  color:var(--ink-2); font-variant-numeric:tabular-nums; }
+.fr-partial { flex:0 0 auto; font-size:var(--fs-caption); color:var(--ink-3); font-style:italic; }
+.fr-events { margin-top:var(--sp-3); padding-top:var(--sp-3); border-top:1px solid var(--divider); }
+
+.diag-adv { margin-top:var(--sp-4); }
+.diag-adv > summary { cursor:pointer; font-weight:600; padding:8px 0; }
+.diag-adv-note { margin:2px 0 12px; max-width:64ch; }
+.diag-tools { display:flex; flex-direction:column; gap:var(--sp-3); }
+
+@media (max-width:720px) {
+  .fr-name { width:88px; }
+}
+
+/* ── Settings index ────────────────────────────────────────────────────────────
+   One table, one search field, facets as toggles. The chips carry the warnings
+   that used to be buried in card prose — a lock-out risk should be visible while
+   scanning, not only once you have already opened the right tab. */
+/* Sticks under the topbar so the filter stays reachable while the PAGE scrolls, which is what the list's
+   own scroll region used to buy. Background measured, not guessed: nothing between here and `.app` paints
+   one, so the page background is what shows through. The old margin becomes padding — a margin is
+   transparent, and a stuck bar with one would let a sliver of the row underneath show below it. */
+.sx-top { display:flex; gap:var(--sp-3); align-items:center; flex-wrap:wrap;
+  position:sticky; top:var(--topbar-h); z-index:3; background:var(--bg); padding-bottom:var(--sp-2); }
+.sx-search { flex:1 1 260px; min-width:0; }
+.sx-facets { display:flex; gap:6px; flex-wrap:wrap; }
+.sx-facet.on { background:var(--accent-tint); border-color:var(--accent); color:var(--accent-light); }
+.sx-count { margin-bottom:var(--sp-3); }
+/* The list used to scroll inside itself so the search field and the facet toggles stayed put. That put a
+   second scrollbar inside a page that then could not scroll at all — 1482px of settings in an 893px box on
+   a 1440px-tall window. The filter bar sticks under the topbar instead, so it still stays put while the
+   page scrolls normally. `overflow:hidden` only keeps the rows inside the rounded corners; it clips
+   nothing, because the list is now as tall as its contents. */
+.sx-list { display:flex; flex-direction:column; border:1px solid var(--divider);
+  border-radius:var(--radius); overflow:hidden; background:var(--card); }
+.sx-row { display:grid; grid-template-columns:minmax(230px,1fr) minmax(0,1.5fr); gap:var(--sp-3);
+  padding:5px var(--sp-3); border-bottom:1px solid var(--divider); align-items:center; }
+.sx-row:last-child { border-bottom:0; }
+.sx-row.group { background:var(--card-2); }
+.sx-key { min-width:0; display:flex; align-items:baseline; gap:7px; flex-wrap:wrap; }
+.sx-name { font-size:var(--fs-control); font-weight:600; }
+.sx-row.group { align-items:start; padding:8px var(--sp-3); }
+.sx-where { font-size:var(--fs-caption); color:var(--ink-3); }
+.sx-chips { display:flex; gap:5px; flex-wrap:wrap; }
+.sx-chip { font-size:var(--fs-caption); padding:1px 7px; border-radius:var(--radius-pill);
+  border:1px solid var(--divider-strong); color:var(--ink-2); }
+.sx-chip.warn { border-color:var(--warn); color:var(--warn); }
+.sx-ctl { min-width:0; }
+/* The moved fields keep their own markup; they just no longer need their card's spacing. */
+.sx-ctl .field { margin:0; }
+.sx-ctl .field > label { display:none; }
+.sx-rest { display:flex; flex-direction:column; gap:var(--sp-2); }
+.sx-rest .field { margin:0; }
+
+@media (max-width:760px) {
+  .sx-row { grid-template-columns:1fr; gap:var(--sp-2); }
+}
+.sx-why > summary { cursor:pointer; font-size:var(--fs-caption); color:var(--ink-3);
+  padding:2px 0; user-select:none; }
+.sx-why > .hint { margin-top:4px; }
+.sx-rest > .hint { font-size:var(--fs-small); }
+/* A textarea inside the index is a field, not a document: two visible lines is enough to edit in,
+   and the row stays scannable next to its neighbours. */
+.sx-ctl textarea { min-height:52px; }
+.sx-ctl .kv-grid { gap:var(--sp-2); }
+
+/* ── Activity ribbon (Dashboard) ───────────────────────────────────────────────
+   One bar per minute, newest right, with events marked on the same axis. A minute
+   with no sample is drawn as a hole rather than as a quiet minute — the record is
+   missing there, and the two must never look alike. */
+.ribbon-scale { font-variant-numeric:tabular-nums; }
+.ribbon-body { margin-top:var(--sp-2); }
+.ribbon-track { position:relative; padding-bottom:9px;
+  /* One bar per bucket at min-width 1px PLUS a 1px gap, so the track's width grows with the number of
+     buckets and has no relation to the viewport. At 375px it ran 134px past the right edge and
+     body{overflow-x:hidden} ate it silently — no scrollbar, no way to reach the older half of the
+     day. Scroll it in its own container instead, which is the remedy for wide content generally: the
+     page never moves sideways and the whole window stays reachable. */
+  overflow-x:auto; overscroll-behavior-x:contain; }
+.ribbon-bars { display:flex; align-items:flex-end; gap:1px; height:56px;
+  border-bottom:1px solid var(--divider); }
+.ribbon-bar { flex:1 1 auto; min-width:1px; background:var(--plot); border-radius:1px 1px 0 0; }
+.ribbon-bar.gap { align-self:stretch; background:repeating-linear-gradient(45deg,
+  var(--divider) 0 2px, transparent 2px 4px); }
+.ribbon-marks { position:relative; height:9px; }
+.ribbon-mark { position:absolute; top:0; width:2px; height:9px; transform:translateX(-1px);
+  border-radius:1px; }
+.ribbon-mark.down { background:var(--err); }
+.ribbon-mark.up { background:var(--ok); }
+.ribbon-mark.switch { background:var(--accent-light); }
+.ribbon-legend { display:flex; flex-direction:column; gap:2px; margin-top:var(--sp-2); }
+.dns-native-sum { font-size:var(--fs-control); margin-bottom:var(--sp-2); }
+.dns-native-det > summary { cursor:pointer; padding:2px 0; user-select:none; }
+
+/* The ordered ruleset at real scale. The column headings used to stay put by giving the rows their own
+   scroll region; at 65 lists on a 1440px-tall window that trapped 6836px of rules inside an 835px box,
+   left dead space under it, and stopped the page itself from scrolling at all. The page scrolls now and
+   the heading sticks under the topbar instead, which keeps what the scroll region was for without a
+   second scrollbar. Order is never regrouped — it IS the meaning here. */
+/* Same shape as the routing filter below, on the page that grows with the number of GROUPS. */
+.fo-findbar { display:flex; align-items:center; gap:var(--sp-3); flex-wrap:wrap;
+  margin-bottom:var(--sp-3); }
+.fo-find { flex:1 1 260px; min-width:0; }
+.fo-find-n { flex:0 0 auto; }
+
+.rl-findbar { display:flex; align-items:center; gap:var(--sp-3); flex-wrap:wrap;
+  margin-bottom:var(--sp-2); }
+.rl-find { flex:1 1 260px; min-width:0; }
+.rl-find-n { flex:0 0 auto; }
+/* No height and no scroller: the class stays because the markup names it, and it now only carries the
+   sticky heading the old scroll region used to provide. */
+.rl-scroll .rlhead { position:sticky; top:var(--topbar-h); z-index:2; background:var(--card); }
+
+/* Verdict stays, enumeration folds — the dashboard list strip and the Diagnostics protocol matrix
+   both grow with the router, not with the design. */
+.dashrl-det > summary, .ns-det > summary { cursor:pointer; margin-top:var(--sp-2); }
+.dashrl-det[open] > summary, .ns-det[open] > summary { margin-bottom:var(--sp-2); }
+.ns-sum { font-size:var(--fs-control); font-weight:500; }
+.talker-more { margin-top:var(--sp-2); }
+
+/* Capacity bands: the header is the verdict, the rows are enumeration. Same fold as the routing
+   strip, the exit grid and the protocol matrix. */
+.fo-band-more > summary { cursor:pointer; padding:var(--sp-2) 0; }
+
+/* Folds for the three blocks the stress profile exposed: the flight recorder's per-exit bands, the
+   DNS query path's rule branches, and the next-hop chain inside each failover group. */
+.fr-more > summary, .qp-more > summary, .fo-hop-more > summary { cursor:pointer; padding:var(--sp-2) 0; }
+.fo-hop-more { list-style:none; }
+
+/* Folds for the three blocks the stress profile exposed: the flight recorder's per-exit bands, the
+   DNS query path's rule branches, and the next-hop chain inside each failover group card. */
+.fr-more > summary, .qp-more > summary, .fo-hop-more > summary { cursor:pointer; padding:var(--sp-2) 0; }
+.fo-hop-more { list-style:none; }
+.fo-g-more > summary { cursor:pointer; padding:var(--sp-2) 0; }
+.fo-g-more[open] { display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr));
+  gap:var(--sp-4); margin-top:var(--sp-3); }
+.fo-g-more[open] > summary { grid-column:1 / -1; }
+.fo-bands-more > summary { cursor:pointer; padding:var(--sp-2) 0; font-weight:500; }
+.fr-ev-more > summary { cursor:pointer; padding:var(--sp-2) 0; }
+
+/* ---- Nav icons -------------------------------------------------------------------------------
+   The nine glyphs that used to sit here came from nine different Unicode blocks, so they disagreed
+   about optical weight (a solid ▤ next to a hairline ⚙), optical size (a tiny ⋔ next to a full-height
+   ⚠) and vertical centring — while their 18px boxes measured identical. The boxes were never the
+   problem. These are one set on one 24x24 grid at one stroke weight, so the column reads as a column. */
+.nav-item .ico { display:inline-flex; align-items:center; justify-content:center; flex:0 0 18px;
+  width:18px; height:18px; opacity:.72; transition:opacity var(--t) linear; }
+.nav-item:hover .ico { opacity:.9; }
+.nav-item.active .ico { opacity:1; color:var(--accent); }
+svg.ico { display:block; }
+
+/* ---- Control heights in a row ---------------------------------------------------------------
+   .btn is min-height 34 and an input resolves to 36, so any row holding both sat 2px out of true.
+   Measured on Diagnostics' ask row. Give the row's controls one height instead of two. */
+.ask-row .btn, .ask-row input { min-height:36px; }
+
+/* ---- Things that must not break mid-value ----------------------------------------------------
+   Measured on the Keenetic: the WAN tile renders "↓3.8 MB/s ↑845.5 KB/s", which wrapped between the
+   number and its unit, leaving "KB/s" alone on a second line and making that tile taller than the
+   four beside it.
+
+   A line may break BETWEEN the two directions; it may never break inside one reading. Wrapping each
+   reading in its own nowrap box says exactly that, where a blanket nowrap would just overflow. */
+
+/* The next two were written for a layout that no longer exists. "Live connections" split across two
+   lines in the 106px title slot of the TWO-COLUMN activity row, and the four-reading summary
+   ("686 active · 2% of 32768 · direct 495.7 GB · grp-all-vpn 11.5 KB") could not share a line with
+   the title in that narrow right column. The row is one column now and both cards are full width.
+
+   Re-measured with the current layout, at 375 / 560 / 900 / 1440, each rule suppressed at runtime
+   and the header re-read: identical every time — one title line, same header height, summary on its
+   own line either way. So BOTH ARE INERT. They are kept rather than deleted (this codebase's rule is
+   to propose removals, not perform them) and the removal is proposed here: if nothing below this
+   comment reintroduces a narrow column for these cards, the two rules can go. */
+.conns-head .card-title { white-space:nowrap; }
+.conns-head { flex-wrap:wrap; }
+.conns-head #conns-sum { margin-left:auto; text-align:right; min-width:0; }
+.sys-tile .sys-v { overflow-wrap:normal; }
+.sys-tile .sys-v .sv-r { white-space:nowrap; display:inline-block; }
+/* A status chip must keep its natural width: squeezed to 55px by a flex parent, a pill reading just
+   "Down" wrapped onto two lines. flex:none stops the squeeze; max-width and overflow-wrap above still
+   handle the opposite case, a pill carrying a long URL. */
+.pill { flex:0 0 auto; }
+
+/* ---- Page-level folds keep their block ------------------------------------------------------
+   Two folds on Failover are appended straight to the page rather than inside a card: the capacity
+   roster and the overflow of group cards. Open, each holds bordered blocks and reads as a section;
+   closed, the summary was a bare line of text floating on the page background between two cards, so
+   it read as something that had come loose rather than as a section that is folded. Give the closed
+   state the same block the open one has. */
+.fo-bands-more, .fo-g-more, .fo-log-more, .upd-adv, .diag-adv { border:1px solid var(--divider); border-radius:var(--radius);
+  background:var(--card); padding:0 var(--sp-3); }
+.fo-bands-more > summary, .fo-g-more > summary, .upd-adv > summary, .diag-adv > summary { padding:var(--sp-3) 0; }
+.fo-bands-more[open], .fo-g-more[open], .upd-adv[open], .diag-adv[open] { padding-bottom:var(--sp-3); }
+
+/* A single word alone on the last line reads as a mistake. Modern engines can balance the rag; where
+   unsupported this is simply ignored. */
+.desc, .hint, .block-head .desc { text-wrap:pretty; }
+
+/* ---- The settings control column ------------------------------------------------------------
+   Every control starts at the same x, which is why no alignment check ever flagged this — but each
+   one ENDED wherever its own content decided. A <select> sizes to its longest option, so Theme and
+   Language came out 260px against 480px for Mode and Flow offload; a couple of inputs carried their
+   own max-width and landed at 420. Measured down 24 rows: 452px of ragged right edge. This is the
+   literal form of "wider than the others".
+
+   One width for the column. Checkboxes and radios are excluded by selector rather than by hoping —
+   the "Updater mirrors" control is 13px wide and stretching it would be a worse defect than the one
+   being fixed. */
+.sx-ctl select,
+.sx-ctl textarea,
+.sx-ctl input:not([type="checkbox"]):not([type="radio"]) { width:100%; max-width:480px; }
+/* This rule was correct all along and still lost: Theme and Language carried `max-width:260px` as an
+   INLINE style from app.js, and inline beats any stylesheet. Two attempts were spent here — first
+   suspecting the rule never reached those selects (it does; computed max-width really is 480px), then
+   adding `width:100%` to the wrapper (no effect, since a block div already fills its parent). The
+   cap was removed from the markup instead. Nothing here needs to change; the note is so the next
+   person measuring a 260px select looks at the element's style attribute before this file. */
+.sx-ctl .field { max-width:480px; }
+
+/* Native package-manager delegation on the Updater page. The panel used to print a paragraph telling
+   the operator to open an SSH session; it now shows the three actions, the exact command each would
+   run, and the preconditions behind a refusal. The command is a code line rather than prose because
+   it is a command — it must be readable as one and copyable if the operator would rather run it
+   themselves. `overflow-x:auto` on it, not wrapping: a command broken across lines invites pasting a
+   half of one. */
+.pm-deleg { display:flex; flex-direction:column; gap:var(--sp-2); margin-top:var(--sp-2); }
+.pm-deleg > .acts { display:flex; gap:6px; flex-wrap:wrap; }
+.pm-cmd { display:flex; flex-direction:column; gap:6px; align-items:flex-start; }
+.pm-cmd:empty { display:none; }
+/* align-items:flex-start sizes these children to their CONTENT, so a wide one does not shrink and
+   `max-width:100%` on a grandchild resolves against a parent that is already too wide. Measured with
+   the preview open: the effect block sat at a fixed 735px and pushed the page sideways at eight of
+   the twelve widths this gate renders — including 759 and 979, nowhere near a phone. Cap the row's
+   own children and the disclosure that holds the block. */
+.pm-cmd > *, .pm-checks > *, .pm-why { max-width:100%; min-width:0; }
+.pm-argv { display:block; max-width:100%; overflow-x:auto; white-space:pre; padding:7px 10px;
+  border:1px solid var(--divider); border-radius:var(--radius-sm); background:var(--card-2);
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:var(--fs-small); }
+/* The command is ONE line you scroll; the dry run's answer is a paragraph you read. Giving both
+   `white-space:pre` made the second unreadable on anything narrow — the operator would have to drag
+   the page sideways through the very text that is supposed to make the confirmation informed. */
+.pm-effect { white-space:pre-wrap; overflow-wrap:anywhere; }
+.pm-checks:empty { display:none; }
+.pm-why > summary { cursor:pointer; }
+.pm-why .vbox { gap:2px; margin-top:4px; }
+
+/* A DNS path with no provider fallback is a deliberate, sharper trade — it hides every query and
+   takes DNS down with the tunnel. It reads as a caution, not an error: nothing is broken. */
+.dns-path-strict { color:var(--warn); }
+
+/* A note is a fact about a configuration that works, so it gets the compact treatment: tighter
+   spacing, and a fix that opens on demand. Blockers and decisions keep their full weight — the point
+   of shrinking notes is that the things which DO need attention stop being buried among them. */
+.cs-preflight-row.cs-note { gap:4px; }
+.cs-preflight-row.cs-note .cs-preflight-reason { font-size:12.5px; color:var(--ink-2); }
+.cs-preflight-row.cs-note > details.cs-preflight-fix { padding:4px 0; background:none; }
+.cs-preflight-row.cs-note > details.cs-preflight-fix > summary { font-size:12px; color:var(--ink-3); cursor:pointer; }
+.cs-preflight-row.cs-note > details.cs-preflight-fix > div { padding:6px 10px; margin-top:4px;
+  border-radius:var(--radius-sm); background:var(--card); font-size:12.5px; }
+.cs-preflight-row.cs-note + .cs-preflight-row.cs-note { padding-top:7px; }
+
+/* "Right now" reads as a table of facts: label, value, and where the value came from. Fixed label
+   column so five lines scan down one edge instead of wrapping around their own text. */
+.diag-now { display:flex; flex-direction:column; gap:6px; margin-top:var(--sp-2); }
+.diag-now-row { display:grid; grid-template-columns:minmax(150px,190px) minmax(0,1fr); gap:4px 12px;
+  align-items:baseline; padding:5px 0; border-top:1px solid var(--divider); }
+.diag-now-row:first-child { border-top:none; }
+.diag-now-k { font-size:var(--fs-caption); text-transform:uppercase; letter-spacing:var(--ls-caps); color:var(--ink-3); }
+.diag-now-v { font-size:var(--fs-control); }
+.diag-now-n { grid-column:2; font-size:var(--fs-caption); color:var(--ink-3); }
+@media (max-width:560px) { .diag-now-row { grid-template-columns:1fr; } .diag-now-n { grid-column:1; } }
+
+/* Component offer — what an install would unlock and what it costs, side by side under the row.
+   Both are quiet: on a router where nothing needs installing they are context, not a prompt. */
+.upd-unlock, .upd-cost { display:flex; flex-direction:column; gap:2px; }
+.upd-cost .upd-target-warn { margin-top:4px; }
+/* The offer for a router that needs nothing: available, not advertised. */
+.upd-offer > summary { cursor:pointer; font-size:var(--fs-small); color:var(--ink-2); padding:2px 0; }
+.upd-offer[open] > summary { margin-bottom:4px; }
+
+/* Auth gate: the "run without a password" path. Deliberately quiet next to the primary button, and
+   loud once opened — the consequence is the point, not the control. */
+.auth-skip { display:flex; flex-direction:column; gap:8px; margin-top:14px; padding-top:12px;
+  border-top:1px solid var(--divider); align-items:flex-start; }
+.auth-skip-warn { display:flex; flex-direction:column; gap:4px; border-left:3px solid var(--warn);
+  padding:8px var(--sp-3); border-radius:var(--radius-sm); background:var(--surface-2);
+  font-size:var(--fs-small); }
+.auth-skip-warn strong { color:var(--warn); }
+
+/* What the routing lists cost in kernel memory: one segmented bar, then a figure per list. The bar
+   is a proportion, the legend is the number — a colour alone is not a quantity anyone can read. */
+.rl-mem-bar { display:flex; height:10px; border-radius:5px; overflow:hidden; background:var(--surface-2);
+  margin:2px 0 10px; }
+.rl-mem-seg { display:block; height:100%; }
+.rl-mem-legend { display:flex; flex-wrap:wrap; gap:6px 18px; margin-bottom:8px; }
+.rl-mem-item { display:flex; align-items:center; gap:6px; font-size:var(--fs-small); min-width:0; }
+.rl-mem-dot { width:9px; height:9px; border-radius:2px; flex:0 0 auto; }
+.rl-mem-name { color:var(--ink-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:34ch; }
+.rl-mem-size { color:var(--ink); font-variant-numeric:tabular-nums; }
+/* Which connection component downloads leave through — stated next to the target they land in. */
+.upd-dlpath { align-items:flex-end; gap:12px; flex-wrap:wrap; margin-top:6px; }
+.upd-dlpath .field { margin:0; min-width:16rem; }
+/* What the router already carries — stated as prose under the table, never as an installable row. */
+.upd-carried { margin-top:10px; }
+/* The DNS page's in-page filter — sized like the Routing one, in the block head beside the actions. */
+.dns-filter { margin:0; min-width:15rem; }
+.dns-filter input { width:100%; }

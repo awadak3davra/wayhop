@@ -1,0 +1,7 @@
+#!/bin/sh
+# opkg pre-install. Nothing to refuse: an upgrade over any older installation is safe because the
+# daemon imports whatever applied state it finds on first start (a previous-generation apply ledger,
+# or the pre-ledger applied snapshot) and, failing that, simply owns nothing until the next Apply.
+# The script is kept so the packaged control set does not change shape between releases.
+[ -n "${IPKG_INSTROOT:-}" ] && exit 0
+exit 0

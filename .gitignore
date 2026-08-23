@@ -1,0 +1,77 @@
+# build output
+/dist/
+# ... and the staging the CI build scatters beside it. The release job makes one directory per
+# architecture, copies the binary and the installer scripts in, and tars it; the matrix job leaves
+# its tarball in the root. All of it is build output, but it sat in the working tree UNTRACKED - so
+# from the second architecture onward scripts/buildinfo.sh saw a non-empty `git status` and stamped
+# every later binary DIRTY, and the release refused itself over sources that had not changed at all.
+# The guard was right about the tree and wrong about what it meant; ignoring build output is what
+# makes the dirty flag mean "built from modified source" again.
+/wayhop-*-pkg/
+/wayhop-*.tar.gz
+/bins/
+/pkgs/
+# local runtime state (created by demo/run) — machine-specific, may hold secrets
+/.wrdata/
+/profile.json
+/profile.json.tmp
+/dev-config.json
+/dev-config.json.tmp
+/servers.json
+/servers.json.tmp
+/singbox.json
+# feed signing PRIVATE keys — the .pub halves ARE committed; the private halves live only in the
+# GitHub Actions secrets (WAYHOP_USIGN_SEC / WAYHOP_APK_SEC_PEM) and a LOCAL-ONLY backup
+# (%LOCALAPPDATA%\wayhop-keys — never inside a cloud-synced tree like Google Drive). Losing them
+# forces a key rotation (every device must re-trust), so keep that local backup.
+/packaging/feed/keys/*.sec
+/packaging/feed/keys/*.pem
+
+# editor / OS cruft
+*.swp
+.DS_Store
+
+# Locally-built binaries at the repo root. /dist/ is already ignored, but a plain
+# `go build` with no -o drops the executable here, where an `add -A` would commit ~16 MB.
+/wayhop.exe
+/wayhop
+/usigntool.exe
+/usigntool
+
+# Redesign-session artefacts. The audit tree is worked in place, so a build, a demo log or a
+# scratch probe left at the root would otherwise be swept into a commit.
+/wayhop-redesign.exe
+/redesign-demo.log
+/redesign-demo.err.log
+/verify_usage.txt
+/rd-wayhop.exe
+/rd-wayhop.exe~
+/wrscratch.exe
+# The demo the UI gates run against. Regenerated from scratch by `node scripts/seed-demo.mjs`,
+# which IS tracked, so the seed is reproducible and the 39KB of generated profile state is not
+# worth carrying — same reason /profile.json is ignored above.
+/rd-demo/
+# On Windows `> nul` in a POSIX shell creates a real file instead of discarding, so a redirected
+# screenshot lands here as a 100KB PNG named `nul`.
+/nul
+
+# Per-session scratch under .claude. The i18n dictionaries and launch config there ARE tracked;
+# these are throwaway probe scripts and captures from individual investigations.
+.claude/bug-hunt/
+.claude/c[0-9][0-9]-*
+.claude/c[0-9][0-9]/
+.claude/tmp-*
+.claude/per-device/
+.claude/research/
+.claude/routing-check/
+.claude/ui-review/
+.claude/gemini-review-*.md
+
+# Build backups left by the redesign loop.
+/wayhop-redesign.exe~
+
+# scripts/i18n-merge-pending.mjs copies each dictionary beside itself before writing, so a failed
+# batch can be put back. Those copies are ~100KB each across fifteen languages and are worthless
+# once the merge is verified — but they sit inside a TRACKED directory, so without this line the
+# next `git add` on .claude/i18n would carry them in.
+.claude/i18n/dicts/*.bak

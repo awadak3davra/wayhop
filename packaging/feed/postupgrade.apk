@@ -1,0 +1,13 @@
+#!/bin/sh
+# apk post-upgrade: the package owns only the private payload. Publish it, then restart so the new
+# binary takes over. The sibling+rename preserves
+# the previous live path if copying the payload fails.
+/usr/libexec/wayhop/harden-state.sh /etc/wayhop /var/lib/wayhop || exit 1
+cp /usr/libexec/wayhop/wayhop /usr/sbin/wayhop.new || exit 1
+chmod 0755 /usr/sbin/wayhop.new || exit 1
+mv -f /usr/sbin/wayhop.new /usr/sbin/wayhop || exit 1
+if [ -x /etc/init.d/wayhop ]; then
+  /etc/init.d/wayhop enable 2>/dev/null
+  /etc/init.d/wayhop restart 2>/dev/null
+fi
+exit 0

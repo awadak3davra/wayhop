@@ -1,0 +1,156 @@
+#!/bin/sh
+# Entware init script for WayHop.
+# Install to /opt/etc/init.d/S99wayhop (chmod +x). Starts after networking (S99).
+#
+# Entware's shared rc.func sends daemon stdout/stderr to /dev/null. WayHop's
+# startup-recovery and native-adapter diagnostics are operational evidence, so
+# keep them in Keenetic's bounded native system log instead (`show log`).
+
+ENABLED=yes
+PROG=${WAYHOP_PROG:-/opt/sbin/wayhop}
+CONFIG=${WAYHOP_CONFIG:-/opt/etc/wayhop/config.json}
+NAME=${WAYHOP_NAME:-wayhop}
+DESC=WayHop
+# Who asked for this. rc.unslung passes its own second argument through ($i $ACTION $CALLER), and on
+# KeeneticOS the firmware starts Entware with no second argument at all - so defaulting to "manual"
+# meant every BOOT start was logged as a human's doing. An operator reading the native log after an
+# unexpected restart ("who restarted the VPN at 3am?") was told a person did it. Unknown is unknown:
+# FROM stays empty and the line simply does not name an agent. cron still identifies itself, which is
+# the one caller the start guard below actually branches on.
+CALLER=${2:-}
+FROM=${CALLER:+ from $CALLER}
+PATH=${WAYHOP_PATH:-/opt/sbin:/opt/bin:/usr/sbin:/usr/bin:/sbin:/bin}
+
+is_running() {
+	pidof "$NAME" >/dev/null 2>&1
+}
+
+start() {
+	[ "$ENABLED" = yes ] || return 8
+	[ "$CALLER" != cron ] || return 7
+
+	printf 'Starting %s... ' "$DESC"
+	if is_running; then
+		echo 'already running.'
+		return 0
+	fi
+	if [ ! -x "$PROG" ]; then
+		echo 'failed (binary is missing or not executable).'
+		logger -t "$NAME" "Failed to start $DESC$FROM: $PROG is missing or not executable."
+		return 255
+	fi
+	if ! command -v logger >/dev/null 2>&1; then
+		echo 'failed (logger is unavailable).'
+		return 255
+	fi
+
+	# Keep the real daemon as a `wayhop` process so pidof/killall and package
+	# upgrades retain Entware's established lifecycle semantics. WayHop's Go log
+	# lines start with YYYY/MM/DD; child engine logs use another shape and already
+	# live in the bounded Diagnostics buffer. Dropping routine successful polling
+	# keeps Keenetic's bounded native log useful instead of flooding it.
+	"$PROG" --config "$CONFIG" 2>&1 | while IFS= read -r line; do
+		case $line in
+			[0-9][0-9][0-9][0-9]/*) ;;
+			*) continue ;;
+		esac
+		case $line in
+			*" GET /api/"*" 200 ("*|*" GET /api/"*" 204 ("*) continue ;;
+		esac
+		# Keenetic already timestamps each native-log record. Removing Go's
+		# duplicate fixed-width prefix preserves the actionable part of the line.
+		line=${line#????/??/?? ??:??:?? }
+		logger -t "$NAME" "$line"
+	done &
+
+	counter=0
+	limit=10
+	while ! is_running && [ "$counter" -le "$limit" ]; do
+		sleep 1
+		counter=$((counter + 1))
+	done
+	if ! is_running; then
+		echo 'failed.'
+		logger -t "$NAME" "Failed to start $DESC$FROM."
+		return 255
+	fi
+
+	echo 'done.'
+	logger -t "$NAME" "Started $DESC$FROM."
+}
+
+stop() {
+	printf 'Shutting down %s... ' "$NAME"
+	killall "$NAME" 2>/dev/null || true
+	counter=0
+	limit=10
+	while is_running && [ "$counter" -le "$limit" ]; do
+		sleep 1
+		counter=$((counter + 1))
+	done
+	if is_running; then
+		echo 'failed.'
+		return 255
+	fi
+	echo 'done.'
+}
+
+kill_now() {
+	printf 'Killing %s... ' "$NAME"
+	killall -9 "$NAME" 2>/dev/null || true
+	if is_running; then
+		echo 'failed.'
+		return 255
+	fi
+	echo 'done.'
+}
+
+check() {
+	printf 'Checking %s... ' "$DESC"
+	if is_running; then
+		echo 'alive.'
+		return 0
+	fi
+	echo 'dead.'
+	return 1
+}
+
+reconfigure() {
+	# WayHop deliberately has no in-process SIGHUP config reload: router state is
+	# replayed only through the authenticated Apply runtime. A controlled restart
+	# preserves Entware's reconfigure command without killing the daemon and
+	# leaving it down.
+	echo "$DESC has no SIGHUP reload; performing a controlled restart."
+	if is_running; then
+		stop || return $?
+	fi
+	start
+}
+
+case ${1:-} in
+	start)
+		start
+		;;
+	stop)
+		is_running && stop
+		;;
+	restart)
+		if is_running; then
+			stop || exit $?
+		fi
+		start
+		;;
+	check|status)
+		check
+		;;
+	kill)
+		is_running && kill_now
+		;;
+	reconfigure)
+		reconfigure
+		;;
+	*)
+		echo "Usage: $0 (start|stop|restart|check|status|kill|reconfigure)"
+		exit 1
+		;;
+esac

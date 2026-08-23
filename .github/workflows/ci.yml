@@ -1,0 +1,127 @@
+name: ci
+
+# Per-push / per-PR quality signal. The BLOCKING static + fuzz checks (gofmt/vet/govulncheck,
+# shellcheck, gitleaks, UI syntax/i18n/a11y, parser fuzz) live in the reusable quality-gate.yml
+# so the exact same gate also blocks the release + feed tags — one source of truth, no drift.
+# This file adds the checks kept OFF the release path on purpose: the real sing-box / mihomo
+# config validation (they fetch upstream cores, so they must not be able to wedge a release on a
+# CDN hiccup) and the self-hosted source-builds of the engine binaries WayHop orchestrates.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '37 5 * * 1'   # weekly — catches upstream engine-build breakage with no push
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Both the checks here and the release builds in build.yml run on the same Go 1.26
+  # (patched stdlib); go.mod's `go 1.22` is only the language-version floor.
+  GO_VERSION: '1.26.6'  # >= 1.26.6: GO-2026-6218 / 6090 / 6089 / 5972 / 5942 (net/url, crypto/tls, net/http, encoding/asn1, net) fixed here
+  # Run the JS-based actions on the runner's bundled Node 24 (Node 20 is deprecated).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  # --- the blocking static + fuzz gate (shared verbatim with the release + feed tags) ---
+  gate:
+    uses: ./.github/workflows/quality-gate.yml
+    # A pull request gets the fast UI subset; a push to main gets every UI gate, so main is held
+    # to the same contract a release tag is.
+    with:
+      ui_scope: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'full' || 'min' }}
+
+  # --- validate EVERY protocol against the real sing-box core, on BOTH the
+  # deployed 1.12.x line AND 1.13.x (which REMOVED the legacy wireguard outbound).
+  # Native WireGuard is emitted as a top-level `endpoints` entry, so the
+  # all-protocols config must pass `sing-box check` on both — this matrix proves
+  # the schema is forward-compatible past the 1.13 removal. ---
+  singbox-check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.12.17 = the version on the AX3000T today; 1.13.13 = the line that
+        # removed the wireguard outbound. Bump deliberately when WayHop moves.
+        singbox: ['1.12.17', '1.13.13']
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with: { go-version: '${{ env.GO_VERSION }}', cache: false}
+      - name: Fetch sing-box ${{ matrix.singbox }}
+        run: |
+          set -euo pipefail
+          ver='${{ matrix.singbox }}'
+          curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${ver}/sing-box-${ver}-linux-amd64.tar.gz" -o sb.tgz
+          tar -xzf sb.tgz
+          echo "WR_SINGBOX=$PWD/sing-box-${ver}-linux-amd64/sing-box" >> "$GITHUB_ENV"
+      # Explicit allowlist, NOT the whole package: TestHybridSingBoxCheck is intentionally excluded
+      # because `sing-box check` on a hybrid config initializes TUN auto-redirect, which needs a
+      # router (nftables) environment and FATALs "auto-redirect: invalid argument" on a CI runner.
+      # Add any new sing-box-gated generator test to this list.
+      - name: sing-box ${{ matrix.singbox }} check on all-protocols + transport + clash + WG-conf configs
+        run: go test -run 'TestAllProtocolsGenerate|TestGeneratorTransportMatrix|TestClashSubscriptionGenerate|TestWireGuardConfGenerate|TestSourceRuleSingBoxCheck' -count=1 ./internal/generator/
+
+  # --- validate the clash subscription EXPORT against the real mihomo (clash-meta) client ---
+  # The export was previously only round-trip tested (re-imported into WayHop); this runs
+  # `mihomo -t` on a generated subscription (incl. the failover proxy-groups) so a field a real
+  # clash client rejects is caught before users are. mihomo is pinned; bump deliberately.
+  clash-export-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with: { go-version: '${{ env.GO_VERSION }}', cache: false}
+      - name: Fetch mihomo
+        run: |
+          set -euo pipefail
+          ver='1.19.27'
+          curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/download/v${ver}/mihomo-linux-amd64-compatible-v${ver}.gz" -o mihomo.gz
+          gunzip mihomo.gz
+          chmod +x mihomo
+          echo "WR_MIHOMO=$PWD/mihomo" >> "$GITHUB_ENV"
+      - name: mihomo -t on the exported clash subscription
+        run: go test -run TestClashExportMihomo -count=1 ./internal/exporter/
+
+  # --- source-build the engine binaries WayHop orchestrates ---
+  # Heavy (olcRTC pulls a large WebRTC stack and needs Go 1.26), so it is skipped
+  # on PRs to keep them fast and runs on push / the weekly schedule / manual.
+  engines:
+    if: github.event_name != 'pull_request'
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      # cache:false like every other job — this job builds EXTERNAL clones (awg/olc),
+      # so there is nothing in this repo for setup-go to cache, and a stale module-cache
+      # tarball on the self-hosted runner was failing the restore (tar exit 2).
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with: { go-version: '1.26.6', cache: false }   # olcRTC go.mod requires go 1.26.3; amneziawg-go builds on it too; 1.26.6 closes five standard-library advisories
+      # Both steps clone into a FRESH directory under $RUNNER_TEMP and remove it on the way out.
+      # They used to clone into fixed `awg`/`olc` paths in the workspace, which is fine exactly once:
+      # this is a persistent self-hosted runner, so the second run met its own leftovers and the job
+      # died on `destination path 'awg' already exists and is not an empty directory` — leaving main
+      # red for reasons that had nothing to do with the commit that triggered it.
+      - name: amneziawg-go binary cross-builds (arm64)
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d "${RUNNER_TEMP:-/tmp}/awg.XXXXXX")"
+          trap 'rm -rf "$work"' EXIT
+          git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-go "$work/awg"
+          cd "$work/awg"
+          # Build the binary (.), NOT ./... — a transitive dep (outline-sdk/x/smart)
+          # fails to cross-compile but is not imported by the amneziawg-go binary.
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o "${RUNNER_TEMP:-/tmp}/amneziawg-go" .
+          ls -la "${RUNNER_TEMP:-/tmp}/amneziawg-go"
+      - name: olcRTC cross-builds (arm64 + mipsle)
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d "${RUNNER_TEMP:-/tmp}/olc.XXXXXX")"
+          trap 'rm -rf "$work"' EXIT
+          git clone --depth 1 https://github.com/openlibrecommunity/olcrtc "$work/olc"
+          cd "$work/olc"
+          out="${RUNNER_TEMP:-/tmp}"
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64           go build -trimpath -ldflags '-s -w' -o "$out/olcrtc-arm64"  ./cmd/olcrtc
+          CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -o "$out/olcrtc-mipsle" ./cmd/olcrtc
+          ls -la "$out/olcrtc-arm64" "$out/olcrtc-mipsle"

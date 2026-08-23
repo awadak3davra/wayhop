@@ -1,0 +1,4 @@
+# Historical deterministic WireGuard demo fixture. The literal was replaced by
+# runtime-generated demoKey() in 0692662; keep the exception pinned to this one
+# detector finding rather than suppressing a rule, path, commit, or current file.
+9c2f828f02dfce9ae769fbd703d26489291d7bda:scripts/seed-demo.mjs:generic-api-key:48

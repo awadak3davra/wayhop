@@ -1,0 +1,363 @@
+name: build
+
+# CI on every push/PR cross-compiles all router arches (the build signal). On a v* tag a
+# single release job rebuilds every arch and attaches the per-SoC tarballs DIRECTLY to the
+# GitHub Release. It deliberately does NOT use actions/upload-artifact: Actions artifact
+# storage is a small, account-wide quota (shared across every repo) that fills up and then
+# fails releases, whereas Release assets are separate and don't draw on it. No artifacts are
+# uploaded anywhere, so a release can never be blocked by the artifact quota again.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Run the JS-based actions on the runner's bundled Node 24 (Node 20 is
+  # deprecated). The self-hosted runner ships node24; this opts in now.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  # apk-tools 3.0.7-r0 is already inside this immutable image. Package production is offline:
+  # no mutable alpine:edge pull and no apk add from a moving repository during a release.
+  APK_TOOLS_IMAGE: alpine:edge@sha256:d77617aef5805191da75fbbfe2f9dc2043582ecad0f4d381b27c151034765a76
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.6'  # >= 1.26.6: GO-2026-6218 / 6090 / 6089 / 5972 / 5942 (net/url, crypto/tls, net/http, encoding/asn1, net) fixed here
+          cache: false
+      - run: go vet ./...
+      # -v so the run says which tests SKIPPED. `go test` prints ok for a package whose tests all
+      # skipped, so this step alone cannot tell a covered package from an inert one; the next step
+      # reads this log rather than running the suite a second time to find out.
+      # Written to a file rather than piped: a pipeline here would put a filter's exit status in the
+      # step's, and `grep -v` with nothing left to print exits 1 — a green suite reported as a
+      # failure. The status is the test run's, and the log is summarised unless it fails.
+      - run: |
+          go test -race ./... -v > "$RUNNER_TEMP/gotest.log" 2>&1 \
+            || { tail -n 120 "$RUNNER_TEMP/gotest.log"; exit 1; }
+          grep -E '^(ok|FAIL|---)' "$RUNNER_TEMP/gotest.log" || true
+      # Which tests proved nothing here, and whether that was expected. The manifest states the
+      # CONDITION for each skip (an unset env var, a missing tool, a platform), and this checks the
+      # condition against the runner: a test that skips where its condition says it should run fails,
+      # and so does one that runs while the manifest still claims an exemption for it.
+      - name: inert tests (a green suite must not hide tests that ran nothing)
+        run: node scripts/check-skips.mjs
+        env:
+          WAYHOP_GOTEST_LOG: ${{ runner.temp }}/gotest.log
+
+  # Push/PR cross-compile signal: build + package every arch so a regression that breaks any
+  # SoC build (or the packaging) fails CI. Skipped on tags — the release job below rebuilds
+  # them there. Uploads nothing (no artifact-quota dependency).
+  build:
+    needs: test
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Router SoC families (Keenetic/Entware + OpenWrt/Asus-Merlin):
+          - { name: mipsle, goarch: mipsle, gomips: softfloat }  # MediaTek MT7621 etc. (most Keenetic)
+          - { name: mips,   goarch: mips,   gomips: softfloat }  # big-endian MIPS
+          - { name: arm,    goarch: arm,    goarm: '7' }         # ARMv7 (Cortex-A7/A9)
+          - { name: arm64,  goarch: arm64 }                      # ARMv8 (aarch64)
+          - { name: amd64,  goarch: amd64 }                      # x86-64 (VPS/testing)
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.6'  # >= 1.26.6: GO-2026-6218 / 6090 / 6089 / 5972 / 5942 (net/url, crypto/tls, net/http, encoding/asn1, net) fixed here
+          cache: false
+      - name: Cross-compile + package ${{ matrix.name }}
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          GOMIPS: ${{ matrix.gomips }}
+          GOARM: ${{ matrix.goarm }}
+        run: |
+          set -euo pipefail
+          version="0.0.0-dev+$(git rev-parse --short HEAD)"
+          stage="wayhop-${{ matrix.name }}-pkg"
+          mkdir -p "$stage"
+          go build -trimpath \
+            -ldflags "-s -w $(sh scripts/buildinfo.sh "${version}")" \
+            -o "$stage/wayhop-${{ matrix.name }}" ./cmd/wayhop
+          # Entware /opt tarball
+          cp packaging/install.sh packaging/uninstall.sh packaging/S99wayhop packaging/identity-match.sh packaging/retire-iptv.sh packaging/harden-state.sh "$stage/"
+          chmod +x "$stage"/*.sh "$stage"/S99wayhop "$stage/wayhop-${{ matrix.name }}"
+          tar -C "$stage" -czf "wayhop-${version}-${{ matrix.name }}.tar.gz" .
+          # OpenWrt native tarball
+          owstage="wayhop-${{ matrix.name }}-openwrt-pkg"
+          mkdir -p "$owstage"
+          cp "$stage/wayhop-${{ matrix.name }}" "$owstage/wayhop-${{ matrix.name }}"
+          cp packaging/openwrt/install.sh packaging/openwrt/uninstall.sh packaging/openwrt/wayhop.init packaging/identity-match.sh packaging/retire-iptv.sh packaging/harden-state.sh "$owstage/"
+          chmod +x "$owstage"/*.sh "$owstage"/wayhop.init "$owstage/wayhop-${{ matrix.name }}"
+          tar -C "$owstage" -czf "wayhop-${version}-${{ matrix.name }}-openwrt.tar.gz" .
+
+  # Tag-only release gate: the SAME blocking checks CI runs on every push/PR (gofmt/vet/
+  # govulncheck, shellcheck, gitleaks, UI, fuzz) must pass before a tag can publish. Gated to
+  # tags so it does not double-run with ci.yml on push/PR (ci.yml already calls this gate there).
+  gate:
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/quality-gate.yml
+    with:
+      ui_scope: full   # a release may not be green on the cheaper subset
+
+  # Tag-only: rebuild every arch in one job and create the GitHub Release with the tarballs
+  # attached as RELEASE ASSETS (not Actions artifacts). One job → deterministic SHA256SUMS and
+  # no matrix race to create the release.
+  release:
+    needs: [test, gate]   # a red quality-gate check blocks the tag from publishing
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: [self-hosted, Linux, X64]
+    # Signing runs ONLY on the trusted self-hosted runner (PR/untrusted jobs now run on
+    # ubuntu-latest, so no PR code can persist here and wait for this secret). The environment
+    # gate is defence-in-depth: add required reviewers to the 'release' environment in repo
+    # settings and a human must approve before the usign key is exposed. Non-breaking until set.
+    environment: release
+    permissions:
+      contents: write   # create the release + upload assets
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.6'  # >= 1.26.6: GO-2026-6218 / 6090 / 6089 / 5972 / 5942 (net/url, crypto/tls, net/http, encoding/asn1, net) fixed here
+          cache: false
+      - name: Verify immutable release source
+        id: source
+        env:
+          WAYHOP_RELEASE_TAG: ${{ github.ref_name }}
+          WAYHOP_GITHUB_REF_TYPE: ${{ github.ref_type }}
+          WAYHOP_GITHUB_REF_NAME: ${{ github.ref_name }}
+          WAYHOP_EXPECTED_SHA: ${{ github.sha }}
+        run: node scripts/check-release-source.mjs
+      - name: Build every arch + package
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          WAYHOP_ARTIFACT_VERSION: ${{ steps.source.outputs.artifact_version }}
+          WAYHOP_BASE_VERSION: ${{ steps.source.outputs.base_version }}
+          WAYHOP_PACKAGE_RELEASE: ${{ steps.source.outputs.package_release }}
+        run: |
+          set -euo pipefail
+          version="$WAYHOP_ARTIFACT_VERSION"
+          # The immutable tag may add -rN, but its base version must stay equal to version.go.
+          gover="$(sed -n 's/.*Version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' internal/version/version.go | head -n1)"
+          if [ "$gover" != "$WAYHOP_BASE_VERSION" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} base version ($WAYHOP_BASE_VERSION) does not match version.go ($gover)"; exit 1
+          fi
+          # An official build must be traceable. The binary found running on a production router during
+          # the audit was a dirty build from a commit that no longer existed, and nothing about it said
+          # so — every build path stamped the version and left the commit, the date and the dirty flag
+          # at "unknown". Checked BEFORE building, so one refusal covers every arch.
+          ld="$(sh scripts/buildinfo.sh "${version}")"
+          case "$ld" in
+            *Commit=unknown*|*Date=unknown*|*Dirty=true*|*Dirty=unknown*)
+              echo "::error::refusing to release a build with no traceable identity: ${ld}"; exit 1 ;;
+          esac
+          mkdir -p dist
+          build_one() {  # name goarch [gomips] [goarm]
+            local name="$1" stage owstage
+            stage="wayhop-${name}-pkg"; owstage="wayhop-${name}-openwrt-pkg"
+            mkdir -p "$stage" "$owstage"
+            GOARCH="$2" GOMIPS="${3:-}" GOARM="${4:-}" go build -trimpath \
+              -ldflags "-s -w $(sh scripts/buildinfo.sh "${version}")" \
+              -o "$stage/wayhop-${name}" ./cmd/wayhop
+            cp packaging/install.sh packaging/uninstall.sh packaging/S99wayhop packaging/identity-match.sh packaging/retire-iptv.sh packaging/harden-state.sh "$stage/"
+            chmod +x "$stage"/*.sh "$stage"/S99wayhop "$stage/wayhop-${name}"
+            tar -C "$stage" -czf "dist/wayhop-${version}-${name}.tar.gz" .
+            cp "$stage/wayhop-${name}" "$owstage/wayhop-${name}"
+            cp packaging/openwrt/install.sh packaging/openwrt/uninstall.sh packaging/openwrt/wayhop.init packaging/identity-match.sh packaging/retire-iptv.sh packaging/harden-state.sh "$owstage/"
+            chmod +x "$owstage"/*.sh "$owstage"/wayhop.init "$owstage/wayhop-${name}"
+            tar -C "$owstage" -czf "dist/wayhop-${version}-${name}-openwrt.tar.gz" .
+            ( cd dist && sha256sum "wayhop-${version}-${name}.tar.gz" "wayhop-${version}-${name}-openwrt.tar.gz" )
+          }
+          build_one mipsle mipsle softfloat
+          build_one mips   mips   softfloat
+          build_one arm    arm    ''        7
+          build_one arm64  arm64
+          build_one amd64  amd64
+          # And the end-to-end proof that the stamp reached the binary rather than only the command
+          # line: amd64 is the one arch this runner can execute. A -ldflags typo would otherwise
+          # produce a release that still reports (unknown, unknown) with every check above green.
+          idline="$(./wayhop-amd64-pkg/wayhop-amd64 --version)"
+          case "$idline" in
+            *unknown*|*DIRTY*)
+              echo "::error::the built binary reports an untraceable identity: ${idline}"; exit 1 ;;
+          esac
+          echo "release identity: ${idline}"
+          # --- native packages for the release: opkg .ipk (one per OpenWrt CPU-family token) + Entware
+          #     .ipk (one per Entware token), via the SAME pack scripts the signed feed uses, so a
+          #     release .ipk is byte-for-byte a feed .ipk (offline `opkg install ./wayhop_*.ipk`). ---
+          export SOURCE_DATE_EPOCH=0
+          mkdir -p bins pkgs
+          for n in mipsle mips arm arm64 amd64; do cp "wayhop-${n}-pkg/wayhop-${n}" "bins/wayhop-${n}"; done
+          while IFS= read -r line; do
+            case "$line" in ''|\#*) continue ;; esac
+            ow="${line%%|*}"; ew="${line##*|}"
+            # shellcheck disable=SC2086
+            set -- $ow; goname="$1"; shift; owtokens="$*"
+            ewtoken="$(printf '%s' "$ew" | tr -d ' ')"
+            # shellcheck disable=SC2086
+            sh packaging/feed/pack-ipk.sh     "bins/wayhop-$goname" "$WAYHOP_BASE_VERSION" "$WAYHOP_PACKAGE_RELEASE" pkgs/ipk     $owtokens
+            sh packaging/feed/pack-entware.sh "bins/wayhop-$goname" "$WAYHOP_BASE_VERSION" "$WAYHOP_PACKAGE_RELEASE" pkgs/entware "$ewtoken"
+          done < packaging/feed/arch-map.txt
+          find pkgs -name '*.ipk' -exec cp {} dist/ \;
+          echo "packages built:"; ls -1 dist/*.ipk
+          # --- apk (OpenWrt 25.12+) — mandatory, pinned and offline. The release claims apk-only
+          # OpenWrt support, so missing Docker/tools/any architecture is a release failure.
+          command -v docker >/dev/null 2>&1 || { echo "::error::docker is required to build supported apk artifacts"; exit 1; }
+          docker info >/dev/null 2>&1 || { echo "::error::docker daemon is unavailable — apk artifacts were not built"; exit 1; }
+          docker run --rm --network none --read-only --user "$(id -u):$(id -g)" \
+            --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=256m \
+            --env WAYHOP_BASE_VERSION --env WAYHOP_PACKAGE_RELEASE \
+            -v "$PWD:/w:ro" -v "$PWD/pkgs:/out" -w /w "$APK_TOOLS_IMAGE" sh -euc '
+            apk mkpkg --help 2>&1 | grep -q "Usage: apk mkpkg" || { echo "apk-tools v3 mkpkg is unavailable" >&2; exit 3; }
+            v="$WAYHOP_BASE_VERSION"
+            rel="$WAYHOP_PACKAGE_RELEASE"
+            while IFS= read -r line; do
+              case "$line" in ""|\#*) continue ;; esac
+              ow="${line%%|*}"
+              # shellcheck disable=SC2086
+              set -- $ow
+              goname="$1"; shift; owtokens="$*"
+              # shellcheck disable=SC2086
+              sh packaging/feed/pack-apk.sh "bins/wayhop-$goname" "$v" "$rel" /out $owtokens
+            done < packaging/feed/arch-map.txt
+          '
+          sh packaging/feed/verify-apk-feed.sh pkgs packaging/feed/arch-map.txt
+          # GitHub release assets share one flat namespace. Preserve every target instead of copying
+          # thirteen same-named files over each other and publishing only the final architecture.
+          while IFS= read -r line; do
+            case "$line" in ''|\#*) continue ;; esac
+            ow="${line%%|*}"
+            # shellcheck disable=SC2086
+            set -- $ow; shift
+            for tok in "$@"; do
+              cp "pkgs/apk/$tok/wayhop-${WAYHOP_BASE_VERSION}-r${WAYHOP_PACKAGE_RELEASE}.apk" \
+                 "dist/wayhop-${version}-${tok}.apk"
+            done
+          done < packaging/feed/arch-map.txt
+          ( cd dist && for f in *.tar.gz *.ipk *.apk; do [ -e "$f" ] && sha256sum "$f"; done > SHA256SUMS.txt )
+          # Online one-command installer. Unversioned asset name so the copy-paste
+          # `releases/latest/download/bootstrap.sh` one-liner always resolves; kept out
+          # of SHA256SUMS.txt (which lists only the tarballs the bootstrap verifies).
+          cp packaging/bootstrap.sh dist/bootstrap.sh
+          # Build the audited signer before the secret-bearing step starts. The next step receives
+          # the signing secret; this build/package step never does.
+          signer_dir="$(mktemp -d "$RUNNER_TEMP/wayhop-release-signer.XXXXXX")"
+          signer="$signer_dir/usigntool"
+          go build -trimpath -o "$signer" ./packaging/feed/usigntool
+          if [ ! -x "$signer" ] || [ -L "$signer" ]; then
+            echo "::error::release signer build is not a regular executable"; exit 1
+          fi
+          printf 'WAYHOP_RELEASE_SIGNER=%s\nWAYHOP_RELEASE_SIGNER_DIR=%s\n' \
+            "$signer" "$signer_dir" >> "$GITHUB_ENV"
+      - name: Sign and verify release manifest (mandatory)
+        env:
+          # Release and feed currently share this usign key. The public half is committed and
+          # embedded in bootstrap.sh; both representations are compared below before signing.
+          WAYHOP_RELEASE_SIGN_KEY: ${{ secrets.VELINX_USIGN_SEC }}
+        run: |
+          set -euo pipefail
+          [ -n "${WAYHOP_RELEASE_SIGN_KEY:-}" ] || { echo "::error::VELINX_USIGN_SEC is required for an official release"; exit 1; }
+          umask 077
+          key="$(mktemp "$RUNNER_TEMP/wayhop-relsign.XXXXXX")"
+          embedded="$(mktemp "$RUNNER_TEMP/wayhop-release-pub.XXXXXX")"
+          if [ ! -f "$key" ] || [ -L "$key" ] || [ "$(stat -c %a "$key")" != 600 ]; then
+            echo "::error::release signing key file is not a private regular file"; exit 1
+          fi
+          printf 'WAYHOP_RELEASE_KEY_FILE=%s\nWAYHOP_RELEASE_EMBEDDED_FILE=%s\n' \
+            "$key" "$embedded" >> "$GITHUB_ENV"
+          cleanup() { rm -f "$key" "$embedded"; }
+          trap cleanup EXIT
+          trap 'exit 129' HUP
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          printf '%s' "$WAYHOP_RELEASE_SIGN_KEY" > "$key"
+          unset WAYHOP_RELEASE_SIGN_KEY
+
+          # Extract the two-line trust root from the exact bootstrap asset. A future key rotation
+          # must update both files in the same source commit or the release stops here.
+          awk '
+            /^RELEASE_PUBKEY="/ { inside=1; sub(/^RELEASE_PUBKEY="/, "") }
+            inside { if (sub(/"$/, "")) { print; exit }; print }
+          ' dist/bootstrap.sh > "$embedded"
+          [ -s "$embedded" ] || { echo "::error::bootstrap.sh has no embedded release public key"; exit 1; }
+          cmp -s "$embedded" packaging/feed/keys/wayhop.pub || { echo "::error::bootstrap release key differs from the published feed key"; exit 1; }
+
+          "$WAYHOP_RELEASE_SIGNER" sign -sec "$key" -m dist/SHA256SUMS.txt -out dist/SHA256SUMS.txt.sig
+          "$WAYHOP_RELEASE_SIGNER" verify -pub "$embedded" -m dist/SHA256SUMS.txt -sig dist/SHA256SUMS.txt.sig
+          [ -s dist/SHA256SUMS.txt.sig ] || { echo "::error::release signature is empty"; exit 1; }
+          echo "signed and verified SHA256SUMS.txt -> SHA256SUMS.txt.sig (usign/Ed25519)"
+      - name: Remove release signing material
+        if: always()
+        run: |
+          [ -z "${WAYHOP_RELEASE_KEY_FILE:-}" ] || rm -f -- "$WAYHOP_RELEASE_KEY_FILE"
+          [ -z "${WAYHOP_RELEASE_EMBEDDED_FILE:-}" ] || rm -f -- "$WAYHOP_RELEASE_EMBEDDED_FILE"
+      - name: Verify the release is complete (no partial publish)
+        env:
+          WAYHOP_ARTIFACT_VERSION: ${{ steps.source.outputs.artifact_version }}
+          WAYHOP_BASE_VERSION: ${{ steps.source.outputs.base_version }}
+          WAYHOP_PACKAGE_RELEASE: ${{ steps.source.outputs.package_release }}
+        run: |
+          set -euo pipefail
+          version="$WAYHOP_ARTIFACT_VERSION"
+          missing=0
+          for name in mipsle mips arm arm64 amd64; do
+            for suffix in "" "-openwrt"; do
+              f="dist/wayhop-${version}-${name}${suffix}.tar.gz"
+              [ -s "$f" ] || { echo "::error::missing or empty release asset: $f"; missing=1; }
+            done
+          done
+          # The Entware .ipk set is deterministic; requiring all five proves the pack loop ran.
+          for tok in aarch64-3.10 armv7sf-k3.2 mipselsf-k3.4 mips-3.4 x86-64-3.2; do
+            f="dist/wayhop_${WAYHOP_BASE_VERSION}-${WAYHOP_PACKAGE_RELEASE}_${tok}.ipk"
+            [ -s "$f" ] || { echo "::error::missing or empty Entware package: $f"; missing=1; }
+          done
+          while IFS= read -r line; do
+            case "$line" in ''|\#*) continue ;; esac
+            ow="${line%%|*}"
+            # shellcheck disable=SC2086
+            set -- $ow; shift
+            for tok in "$@"; do
+              f="dist/wayhop-${version}-${tok}.apk"
+              [ -s "$f" ] || { echo "::error::missing or empty OpenWrt apk package: $f"; missing=1; }
+            done
+          done < packaging/feed/arch-map.txt
+          for f in dist/SHA256SUMS.txt dist/SHA256SUMS.txt.sig dist/bootstrap.sh; do
+            [ -s "$f" ] || { echo "::error::missing or empty release asset: $f"; missing=1; }
+          done
+          [ "$missing" = 0 ] || { echo "release is INCOMPLETE — refusing to publish"; exit 1; }
+          "$WAYHOP_RELEASE_SIGNER" verify -pub packaging/feed/keys/wayhop.pub \
+            -m dist/SHA256SUMS.txt -sig dist/SHA256SUMS.txt.sig
+          ( cd dist && sha256sum -c SHA256SUMS.txt )
+          echo "all required assets present:"; ls -1 dist
+      - name: Remove release signer
+        if: always()
+        run: |
+          [ -z "${WAYHOP_RELEASE_SIGNER:-}" ] || rm -f -- "$WAYHOP_RELEASE_SIGNER"
+          [ -z "${WAYHOP_RELEASE_SIGNER_DIR:-}" ] || rmdir -- "$WAYHOP_RELEASE_SIGNER_DIR"
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          assets=(dist/*.tar.gz dist/*.ipk dist/*.apk dist/SHA256SUMS.txt dist/SHA256SUMS.txt.sig dist/bootstrap.sh)
+          gh release create "${GITHUB_REF_NAME}" "${assets[@]}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "WayHop ${GITHUB_REF_NAME}" \
+            --generate-notes

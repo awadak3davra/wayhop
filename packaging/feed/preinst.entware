@@ -1,0 +1,5 @@
+#!/bin/sh
+# Entware/opkg pre-install. Nothing to refuse: the daemon imports whatever applied state it finds on
+# first start (a previous-generation apply ledger, or the pre-ledger applied snapshot) and otherwise
+# owns nothing until the next Apply. Kept so the packaged control set keeps its shape.
+exit 0
