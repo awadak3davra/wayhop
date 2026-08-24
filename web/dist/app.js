@@ -4295,11 +4295,21 @@ function dnsRuleRow(r, i) {
     .concat(r.domain_suffix || [], r.geosite || [], (r.query_type || []).map(q => "type:" + q));
   const match = parts.length ? parts.join(", ") : t("(no match)");
   return el("div", { class: "dns-rule" },
-    orderControls(i, dnsState.rules.length, "DNS rule " + match, async (from, to) => {
-      const prev = dnsState.rules.slice();
-      dnsState.rules = moveInArray(dnsState.rules, from, to);
-      try { await dnsPut(); route(); }
-      catch (e) { dnsState.rules = prev; dnsWriteFailed(e); }
+    // Serialize through dnsSaveChain for the reason the rule editor states: a bare PUT here
+    // races a concurrent save. Rule ORDER is meaning - sing-box takes the first match - and
+    // two quick arrow clicks sent two writes stamped with the same rev, so the second was
+    // refused as stale and rolled back to a snapshot the first had already superseded: the
+    // panel showed one order while the router enforced another. Mutating INSIDE the chain
+    // operates on the latest state, and adopting r.dns keeps this path identical to every
+    // other DNS write.
+    orderControls(i, dnsState.rules.length, "DNS rule " + match, (from, to) => {
+      dnsSaveChain = dnsSaveChain.then(async () => {
+        const prev = dnsState.rules.slice();
+        dnsState.rules = moveInArray(dnsState.rules, from, to);
+        try { const r = await dnsPut(); if (r && r.dns) dnsState = r.dns; route(); }
+        catch (e) { dnsState.rules = prev; dnsWriteFailed(e); }
+      });
+      return dnsSaveChain;
     }),
     // Match and destination are siblings, not nested, so the row is one grid line instead of two.
     // The old two-column grid held three children, which pushed the order controls onto a row of

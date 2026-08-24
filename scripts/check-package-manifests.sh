@@ -177,6 +177,10 @@ done
 
 # --- a firmware sysupgrade must not take the config with it -------------------------------------
 want pack-ipk.sh 'ipk: ships the sysupgrade keep entry' 'lib/upgrade/keep.d'
+# ...and refuses to build without it: the else-branch below catches the file going missing from
+# the REPO, but only the packer itself can catch it missing from a build context (a partial
+# checkout, a tarball build) - pack-apk has failed closed all along, pack-ipk now matches.
+want pack-ipk.sh 'ipk: refuses to build without the keep list' 'keep file not found'
 if [ -f "$ROOT/packaging/openwrt/wayhop.keep" ]; then
   if grep -q '/etc/wayhop' "$ROOT/packaging/openwrt/wayhop.keep"; then
     ok_ 'the keep list names the config directory'

@@ -80,7 +80,7 @@ const RULES = path.join(ROOT, 'publish', 'scrub-rules.json');
 // private address has no shape that distinguishes one household from another. Thirty replacement
 // rules were added at once, so the coverage over published Go source moved accordingly. The lesson
 // this pin records: a scrub list grows by being ATTACKED, not by being reviewed.
-const EXPECTED_GO_COVERAGE_SHA256 = '7f8c6f3d85c9e26051fca2dd7e7f8b264b08f099d825e677da23fb91df458212';
+const EXPECTED_GO_COVERAGE_SHA256 = '7543c3742f34aa0ff1b3abff0b330b33c7af6ef5721a1955870ad761f896f40a';
 // K5 intentionally retired seven more personal-device-derived Keenetic migration/cutover Go files.
 // Their scrub matches disappeared with the code; pin the reduced subject so any further loss fails.
 const MIN_REWRITTEN_GO_FILES = 108;

@@ -171,13 +171,19 @@ func (r *Runner) Tick(groups []GroupSpec, hs HealthSource, sel Selector, now int
 		// Decide over the FLAP-DAMPED view (a chronically-flapping member is hidden from selection),
 		// but judge EMERGENCY from the raw health — a flappy-but-currently-alive incumbent isn't a
 		// dead-exit emergency, so moving off it stays a graceful, hold-gated, drain-not-cut switch.
+		// ONE verdict about the incumbent, used by Decide (min-dwell gating) and by the
+		// hold/drain branch below. Two verdicts is how the suppressed-but-alive incumbent
+		// bypassed min-dwell: Decide derived "dead" from the damped view while this loop
+		// derived "alive" from the raw one.
+		rawCurrentAlive := !(currentDeadOrEmpty(from, health) || r.currentEjected(from, now))
 		desired, reason, changed := Decide(DecideInput{
-			Policy:     g.Policy,
-			Members:    r.filteredHealth(health, now, recorded),
-			Current:    from,
-			LastSwitch: r.lastSwitch[g.ID],
-			Now:        now,
-			Cfg:        g.Cfg,
+			Policy:          g.Policy,
+			Members:         r.filteredHealth(health, now, recorded),
+			Current:         from,
+			LastSwitch:      r.lastSwitch[g.ID],
+			Now:             now,
+			Cfg:             g.Cfg,
+			CurrentRawAlive: &rawCurrentAlive,
 		})
 		if !changed {
 			delete(r.pending, g.ID) // the want went away — reset any in-progress failback hold
@@ -188,7 +194,7 @@ func (r *Runner) Tick(groups []GroupSpec, hs HealthSource, sel Selector, now int
 		// traffic-dead exit we must move off IMMEDIATELY (bypass the failback hold) and hard-cut its
 		// flows, NOT treat as a graceful hold-gated failback. Plain flap-suppression via the damper stays
 		// a graceful failback (per the note above); only genuine real-traffic failure escalates here.
-		emergency := currentDeadOrEmpty(from, health) || r.currentEjected(from, now)
+		emergency := !rawCurrentAlive
 		// Failback dampening: a switch AWAY from a still-healthy member (a failback to a preferred
 		// member, or a latency optimization) must stay wanted for Config.FailbackHold before it
 		// commits, so a member that recovers then flaps can't repeatedly steal traffic back. An

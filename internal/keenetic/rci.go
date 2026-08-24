@@ -149,6 +149,14 @@ func (c *RCIClient) ParseBatch(ctx context.Context, cmds []string) ([]byte, erro
 // returns its data (no error-status). Only status=="error" entries are reported (warnings /
 // ok / message are ignored).
 func rciErrors(raw []byte) []string {
+	// Malformed JSON is not an all-clear. statusErrors returns nil when it cannot unmarshal, which is
+	// right for a VALID result whose shape it does not recognise (a successful command returns its own
+	// data), and wrong for a body that is not JSON at all: a truncated or garbled response then read
+	// as "no command errors" and Apply reported success for commands it never saw the verdict on.
+	// json.Valid separates the two exactly - unexpected-but-valid shapes still pass through silently.
+	if !json.Valid(raw) {
+		return []string{fmt.Sprintf("the router returned an unreadable response (%d bytes); the commands may or may not have applied", len(raw))}
+	}
 	var arr []json.RawMessage
 	if json.Unmarshal(raw, &arr) == nil { // batch: one result per command
 		var out []string
@@ -214,9 +222,18 @@ func (c *RCIClient) do(ctx context.Context, method, path string, body []byte) ([
 		}
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, maxRCIBody))
+	b, readErr := io.ReadAll(io.LimitReader(resp.Body, maxRCIBody))
 	if resp.StatusCode != http.StatusOK {
+		// Whatever arrived before the read broke still names the refusal better than nothing, so the
+		// non-OK path keeps reporting the partial text rather than the read error.
 		return nil, fmt.Errorf("rci %s %s: status %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	// A body that stopped arriving mid-response is NOT a successful call. The error used to be
+	// discarded, and the truncated JSON then fell through rciErrors as "no command errors" - so a
+	// rejected firewall command, whose 200 error body was cut short, reported success and Apply
+	// believed an object existed that the router never created.
+	if readErr != nil {
+		return nil, fmt.Errorf("rci %s %s: reading the response failed after %d bytes: %w", method, path, len(b), readErr)
 	}
 	return b, nil
 }

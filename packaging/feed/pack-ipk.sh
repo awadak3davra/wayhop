@@ -26,10 +26,12 @@ install -m0755 "$INIT" "$work/data/etc/init.d/wayhop"
 install -m0755 "$HARDEN" "$work/data/usr/libexec/wayhop/harden-state.sh"
 # Keep the saved config/connections across a firmware sysupgrade (the binary is wiped from the
 # overlay and reinstalled from the feed; /etc/wayhop must survive). OpenWrt reads /lib/upgrade/keep.d.
-if [ -f "$HERE/../openwrt/wayhop.keep" ]; then
-  mkdir -p "$work/data/lib/upgrade/keep.d"
-  install -m0644 "$HERE/../openwrt/wayhop.keep" "$work/data/lib/upgrade/keep.d/wayhop"
-fi
+# Fail-closed like pack-apk.sh, not if-present: this comment says "must survive", and a soft branch
+# quietly built a package whose first firmware flash deletes the config, connections and keys.
+KEEP="$HERE/../openwrt/wayhop.keep"
+[ -f "$KEEP" ] || { echo "pack-ipk: keep file not found: $KEEP (without it a sysupgrade deletes /etc/wayhop)" >&2; exit 1; }
+mkdir -p "$work/data/lib/upgrade/keep.d"
+install -m0644 "$KEEP" "$work/data/lib/upgrade/keep.d/wayhop"
 # PROTECTION-BY-OMISSION CONTRACT: the payload must NEVER ship /etc/wayhop. opkg only touches
 # files a package owns, so keeping the config tree OUT of the package is what makes upgrades and
 # removes unable to clobber user config (postinst SEEDS a config when absent instead). This guard

@@ -328,9 +328,37 @@ func TestExactKeeneticAdapterSaveFailureIsRedacted(t *testing.T) {
 	if !errors.Is(err, errExactKeeneticApply) || strings.Contains(err.Error(), "sensitive") {
 		t.Fatalf("error = %v", err)
 	}
+	// This test used to demand a teardown here, and that demand encoded the bug: persist runs only
+	// after the postcheck proved the datapath, its caller keeps the revision as a live unsaved
+	// window with "use Keep to retry", and Keep retries persist - which cannot succeed against a
+	// target the previous attempt tore down. A failed `system configuration save` means flash
+	// failed, not the datapath: the target must SURVIVE so the promised retry can work.
+	if len(runner.batches) != 2 {
+		t.Fatalf("save failure batches = %#v; want commit+save only, target left running", runner.batches)
+	}
 	wantCleanup := keenetic.TeardownCommands(target.Keenetic)
-	if len(runner.batches) != 3 || !reflect.DeepEqual(runner.batches[2], wantCleanup) {
-		t.Fatalf("save failure batches = %#v; want cleanup %#v", runner.batches, wantCleanup)
+	for _, batch := range runner.batches {
+		if reflect.DeepEqual(batch, wantCleanup) {
+			t.Fatal("a failed save tore down the verified live target")
+		}
+	}
+}
+
+// The read that guards the save is plumbing, not drift: when it fails, nothing is known to be
+// wrong with the running datapath, so nothing may be torn down and no save may be attempted.
+func TestExactKeeneticAdapterPersistReadFailureLeavesTargetRunning(t *testing.T) {
+	runner := &exactKeeneticRecordRunner{}
+	adapter, _ := newExactKeeneticNativeAdapter(runner)
+	target := exactKeeneticTestTarget()
+	adapter.readConfig = func(context.Context) (string, error) {
+		return "", errors.New("PRIVATE transient read failure")
+	}
+	err := adapter.persist(context.Background(), exactKeeneticReconciliation(target, nil))
+	if !errors.Is(err, errExactKeeneticApply) || strings.Contains(err.Error(), "PRIVATE") {
+		t.Fatalf("error = %v", err)
+	}
+	if len(runner.batches) != 0 {
+		t.Fatalf("a transient pre-save read failure mutated the router: %#v", runner.batches)
 	}
 }
 

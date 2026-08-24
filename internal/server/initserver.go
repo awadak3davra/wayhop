@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -392,20 +393,42 @@ func (s *Server) provisionDemo(job *initserver.Job, b provisionReq) string {
 	return sb.String()
 }
 
+// saveProvisionedServer records or refreshes the saved server. Two things it must not do, both
+// learned here: merge OUTSIDE the store lock, and swallow the write error.
+//
+// The merge used to be Get -> mergeStrings -> Upsert with the store unlocked in between, so two
+// jobs provisioning different protocols on the same host both read the old list and the later
+// Upsert dropped the other one's protocol - the servers list then under-claimed what is installed.
+// Patch does the same read-modify-write INSIDE the store mutex, with the persist-then-commit and
+// deep-clone the store already implements.
+//
+// And a discarded error was the job handing back a server_id for a record that does not exist:
+// the store persists before it commits, so a failed write leaves the server missing from disk AND
+// memory, while the panel offers to harden a server it cannot resolve. Say so instead.
 func (s *Server) saveProvisionedServer(job *initserver.Job, b provisionReq, installedProtos []string) {
 	id := serverIDFor(b)
-	existing, ok := s.servers.Get(id)
-	merged := mergeStrings(existing.Installed, installedProtos)
-	sv := serverstore.Server{
-		ID: id, Name: util.FirstNonEmpty(b.Name, existing.Name, b.Host),
-		Host: b.Host, Port: b.Port, User: b.User,
-		Installed: merged, Hardened: existing.Hardened, Note: existing.Note,
-		CreatedAt: util.FirstNonEmpty(existing.CreatedAt, time.Now().UTC().Format(time.RFC3339)), LastJob: job.ID(),
+	name := util.FirstNonEmpty(b.Name, b.Host)
+	err := s.servers.Patch(id, func(sv *serverstore.Server) {
+		sv.Name = util.FirstNonEmpty(b.Name, sv.Name, b.Host)
+		sv.Host, sv.Port, sv.User = b.Host, b.Port, b.User
+		sv.Installed = mergeStrings(sv.Installed, installedProtos)
+		sv.LastJob = job.ID()
+		name = sv.Name
+	})
+	if errors.Is(err, serverstore.ErrNotFound) {
+		sv := serverstore.Server{
+			ID: id, Name: name, Host: b.Host, Port: b.Port, User: b.User,
+			Installed: mergeStrings(nil, installedProtos),
+			CreatedAt: time.Now().UTC().Format(time.RFC3339), LastJob: job.ID(),
+		}
+		if err = s.servers.Upsert(sv); err == nil {
+			job.Logf("saved “%s” to your servers list", sv.Name)
+		}
 	}
-	if !ok {
-		job.Logf("saved “%s” to your servers list", sv.Name)
+	if err != nil {
+		job.Fail("could not save this server to your servers list",
+			"The connections were imported and work; only the servers-list entry failed to write. Check free space on the router, then add the server again from Servers.")
 	}
-	_ = s.servers.Upsert(sv)
 }
 
 // ---- hardening (key install, then gated password lockdown) ----
@@ -545,7 +568,12 @@ func (s *Server) runLockdown(job *initserver.Job, b hardenReq) {
 		return
 	}
 	job.OK("password auth disabled, pubkey enforced")
-	_ = s.servers.Patch(b.ServerID, func(sv *serverstore.Server) { sv.Hardened = true; sv.LastJob = job.ID() })
+	// The lockdown ALREADY happened on the server; only its record can still fail. A discarded error
+	// here left the panel showing the box as un-hardened while password login was in fact disabled -
+	// the operator reads a security state that is not the one in force. The job still succeeded.
+	if err := s.servers.Patch(b.ServerID, func(sv *serverstore.Server) { sv.Hardened = true; sv.LastJob = job.ID() }); err != nil {
+		job.Logf("note: password auth IS disabled on the server, but recording it in your servers list failed (%v) - the entry may still show “not hardened”", err)
+	}
 	job.Finish(true, map[string]any{"hardened": true})
 }
 

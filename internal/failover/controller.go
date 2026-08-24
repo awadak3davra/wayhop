@@ -72,6 +72,15 @@ type DecideInput struct {
 	LastSwitch int64          // unix ms of the last committed switch (0 if never)
 	Now        int64          // unix ms
 	Cfg        Config
+	// CurrentRawAlive, when set, replaces the Members-derived aliveness of Current in the
+	// EMERGENCY classification only. Members may be a flap-damped view that hides a
+	// suppressed-but-alive incumbent from SELECTION; without this override that hiding also
+	// reclassified the move OFF that incumbent as an emergency, and min-dwell - which exists
+	// precisely to pace graceful moves - was skipped for the one member the damper was trying
+	// to leave gently. The caller passes its own verdict (raw health, minus outlier ejection,
+	// which must stay immediate); selection still reads Members. nil keeps the old derivation
+	// for single-view callers and tests.
+	CurrentRawAlive *bool
 }
 
 func (in DecideInput) memberAlive(id string) (alive bool, latency int, present bool) {
@@ -156,6 +165,9 @@ func Decide(in DecideInput) (desired, reason string, changed bool) {
 		return in.Current, why, false
 	}
 	curAlive, _, _ := in.memberAlive(in.Current)
+	if in.CurrentRawAlive != nil {
+		curAlive = *in.CurrentRawAlive
+	}
 	emergency := in.Current == "" || !curAlive
 	if !emergency && in.LastSwitch > 0 && in.Now-in.LastSwitch < in.Cfg.minDwell() {
 		return in.Current, "held (min-dwell)", false

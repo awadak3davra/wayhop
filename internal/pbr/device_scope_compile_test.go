@@ -155,3 +155,74 @@ func TestCompileExceptEmptyGroupRoutesAll(t *testing.T) {
 		t.Errorf("except-empty must be an UNSCOPED route-all zone, got SrcScoped=%v SrcNegate=%v", z.SrcScoped, z.SrcNegate)
 	}
 }
+
+// A device-scoped zone with NO destination CIDRs must still honour "except". This is a RENDERING
+// gate rather than a compile one because the two sides were tested apart: the compiler set
+// SrcNegate correctly and the renderer dropped it, so a list saying "everyone except the kids"
+// marked ONLY the kids - the exact inverse, while the panel showed what the operator intended.
+// Both directions come from ONE plan so the DIFFERENCE is the subject: a ruleset that reads the
+// same with and without the flag is the bug, whatever else it contains.
+func TestRenderNft_SourceOnlyZoneHonoursExcept(t *testing.T) {
+	render := func(negate bool) string {
+		pl := &Plan{
+			Table: "wayhop_pbr", Mask: 0xff0000,
+			Zones: []Zone{{
+				Name: "kids", Mark: 0x20000,
+				SrcV4: []string{"192.168.50.10/32"}, SrcScoped: true, SrcNegate: negate,
+			}},
+		}
+		return pl.RenderNft()
+	}
+	plain, except := render(false), render(true)
+	if !strings.Contains(plain, "saddr @kids_s4") {
+		t.Fatalf("plain zone rendered no source rule:%s%s", " ", plain)
+	}
+	if plain == except {
+		t.Errorf("an except zone renders identically to a plain one - the negation is lost")
+	}
+	if strings.Contains(plain, "!=") {
+		t.Errorf("a plain zone must not negate its source:%s%s", " ", plain)
+	}
+	if !strings.Contains(except, "saddr != @kids_s4") {
+		t.Errorf("an except zone must mark every source NOT in the set:%s%s", " ", except)
+	}
+}
+
+// A dest the user NAMED but this plane cannot carry must remove the rule/list from the kernel
+// plane, never widen it. Before the guards, "block youtube.com for this MAC" (a rule) and a
+// scoped domain-only list both compiled into destination-less source-only zones - a device-wide
+// block/route the operator never asked for, with the panel showing the domain form. The two
+// paths lose the dest differently (rules drop Domain* fields with a warning; lists classify
+// names out inside addZone), so both are pinned here.
+func TestCompile_DomainOnlyDestNeverBecomesCatchAll(t *testing.T) {
+	// Rule path: source matcher + domain-only dest, domains not collected on this plane.
+	p := &model.Profile{
+		Endpoints: []model.Endpoint{{ID: "tunnel-a", Engine: model.EngineExternal, Server: "198.51.100.20", Enabled: true, Params: map[string]any{"interface": "awg1"}}},
+		Rules:     []model.Rule{{ID: "kid-yt", SourceMAC: []string{"aa:bb:cc:dd:ee:ff"}, DomainSuffix: []string{"youtube.com"}, Outbound: model.OutboundBlock}},
+	}
+	plan, _, err := Compile(p, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, z := range plan.Zones {
+		if z.SrcScoped && len(z.V4) == 0 && len(z.V6) == 0 && len(z.Domains) == 0 {
+			t.Fatalf("domain-only rule compiled into a destination-less zone %q - a device-wide catch-all", z.Name)
+		}
+	}
+
+	// List path: device-scoped, manual entries are all names, CollectDomainZones off.
+	p2 := &model.Profile{
+		Endpoints:    []model.Endpoint{{ID: "tunnel-a", Engine: model.EngineExternal, Server: "198.51.100.20", Enabled: true, Params: map[string]any{"interface": "awg1"}}},
+		DeviceGroups: []model.DeviceGroup{{ID: "kids", Name: "Kids", Members: []model.DeviceMember{{MAC: "aa:bb:cc:dd:ee:ff"}}}},
+		RoutingLists: []model.RoutingList{{ID: "yt", Name: "YT", Manual: []string{"youtube.com"}, Outbound: model.OutboundBlock, Enabled: true, ScopeMode: "only", ScopeGroups: []string{"kids"}}},
+	}
+	plan2, _, err := Compile(p2, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, z := range plan2.Zones {
+		if z.SrcScoped && len(z.V4) == 0 && len(z.V6) == 0 && len(z.Domains) == 0 {
+			t.Fatalf("scoped domain-only list compiled into a destination-less zone %q", z.Name)
+		}
+	}
+}

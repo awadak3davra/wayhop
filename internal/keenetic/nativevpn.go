@@ -152,6 +152,17 @@ func WireguardCommands(e model.Endpoint, o WireguardOpts) ([]string, error) {
 	return c, nil
 }
 
+// AWGObfuscationDropped reports that this endpoint is configured as AmneziaWG but its 9-arg
+// obfuscation base is incomplete, so the rendered interface carries NO `wireguard asc` line and the
+// router runs it as plain WireGuard. Dropping the line is right for a WG endpoint - it has no such
+// params - but for an AWG one it is a DOWNGRADE, and it used to happen in silence: the panel showed
+// AmneziaWG with the boxes the operator filled in, the router ran an unobfuscated tunnel. Against an
+// AmneziaWG peer that simply never answers; against a plain-WG peer it works, and the operator
+// believes they have obfuscation they do not have.
+func AWGObfuscationDropped(e model.Endpoint) bool {
+	return e.Engine == model.EngineAmneziaWG && ascArgs(e.Params) == ""
+}
+
 // ascArgs builds the `wireguard asc` argument string from the model's obfuscation params,
 // or "" when the 9-arg base is incomplete (a plain WireGuard endpoint → no asc line).
 func ascArgs(p map[string]any) string {

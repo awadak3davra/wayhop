@@ -315,6 +315,12 @@ function openRoutingList(rl) {
     // zeroing it when cidr_source is empty would destroy a Source-only list's custom interval on
     // any edit — and omitting it entirely lets the whole-struct Upsert zero it (the original bug).
     body.refresh_hours = parseInt(cidrHours.value, 10) || 0;
+    // Preserve the domain feed on edit for the same reason, with a sharper consequence. The form
+    // has no input for domain_source, and the store reads a MISSING one as a CHANGED one: it then
+    // drops domain_cache and domain_refreshed along with it. So renaming a list, or changing its
+    // outbound, used to delete both the feed URL and every domain it had fetched — the list stayed
+    // in the panel and quietly stopped matching anything, with nothing left to refill it.
+    if (rl.domain_source) body.domain_source = rl.domain_source;
     // Preserve the explicit rule-set format on edit — the form has no input for it, so
     // dropping it makes a list whose URL extension doesn't reveal the format (a .json
     // source, or a query-string URL) silently re-infer wrong and fail to load. Catalog

@@ -2505,6 +2505,71 @@ globalThis.pi = pluralIndex; globalThis.tn = tn;`, context);
     'and the result still names the path the server actually used');
 }
 
+// DNS rule ORDER is meaning - sing-box takes the first match - so a reorder is a real config write.
+// Both copies of the row (app.js and the page-dns chunk) used to PUT directly, outside the
+// dnsSaveChain every other DNS write goes through. Replayed against a rev-checking double, two quick
+// arrow clicks left the panel showing C,A,B while the server held A,C,B: both writes carried the
+// same rev, the second was refused as stale, and its rollback restored a snapshot the first had
+// already superseded. Serializing converges both; this pins that neither copy regresses to a bare PUT.
+{
+  for (const [name, src] of [['app.js', app], ['page-dns.js', dns]]) {
+    const at = src.indexOf('"DNS rule " + match');
+    check(at > 0, `${name}: the DNS rule row still carries an order control`);
+    if (at < 0) continue;
+    const handler = src.slice(at, at + 700);
+    check(/dnsSaveChain = dnsSaveChain\.then/.test(handler),
+      `${name}: the DNS reorder serializes through dnsSaveChain instead of racing a concurrent save`);
+    check(!/try \{ await dnsPut\(\); route\(\); \}/.test(handler),
+      `${name}: the DNS reorder no longer PUTs directly from the click handler`);
+    check(/if \(r && r\.dns\) dnsState = r\.dns/.test(handler),
+      `${name}: the DNS reorder adopts the server echo like every other DNS write`);
+  }
+}
+// Pasting a second link before the first parse answers must not resurrect the first. /api/import
+// can answer out of order, and the late answer used to overwrite the newer confirmation form -
+// Save then wrote the endpoint from link A while the textarea above it still read link B. Both
+// exits need the guard: the success path (a stale form) and the error path (a stale error
+// replacing a good form). Same shape as the router's routeGen.
+{
+  const parse = conns.slice(conns.indexOf('async function parse()'), conns.indexOf('async function parse()') + 4200);
+  check(parse.length > 100, 'the paste tab still has a parse function');
+  check(/const gen = \+\+parseGen/.test(parse),
+    'each paste parse takes a generation number');
+  const guards = (parse.match(/gen !== parseGen/g) || []).length;
+  check(guards >= 2,
+    'both the success and the error path discard a superseded parse', `guards=${guards}`);
+}
+// Adding a connection by hand for a host that already has one used to overwrite it in silence: the
+// id is protocol+server+port and POST /api/endpoints is an UPSERT, so the manual tab replaced the
+// old keys and still toasted "Added". The paste tab had grown a confirm-first check; the manual tab
+// posted blind. Both now call ONE helper, so they cannot drift apart again - that is what is pinned
+// here: the helper exists, both save handlers go through it, and neither posts unguarded.
+{
+  const add = conns.slice(conns.indexOf('function openAddConnection()'));
+  check(/async function confirmEndpointReplace\(e\)/.test(add),
+    'one helper owns the "this id already exists" check');
+  const calls = (add.match(/await confirmEndpointReplace\(e\)/g) || []).length;
+  check(calls === 2, 'both the paste tab and the manual tab ask before overwriting', `calls=${calls}`);
+  const manual = add.slice(add.indexOf('function manualTab()'), add.indexOf('function subTab()'));
+  check(/confirmEndpointReplace/.test(manual),
+    'the manual tab specifically no longer posts an endpoint blind');
+  check(/replacing \? t\("Replaced \{0\}"/.test(manual),
+    'and it reports a replacement as a replacement, not as "Added"');
+}
+// The routing-list editor submits the WHOLE struct, and the store reads a missing domain_source as
+// a CHANGED one - which also drops domain_cache and domain_refreshed. The form has no input for the
+// domain feed, so renaming a list, or changing its outbound, deleted the feed URL and every domain
+// it had fetched: the list stayed in the panel and quietly stopped matching anything. The editor
+// must carry the field through, exactly as it already does for cidr_source and format.
+{
+  const routing = fs.readFileSync('web/dist/page-routing.js', 'utf8');
+  const save = routing.slice(routing.indexOf('async function save(btn)'), routing.indexOf('async function save(btn)') + 3000);
+  check(save.length > 100, 'the routing-list editor still has a save function');
+  check(/body\.domain_source = rl\.domain_source|body\.domain_source =/.test(save),
+    'the list editor carries the domain feed through an edit instead of erasing it');
+  check(/body\.cidr_source = cidrSrc\.value\.trim\(\)/.test(save),
+    'and still carries the CIDR feed, the sibling this was modelled on');
+}
 if (failures.length) {
   console.error(`interaction regressions FAILED (${failures.length}/${checks}):\n  - ${failures.join('\n  - ')}`);
   process.exit(1);
