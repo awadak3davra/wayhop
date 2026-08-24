@@ -99,6 +99,11 @@ func (s *Store) Get(id string) (Server, bool) {
 // (e.g. a full overlay / EROFS) the in-memory list is left untouched, so it can
 // never diverge from disk — a "saved" record that exists only in RAM and vanishes
 // on reboot, or a still-present record reads claim was deleted.
+// ErrNotFound reports that no stored server carries the requested id. Callers that must tell
+// "this record does not exist yet" apart from "the write to disk failed" match on it: the two
+// demand opposite responses - create it, versus tell the operator their change did not persist.
+var ErrNotFound = errors.New("server not found")
+
 func (s *Store) Upsert(sv Server) error {
 	if sv.ID == "" {
 		return errors.New("server id is required")
@@ -148,7 +153,7 @@ func (s *Store) Patch(id string, fn func(*Server)) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("server %q not found", id)
+	return fmt.Errorf("server %q: %w", id, ErrNotFound)
 }
 
 // Delete removes a server by id.
@@ -167,7 +172,7 @@ func (s *Store) Delete(id string) error {
 		cand = append(cand, sv)
 	}
 	if !found {
-		return fmt.Errorf("server %q not found", id)
+		return fmt.Errorf("server %q: %w", id, ErrNotFound)
 	}
 	if err := s.saveLocked(cand); err != nil {
 		return err

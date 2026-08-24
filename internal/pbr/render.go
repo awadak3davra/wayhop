@@ -223,12 +223,17 @@ func (pl *Plan) RenderNft() string {
 		// everything) — a SrcScoped zone always has at least one matcher, but guard regardless.
 		if len(z.V4) == 0 && len(z.V6) == 0 && z.SrcScoped {
 			wrote := false
+			// neg belongs here for the same reason it belongs on the dest lines above: an
+			// "except" zone marks every source NOT in the set. Without it a source-only zone
+			// rendered the exact inverse of what the operator asked for - "route everyone
+			// except the kids" routed ONLY the kids, and a blocking list blocked precisely the
+			// devices meant to be left alone. The screen said one thing, the kernel did the other.
 			if len(z.SrcV4) > 0 {
-				fmt.Fprintf(&b, "\t\t%sip saddr @%s_s4 %s\n", pre, z.Name, pl.markSet(z.Mark))
+				fmt.Fprintf(&b, "\t\t%sip saddr %s@%s_s4 %s\n", pre, neg, z.Name, pl.markSet(z.Mark))
 				wrote = true
 			}
 			if len(z.SrcV6) > 0 {
-				fmt.Fprintf(&b, "\t\t%sip6 saddr @%s_s6 %s\n", pre, z.Name, pl.markSet(z.Mark))
+				fmt.Fprintf(&b, "\t\t%sip6 saddr %s@%s_s6 %s\n", pre, neg, z.Name, pl.markSet(z.Mark))
 				wrote = true
 			}
 			if !wrote && pre != "" {

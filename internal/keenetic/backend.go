@@ -170,6 +170,25 @@ func Compile(p *model.Profile, opt CompileOptions) (*Plan, error) {
 	// 1) Native VPN endpoints → interface command blocks; non-native ones are collected for
 	// the sing-box fallback below.
 	var bypass []string
+	// kernelBypassOrWarn records e.Server as an anti-loop ISP route when it is an IP literal.
+	// A hostname cannot become a route here - Compile is pure and must not resolve names - and
+	// for a long time the adopted branch claimed a nonexistent ExtraBypass option covered that
+	// case; nothing did. A kernel-routed endpoint with a hostname server therefore had NO
+	// planned bypass, and a broad list routed through it could steer the tunnel's own handshake
+	// into itself. The honest contract is a review-visible warning: the operator owns that
+	// route. An EMPTY server stays silent - an adopted external tunnel may have its peer
+	// managed entirely by NDM, where reachability is the router's own concern.
+	kernelBypassOrWarn := func(e *model.Endpoint) {
+		if ip, err := netip.ParseAddr(e.Server); err == nil {
+			bypass = append(bypass, ip.String())
+			return
+		}
+		if e.Server != "" {
+			plan.Warnings = append(plan.Warnings, fmt.Sprintf(
+				"endpoint %q: server %q is a hostname, so its anti-loop bypass route cannot be planned; make sure the peer stays reachable outside the tunnel",
+				e.ID, e.Server))
+		}
+	}
 	var nonNative []*model.Endpoint
 	for i := range p.Endpoints {
 		e := &p.Endpoints[i]
@@ -190,9 +209,7 @@ func Compile(p *model.Profile, opt CompileOptions) (*Plan, error) {
 				return nil, fmt.Errorf("adopted endpoint %q has no NDM interface name for its routes", e.ID)
 			}
 			plan.IfaceFor[e.ID] = target
-			if ip, err := netip.ParseAddr(e.Server); err == nil { // anti-loop (External may have no Server → ExtraBypass covers it)
-				bypass = append(bypass, ip.String())
-			}
+			kernelBypassOrWarn(e) // anti-loop: adopted peer IP → ISP, or a review warning for a hostname
 			continue
 		}
 		if !nativeIface(e) {
@@ -209,12 +226,15 @@ func Compile(p *model.Profile, opt CompileOptions) (*Plan, error) {
 		if err != nil {
 			return nil, fmt.Errorf("native endpoint %q: %w", e.ID, err)
 		}
+		if AWGObfuscationDropped(*e) {
+			plan.Warnings = append(plan.Warnings, fmt.Sprintf(
+				"endpoint %q: the AmneziaWG obfuscation set is incomplete (jc, jmin, jmax, s1, s2 and h1-h4 are all required), so this interface is configured as PLAIN WireGuard - an AmneziaWG peer will not answer it",
+				e.ID))
+		}
 		plan.IfaceFor[e.ID] = fmt.Sprintf("Wireguard%d", idx)
 		occupied[plan.IfaceFor[e.ID]] = true
 		plan.Interfaces = append(plan.Interfaces, cmds)
-		if ip, err := netip.ParseAddr(e.Server); err == nil { // anti-loop: peer endpoint IP → ISP
-			bypass = append(bypass, ip.String())
-		}
+		kernelBypassOrWarn(e) // anti-loop: peer endpoint IP → ISP, or a review warning for a hostname
 		idx++
 		metric += 25
 	}

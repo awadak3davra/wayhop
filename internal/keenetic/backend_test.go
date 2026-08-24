@@ -605,3 +605,94 @@ func TestCompile_DefaultRuleRefusesWithoutObservedPriorities(t *testing.T) {
 		t.Fatal("a native default route was compiled with no observed global priorities")
 	}
 }
+
+// A kernel-routed endpoint whose server is a hostname gets NO planned anti-loop bypass - Compile
+// is pure and cannot resolve names - and for a long time the adopted branch claimed a nonexistent
+// ExtraBypass option covered it. The contract now is a review-visible warning, one per hostname
+// endpoint, on BOTH kernel paths (adopted and native); an IP-literal server keeps its bypass and
+// warns nothing.
+func TestCompile_HostnameServerWarnsMissingBypass(t *testing.T) {
+	profile := &model.Profile{Endpoints: []model.Endpoint{
+		{ID: "adopted-host", Engine: model.EngineExternal, Server: "vpn.example.com", Enabled: true,
+			Params: map[string]any{"interface": "awg1"}},
+		{ID: "native-host", Engine: model.EngineAmneziaWG, Server: "peer.example.net", Port: 51820, Enabled: true,
+			Params: map[string]any{"private_key": "aGVsbG8td29ybGQtaGVsbG8td29ybGQtaGVsbG8tMTI=",
+				"peer_public_key": "aGVsbG8td29ybGQtaGVsbG8td29ybGQtaGVsbG8tMTI=", "address": "10.99.0.2/32"}},
+		{ID: "literal", Engine: model.EngineExternal, Server: "198.51.100.7", Enabled: true,
+			Params: map[string]any{"interface": "awg2"}},
+	}}
+	plan, err := Compile(profile, CompileOptions{
+		AdoptInterfaces: map[string]string{"adopted-host": "nwg1", "literal": "nwg2"},
+		AdoptNDMNames:   map[string]string{"adopted-host": "Wireguard1", "literal": "Wireguard2"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	warned := map[string]bool{}
+	for _, w := range plan.Warnings {
+		for _, id := range []string{"adopted-host", "native-host", "literal"} {
+			if strings.Contains(w, id) && strings.Contains(w, "hostname") {
+				warned[id] = true
+			}
+		}
+	}
+	if !warned["adopted-host"] || !warned["native-host"] {
+		t.Fatalf("hostname endpoints must warn about the unplannable bypass; warnings = %q", plan.Warnings)
+	}
+	if warned["literal"] {
+		t.Fatalf("an IP-literal server must not warn; warnings = %q", plan.Warnings)
+	}
+	found := false
+	for _, r := range plan.Routes {
+		if strings.Contains(r, "198.51.100.7") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the literal server lost its bypass route; routes = %#v", plan.Routes)
+	}
+}
+
+// An AmneziaWG endpoint whose obfuscation set is incomplete renders WITHOUT the `wireguard asc`
+// line, so the router runs it as plain WireGuard. That is the correct rendering - the line cannot be
+// half-written - but it used to happen in silence, and the panel went on showing AmneziaWG. Against
+// an AWG peer the tunnel never answers; against a plain-WG peer it works and the operator believes
+// they have obfuscation they do not have. A complete set, and a genuine WireGuard endpoint, stay
+// quiet.
+func TestCompile_PartialAWGObfuscationWarns(t *testing.T) {
+	const k = "aGVsbG8td29ybGQtaGVsbG8td29ybGQtaGVsbG8tMTI="
+	wgParams := func(extra map[string]any) map[string]any {
+		p := map[string]any{"private_key": k, "peer_public_key": k, "address": "10.99.0.2/32"}
+		for kk, vv := range extra {
+			p[kk] = vv
+		}
+		return p
+	}
+	full := map[string]any{"jc": 4, "jmin": 40, "jmax": 70, "s1": 30, "s2": 40,
+		"h1": "1148853832", "h2": "1148853833", "h3": "1148853834", "h4": "1148853835"}
+	partial := map[string]any{"jc": 4, "jmin": 40, "jmax": 70} // s1/s2/h1-h4 missing
+
+	profile := &model.Profile{Endpoints: []model.Endpoint{
+		{ID: "awg-partial", Engine: model.EngineAmneziaWG, Server: "198.51.100.21", Port: 51820, Enabled: true, Params: wgParams(partial)},
+		{ID: "awg-full", Engine: model.EngineAmneziaWG, Server: "198.51.100.22", Port: 51820, Enabled: true, Params: wgParams(full)},
+		{ID: "plain-wg", Engine: model.EngineSingBox, Protocol: model.ProtoWireGuard, Server: "198.51.100.23", Port: 51820, Enabled: true, Params: wgParams(nil)},
+	}}
+	plan, err := Compile(profile, CompileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	warned := map[string]bool{}
+	for _, w := range plan.Warnings {
+		for _, id := range []string{"awg-partial", "awg-full", "plain-wg"} {
+			if strings.Contains(w, id) && strings.Contains(w, "PLAIN WireGuard") {
+				warned[id] = true
+			}
+		}
+	}
+	if !warned["awg-partial"] {
+		t.Fatalf("a half-filled AmneziaWG set downgraded to plain WireGuard in silence; warnings = %q", plan.Warnings)
+	}
+	if warned["awg-full"] || warned["plain-wg"] {
+		t.Fatalf("a complete AWG set or a genuine WireGuard endpoint must not warn; warnings = %q", plan.Warnings)
+	}
+}

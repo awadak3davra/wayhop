@@ -41,9 +41,18 @@ func TestRCIErrors_RealFormats(t *testing.T) {
 		t.Errorf("ident fallback → %v", errs)
 	}
 
-	// Garbage → no panic, no errors.
-	if errs := rciErrors([]byte(`not json`)); len(errs) != 0 {
-		t.Errorf("garbage → %v", errs)
+	// Garbage → no panic, and NOT an all-clear. This assertion used to require the opposite ("no
+	// errors"), which wrote the defect down as a guarantee: NDM answers HTTP 200 even when it rejects
+	// a command, so a truncated or garbled 200 body reading as "no command errors" made Apply report
+	// success for a firewall object the router never created. An unreadable verdict is not a passing
+	// verdict. A VALID result of an unrecognised shape still passes silently - that is the case the
+	// old assertion was really protecting, and the two above cover it.
+	if errs := rciErrors([]byte(`not json`)); len(errs) != 1 {
+		t.Errorf("garbage → %v, want exactly one 'unreadable response' error", errs)
+	}
+	// A successful command returning its own data in a shape statusErrors does not model is fine.
+	if errs := rciErrors([]byte(`{"release":"5.1.0","hw":{"id":"kn-1010"}}`)); len(errs) != 0 {
+		t.Errorf("valid-but-unmodelled success → %v, want none", errs)
 	}
 }
 

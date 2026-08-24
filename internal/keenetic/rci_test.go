@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -134,5 +135,34 @@ func TestRCIClient_BadPassword(t *testing.T) {
 	}
 	if _, err := c.Show(context.Background(), "version"); err == nil {
 		t.Error("Show with wrong password should fail")
+	}
+}
+
+// NDM answers HTTP 200 even when it REJECTS a command - the refusal rides in the body. So a body
+// that stops arriving mid-response must fail the call, not pass as a 200 with fewer errors: the
+// truncated JSON used to read as "no command errors" and Apply reported success for a firewall
+// object the router never created. The server here promises more bytes than it sends and hangs up,
+// which is what a dropped connection mid-body looks like to the client.
+func TestRCI_TruncatedBodyIsNotSuccess(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/rci/parse", func(w http.ResponseWriter, r *http.Request) {
+		// The prefix that arrives is VALID JSON reading as "no command errors" - the nastiest shape of
+		// this failure, and the one only the read-error check can catch. The refusal was in the bytes
+		// that never came. Declaring a longer Content-Length than we write is what a connection
+		// dropping mid-response looks like to the client.
+		sent := `[{"status":[]}]`
+		w.Header().Set("Content-Length", strconv.Itoa(len(sent)+64))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(sent))
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	c, err := NewRCIClient(ts.URL, "admin", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ParseBatch(context.Background(), []string{"interface Wireguard0 up"}); err == nil {
+		t.Fatal("a response that stopped mid-body reported success; a rejected command would look applied")
 	}
 }

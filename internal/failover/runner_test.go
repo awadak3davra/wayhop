@@ -273,3 +273,35 @@ func TestRunnerGroupsIndependent(t *testing.T) {
 		t.Fatalf("only g1 should switch: %+v", sw)
 	}
 }
+
+// A suppressed-but-alive incumbent is the damper asking for a GRACEFUL exit; it must not be
+// reclassified as a dead-exit emergency. Before the fix Decide derived the incumbent aliveness
+// from the damped view - where suppression looks like death - so the move off it skipped
+// min-dwell, the one pacing gate meant for exactly this move. Raw-dead and ejected incumbents
+// keep bypassing the gate (TestRunnerEmergencySwitch, TestRunnerOutlierEjectionIsEmergency);
+// this pins the third case: suppressed, raw-alive, not ejected.
+func TestRunnerSuppressedIncumbentStaysMinDwellGated(t *testing.T) {
+	r := NewRunner()
+	r.damper = NewDamper(DampConfig{FlapPenalty: 1000, HalfLifeMS: 60_000, SuppressAt: 2000, ReuseAt: 750, MaxSuppressMS: 1_000_000})
+	now := int64(100_000)
+	for i := 0; i < 3; i++ {
+		r.damper.Penalize("a", now)
+	}
+	if !r.damper.Suppressed("a", now) {
+		t.Fatal("setup: the incumbent must be suppressed")
+	}
+	r.lastSwitch["g"] = now - 1_000 // 1s after the last switch; min-dwell is 60s
+	hs := fakeHealth{byID: map[string]MemberHealth{
+		"a": {Alive: true, LatencyMs: 40},
+		"b": {Alive: true, LatencyMs: 50},
+	}}
+	sel := &fakeSelector{now: map[string]string{"g": "a"}}
+	cfg := Config{MinDwellMS: 60_000, FailbackHoldMS: 1}
+	// Two ticks 10ms apart: enough for the 1ms failback hold, nowhere near min-dwell - so a
+	// commit here can only mean the dwell gate was skipped.
+	r.Tick([]GroupSpec{specLatencyCfg("g", cfg, "a", "b")}, hs, sel, now)
+	sw := r.Tick([]GroupSpec{specLatencyCfg("g", cfg, "a", "b")}, hs, sel, now+10)
+	if len(sw) != 0 || len(sel.sels) != 0 {
+		t.Fatalf("suppressed-but-alive incumbent bypassed min-dwell: switches=%v selects=%v", sw, sel.sels)
+	}
+}

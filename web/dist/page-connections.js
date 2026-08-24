@@ -436,16 +436,44 @@ function openAddConnection() {
   let back;
   const done = msg => { back.remove(); loadProfile().then(route).catch(e => toast(e.message, "err")); toast(msg, "ok"); };
 
+  // A connection id is derived from protocol+server+port and POST /api/endpoints is an UPSERT, so a
+  // second account on a host that already has one lands on the SAME id and replaces it. Measured on a
+  // live router: importing a new VLESS link for a server that already had a connection overwrote its
+  // uuid and its name, the connection count did not change, and the toast said "Added". The paste tab
+  // grew a check for that; the manual tab kept posting blind and saying "Added" for a silent
+  // overwrite. One helper now guards both, so the two tabs cannot drift apart again.
+  async function confirmEndpointReplace(e) {
+    let replacing = null;
+    try {
+      // ?lite=1 — this reads endpoints only, and the full form drags every routing list's feed
+      // cache along (275 KB on a live router) at the exact moment the user pressed Save.
+      const cur = await api.get("/api/profile?lite=1");
+      replacing = (((cur && cur.profile) || cur || {}).endpoints || []).find(x => x.id === e.id) || null;
+    } catch (_) { /* the check is a courtesy; a failed read must not block the save */ }
+    if (!replacing) return { go: true, replacing: null };
+    const go = await modalConfirm(t(
+      "A connection to {0}:{1} already exists — {2}. Saving REPLACES it: its keys and settings are overwritten and cannot be recovered from here. Replace it?",
+      e.server, e.port, replacing.name || replacing.id));
+    return { go, replacing };
+  }
+
   function pasteTab() {
     const ta = el("textarea", { placeholder: "Paste a vless:// / hysteria2:// / tuic:// link — or a [Interface] WireGuard / AmneziaWG config",
       onpaste: () => setTimeout(parse, 0) });
     const confirm = el("div", {});
+    // Generation guard, same shape as the router's routeGen: every paste starts a parse, and
+    // /api/import can answer out of order. Paste link A, replace it with B, paste again - if A
+    // lands last it overwrites B's confirmation form, and Save then writes the endpoint from A
+    // while the textarea above it still reads B. Only the newest parse may touch the DOM.
+    let parseGen = 0;
     async function parse() {
+      const gen = ++parseGen;
       const link = ta.value.trim();
       if (!link) { confirm.innerHTML = ""; confirm.appendChild(friendlyImportError("", null)); ta.focus(); return; }
       confirm.innerHTML = ""; confirm.appendChild(el("div", { class: "hint" }, t("parsing…")));
       try {
         const parsed = await api.post("/api/import", { link });
+        if (gen !== parseGen) return; // a newer paste superseded us — discard this parse
         confirm.innerHTML = "";
         const form = manualForm(parsed); // editable confirmation — protocol dropdown overrides the type
         const saveBtn = el("button", { class: "btn btn-primary", onclick: async (ev) => {
@@ -458,19 +486,8 @@ function openAddConnection() {
           // REPLACES it. Measured on a live router: importing a new VLESS link for a server
           // that already had a connection overwrote its uuid and its name, the connection count did
           // not change, and the toast said "Added". Ask first, and then say what actually happened.
-          let replacing = null;
-          try {
-            // ?lite=1 — this reads endpoints only, and the full form drags every routing list's feed
-            // cache along (275 KB on a live router) at the exact moment the user pressed Save.
-            const cur = await api.get("/api/profile?lite=1");
-            replacing = (((cur && cur.profile) || cur || {}).endpoints || []).find(x => x.id === e.id) || null;
-          } catch (_) { /* the check is a courtesy; a failed read must not block the save */ }
-          if (replacing) {
-            const okToReplace = await modalConfirm(t(
-              "A connection to {0}:{1} already exists — {2}. Saving REPLACES it: its keys and settings are overwritten and cannot be recovered from here. Replace it?",
-              e.server, e.port, replacing.name || replacing.id));
-            if (!okToReplace) { b.disabled = false; return; }
-          }
+          const { go, replacing } = await confirmEndpointReplace(e);
+          if (!go) { b.disabled = false; return; }
           try {
             await api.post("/api/endpoints", e);
             done(replacing ? t("Replaced {0}", replacing.name || replacing.id) : t("Added {0}", e.name || e.id));
@@ -485,6 +502,7 @@ function openAddConnection() {
         confirm.appendChild(form.el);
         confirm.appendChild(el("div", { style: "margin-top:10px" }, saveBtn));
       } catch (e) {
+        if (gen !== parseGen) return; // ...and a superseded parse must not replace a good form with ITS error
         confirm.innerHTML = "";
         confirm.appendChild(friendlyImportError(e.message, () => { ta.value = ""; ta.focus(); confirm.innerHTML = ""; }));
       }
@@ -503,7 +521,9 @@ function openAddConnection() {
       const unavailable = form.supportError(); if (unavailable) return toast(unavailable, "err");
       const e = form.collect(); if (!e.server || !e.port) return toast("Server and port required", "err");
       const b = ev.currentTarget; if (b.disabled) return; b.disabled = true; // guard against double-submit firing two POSTs before done() removes the modal
-      try { await api.post("/api/endpoints", e); done(t("Added {0}", e.name || e.id)); } catch (err) { b.disabled = false; toast(redactSecrets(err.message), "err"); } // redact: a validation error can echo a credential, like the paste/subscription paths
+      const { go, replacing } = await confirmEndpointReplace(e);
+      if (!go) { b.disabled = false; return; }
+      try { await api.post("/api/endpoints", e); done(replacing ? t("Replaced {0}", replacing.name || replacing.id) : t("Added {0}", e.name || e.id)); } catch (err) { b.disabled = false; toast(redactSecrets(err.message), "err"); } // redact: a validation error can echo a credential, like the paste/subscription paths
     } }, "Add");
     return el("div", {}, form.el, el("div", { style: "margin-top:8px" }, addBtn));
   }
@@ -979,7 +999,13 @@ function manualForm(ep) {
       // WG/AWG branch above, which is their single source of truth (the generator reads the
       // top-level field). The collect() above migrates any legacy params.mtu into it.
       wireguard: ["reserved"],
-      amneziawg: ["jc", "jmin", "jmax", "s1", "s2", "s3", "s4", "h1", "h2", "h3", "h4", "i1", "i2", "i3", "i4", "i5", "reserved"],
+      // ONLY reserved: the sixteen obfuscation fields are all rendered by the AWG form above,
+      // whose collect() deletes a cleared key ON PURPOSE ("blanking a field actually blanks it").
+      // Listing them here resurrected every cleared value from P - clear h1, Save, and the old
+      // h1 came silently back - because a user-deleted key and a never-rendered key both read as
+      // undefined. A keep entry is for fields the form does NOT render, and for AWG that is
+      // reserved alone.
+      amneziawg: ["reserved"],
     };
     (keep[proto] || []).forEach(k => { if (P[k] !== undefined && p[k] === undefined) p[k] = P[k]; });
     return out;

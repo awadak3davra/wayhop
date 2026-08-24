@@ -346,6 +346,14 @@ func Compile(p *model.Profile, opt Options) (*Plan, []Warning, error) {
 				warn(scope, "skipped non-IP entry "+b+" (domain matching is Phase 2)")
 			}
 		}
+		// A caller that NAMED a destination which classification then emptied - every entry a
+		// non-IP name on a plane that does not collect domains - must not degrade into a
+		// destination-less source-only zone: a scoped domain-only list would compile into "route
+		// EVERYTHING for these devices". The unscoped case already dropped here; the scoped one
+		// slipped past on srcScoped alone.
+		if len(cidrs) > 0 && len(v4) == 0 && len(v6) == 0 && len(domains) == 0 {
+			return
+		}
 		if len(v4) == 0 && len(v6) == 0 && len(domains) == 0 && !srcScoped {
 			return
 		}
@@ -404,6 +412,15 @@ func Compile(p *model.Profile, opt Options) (*Plan, []Warning, error) {
 		}
 		if len(r.GeoIP) > 0 {
 			warn(r.ID, "geoip rule-set not kernel-routed in Phase 1 (expand to a CIDR set in Phase 2)")
+		}
+		// The predicates warned away above were this rule's DESTINATION. A rule whose only dest
+		// was domain/geosite/geoip must route NOTHING on the kernel plane - the same contract the
+		// v4-posture guard below enforces when stripping empties r.IPCIDR. Falling through would
+		// build a destination-less source-only zone, and "block youtube.com for this MAC" would
+		// compile into "block this MAC": the panel shows a domain rule, the kernel enforces a
+		// device-wide one.
+		if len(r.IPCIDR) == 0 && len(r.Domain)+len(r.DomainSuffix)+len(r.GeoSite)+len(r.GeoIP) > 0 {
+			continue
 		}
 		// A rule with no dest AND no source matcher has nothing to kernel-route — skip. A
 		// source-only rule (no dest, has source) proceeds: it builds a destination-less zone.

@@ -1,8 +1,11 @@
 package server
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -453,5 +456,86 @@ func TestFirstNonEmpty(t *testing.T) {
 	}
 	if got := util.FirstNonEmpty(); got != "" {
 		t.Errorf("util.FirstNonEmpty() = %q, want empty", got)
+	}
+}
+
+// Two jobs provisioning DIFFERENT protocols on the SAME host must not lose one another's work.
+// The old Get -> merge -> Upsert ran with the store unlocked in between, so both read the same old
+// Installed list and the later write dropped the other protocol - the servers list then under-
+// claimed what is installed on the box, and the panel offered to install a protocol already there.
+// Merging inside Patch (under the store mutex) makes the two orders converge.
+func TestSaveProvisionedServer_ConcurrentProtocolsBothSurvive(t *testing.T) {
+	s := provision_newServer(t)
+	// Many rounds on DISTINCT hosts: the lost-update window is the gap between reading the list and
+	// writing it back, which is short enough that a single round wins the race by luck most of the
+	// time. Repeating makes the defect certain to show rather than probable - measured: the
+	// read-merge-write version loses a protocol within these rounds, the Patch version never does.
+	for round := 0; round < 60; round++ {
+		b := provisionReq{Host: fmt.Sprintf("198.51.100.%d", 10+round%200), Port: 22, User: "root",
+			Protocols: []string{initserver.ProtoAmneziaWG, initserver.ProtoReality}}
+		// Seed the record so both jobs take the merge path, exactly as a re-provision does.
+		s.saveProvisionedServer(s.jobs.New("provision", ""), b, nil)
+
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for _, proto := range []string{initserver.ProtoAmneziaWG, initserver.ProtoReality} {
+			wg.Add(1)
+			go func(p string) {
+				defer wg.Done()
+				<-start // release both at once, so they contend instead of running in sequence
+				s.saveProvisionedServer(s.jobs.New("provision", ""), b, []string{p})
+			}(proto)
+		}
+		close(start)
+		wg.Wait()
+
+		sv, ok := s.servers.Get(serverIDFor(b))
+		if !ok {
+			t.Fatalf("round %d: server not saved", round)
+		}
+		got := map[string]bool{}
+		for _, p := range sv.Installed {
+			got[p] = true
+		}
+		if !got[initserver.ProtoAmneziaWG] || !got[initserver.ProtoReality] {
+			t.Fatalf("round %d: a concurrent provision lost a protocol: Installed = %v, want both", round, sv.Installed)
+		}
+	}
+}
+
+// A store write that fails must not pass for a saved server: the store persists BEFORE it commits,
+// so the record is missing from disk and memory alike while the job hands back its server_id. The
+// job has to say so - the imported connections work, the list entry does not exist.
+func TestSaveProvisionedServer_WriteFailureIsReported(t *testing.T) {
+	s := provision_newServer(t)
+	job := s.jobs.New("provision", "")
+	b := provisionReq{Host: "198.51.100.11", Port: 22, User: "root", Protocols: []string{initserver.ProtoAmneziaWG}}
+	// A DIRECTORY standing where the store file belongs: atomicfile.Write recreates missing parent
+	// directories (so deleting them proves nothing), but its final rename onto a directory cannot
+	// succeed - the same refusal a read-only or exhausted router overlay produces.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "servers.json")
+	ss, err := serverstore.Open(path)
+	if err != nil {
+		t.Fatalf("serverstore.Open: %v", err)
+	}
+	s.servers = ss
+	// Open does not create the file when it is simply absent, so nothing has to be removed first.
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatalf("stand a directory in the store file's place: %v", err)
+	}
+	s.saveProvisionedServer(job, b, []string{initserver.ProtoAmneziaWG})
+
+	if _, ok := s.servers.Get(serverIDFor(b)); ok {
+		t.Fatal("the store committed a record whose write failed - persist-then-commit was broken")
+	}
+	failed := false
+	for _, line := range job.Snapshot().Console {
+		if strings.Contains(line, "could not save this server") {
+			failed = true
+		}
+	}
+	if !failed {
+		t.Fatalf("a failed servers-list write was silently swallowed; console = %q", job.Snapshot().Console)
 	}
 }

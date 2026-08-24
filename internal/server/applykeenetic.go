@@ -380,14 +380,28 @@ func (adapter *exactKeeneticNativeAdapter) persist(
 	if exactKeeneticNativeMutationEmpty(*reconcile.Target, reconcile.KeeneticTeardown, reconcile.KeeneticPriorityRestore) {
 		return nil
 	}
+	// Three distinct failures used to share one answer - tear the target down - and that answer
+	// contradicted the caller: apply keeps the revision as a live unsaved window and tells the
+	// operator "the configuration runs - use Keep to retry", and Keep retries THIS function. A
+	// retry after a teardown cannot succeed (the re-read verifies against a target that is gone),
+	// so the old behaviour made its own retry path unimplementable while the panel promised it.
+	// persist runs only after the global postcheck proved the datapath, so:
+	//   - a READ failure is transient plumbing: the target is live and carrying traffic; keep it,
+	//     report the error, and let Keep retry the save;
+	//   - a VERIFY mismatch means something else mutated NDM between postcheck and persist - that
+	//     is drift, not a hiccup: fail closed and tear down, as before;
+	//   - a failed `system configuration save` does not un-run the configuration: flash failed,
+	//     the datapath did not; keep it, retryable.
 	running, err := adapter.readConfig(ctx)
-	if err != nil || !verifyExactKeeneticRunningConfig(
+	if err != nil {
+		return errExactKeeneticApply
+	}
+	if !verifyExactKeeneticRunningConfig(
 		*reconcile.Target, reconcile.KeeneticTeardown, reconcile.KeeneticPriorityRestore, running) {
 		_ = adapter.cleanup(context.WithoutCancel(ctx), reconcile.Target.Keenetic)
 		return errExactKeeneticApply
 	}
 	if _, err := adapter.runner.ParseBatch(ctx, []string{exactKeeneticSaveCommand}); err != nil {
-		_ = adapter.cleanup(context.WithoutCancel(ctx), reconcile.Target.Keenetic)
 		return errExactKeeneticApply
 	}
 	return nil
