@@ -100,7 +100,7 @@ jobs:
           owstage="wayhop-${{ matrix.name }}-openwrt-pkg"
           mkdir -p "$owstage"
           cp "$stage/wayhop-${{ matrix.name }}" "$owstage/wayhop-${{ matrix.name }}"
-          cp packaging/openwrt/install.sh packaging/openwrt/uninstall.sh packaging/openwrt/wayhop.init packaging/identity-match.sh packaging/retire-iptv.sh packaging/harden-state.sh "$owstage/"
+          cp packaging/openwrt/install.sh packaging/openwrt/uninstall.sh packaging/openwrt/wayhop.init packaging/openwrt/wayhop.keep packaging/identity-match.sh packaging/retire-iptv.sh packaging/harden-state.sh "$owstage/"
           chmod +x "$owstage"/*.sh "$owstage"/wayhop.init "$owstage/wayhop-${{ matrix.name }}"
           tar -C "$owstage" -czf "wayhop-${version}-${{ matrix.name }}-openwrt.tar.gz" .
 
@@ -180,7 +180,7 @@ jobs:
             chmod +x "$stage"/*.sh "$stage"/S99wayhop "$stage/wayhop-${name}"
             tar -C "$stage" -czf "dist/wayhop-${version}-${name}.tar.gz" .
             cp "$stage/wayhop-${name}" "$owstage/wayhop-${name}"
-            cp packaging/openwrt/install.sh packaging/openwrt/uninstall.sh packaging/openwrt/wayhop.init packaging/identity-match.sh packaging/retire-iptv.sh packaging/harden-state.sh "$owstage/"
+            cp packaging/openwrt/install.sh packaging/openwrt/uninstall.sh packaging/openwrt/wayhop.init packaging/openwrt/wayhop.keep packaging/identity-match.sh packaging/retire-iptv.sh packaging/harden-state.sh "$owstage/"
             chmod +x "$owstage"/*.sh "$owstage"/wayhop.init "$owstage/wayhop-${name}"
             tar -C "$owstage" -czf "dist/wayhop-${version}-${name}-openwrt.tar.gz" .
             ( cd dist && sha256sum "wayhop-${version}-${name}.tar.gz" "wayhop-${version}-${name}-openwrt.tar.gz" )
