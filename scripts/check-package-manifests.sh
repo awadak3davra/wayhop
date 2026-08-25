@@ -191,6 +191,30 @@ else
   bad_ 'packaging/openwrt/wayhop.keep is missing, so a sysupgrade would drop the config'
 fi
 
+# The MANUAL OpenWrt install path needs the same keep entry the packages ship. It went without one
+# for a long time: a tarball install looked identical and healthy, and the first sysupgrade deleted
+# /etc/wayhop with the config, the connections and the keys - the loss pack-ipk.sh refuses to build
+# a package over. Three things have to hold together, so all three are asserted.
+# Matched on the atomic temp name, which only the install CODE carries: "lib/upgrade/keep.d" also
+# appears in the comment above it, so that pattern passed with the code deleted.
+if grep -q "keep.d/wayhop.new" "$ROOT/packaging/openwrt/install.sh"; then
+  ok_ "openwrt tarball: the manual installer ships the sysupgrade keep entry"
+else
+  bad_ "the manual OpenWrt installer does not install /lib/upgrade/keep.d, so a sysupgrade drops the config"
+fi
+if grep -q "wayhop.keep is missing from the package" "$ROOT/packaging/openwrt/install.sh"; then
+  ok_ "openwrt tarball: it refuses to install without the keep file"
+else
+  bad_ "the manual OpenWrt installer proceeds without the keep file instead of refusing"
+fi
+if [ -f "$ROOT/.github/workflows/build.yml" ]; then
+  if [ "$(grep -c "packaging/openwrt/wayhop.keep" "$ROOT/.github/workflows/build.yml")" -ge 2 ]; then
+    ok_ "openwrt tarball: the release workflow stages wayhop.keep into it"
+  else
+    bad_ "the release workflow does not stage wayhop.keep, so the installer above would refuse to run"
+  fi
+fi
+
 # A run that asserted nothing is not a pass: it means the layout moved and every check above was
 # skipped rather than satisfied.
 if [ "$missing" -gt 0 ] || [ "$checked" -lt 55 ]; then

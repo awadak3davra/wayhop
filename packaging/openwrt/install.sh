@@ -158,6 +158,11 @@ esac
 BIN="$SRC/wayhop-$ARCH"
 [ -f "$BIN" ] || BIN="$SRC/wayhop"
 [ -f "$BIN" ] || die "binary not found -- expected $SRC/wayhop-$ARCH or $SRC/wayhop (wrong arch tarball?)"
+# Checked HERE, beside the binary, and not at the point of use further down: every other missing-file
+# check in this script fires mid-install, which leaves a half-installed tree behind on a broken
+# package. A missing keep entry is exactly the state this install must never reach, so it is caught
+# before anything is written.
+[ -f "$SRC/wayhop.keep" ] || die "wayhop.keep is missing from the package -- without it a sysupgrade would delete $ETC (config, connections and keys)"
 ok "arch: $ARCH ($(uname -m))   binary: $(basename "$BIN")"
 # shellcheck disable=SC1091  # /etc/openwrt_release exists only on the target device, not at lint time
 [ -f /etc/openwrt_release ] && info "$(. /etc/openwrt_release; echo "$DISTRIB_DESCRIPTION")"
@@ -357,6 +362,19 @@ say "installing procd init -> $INITD/wayhop"
 cp "$SRC/wayhop.init" "$INITD/wayhop.new" || die "failed to install init"
 chmod 0755 "$INITD/wayhop.new" || die "failed to install init"
 mv "$INITD/wayhop.new" "$INITD/wayhop" || die "failed to install init"
+
+# Keep the saved config/connections across a firmware sysupgrade. OpenWrt reads /lib/upgrade/keep.d,
+# and only the FEED packages used to ship this entry: a tarball install looked identical and
+# healthy, then the first sysupgrade deleted /etc/wayhop with the config, the connections and the
+# keys -- the exact loss pack-ipk.sh refuses to build a package without. Same file, same contract,
+# on the path that installs by hand. Fail closed like harden-state.sh below: a package missing a
+# file this install depends on is a broken package, not a reason to proceed quietly.
+say "installing sysupgrade keep entry -> /lib/upgrade/keep.d/wayhop"
+mkdir -p /lib/upgrade/keep.d || die "could not create /lib/upgrade/keep.d"
+cp "$SRC/wayhop.keep" /lib/upgrade/keep.d/wayhop.new || die "failed to install the keep entry"
+chmod 0644 /lib/upgrade/keep.d/wayhop.new || die "failed to install the keep entry"
+mv /lib/upgrade/keep.d/wayhop.new /lib/upgrade/keep.d/wayhop || die "failed to install the keep entry"
+ok "config will survive a sysupgrade"
 
 # Persist the uninstaller next to the config so removal works long after the tmpfs-extracted
 # tarball is gone (the "how do I remove this months later" trap -- /tmp/wr vanishes on reboot).
