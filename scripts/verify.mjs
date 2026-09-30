@@ -126,6 +126,11 @@ const checks = [
   { name: 'router build', cmd: 'go',
     args: ['build', '-trimpath', '-o', process.platform === 'win32' ? 'NUL' : '/dev/null', './cmd/wayhop'],
     env: { CGO_ENABLED: '0', GOOS: 'linux', GOARCH: 'mipsle' } },
+  // The AmneziaWG 3 component, built exactly as CI builds it: pinned to a tag AND a full commit, every
+  // router arch WayHop ships. It clones upstream, so it needs the network; with a warm Go build cache
+  // the whole run is a few seconds. Fewer than five arches is a failure, not a shorter pass.
+  { name: 'amneziawg-go build', cmd: 'sh', args: ['scripts/build-amneziawg-go.sh'],
+    evidence: { re: /(\d+) arches built/, min: 5, what: 'amneziawg-go arches' } },
   { name: 'i18n', cmd: 'node', args: ['scripts/check-i18n.mjs'] },
   // The dictionaries the browser downloads must be exactly what web/i18n/ produces. Without this the
   // two can drift silently, and they did: a translation pass was merged, committed and deployed while

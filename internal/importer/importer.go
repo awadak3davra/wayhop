@@ -140,6 +140,16 @@ func finalize(e *model.Endpoint, err error) (*model.Endpoint, error) {
 	if e.Engine != model.EngineExternal && strings.TrimSpace(e.Server) == "" {
 		return nil, fmt.Errorf("no server address in the link (got %q)", string(e.Protocol))
 	}
+	// An IPv6 literal must be bracketed in a URI, and the parsers that go through url.Parse take the
+	// host from u.Hostname()/u.Port() — which split at the LAST colon without counting them. A pasted
+	// link carrying a bare IPv6 therefore did not fail: `trojan://s@::1` produced Server ":" with port
+	// 1, and `trojan://s@fe80::1` produced Server "fe80:" with port 1, both accepted with 200 and both
+	// copied into the generated config's server AND sni. A host that still holds a colon can only be
+	// such a remnant — a bracketed literal has already had its brackets stripped and parses as an IP,
+	// and a DNS hostname cannot contain a colon. Say what to do instead of inventing a port.
+	if e.Engine != model.EngineExternal && strings.ContainsRune(e.Server, ':') && net.ParseIP(e.Server) == nil {
+		return nil, fmt.Errorf("wrap an IPv6 address in brackets, e.g. [2001:db8::1]:443")
+	}
 	if e.ID == "" {
 		e.ID = genID(e)
 	}

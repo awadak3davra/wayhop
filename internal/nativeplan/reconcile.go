@@ -13,10 +13,13 @@ import (
 // The target plans create/update desired resources; removals are derived only from previously
 // WayHop-owned decisions. External/adopted interfaces never enter a teardown list.
 type Reconciliation struct {
-	Platform         platform.Platform
-	Target           *Plan
-	OpenWrtRemovals  []netvpn.RemovalPlan
-	KeeneticTeardown []string
+	Platform        platform.Platform
+	Target          *Plan
+	OpenWrtRemovals []netvpn.RemovalPlan
+	// OpenWrtUnbindings take the devices of engine-plugin endpoints the target no longer has out of
+	// the firewall zones the baseline put them in.
+	OpenWrtUnbindings []netvpn.DeviceUnbinding `json:",omitempty"`
+	KeeneticTeardown  []string
 	// KeeneticPriorityRestore puts back the `ip global` values on interfaces the baseline raised and
 	// the target no longer does. It is separate from KeeneticTeardown because it is not a removal:
 	// these are `interface X` / `ip global N` blocks writing the router's own numbers back, and the
@@ -46,6 +49,7 @@ func Reconcile(previous, target *Plan, capabilities platform.CapabilitySet, netw
 			return nil, err
 		}
 		result.OpenWrtRemovals = removals
+		result.OpenWrtUnbindings = reconcileOpenWrtBindings(previous, target, firewallUCI)
 	case platform.Keenetic:
 		if previous.Keenetic == nil || target.Keenetic == nil {
 			return nil, fmt.Errorf("native reconcile: Keenetic baseline or target plan is missing")
@@ -142,6 +146,27 @@ func reconcileOpenWrt(previous, target *Plan, capabilities platform.CapabilitySe
 	}
 	sort.Slice(removals, func(i, j int) bool { return removals[i].Iface < removals[j].Iface })
 	return removals, nil
+}
+
+// reconcileOpenWrtBindings unbinds each device the baseline bound and the target does not, where a
+// zone still lists it. Only devices the authenticated baseline bound are ever taken out: a device an
+// operator listed by hand is theirs.
+func reconcileOpenWrtBindings(previous, target *Plan, firewallUCI string) []netvpn.DeviceUnbinding {
+	kept := make(map[string]bool, len(target.OpenWrtBindings))
+	for _, binding := range target.OpenWrtBindings {
+		kept[binding.Device] = true
+	}
+	var out []netvpn.DeviceUnbinding
+	for _, binding := range previous.OpenWrtBindings {
+		if kept[binding.Device] {
+			continue
+		}
+		if unbinding := netvpn.BuildDeviceUnbinding(binding.Device, firewallUCI); len(unbinding.Commands) != 0 {
+			out = append(out, unbinding)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Device < out[j].Device })
+	return out
 }
 
 func nativeManagedPath(path Path) bool {

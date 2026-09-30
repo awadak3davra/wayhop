@@ -80,6 +80,7 @@ func TestApplyConfigFields_CopiesEveryExportedField(t *testing.T) {
 		Features:     map[string]config.FeatureConfig{"iptv": {Enabled: true}},
 		Backup:       config.Backup{AutoHours: 6, KeepN: 5, Dir: "/bk"},
 		IgnoredDrift: []string{"ep1"},
+		Telegram:     config.Telegram{Enabled: true, Token: "123456:abcdefghijklmnopqrstuvwxyz"},
 	}
 	dst := &config.Config{}
 
@@ -120,6 +121,14 @@ func TestApplyConfigFields_CopiesEveryExportedField(t *testing.T) {
 		if f.Name == "Subscription" {
 			if !reflect.DeepEqual(gotDst, config.Subscription{}) {
 				t.Errorf("Subscription must NOT be copied (dedicated import settings endpoint), got %+v", gotDst)
+			}
+			continue
+		}
+		if f.Name == "Telegram" {
+			// The bot's block is written by /api/telegram/* and by pairing. The Settings page holds a
+			// masked token, so a bulk copy would store the mask as the token and drop paired chats.
+			if !reflect.DeepEqual(gotDst, config.Telegram{}) {
+				t.Errorf("Telegram must NOT be copied (its own endpoints), got %+v", gotDst)
 			}
 			continue
 		}

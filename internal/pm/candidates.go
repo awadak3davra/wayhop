@@ -42,12 +42,12 @@ type Candidate struct {
 	Available bool
 }
 
-// apkListRe matches a line of `apk list <pkg>`:
+// apkCandidates parses the lines of `apk list --available <pkg>`:
 //
 //	sing-box-1.12.17-r1 aarch64 {sing-box} (GPL-3.0-or-later) [installed]
 //
-// Interpolating the package name is necessary but NOT sufficient. `apk list sing-box` also returns
-// sibling packages whose names extend it — sing-box-doc — and those start with the same "sing-box-"
+// Interpolating the package name is necessary but NOT sufficient. The listing also returns sibling
+// packages whose names extend it — sing-box-doc — and those start with the same "sing-box-"
 // prefix, so cutting it leaves "doc-1.12.17-r1" and a docs package appears in the list as if it were
 // a rollback target for the binary. The remainder must therefore begin with a DIGIT, which is what a
 // version is and what "doc" is not. Caught by the test, not by the reasoning that wrote the line.
@@ -66,21 +66,21 @@ func apkCandidates(out, pkg string) []Candidate {
 		if ver == "" {
 			continue
 		}
+		// The tag says the build is on disk. Availability is a property of the LISTING — the caller
+		// asked apk for the available set — so every line here is available, and one that also carries
+		// the tag is the installed build being offered by the feed as well.
 		installed := strings.Contains(ln, "[installed]")
-		available := !installed
-		// apk prints ONE version on TWO lines — verbatim from the AX3000T, where `apk list sing-box`
-		// answers `sing-box-1.12.17-r1 … [installed]` and then the same version again without the tag.
-		// Deduplicating by keeping the first line threw away the tag whenever the untagged line came
-		// first, and nothing guarantees the order: the build already running would then be offered as
-		// something to roll back TO, which is an action that changes nothing dressed up as one that
-		// does. A version is installed if ANY line says so.
+		// apk can print ONE version on TWO lines — observed on the AX3000T, where the same version came
+		// back tagged and untagged. Deduplicating by keeping the first line threw the tag away whenever
+		// the untagged line came first, and nothing guarantees the order: the build already running
+		// would then be offered as something to roll back TO, which is an action that changes nothing
+		// dressed up as one that does. A version is installed if ANY line says so.
 		if i, dup := at[ver]; dup {
 			got[i].Installed = got[i].Installed || installed
-			got[i].Available = got[i].Available || available
 			continue
 		}
 		at[ver] = len(got)
-		got = append(got, Candidate{Version: ver, Installed: installed, Available: available})
+		got = append(got, Candidate{Version: ver, Installed: installed, Available: true})
 	}
 	return got
 }
@@ -123,7 +123,19 @@ func (m Manager) Candidates(ctx context.Context, pkg string) ([]Candidate, error
 	var err error
 	switch m.Kind {
 	case Apk:
-		out, err = m.run(ctx, "apk", "list", pkg)
+		// `--available` is the question being asked: which builds can this box INSTALL. Plain
+		// `apk list` answers a different one — every build apk knows, the installed database
+		// included — and the two used to be told apart by the `[installed]` tag, which turns out to
+		// mean "this build is on disk" and not "this line came from the database".
+		//
+		// Measured on the AX3000T minutes after an upgrade: `apk list sing-box` prints ONE line,
+		// `sing-box-1.13.21-r1 … [installed]`, while `apk policy sing-box` shows that same build
+		// coming from both the installed database AND the OpenWrt repository. Reading the tag as
+		// "not available" left the newest build in the feed marked unavailable, no candidate
+		// available at all, and the panel announcing "no configured repository offers this package"
+		// about a package the repository was offering — the ordinary up-to-date state of every
+		// router whose installed build is the feed's current one.
+		out, err = m.run(ctx, "apk", "list", "--available", pkg)
 	case Opkg:
 		out, err = m.run(ctx, "opkg", "list", pkg)
 	default:
@@ -179,9 +191,7 @@ func (m Manager) InstallVersion(ctx context.Context, pkg, version string) (strin
 	}
 	switch m.Kind {
 	case Apk:
-		// One argv token, `pkg=version`. Built here rather than by the caller so the two halves are
-		// both validated above and cannot be spliced apart.
-		return m.run(ctx, "apk", "add", pkg+"="+version)
+		return m.RunPlanned(ctx, m.InstallVersionArgv(pkg, version))
 	case Opkg:
 		return "", ErrNoVersionPin
 	default:

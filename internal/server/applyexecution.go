@@ -330,6 +330,13 @@ func applyNativeConnectionBindings(profile *model.Profile, plan *nativeplan.Plan
 			if endpoint.Engine != model.EngineExternal && !endpoint.IsExternal() {
 				return errExecutionInvalidCapture
 			}
+		case nativeplan.PathEnginePlugin:
+			// WayHop's AmneziaWG engine runs it, so the endpoint keeps its engine; the decision's device
+			// must be the one the plugin and the kernel plane both derive for it.
+			if endpoint.Engine != model.EngineAmneziaWG || decision.Interface == "" ||
+				decision.Interface != pbr.KernelIface(endpoint) {
+				return errExecutionInvalidCapture
+			}
 		case nativeplan.PathCompatibility:
 			if endpoint.Engine != model.EngineSingBox {
 				return errExecutionInvalidCapture

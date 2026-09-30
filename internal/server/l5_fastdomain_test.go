@@ -128,7 +128,7 @@ func TestFastModeDomainWarningKernelPlane(t *testing.T) {
 			{Tag: "dns_secure", Type: "https", Server: "1.1.1.1", Detour: "direct", Enabled: true},
 		}},
 	}
-	if !keenetic.PlanRequiresCore(dnsCore, true) {
+	if !keenetic.PlanRequiresCore(dnsCore, keenetic.RoutePlanes{DomainsViaDNSMasq: true}) {
 		t.Skip("premise moved: this profile no longer needs a core, pick another that does")
 	}
 	if w := fastModeDomainWarning(dnsCore, "fast", keeneticKernelCarriesDomains(

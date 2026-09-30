@@ -154,12 +154,10 @@ func (pl *Plan) RenderNft() string {
 		}
 	}
 
-	// Chain name must NOT be an nft reserved keyword — `chain mark { ... }` fails to
-	// parse ("unexpected mark"), since `mark` is a keyword (meta mark / ct mark). Use a
-	// namespaced identifier instead. (Caught only by a real `nft -f` on-device; the unit
-	// tests use a mock runner and never parsed the ruleset.)
-	b.WriteString("\tchain wr_mark {\n")
-	b.WriteString("\t\ttype filter hook prerouting priority mangle; policy accept;\n")
+	// The classification rules below are rendered ONCE into mb and emitted by BOTH prerouting
+	// chains (wr_mark and wr_mark_late) — see the wr_mark_late comment after them for why this
+	// plane needs two passes over the same rules.
+	var mb strings.Builder
 	// Anti-loop bypass FIRST + TERMINATING (#12/#13): tunnel peer/server IPs must egress via WAN and
 	// STOP here — `accept` short-circuits both the L2 restore and the per-zone match below. Without the
 	// accept (and with the bypass below the restore, as before), a peer IP that happens to fall inside a
@@ -167,11 +165,14 @@ func (pl *Plan) RenderNft() string {
 	// routing loop, and an established peer flow whose connmark carried a tunnel mark was re-pinned by
 	// the L2 restore. Bypass-first-terminating closes both, and mirrors the ipset plane's precedence.
 	wanMark := pl.markByKind(EgressWAN)
+	// Only a plan that CLASSIFIES something (a bypass or a zone line, not just the connmark
+	// bookkeeping every plan carries) needs the second pass below.
+	classified := len(pl.BypassV4) > 0 || len(pl.BypassV6) > 0
 	if len(pl.BypassV4) > 0 {
-		fmt.Fprintf(&b, "\t\tip daddr @bypass4 %s accept\n", pl.markSet(wanMark))
+		fmt.Fprintf(&mb, "\t\tip daddr @bypass4 %s accept\n", pl.markSet(wanMark))
 	}
 	if len(pl.BypassV6) > 0 {
-		fmt.Fprintf(&b, "\t\tip6 daddr @bypass6 %s accept\n", pl.markSet(wanMark))
+		fmt.Fprintf(&mb, "\t\tip6 daddr @bypass6 %s accept\n", pl.markSet(wanMark))
 	}
 	// L2 restore-first connmark: re-adopt an established flow's previously-chosen egress (saved into
 	// the connmark by `ct mark set meta mark` at the chain end) and accept, BEFORE re-classifying it
@@ -179,7 +180,7 @@ func (pl *Plan) RenderNft() string {
 	// already accepted above, so the restore can't re-pin them. See connmarkRestoreLines for why this
 	// is per-egress (nft can't express a masked meta↔ct merge).
 	for _, line := range pl.connmarkRestoreLines() {
-		fmt.Fprintf(&b, "\t\t%s\n", line)
+		fmt.Fprintf(&mb, "\t\t%s\n", line)
 	}
 	sourceOnly := false
 	for _, z := range pl.Zones {
@@ -208,14 +209,16 @@ func (pl *Plan) RenderNft() string {
 			if len(z.SrcV4) > 0 {
 				src = fmt.Sprintf("ip saddr %s@%s_s4 ", neg, z.Name)
 			}
-			fmt.Fprintf(&b, "\t\t%s%sip daddr @%s_4 %s\n", pre, src, z.Name, pl.markSet(z.Mark))
+			fmt.Fprintf(&mb, "\t\t%s%sip daddr @%s_4 %s\n", pre, src, z.Name, pl.markSet(z.Mark))
+			classified = true
 		}
 		if len(z.V6) > 0 && (z.SrcNegate || len(z.SrcV6) > 0 || len(z.SrcV4) == 0) {
 			src := ""
 			if len(z.SrcV6) > 0 {
 				src = fmt.Sprintf("ip6 saddr %s@%s_s6 ", neg, z.Name)
 			}
-			fmt.Fprintf(&b, "\t\t%s%sip6 daddr @%s_6 %s\n", pre, src, z.Name, pl.markSet(z.Mark))
+			fmt.Fprintf(&mb, "\t\t%s%sip6 daddr @%s_6 %s\n", pre, src, z.Name, pl.markSet(z.Mark))
+			classified = true
 		}
 		// Source-only zone (no dest): matches EVERY destination from the matching source. Emit a
 		// per-family saddr line when the source carries IPs; otherwise one family-agnostic line
@@ -229,15 +232,15 @@ func (pl *Plan) RenderNft() string {
 			// except the kids" routed ONLY the kids, and a blocking list blocked precisely the
 			// devices meant to be left alone. The screen said one thing, the kernel did the other.
 			if len(z.SrcV4) > 0 {
-				fmt.Fprintf(&b, "\t\t%sip saddr %s@%s_s4 %s\n", pre, neg, z.Name, pl.markSet(z.Mark))
+				fmt.Fprintf(&mb, "\t\t%sip saddr %s@%s_s4 %s\n", pre, neg, z.Name, pl.markSet(z.Mark))
 				wrote = true
 			}
 			if len(z.SrcV6) > 0 {
-				fmt.Fprintf(&b, "\t\t%sip6 saddr %s@%s_s6 %s\n", pre, neg, z.Name, pl.markSet(z.Mark))
+				fmt.Fprintf(&mb, "\t\t%sip6 saddr %s@%s_s6 %s\n", pre, neg, z.Name, pl.markSet(z.Mark))
 				wrote = true
 			}
 			if !wrote && pre != "" {
-				fmt.Fprintf(&b, "\t\t%s%s\n", pre, pl.markSet(z.Mark))
+				fmt.Fprintf(&mb, "\t\t%s%s\n", pre, pl.markSet(z.Mark))
 				wrote = true
 			}
 			if wrote {
@@ -250,10 +253,10 @@ func (pl *Plan) RenderNft() string {
 	// mark wins) so a tunnel's own packets to its peer never loop back into the tunnel.
 	if sourceOnly {
 		if len(pl.BypassV4) > 0 {
-			fmt.Fprintf(&b, "\t\tip daddr @bypass4 %s\n", pl.markSet(wanMark))
+			fmt.Fprintf(&mb, "\t\tip daddr @bypass4 %s\n", pl.markSet(wanMark))
 		}
 		if len(pl.BypassV6) > 0 {
-			fmt.Fprintf(&b, "\t\tip6 daddr @bypass6 %s\n", pl.markSet(wanMark))
+			fmt.Fprintf(&mb, "\t\tip6 daddr @bypass6 %s\n", pl.markSet(wanMark))
 		}
 	}
 	// Save the chosen egress fwmark into the connmark so the connection's exit is visible in
@@ -262,9 +265,43 @@ func (pl *Plan) RenderNft() string {
 	// MASKED to Plan.Mask (per-egress constant form) so it preserves any non-owned connmark bits a
 	// coexisting subsystem (mwan3) keeps there, matching the iptables plane's --ctmask.
 	for _, l := range pl.connmarkSaveLines() {
-		fmt.Fprintf(&b, "\t\t%s\n", l)
+		fmt.Fprintf(&mb, "\t\t%s\n", l)
 	}
+	// Chain name must NOT be an nft reserved keyword — `chain mark { ... }` fails to
+	// parse ("unexpected mark"), since `mark` is a keyword (meta mark / ct mark). Use a
+	// namespaced identifier instead. (Caught only by a real `nft -f` on-device; the unit
+	// tests use a mock runner and never parsed the ruleset.)
+	b.WriteString("\tchain wr_mark {\n")
+	b.WriteString("\t\ttype filter hook prerouting priority mangle; policy accept;\n")
+	b.WriteString(mb.String())
 	b.WriteString("\t}\n")
+
+	// Second pass at a LATER priority, for ICMP/UDP only. sing-box's own auto_redirect table
+	// (`table inet sing-box`, which we must not edit) ends its `prerouting_udp_icmp` chain —
+	// `type filter hook prerouting priority dstnat + 2`, i.e. AFTER our mangle-priority chain —
+	// with `ct mark != <tun mark> meta mark set <exclude mark> ct mark set meta mark`. That is an
+	// ABSOLUTE assignment, not a masked one, so it wipes the egress mark wr_mark just set and
+	// poisons the connmark too (defeating the L2 restore above). The packet then finds no
+	// `fwmark ... lookup <table>` ip rule, falls through to the main table and leaves via the WAN
+	// — measured on a live AX3000T: TCP to a routed CIDR exited the tunnel while ICMP and UDP to
+	// the SAME address exited the WAN, so a traceroute (and Telegram voice, and any UDP service on
+	// a routed list) silently bypassed the tunnel. TCP escapes the clobber because that chain
+	// returns on `meta l4proto != { icmp, udp, ipv6-icmp }` — hence the same guard here.
+	//
+	// Re-applying our marks after it is safe by construction: the engine's TUN excludes exactly
+	// this plan's Zones ∪ Bypass (generator passes them as route_exclude_address, "single source of
+	// truth"), so every destination these rules match is one the engine has already declined to
+	// handle. The route lookup happens after the whole prerouting hook, so a mark set here still
+	// steers the packet. What we cannot repair is UDP/ICMP egress affinity: the engine overwrites
+	// the connmark on every packet before this chain runs, so the L2 restore can only re-adopt a
+	// flow while its destination is still in the set.
+	if classified || sourceOnly {
+		b.WriteString("\tchain wr_mark_late {\n")
+		b.WriteString("\t\ttype filter hook prerouting priority dstnat + 3; policy accept;\n")
+		b.WriteString("\t\tmeta l4proto != { icmp, udp, ipv6-icmp } return\n")
+		b.WriteString(mb.String())
+		b.WriteString("\t}\n")
+	}
 
 	// The flow-offload chain (wr_offload) is emitted by RenderOffload (best-effort second
 	// transaction), NOT here — see the flowtable note near the top of RenderNft.

@@ -961,11 +961,15 @@ try {
   })()`);
   require('the package-manager section rendered', deleg.drew,
     'no .pm-deleg on the Updater page for a PM-owned engine — every claim below would be about nothing');
-  record('a behind PM-owned engine offers the truthful Update action',
-    deleg.drew && JSON.stringify(deleg.names || []) === JSON.stringify(['Update']),
-    `buttons=${JSON.stringify(deleg.names)}`);
-  record('the operational updater does not offer destructive package actions',
-    deleg.drew && !(deleg.names || []).some(n => n === 'Roll back' || n === 'Remove'),
+  // All three actions, and Update only because this fixture is BEHIND. Remove and Roll back were
+  // withheld here for a while as deliberate policy — the panel does not operate over a package
+  // manager that owns the binary — and the policy was wrong: the daemon carries a tested `apk del`
+  // plan with its collateral list and its stop gate, nothing led to it, and an operator whose
+  // component was owned by apk had no way to remove it from the panel at all. What makes it safe is
+  // not withholding the button; it is that nothing runs until the exact command has been shown and
+  // asked for again, which the checks below measure.
+  record('a behind PM-owned engine offers update, rollback and removal',
+    deleg.drew && JSON.stringify(deleg.names || []) === JSON.stringify(['Update', 'Remove', 'Roll back']),
     `buttons=${JSON.stringify(deleg.names)}`);
   record('no command is proposed until the operator asks', deleg.drew && !deleg.cmdShown,
     `commandShownUnasked=${deleg.cmdShown}`);
@@ -1116,6 +1120,10 @@ try {
   fault = { kind: 'payload', match: ['/api/updater/engines', '/pm/plan'],
             payload: { action: 'remove', manager: 'apk', package: 'sing-box',
                        path: '/usr/bin/sing-box', argv: ['apk', 'del', 'sing-box'],
+                       // A plan carries its whole sequence now — one command here, two for the
+                       // low-space upgrade — and the page sends it back so consent covers every
+                       // command rather than only the first.
+                       steps: [['apk', 'del', 'sing-box']],
                        checks: [{ name: 'the package installs the file in use', ok: true }] } };
   const askedRemove = await c.eval(`(() => {
     const box = document.querySelector('.pm-deleg');
@@ -1150,12 +1158,18 @@ try {
     return { dialog: !!dlg, text: dlg ? (dlg.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 220) : '',
              posts: (window.__pmPosts || []).length };
   })()`);
-  record('the updater does not expose package removal on the operational screen',
-    !askedRemove.ok && !clickedRun.ok,
+  // Removal is reachable, and reaching it takes two deliberate acts: Remove asks what would run,
+  // and Run it runs that. Neither of them alone changes anything, which is what makes offering the
+  // control safe — the earlier answer, withholding it entirely, left an operator whose engine apk
+  // owns with no way to remove it except an SSH session.
+  record('package removal is reachable and takes two deliberate clicks',
+    askedRemove.ok && clickedRun.ok,
     `removeAsked=${askedRemove.ok} runClicked=${clickedRun.ok}`);
-  record('a hidden removal path cannot open a destructive confirmation',
-    !stopAsk.dialog,
-    `dialog=${stopAsk.dialog} text=${JSON.stringify(stopAsk.text)}`);
+  // The daemon refuses the first time with a question, because deleting the package deletes the
+  // binary the router is running on. The page has to ASK it rather than print it and stop.
+  record('the refusal is put to the operator as a question they can answer',
+    stopAsk.dialog && /datapath|stops the VPN/i.test(stopAsk.text) && stopAsk.posts === 1,
+    `dialog=${stopAsk.dialog} posts=${stopAsk.posts} text=${JSON.stringify(stopAsk.text)}`);
 
   // Answering yes must resend the SAME command with the acknowledgement — not a different one, and
   // not the same one again, which would loop on the identical refusal forever.
@@ -1170,7 +1184,15 @@ try {
   await c.eval(`(() => { document.querySelectorAll('.modal-backdrop').forEach(n => n.remove()); return true; })()`);
   await clearFault();
   const parsed = JSON.parse(posts || '[]');
-  record('a hidden removal path sends no package-manager mutation', !answered && parsed.length === 0,
+  // Answering yes resends the SAME command with the acknowledgement attached. Not a different
+  // command — that would be consent transferred to something unseen — and not the identical body
+  // again, which would loop on the identical refusal forever.
+  const removeBodies = parsed.filter(b => b && b.action === 'remove');
+  record('answering yes resends the same command with the acknowledgement',
+    answered && removeBodies.length === 2 &&
+      JSON.stringify(removeBodies[0].argv) === JSON.stringify(['apk', 'del', 'sing-box']) &&
+      JSON.stringify(removeBodies[1].argv) === JSON.stringify(removeBodies[0].argv) &&
+      !removeBodies[0].stop && removeBodies[1].stop === true,
     `answered=${answered} posts=${posts}`);
 
   // --- Scenario 7l: the package changed and the core did not come back --------------------------
@@ -1276,9 +1298,14 @@ try {
              text: (box.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 200) };
   })()`);
   await clearFault();
-  record('the operational updater does not expose rollback on an opkg router', !clickedRollback.ok,
+  // Roll back is offered on an opkg router too, and pressing it asks the DAEMON before it offers
+  // anything: whether a named build can be installed at all is a property of the box. opkg cannot
+  // pin a version, so the answer is the daemon's own sentence in place of a picker — a refusal that
+  // arrives before the choice rather than after it.
+  record('rollback is offered and asks the box before it offers a build', clickedRollback.ok,
     `clicked=${clickedRollback.ok}`);
-  record('a hidden rollback path offers no build to choose from', !pinState.picker,
+  record('an opkg router gets the reason instead of a build to choose from',
+    !pinState.picker && /cannot install a named version/i.test(pinState.text),
     `picker=${pinState.picker} text=${JSON.stringify(pinState.text)}`);
 
   // --- Scenario 7n: the native-first AX3000T Updater screen -------------------------------------

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -21,10 +22,15 @@ func (s *Server) handleSpeedtest(w http.ResponseWriter, r *http.Request) {
 		ID    string `json:"id"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	if !s.speedMu.TryLock() {
+		writeErr(w, http.StatusConflict, errSpeedBusy.Error())
+		return
+	}
+	defer s.speedMu.Unlock()
 
 	bytes := body.Bytes
 	if bytes <= 0 {
-		bytes = 10_000_000
+		bytes = speedBytes
 	}
 	if bytes > 100_000_000 {
 		bytes = 100_000_000
@@ -48,7 +54,7 @@ func (s *Server) handleSpeedtest(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
-	res, err := speedtest.New(s.config().Ports.Mixed).Run(ctx, viaProxy, bytes)
+	res, err := s.speedTester().Run(ctx, viaProxy, bytes)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
@@ -58,6 +64,21 @@ func (s *Server) handleSpeedtest(w http.ResponseWriter, r *http.Request) {
 		Pinned bool   `json:"pinned"`
 		ID     string `json:"id,omitempty"`
 	}{res, pinned, body.ID})
+}
+
+// speedBytes is a test's download size; the upload is half of it.
+const speedBytes = 10_000_000
+
+// errSpeedBusy refuses a second test while one runs (see speedMu).
+var errSpeedBusy = errors.New("a speed test is already running")
+
+// speedTester measures through the engine's mixed inbound, or directly past the engine's
+// transparent redirect (bypassDial), so a direct run measures the provider's line and not whichever
+// outbound sing-box's rules would have picked for it.
+func (s *Server) speedTester() *speedtest.Tester {
+	t := speedtest.New(s.config().Ports.Mixed)
+	t.Direct = bypassDial
+	return t
 }
 
 // selectEndpoint temporarily selects id in any selector group that contains it,

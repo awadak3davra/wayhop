@@ -612,6 +612,7 @@ func validExactKeeneticTarget(target nativeplan.Plan) bool {
 	}
 	seenEndpoints := make(map[string]bool, len(target.Decisions))
 	managedIfaces := make(map[string]bool)
+	userspace := make(map[string]bool)
 	allIfaces := make(map[string]nativeplan.Path)
 	compatibility := 0
 	for _, decision := range target.Decisions {
@@ -637,6 +638,8 @@ func validExactKeeneticTarget(target nativeplan.Plan) bool {
 			}
 			managedIfaces[decision.Interface] = true
 		case nativeplan.PathNativeAdopt, nativeplan.PathExternal:
+		case nativeplan.PathEnginePlugin:
+			userspace[decision.Interface] = true
 		case nativeplan.PathCompatibility:
 			compatibility++
 			if plan.CompatibilityRouting && decision.Interface != exactKeeneticCompatibilityIF {
@@ -681,6 +684,20 @@ func validExactKeeneticTarget(target nativeplan.Plan) bool {
 	}
 	for iface := range managedIfaces {
 		if !blocks["interface "+iface] {
+			return false
+		}
+	}
+	// A device WayHop's userspace AmneziaWG runs is not an NDM interface: no route and no ladder rung
+	// may name it, or NDM refuses the batch at commit (or, worse, resolves the name to something else).
+	for _, command := range plan.Routes {
+		for _, field := range strings.Fields(command) {
+			if userspace[field] {
+				return false
+			}
+		}
+	}
+	for iface := range plan.GlobalPriority {
+		if userspace[iface] {
 			return false
 		}
 	}

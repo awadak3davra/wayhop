@@ -112,6 +112,103 @@ type Backup struct {
 	Dir       string `json:"dir,omitempty"`        // backup directory; "" → <DataDir>/backups
 }
 
+// Telegram configures the built-in Telegram bot (see internal/tgbot). It is written only by its own
+// panel endpoints and by the bot itself (pairing adds a chat), never by the bulk Settings PUT, so a
+// Settings save cannot drop a paired chat or blank the token.
+type Telegram struct {
+	Enabled bool `json:"enabled,omitempty"`
+	// Token is the @BotFather token: a bearer credential for the whole bot. Never returned by the
+	// API, masked in exports, scrubbed from errors.
+	Token string `json:"token,omitempty"`
+	// APIBase replaces https://api.telegram.org, e.g. a self-hosted telegram-bot-api server or a
+	// reverse proxy where Telegram is blocked. Empty = the public Bot API.
+	APIBase string `json:"api_base,omitempty"`
+	// Via is the outbound the bot's API traffic leaves through: an endpoint or group id, or empty
+	// for the router's ordinary path. Same socket-binding mechanism as Updater.DownloadVia.
+	Via string `json:"via,omitempty"`
+	// Chats are the paired chats. Nothing else can talk to the bot.
+	Chats []TelegramChat `json:"chats,omitempty"`
+	// AlertsOff lists alert kinds switched off (see tgbot.AlertKinds). Empty = every alert on.
+	AlertsOff []string `json:"alerts_off,omitempty"`
+	// QuietFrom/QuietTo ("23:00", "07:30", router local time) hold non-critical alerts, which are
+	// delivered as one summary when the window ends. Both empty = no quiet hours.
+	QuietFrom string `json:"quiet_from,omitempty"`
+	QuietTo   string `json:"quiet_to,omitempty"`
+	// Digest is the local time ("08:30") of the daily summary; empty = no digest.
+	Digest string `json:"digest,omitempty"`
+	// StaleMenus lists chats that stopped being an owner or a viewer (unpaired, or made alerts-only)
+	// and may still show the command menu the bot gave them. The bot takes each menu back and drops
+	// the chat from the list, whether the change was made while it ran or while it was off.
+	StaleMenus []int64 `json:"stale_menus,omitempty"`
+}
+
+// TelegramChat is one paired chat.
+type TelegramChat struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name,omitempty"`
+	// Role: "owner" (everything, confirms changes), "viewer" (read-only + alerts), "alerts" (a
+	// group or channel that only receives alerts).
+	Role string `json:"role"`
+	// Lang overrides the language picked from the Telegram client ("en", "ru", "uk"); empty = auto.
+	Lang     string `json:"lang,omitempty"`
+	PairedAt int64  `json:"paired_at,omitempty"` // unix seconds
+	// AlertsOff lists the alert kinds this chat switched off for itself, from the bot's /alerts. A
+	// kind in Telegram.AlertsOff (the panel's switches) is off for every chat regardless.
+	AlertsOff []string `json:"alerts_off,omitempty"`
+}
+
+// Telegram chat roles.
+const (
+	TelegramOwner  = "owner"
+	TelegramViewer = "viewer"
+	TelegramAlerts = "alerts"
+)
+
+var validClock = regexp.MustCompile(`^([01][0-9]|2[0-3]):[0-5][0-9]$`)
+
+// Validate checks the Telegram block. An empty block is valid (the bot is off).
+func (t Telegram) Validate() error {
+	if t.Enabled && strings.TrimSpace(t.Token) == "" {
+		return errors.New("telegram: a bot token is required to enable the bot")
+	}
+	if t.Token != "" && t.Token != RedactedMark && !validBotToken(t.Token) {
+		return errors.New("telegram: the token should look like 123456789:AA... (copy it from @BotFather)")
+	}
+	if t.APIBase != "" && !isHTTPURL(t.APIBase) {
+		return fmt.Errorf("telegram: api_base %q must start with http:// or https://", t.APIBase)
+	}
+	if (t.QuietFrom == "") != (t.QuietTo == "") {
+		return errors.New("telegram: quiet hours need both a start and an end")
+	}
+	for _, v := range []string{t.QuietFrom, t.QuietTo, t.Digest} {
+		if v != "" && !validClock.MatchString(v) {
+			return fmt.Errorf("telegram: %q is not a time of day (HH:MM)", v)
+		}
+	}
+	seen := map[int64]bool{}
+	for _, c := range t.Chats {
+		if c.ID == 0 {
+			return errors.New("telegram: a paired chat has no id")
+		}
+		if seen[c.ID] {
+			return fmt.Errorf("telegram: chat %d is paired twice", c.ID)
+		}
+		seen[c.ID] = true
+		switch c.Role {
+		case TelegramOwner, TelegramViewer, TelegramAlerts:
+		default:
+			return fmt.Errorf("telegram: chat %d has an unknown role %q", c.ID, c.Role)
+		}
+	}
+	return nil
+}
+
+// botTokenShape is the shape @BotFather issues: a numeric bot id, a colon, and a secret of URL-safe
+// characters. The token goes into a URL path, so anything else is refused outright.
+var botTokenShape = regexp.MustCompile(`^[0-9]{3,20}:[A-Za-z0-9_-]{20,100}$`)
+
+func validBotToken(s string) bool { return botTokenShape.MatchString(s) }
+
 // FeatureConfig is the per-plugin state in Config.Features: whether the optional module is
 // installed (Enabled) + an opaque per-module Settings blob the module owns (so the config package
 // stays decoupled from each module's schema). Enabled is toggled via PUT /api/features/{id}.
@@ -181,6 +278,9 @@ type Config struct {
 	Auth           Auth         `json:"auth,omitempty"`
 	Subscription   Subscription `json:"subscription"`
 	Backup         Backup       `json:"backup,omitempty"`
+	// Telegram is the built-in bot. HOT and written only by /api/telegram/* and by pairing, so —
+	// like Subscription — it is NOT copied by applyConfigFields.
+	Telegram Telegram `json:"telegram,omitempty"`
 	// AllowedHosts lists EXTRA Host header values the panel will serve, on top of the ones this
 	// router answers to by itself (its interface IPs, loopback, its OS hostname) — a DNS-rebinding
 	// defense; see docs/SECURITY.md (development repository). Additive, so a wrong entry cannot lock the UI out: the LAN IP
@@ -318,6 +418,9 @@ func (c *Config) Validate() error {
 	if c.Watchdog.NotifyURL != "" && !isHTTPURL(c.Watchdog.NotifyURL) {
 		return fmt.Errorf("watchdog notify_url %q must start with http:// or https://", c.Watchdog.NotifyURL)
 	}
+	if err := c.Telegram.Validate(); err != nil {
+		return err
+	}
 	for _, h := range c.AllowedHosts {
 		// Reject an entry with no HOST part (blank, or port-only like ":8088", or bare "[]"): it
 		// normalizes to empty in hostAllowGuard, and a list of only such entries would otherwise
@@ -376,7 +479,29 @@ func (c Config) Redacted() Config {
 	if c.Auth.PasswordHash != "" {
 		c.Auth.PasswordHash = RedactedMark
 	}
+	c.Telegram = c.Telegram.Redacted()
 	return c
+}
+
+// Redacted returns a copy with the bot token masked. The chat list is copied, not aliased.
+func (t Telegram) Redacted() Telegram {
+	t = t.Clone()
+	if t.Token != "" {
+		t.Token = RedactedMark
+	}
+	return t
+}
+
+// Clone returns a copy that shares no slice with t, down to each chat's own alert switches: a
+// copy edited in place must never change the settings it was taken from.
+func (t Telegram) Clone() Telegram {
+	t.Chats = append([]TelegramChat(nil), t.Chats...)
+	for i := range t.Chats {
+		t.Chats[i].AlertsOff = append([]string(nil), t.Chats[i].AlertsOff...)
+	}
+	t.AlertsOff = append([]string(nil), t.AlertsOff...)
+	t.StaleMenus = append([]int64(nil), t.StaleMenus...)
+	return t
 }
 
 // validHostPort reports whether s is "host:port" / ":port" with a port in

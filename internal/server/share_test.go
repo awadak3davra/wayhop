@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -71,62 +70,6 @@ func sharehandlers_awg(id, name string) model.Endpoint {
 			"jc": 4, "jmin": 40, "jmax": 70,
 		},
 		Enabled: true,
-	}
-}
-
-func TestSharehandlers_QRValidTextReturnsPNG(t *testing.T) {
-	s, _ := sharehandlers_server(t)
-	body := `{"text":"vless://example","size":256}`
-	req := httptest.NewRequest(http.MethodPost, "/api/qr", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	s.handleQR(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("handleQR: got %d, want 200 (%s)", w.Code, w.Body.String())
-	}
-	if ct := w.Header().Get("Content-Type"); ct != "image/png" {
-		t.Errorf("Content-Type = %q, want image/png", ct)
-	}
-	// PNG magic bytes: 89 50 4E 47 0D 0A 1A 0A.
-	pngMagic := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
-	if got := w.Body.Bytes(); len(got) < len(pngMagic) || !bytes.Equal(got[:len(pngMagic)], pngMagic) {
-		t.Errorf("response is not a PNG (first bytes: %x)", got[:min(len(got), len(pngMagic))])
-	}
-}
-
-func TestSharehandlers_QRDefaultSizeForOutOfRange(t *testing.T) {
-	s, _ := sharehandlers_server(t)
-	// size 10 is below the 128 floor -> handler falls back to 320, still valid PNG.
-	body := `{"text":"hello","size":10}`
-	req := httptest.NewRequest(http.MethodPost, "/api/qr", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	s.handleQR(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("handleQR small size: got %d, want 200 (%s)", w.Code, w.Body.String())
-	}
-	if ct := w.Header().Get("Content-Type"); ct != "image/png" {
-		t.Errorf("Content-Type = %q, want image/png", ct)
-	}
-}
-
-func TestSharehandlers_QREmptyTextBadRequest(t *testing.T) {
-	s, _ := sharehandlers_server(t)
-
-	// Empty text field.
-	req := httptest.NewRequest(http.MethodPost, "/api/qr", strings.NewReader(`{"text":""}`))
-	w := httptest.NewRecorder()
-	s.handleQR(w, req)
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("empty text: got %d, want 400", w.Code)
-	}
-
-	// Malformed JSON body.
-	req2 := httptest.NewRequest(http.MethodPost, "/api/qr", strings.NewReader(`not json`))
-	w2 := httptest.NewRecorder()
-	s.handleQR(w2, req2)
-	if w2.Code != http.StatusBadRequest {
-		t.Errorf("bad json: got %d, want 400", w2.Code)
 	}
 }
 

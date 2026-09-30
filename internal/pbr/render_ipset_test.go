@@ -1,6 +1,7 @@
 package pbr
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -347,4 +348,28 @@ func markFor(t *testing.T, pl *Plan, zoneName string) uint32 {
 	}
 	t.Fatalf("zone %s not found", zoneName)
 	return 0
+}
+
+// Userspace tunnel devices get forwarded-LAN MASQUERADE on the ipset plane, installed idempotently and
+// removed by the teardown, once each and in a stable order; with none listed the plane carries only
+// its WAN-fallback MASQUERADE, as before.
+func TestIpsetMasqDevices(t *testing.T) {
+	pl := teardownPlan()
+	io := IpsetOptions{MasqDevices: []string{"wr_b", "wr_a", "wr_a", ""}}
+	script := pl.RenderIptablesScript(io)
+	add := "iptables -t nat -C POSTROUTING -o %s -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o %s -j MASQUERADE\n"
+	a, b := fmt.Sprintf(add, "wr_a", "wr_a"), fmt.Sprintf(add, "wr_b", "wr_b")
+	if strings.Count(script, a) != 1 || strings.Count(script, b) != 1 || strings.Index(script, a) > strings.Index(script, b) {
+		t.Errorf("script:\n%s", script)
+	}
+	down := pl.RenderTeardownScript(Options{}, io)
+	for _, dev := range []string{"wr_a", "wr_b"} {
+		if !strings.Contains(down, "iptables -t nat -D POSTROUTING -o "+dev+" -j MASQUERADE 2>/dev/null || true\n") {
+			t.Errorf("teardown does not remove %s:\n%s", dev, down)
+		}
+	}
+	if plain := pl.RenderIptablesScript(IpsetOptions{}); strings.Contains(plain, "-j MASQUERADE\n") &&
+		strings.Contains(plain, "POSTROUTING -o wr_") {
+		t.Errorf("a plane with no userspace devices masquerades one:\n%s", plain)
+	}
 }

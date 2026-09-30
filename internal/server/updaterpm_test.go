@@ -92,7 +92,7 @@ func pmServer(t *testing.T) (*Server, *pmScript) {
 	path := plan.Path
 	sc.answers["apk info --who-owns "+path] = path + " is owned by sing-box-1.12.17-r1"
 	sc.answers["apk info -L sing-box"] = "sing-box-1.12.17-r1 contains:\nusr/bin/sing-box\n"
-	sc.answers["apk list sing-box"] = "sing-box-1.12.17-r1 aarch64 {sing-box} (GPL-3.0) [installed]\n" +
+	sc.answers["apk list --available sing-box"] = "sing-box-1.12.17-r1 aarch64 {sing-box} (GPL-3.0) [installed]\n" +
 		"sing-box-1.11.4-r2 aarch64 {sing-box} (GPL-3.0)\n"
 	// Forget the setup's own probe. Resolving the path above costs one `apk info --who-owns`, and a
 	// test asserting "nothing reached the package manager" would otherwise be counting this harness
@@ -193,7 +193,7 @@ func TestPMRefreshOpkgPartialSuccessIsTruthfulAndSanitized(t *testing.T) {
 
 func TestPMCandidatesFailureDoesNotLeakRepositoryURLs(t *testing.T) {
 	s, sc := pmServer(t)
-	sc.errs["apk list sing-box"] = errors.New("https://token@example.invalid/private/packages.adb failed")
+	sc.errs["apk list --available sing-box"] = errors.New("https://token@example.invalid/private/packages.adb failed")
 	r := httptest.NewRequest(http.MethodGet, "/api/updater/sing-box/pm/candidates", nil)
 	r.SetPathValue("id", "sing-box")
 	w := httptest.NewRecorder()
@@ -221,7 +221,7 @@ func pmPluginServer(t *testing.T, id string) (*Server, *pmScript) {
 	path := up.PlanPM(context.Background(), *e, updater.PlanUpgrade, "").Path
 	sc.answers["apk info --who-owns "+path] = path + " is owned by " + id + "-1.0.0-r1"
 	sc.answers["apk info -L "+id] = id + "-1.0.0-r1 contains:\n" + strings.TrimPrefix(path, "\\") + "\n"
-	sc.answers["apk list "+id] = id + "-1.0.0-r1 aarch64 {" + id + "} (GPL-3.0) [installed]\n"
+	sc.answers["apk list --available "+id] = id + "-1.0.0-r1 aarch64 {" + id + "} (GPL-3.0) [installed]\n"
 	sc.seen = nil
 	return &Server{updater: up}, sc
 }
@@ -419,9 +419,13 @@ func TestPMApplyEndpoint_ReloadsTheCoreAfterReplacingItsBinary(t *testing.T) {
 		stopPlugin: func(string) int { return 0 },
 		reload:     func() (bool, error) { reloads++; return true, nil },
 	}
-	sc.answers["apk add sing-box"] = "OK: 1 package upgraded"
+	// apk's own verb. The mock used to answer `apk add sing-box` with "OK: 1 package upgraded",
+	// which is a sentence the real apk never prints for that command — it keeps the installed build
+	// and says "OK: 76.6 MiB in 189 packages". A fake that lies in the direction of the code is how
+	// an upgrade path that could not upgrade anything passed its tests for its whole life.
+	sc.answers["apk upgrade sing-box"] = "OK: 1 package upgraded"
 
-	body := `{"action":"upgrade","argv":["apk","add","sing-box"]}`
+	body := `{"action":"upgrade","argv":["apk","upgrade","sing-box"],"steps":[["apk","upgrade","sing-box"]]}`
 	r := httptest.NewRequest(http.MethodPost, "/api/updater/sing-box/pm/apply", strings.NewReader(body))
 	r.SetPathValue("id", "sing-box")
 	w := httptest.NewRecorder()
@@ -450,9 +454,13 @@ func TestPMApplyEndpoint_AFailedReloadIsReportedNotSwallowed(t *testing.T) {
 		stopPlugin: func(string) int { return 0 },
 		reload:     func() (bool, error) { return false, errors.New("config rejected by the new build") },
 	}
-	sc.answers["apk add sing-box"] = "OK: 1 package upgraded"
+	// apk's own verb. The mock used to answer `apk add sing-box` with "OK: 1 package upgraded",
+	// which is a sentence the real apk never prints for that command — it keeps the installed build
+	// and says "OK: 76.6 MiB in 189 packages". A fake that lies in the direction of the code is how
+	// an upgrade path that could not upgrade anything passed its tests for its whole life.
+	sc.answers["apk upgrade sing-box"] = "OK: 1 package upgraded"
 
-	body := `{"action":"upgrade","argv":["apk","add","sing-box"]}`
+	body := `{"action":"upgrade","argv":["apk","upgrade","sing-box"],"steps":[["apk","upgrade","sing-box"]]}`
 	r := httptest.NewRequest(http.MethodPost, "/api/updater/sing-box/pm/apply", strings.NewReader(body))
 	r.SetPathValue("id", "sing-box")
 	w := httptest.NewRecorder()
@@ -509,9 +517,9 @@ func TestPMApplyEndpoint_RestartsAPluginOntoItsNewBinary(t *testing.T) {
 		reload:        func() (bool, error) { t.Fatal("a plugin upgrade reloaded the core"); return false, nil },
 		restartPlugin: func(bin string) int { restarted = append(restarted, bin); return 1 },
 	}
-	sc.answers["apk add olcrtc"] = "OK: 1 package upgraded"
+	sc.answers["apk upgrade olcrtc"] = "OK: 1 package upgraded"
 
-	body := `{"action":"upgrade","argv":["apk","add","olcrtc"]}`
+	body := `{"action":"upgrade","argv":["apk","upgrade","olcrtc"],"steps":[["apk","upgrade","olcrtc"]]}`
 	r := httptest.NewRequest(http.MethodPost, "/api/updater/olcrtc/pm/apply", strings.NewReader(body))
 	r.SetPathValue("id", "olcrtc")
 	w := httptest.NewRecorder()

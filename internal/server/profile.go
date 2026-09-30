@@ -540,14 +540,14 @@ func (s *Server) handleRoutingStatus(w http.ResponseWriter, r *http.Request) {
 			defer cancel()
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, src, nil)
 			if err != nil {
-				cur.Error = "bad url: " + err.Error()
+				cur.Error = "bad url: " + redactSubscriptionError(err.Error())
 				res[i] = cur
 				return
 			}
 			req.Header.Set("User-Agent", "wayhop")
 			resp, err := client.Do(req)
 			if err != nil {
-				cur.Error = err.Error()
+				cur.Error = redactSubscriptionError(err.Error())
 				res[i] = cur
 				return
 			}

@@ -149,7 +149,12 @@ func (s *Server) handleUpdaterPMCandidates(w http.ResponseWriter, r *http.Reques
 	// file-list verification, so a candidate list can never be about a different package from the one
 	// the buttons would act on.
 	plan := s.updater.PlanPM(ctx, *e, updater.PlanUpgrade, "")
-	if !plan.Runnable() {
+	// Blocked for want of DISK is not a reason to withhold the list of builds: a router too full to
+	// take the feed's newest build is exactly the one whose operator is looking for an older, smaller
+	// one. The plan is used here only to resolve and verify the package name, and it carries that as
+	// soon as the ownership and file-list checks pass — so an empty Package is the honest test, and it
+	// means the panel could not establish WHICH package these builds would belong to.
+	if plan.Package == "" {
 		writeJSON(w, http.StatusOK, map[string]any{"blocked": plan.Blocked, "checks": plan.Checks})
 		return
 	}
@@ -302,7 +307,12 @@ func (s *Server) handleUpdaterPMApply(w http.ResponseWriter, r *http.Request) {
 		Action  string   `json:"action"`
 		Version string   `json:"version"`
 		Argv    []string `json:"argv"` // exactly what the operator was shown
-		Stop    bool     `json:"stop"` // acknowledged: stopping the core is part of what was asked for
+		// Steps is the whole sequence when the plan had more than one command — the low-space upgrade
+		// that removes the installed build before writing the new one. Sent back for the same reason
+		// Argv is: consent is to the commands that were displayed, and the daemon re-plans and refuses
+		// if they are no longer the commands it would run.
+		Steps [][]string `json:"steps"`
+		Stop  bool       `json:"stop"` // acknowledged: stopping the core is part of what was asked for
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad request body")
@@ -326,7 +336,7 @@ func (s *Server) handleUpdaterPMApply(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
 
-	approved := updater.PMPlan{Argv: body.Argv}
+	approved := updater.PMPlan{Argv: body.Argv, Steps: body.Steps}
 	// Removing the package removes the FILE. The panel's own uninstall path has stopped the process
 	// first since the day it was written — a deleted binary keeps running as an orphan holding ports
 	// and locks, and the watchdog, whose Desired() is still set, respawns onto a path that no longer
@@ -351,20 +361,26 @@ func (s *Server) handleUpdaterPMApply(w http.ResponseWriter, r *http.Request) {
 	stoppedCore := false
 	stoppedPluginBin := ""
 	var core pmCoreState
-	if action == updater.PlanRemove {
-		if plan, perr := s.updater.PreflightPM(ctx, *e, action, body.Version, approved); perr != nil {
-			writeJSON(w, http.StatusConflict, map[string]any{"error": perr.Error(), "plan": plan})
-			return
-		}
-		core = s.pmCore()
+	// Whether the datapath is about to go down is a property of the PLAN, not of the verb. A removal
+	// deletes the binary; so does the first command of a low-space upgrade, which removes the
+	// installed build because the new one fits only in the room it is holding. The gate used to ask
+	// "is this action remove?", which would have walked an upgrade straight past the stop, the
+	// acknowledgement and the compensation into deleting a running core's binary unannounced.
+	prePlan, perr := s.updater.PreflightPM(ctx, *e, action, body.Version, approved)
+	if perr != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": perr.Error(), "plan": prePlan})
+		return
+	}
+	core = s.pmCore()
+	if prePlan.DeletesInstalled() {
 		switch e.ID {
 		case "sing-box":
 			if core.running() {
 				if !body.Stop {
 					writeJSON(w, http.StatusConflict, map[string]any{
-						"error": "sing-box is running, and removing the package deletes the binary the router " +
-							"is using right now. That stops the VPN datapath until sing-box is installed again.",
+						"error":      pmStopPrompt(action, prePlan),
 						"needs_stop": true,
+						"plan":       prePlan,
 					})
 					return
 				}
@@ -374,9 +390,9 @@ func (s *Server) handleUpdaterPMApply(w http.ResponseWriter, r *http.Request) {
 				// the log saying the daemon had stopped the core on purpose — and the ordering this
 				// code is careful about (stop, THEN delete) could not be confirmed after the fact by
 				// anyone, including a test, without polling the device hard enough to change it.
-				log.Printf("updater: stopping sing-box before %s (approved by the operator) — the VPN datapath is down from here until it is installed again", action)
+				log.Printf("updater: stopping sing-box before %s (approved by the operator) — the VPN datapath is down from here until the binary is back", action)
 				if err := core.stop(); err != nil {
-					writeErr(w, http.StatusInternalServerError, "could not stop sing-box before removal: "+err.Error())
+					writeErr(w, http.StatusInternalServerError, "could not stop sing-box first: "+err.Error())
 					return
 				}
 				log.Printf("updater: sing-box stopped")
@@ -471,22 +487,83 @@ func (s *Server) handleUpdaterPMApply(w http.ResponseWriter, r *http.Request) {
 	// Apply, with the page showing the new version. The core is simply the half that was noticed
 	// first.
 	if action != updater.PlanRemove && e.ID != "sing-box" {
-		if n := s.pmCore().restartPlugin(e.BinName); n > 0 {
-			resp["restarted"] = n
+		// A plugin STOPPED to make room is a different case from one merely re-exec'd after its file
+		// changed: restartPlugin re-syncs only when it finds procs to stop, and there are none left to
+		// find, so on the two-command path it would have returned 0 and left the tunnel down.
+		if stoppedPluginBin != "" && core.restorePlugin != nil {
+			core.restorePlugin()
+			resp["restarted"] = stoppedProcs
+		} else if core.restartPlugin != nil {
+			if n := core.restartPlugin(e.BinName); n > 0 {
+				resp["restarted"] = n
+			}
 		}
 	}
 	if action != updater.PlanRemove && e.ID == "sing-box" {
-		reloaded, rerr := s.pmCore().reload()
+		// Reload restarts a RUNNING core onto the new file. It answers (false, nil) for a core that is
+		// not running — correctly, there is nothing to reload — and on the low-space path the core is
+		// not running because this handler stopped it to free the disk. Reloading there would have
+		// reported a clean success over a router whose datapath never came back up.
+		reloaded, rerr := false, error(nil)
+		if stoppedCore {
+			if err := core.restore(); err != nil {
+				rerr = err
+			} else {
+				reloaded = true
+			}
+		} else {
+			reloaded, rerr = core.reload()
+		}
 		switch {
 		case rerr != nil:
-			// The package changed and the core did not come back on this reload. Reporting a bare
-			// success here would be the same false report the reload exists to prevent. Reload
-			// re-asserts desired=true, so the watchdog keeps retrying.
-			log.Printf("updater: %s %s succeeded but sing-box reload failed: %s", e.ID, action, rerr)
+			// The package changed and the core did not come back. Reporting a bare success here would be
+			// the same false report the reload exists to prevent. Both paths re-assert desired=true, so
+			// the watchdog keeps retrying.
+			log.Printf("updater: %s %s succeeded but sing-box did not come back: %s", e.ID, action, rerr)
 			resp["reload_error"] = rerr.Error()
 		case reloaded:
 			resp["reloaded"] = true
 		}
 	}
+	// The package manager said OK. Ask it what is installed NOW, because those are two different
+	// claims and this panel has already shipped one standing in for the other: `apk add` on an
+	// installed package prints "OK: 76.6 MiB in 189 packages" and changes nothing, which is how the
+	// Update button spent its life reporting success over a core that never moved. A check that costs
+	// one query is the difference between that and a defect nobody can see from the panel.
+	//
+	// Not in demo mode, whose package manager deliberately changes nothing and says so.
+	if action != updater.PlanRemove && !s.demoMode() && plan.Space != nil && plan.Space.TargetVersion != "" {
+		if got, known := s.updater.PMInstalledVersion(ctx, plan.Package); known && got != plan.Space.TargetVersion {
+			log.Printf("updater: %s %s reported success but %s is installed at %s, not %s",
+				e.ID, action, plan.Package, got, plan.Space.TargetVersion)
+			resp["verify_error"] = "the package manager reported success, but " + plan.Package +
+				" is still at " + got + " instead of " + plan.Space.TargetVersion
+		}
+	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// pmStopPrompt is the question the operator answers before the core's binary is taken away. The two
+// cases are genuinely different and were never going to be served by one sentence: a removal ends
+// with sing-box gone on purpose, while a low-space upgrade removes the installed build only to make
+// room for the next one and puts it straight back — but it does mean a window with no core on disk,
+// and if the install then fails the router is left without one. Both facts belong in front of the
+// click, with the figures that forced the choice.
+func pmStopPrompt(action updater.PlanAction, plan updater.PMPlan) string {
+	if action == updater.PlanRemove {
+		return "sing-box is running, and removing the package deletes the binary the router " +
+			"is using right now. That stops the VPN datapath until sing-box is installed again."
+	}
+	target := plan.Version
+	if plan.Space != nil && plan.Space.TargetVersion != "" {
+		target = plan.Space.TargetVersion
+	}
+	msg := "There is not enough free space to write " + target + " beside the installed build"
+	if plan.Space != nil && plan.Space.Measured {
+		msg += " (" + updater.MiB(plan.Space.Need) + " needed, " + updater.MiB(plan.Space.Avail) +
+			" free in " + plan.Space.Dir + ")"
+	}
+	return msg + ", so the panel will remove the installed build first and then install " + target +
+		". sing-box is stopped and off the disk between the two commands — the VPN datapath is down " +
+		"for that window, and if the install fails the router is left without sing-box until it succeeds."
 }

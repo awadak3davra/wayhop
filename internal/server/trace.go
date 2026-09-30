@@ -280,7 +280,13 @@ func (s *Server) handleTrace(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "a valid domain is required")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	writeJSON(w, http.StatusOK, s.traceDomain(r.Context(), domain))
+}
+
+// traceDomain is the trace itself, shared by the Diagnostics page and the Telegram bot's /route.
+// The caller has validated domain.
+func (s *Server) traceDomain(parent context.Context, domain string) traceResult {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 	res := traceResult{Domain: domain, Exits: map[string]int{}}
 	ips, err := net.DefaultResolver.LookupHost(ctx, domain)
@@ -299,7 +305,7 @@ func (s *Server) handleTrace(w http.ResponseWriter, r *http.Request) {
 		// Augment with connections sing-box sniffed to this domain at IPs the resolved set missed
 		// (CDN rotation / a client resolving itself). Best-effort: tun/hybrid only, clash-failure-safe.
 		if s.clash != nil {
-			cctx, ccancel := context.WithTimeout(r.Context(), 4*time.Second)
+			cctx, ccancel := context.WithTimeout(parent, 4*time.Second)
 			if cs, cerr := s.clash.Connections(cctx); cerr == nil {
 				seen := make(map[string]bool, len(res.Connections))
 				for _, c := range res.Connections {
@@ -321,5 +327,5 @@ func (s *Server) handleTrace(w http.ResponseWriter, r *http.Request) {
 	profile := s.store.Profile()
 	_, plan := s.genOptionsWithPlan(&profile, s.config())
 	res.Configured, res.Unevaluated = traceCandidates(domain, ips, &profile, plan)
-	writeJSON(w, http.StatusOK, res)
+	return res
 }

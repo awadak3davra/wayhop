@@ -380,12 +380,12 @@ func TestPlanRequiresCoreMatchesCompiledSingboxPresence(t *testing.T) {
 			t.Fatalf("%s: compile: %v", tc.name, err)
 		}
 		want := plan.Singbox != nil
-		if got := PlanRequiresCore(&profile, false); got != want {
+		if got := PlanRequiresCore(&profile, RoutePlanes{}); got != want {
 			t.Fatalf("%s: PlanRequiresCore = %v, but Compile produced Singbox != nil = %v",
 				tc.name, got, want)
 		}
 	}
-	if PlanRequiresCore(nil, false) {
+	if PlanRequiresCore(nil, RoutePlanes{}) {
 		t.Fatal("a nil profile requires a core")
 	}
 }

@@ -286,7 +286,6 @@ if (/^FAIL/m.test(out) && res.status !== 0) {
 const byReason = new Map();
 for (const [, reason] of found) {
   const key = /WR_SINGBOX/.test(reason) ? 'needs a sing-box binary (WR_SINGBOX)'
-    : /WR_MIHOMO/.test(reason) ? 'needs a mihomo binary (WR_MIHOMO)'
       : /nft not in PATH/.test(reason) ? 'needs nft'
         : /traceroute binary not installed/i.test(reason) ? 'needs traceroute'
         : /WR_NATIVEDNS_FIXTURE/.test(reason) ? 'needs a captured-device fixture'

@@ -382,6 +382,59 @@ func TestServererrorpaths_ServersPostInvalidHost400(t *testing.T) {
 	}
 }
 
+// TestServererrorpaths_ServersPostPortRange400 pins the SSH port to 1-65535.
+// Before this guard the handler checked only `Port == 0`, so every other value an int can
+// hold was stored verbatim: -1, 65536 and 4294967296 each came back 200 "Server saved",
+// and the first sign of trouble was a dial failing later during provisioning.
+func TestServererrorpaths_ServersPostPortRange400(t *testing.T) {
+	s := servererrorpaths_server(t)
+	// Literal JSON rather than a marshalled struct: 4294967296 does not fit a 32-bit int, so as a
+	// Go constant it does not even compile for arm/mips (`GOARCH=386 go vet` failed on this line),
+	// while on the wire it is exactly what a client can send. A 32-bit daemon refuses it in the
+	// decoder before the range check gets a turn; either way it is a 400 and nothing is stored,
+	// and that is the contract.
+	for _, port := range []string{"-1", "65536", "4294967296"} {
+		body := `{"host":"203.0.113.60","port":` + port + `}`
+		w := servererrorpaths_post(s.handleServers, "/api/servers", body)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("servers port %s: got %d, want 400 (%s)", port, w.Code, w.Body.String())
+		}
+	}
+	if got := len(s.servers.List()); got != 0 {
+		t.Errorf("registry must stay empty after rejected ports, has %d", got)
+	}
+}
+
+// TestServererrorpaths_ServersPostPortAccepted keeps the guard from over-reaching: both ends
+// of the valid range still pass, and an omitted port still defaults to 22 rather than failing.
+func TestServererrorpaths_ServersPostPortAccepted(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		port int
+		want int
+	}{
+		{"lower bound", 1, 1},
+		{"upper bound", 65535, 65535},
+		{"omitted defaults to ssh", 0, 22},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := servererrorpaths_server(t)
+			body, _ := json.Marshal(serverstore.Server{Host: "203.0.113.61", Port: tc.port})
+			w := servererrorpaths_post(s.handleServers, "/api/servers", string(body))
+			if w.Code != http.StatusOK {
+				t.Fatalf("port %d: got %d, want 200 (%s)", tc.port, w.Code, w.Body.String())
+			}
+			list := s.servers.List()
+			if len(list) != 1 {
+				t.Fatalf("port %d: registry has %d servers, want 1", tc.port, len(list))
+			}
+			if list[0].Port != tc.want {
+				t.Errorf("port %d: stored %d, want %d", tc.port, list[0].Port, tc.want)
+			}
+		})
+	}
+}
+
 // ---- handleDeleteServer ----------------------------------------------------
 
 // TestServererrorpaths_DeleteServerUnknown404 deletes an id that was never added.
@@ -569,27 +622,6 @@ func TestServererrorpaths_ImportEmptyBody400(t *testing.T) {
 	s.handleImport(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("import empty body: got %d, want 400 (%s)", w.Code, w.Body.String())
-	}
-}
-
-// ---- handleQR (encode-overflow error branch) ------------------------------
-
-// TestServererrorpaths_QROversizedTextBadRequest covers the qrcode.Encode error
-// branch: a payload larger than any QR version's capacity makes Encode fail,
-// which the handler maps to 400 "could not encode QR". (Distinct from the empty-
-// text / bad-JSON 400s already covered in share_test.go.)
-func TestServererrorpaths_QROversizedTextBadRequest(t *testing.T) {
-	s := servererrorpaths_server(t)
-	// The largest QR (version 40) holds well under 3 KB at Medium EC; 8 KB
-	// overflows every version, so Encode returns an error.
-	huge := strings.Repeat("A", 8000)
-	body, _ := json.Marshal(map[string]any{"text": huge, "size": 256})
-	w := servererrorpaths_post(s.handleQR, "/api/qr", string(body))
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("oversized QR text: got %d, want 400 (%s)", w.Code, w.Body.String())
-	}
-	if msg := servererrorpaths_errMsg(t, w); !strings.Contains(msg, "encode QR") {
-		t.Errorf("error = %q, want it to mention QR encoding", msg)
 	}
 }
 

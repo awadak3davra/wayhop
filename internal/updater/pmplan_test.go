@@ -87,7 +87,7 @@ func apkBox(t *testing.T, extra map[string]string) (*Updater, Engine, *scriptRun
 	answers := map[string]string{
 		"apk info --who-owns <bin>": "<bin> is owned by sing-box-1.12.17-r1",
 		"apk info -L sing-box":      "sing-box-1.12.17-r1 contains:\nusr/bin/sing-box\n",
-		"apk list sing-box": "sing-box-1.12.17-r1 aarch64 {sing-box} (GPL-3.0) [installed]\n" +
+		"apk list --available sing-box": "sing-box-1.12.17-r1 aarch64 {sing-box} (GPL-3.0) [installed]\n" +
 			"sing-box-1.11.4-r2 aarch64 {sing-box} (GPL-3.0)\n",
 	}
 	for k, v := range extra {
@@ -132,13 +132,16 @@ func TestPlanPM_Rollback_RefusesAVersionTheFeedDoesNotHave(t *testing.T) {
 	}
 }
 
-func TestPlanPM_Rollback_RefusesAnInstalledOnlyApkRow(t *testing.T) {
+// A build that is installed but that no repository carries any more cannot be rolled back to: there
+// is nothing to install. apk says so by leaving it out of the available listing entirely — this is
+// the AX3000T's own situation, where 1.12.17-r1 ran for weeks after the feed had moved to 1.13.
+func TestPlanPM_Rollback_RefusesABuildTheFeedNoLongerCarries(t *testing.T) {
 	u, e, r, _ := apkBox(t, map[string]string{
-		"apk list sing-box": "sing-box-1.12.17-r1 aarch64 {sing-box} [installed]\n",
+		"apk list --available sing-box": "",
 	})
 	p := u.PlanPM(context.Background(), e, PlanRollback, "1.12.17-r1")
 	if p.Runnable() {
-		t.Fatalf("an installed-database row was treated as an available rollback: %v", p.Argv)
+		t.Fatalf("a build the feed does not carry was treated as an available rollback: %v", p.Argv)
 	}
 	if !strings.Contains(p.Blocked, "not offered by this feed") {
 		t.Fatalf("blocked reason = %q", p.Blocked)
@@ -207,9 +210,19 @@ func TestPlanPM_Remove_And_Upgrade_Argv(t *testing.T) {
 	if !rm.Runnable() || !sameArgv(rm.Argv, []string{"apk", "del", "sing-box"}) {
 		t.Fatalf("remove plan = %+v", rm)
 	}
+	// apk's verb for moving an installed package to the feed's build is `upgrade`. It used to be
+	// planned — and executed — as `apk add sing-box`, which apk answers with a cheerful
+	// "OK: 76.6 MiB in 189 packages" and an unchanged installed version. This assertion is the one
+	// that was wrong for as long as the Update button was.
 	up := u.PlanPM(context.Background(), e, PlanUpgrade, "")
-	if !up.Runnable() || !sameArgv(up.Argv, []string{"apk", "add", "sing-box"}) {
+	if !up.Runnable() || !sameArgv(up.Argv, []string{"apk", "upgrade", "sing-box"}) {
 		t.Fatalf("upgrade plan = %+v", up)
+	}
+	if len(up.Steps) != 1 || !sameArgv(up.Steps[0], up.Argv) {
+		t.Fatalf("an upgrade with room to spare is ONE command: %v", up.Steps)
+	}
+	if up.DeletesInstalled() {
+		t.Fatal("a plain upgrade does not take the installed binary away")
 	}
 }
 
@@ -269,7 +282,7 @@ func TestPlanPM_NoPackageManager_IsBlockedNotCrashing(t *testing.T) {
 func TestPlanPM_Install_RefusesAPackageTheFeedDoesNotHave(t *testing.T) {
 	// An engine whose binary is absent, and a feed that has never heard of it. `apk list` answers
 	// empty for an unknown package rather than failing, which is exactly how the real one behaves.
-	u, _, r, _ := newBox(t, pm.Apk, map[string]string{"apk list mihomo": "\n"})
+	u, _, r, _ := newBox(t, pm.Apk, map[string]string{"apk list --available mihomo": "\n"})
 	e := Engine{ID: "mihomo", Name: "Mihomo", BinName: "mihomo-not-on-this-host", Role: "standalone"}
 	p := u.PlanPM(context.Background(), e, PlanInstall, "")
 	if p.Runnable() {
@@ -286,7 +299,7 @@ func TestPlanPM_Install_RefusesAPackageTheFeedDoesNotHave(t *testing.T) {
 // And the honest case still goes through, or the guard is only a way of never installing anything.
 func TestPlanPM_Install_ProceedsWhenTheFeedHasIt(t *testing.T) {
 	u, _, _, _ := newBox(t, pm.Apk, map[string]string{
-		"apk list dnscrypt-proxy": "dnscrypt-proxy-2019.08.20~07ac3825-r3 aarch64 {dnscrypt-proxy} (ISC)\n",
+		"apk list --available dnscrypt-proxy": "dnscrypt-proxy-2019.08.20~07ac3825-r3 aarch64 {dnscrypt-proxy} (ISC)\n",
 	})
 	e := Engine{ID: "dnscrypt-proxy", Name: "dnscrypt-proxy", BinName: "dnscrypt-proxy-not-on-this-host"}
 	p := u.PlanPM(context.Background(), e, PlanInstall, "")

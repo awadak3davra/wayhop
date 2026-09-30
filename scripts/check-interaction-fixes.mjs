@@ -1083,14 +1083,29 @@ globalThis.row = healthRowEl;`, rowCtx);
   // "current" was the last silent state, found on a live AX3000T: an apk-owned sing-box at
   // 1.12.17 against a 1.12.17-r1 catalog rendered "Installed as apk package sing-box · 1.12.17-r1."
   // and stopped — no Update (right, there is nothing to update to), but also no Remove, no Roll back
-  // and no reason. Withholding those is deliberate policy — the panel does not operate over a package
-  // manager that owns the binary — and the policy was never stated.
+  // and no reason. The first fix stated the policy: the panel does not operate over a package manager
+  // that owns the binary. The policy itself was then wrong — the daemon has carried a tested `apk del`
+  // plan, its collateral list and its stop gate all along, and nothing led to them — so the row now
+  // says there is nothing to UPDATE and points at the actions it does offer.
   check(/pkg\.state === "current"/.test(managed),
-    'an up-to-date package says why it offers nothing');
+    'an up-to-date package says why it offers no update');
   const currentBranch = managed.slice(managed.indexOf('pkg.state === "current"'));
-  check(/nothing to update/.test(currentBranch) && /owns this binary/.test(currentBranch),
-    'and names both halves: nothing to update, and whose job the rest is',
+  check(/nothing to update/.test(currentBranch) && /going back to an older build/.test(currentBranch),
+    'and names both halves: nothing to update, and where removing or rolling back happens',
     currentBranch.slice(0, 200));
+  // The controls themselves, which is the half a sentence cannot stand in for. Every package-owned
+  // row gets the delegation box — "owned" when the feed has something newer, "managed" when it does
+  // not — and the mode that carries Update is the only one gated on being behind. This is the check
+  // that would have caught the original defect: `pmDelegation` had an "owned" mode with Remove and
+  // Roll back in it that no call site ever passed.
+  check(/pmDelegation\(e, pmKind, pkg\.state === "behind" \? "owned" : "managed"\)/.test(managed),
+    'and every package-owned row gets the delegation, not only one with an update waiting');
+  const delegation = src.slice(src.indexOf('function pmDelegation'));
+  check(/mode === "owned"[\s\S]{0,120}act\(t\("Update"\), "upgrade"\)/.test(delegation),
+    'Update is offered only where there is something to update to');
+  check(/acts\.appendChild\(act\(t\("Remove"\), "remove"\)\)/.test(delegation) &&
+    !/mode === "update"/.test(delegation),
+    'Remove is reachable in both owned modes rather than returned past');
   // The case this exists for: anything else with a reason attached must surface that reason.
   check(/else if \(pkg\.error\)/.test(managed),
     'any other state surfaces the daemon reason instead of going quiet');
@@ -2512,7 +2527,11 @@ globalThis.pi = pluralIndex; globalThis.tn = tn;`, context);
 // same rev, the second was refused as stale, and its rollback restored a snapshot the first had
 // already superseded. Serializing converges both; this pins that neither copy regresses to a bare PUT.
 {
-  for (const [name, src] of [['app.js', app], ['page-dns.js', dns]]) {
+  // page-dns.js ONLY. app.js carried a second copy of this row - dnsRuleRow - that nothing called:
+  // residue from moving the DNS page into its route chunk. The reorder fix was applied to both,
+  // and the app.js half was a no-op nobody could reach; the dead copy is gone, so asserting on it
+  // would pin a file that no longer has the row.
+  for (const [name, src] of [['page-dns.js', dns]]) {
     const at = src.indexOf('"DNS rule " + match');
     check(at > 0, `${name}: the DNS rule row still carries an order control`);
     if (at < 0) continue;
@@ -2569,6 +2588,42 @@ globalThis.pi = pluralIndex; globalThis.tn = tn;`, context);
     'the list editor carries the domain feed through an edit instead of erasing it');
   check(/body\.cidr_source = cidrSrc\.value\.trim\(\)/.test(save),
     'and still carries the CIDR feed, the sibling this was modelled on');
+}
+// "Depended on by" is ONE line per dependent, not one per relationship. A routing list normally
+// both routes and downloads through the same exit, and emitting a row for each printed every list
+// twice under the same name — the panel looked like it was double-rendering. The fetch row also
+// dropped the "via <group>" qualifier the routing row carried, so the pair read as a bare
+// duplicate rather than two facts. Executed here against real profile shapes, not grepped.
+{
+  const t2 = (str, ...a) => a.length ? str.replace(/\{(\d+)\}/g, (_, i) => a[+i]) : str;
+  const tn2 = (str, n) => str.split("|")[n === 1 ? 0 : 1].replace("{0}", n);
+  const nameOf2 = (id) => ({ grp: "Primary group", cy: "Cyprus" })[id] || id;
+  const deps = (lists, who = "cy") => {
+    const st = { profile: { groups: [{ id: "grp", name: "Primary group", members: ["cy", "by"] }],
+      routing_lists: lists, dns: {} } };
+    const fn = new Function("state", "t", "tn", "nameOf",
+      functionSource(app, "dependentsOf") + "; return dependentsOf;")(st, t2, tn2, nameOf2);
+    return fn(who).filter((r) => r.icon !== "⇄");
+  };
+
+  const both = deps([{ id: "tg", name: "Telegram", outbound: "grp", download_via: "grp", enabled: true }]);
+  check(both.length === 1,
+    "a list that routes AND downloads through one exit is one line, not two", `rows=${both.length}`);
+  check(/routing list/.test(both[0]?.note || "") && /downloads its list/.test(both[0]?.note || ""),
+    "and that one line names both roles", both[0]?.note);
+  check(/via Primary group/.test(both[0]?.note || ""),
+    "and still says which group stands between them", both[0]?.note);
+
+  const fetchOnly = deps([{ id: "y", name: "Fetch only", outbound: "direct", download_via: "grp", enabled: true }]);
+  check(fetchOnly.length === 1 && /via Primary group/.test(fetchOnly[0]?.note || ""),
+    "a fetch-only dependency carries the via-qualifier the routing row always had", fetchOnly[0]?.note);
+
+  // A direct role pins this exit; only an all-indirect dependency may be drawn as weak.
+  const mixed = deps([{ id: "x", name: "Split", outbound: "grp", download_via: "cy", enabled: true }]);
+  check(mixed.length === 1 && mixed[0]?.weak === false,
+    "a list downloading DIRECTLY through this exit is not a weak dependency", String(mixed[0]?.weak));
+  check(both[0]?.weak === true,
+    "while an all-via-group dependency still is");
 }
 if (failures.length) {
   console.error(`interaction regressions FAILED (${failures.length}/${checks}):\n  - ${failures.join('\n  - ')}`);

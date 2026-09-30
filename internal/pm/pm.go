@@ -2,10 +2,11 @@
 // Entware/older OpenWrt, apk on OpenWrt 24.10+. WayHop uses it READ-ONLY today: to recognise when
 // an engine (e.g. sing-box) is owned by the package manager at the path the daemon actually runs,
 // so the panel can defer to opkg/apk instead of clobbering the packaged binary with a raw download.
-// The mutating methods (Install/Upgrade/Remove) are the package's API for a future, path-verified,
-// version-gated delegation; they are NOT wired into the updater's install/remove path yet (that
-// needs on-device validation — see docs). Everything is exec-argv (never a shell string), and every
-// package name is validated against a strict charset before it can reach exec.
+// The mutating methods (Install/Upgrade/Remove/InstallVersion) are reached through the updater's
+// path-verified, version-gated plan (internal/updater/pmplan.go): the operator is shown an argv this
+// package built and the daemon runs that same argv back through RunPlanned. Everything is exec-argv
+// (never a shell string), and every package name is validated against a strict charset before it can
+// reach exec.
 package pm
 
 import (
@@ -205,40 +206,120 @@ func (m Manager) Owner(ctx context.Context, path string) (pkg string, owned bool
 	return "", false, nil
 }
 
-// Install installs (opkg: also in-place upgrades) a package by name. argv only.
+// InstallArgv, UpgradeArgv and RemoveArgv are the exact native commands for the three mutating
+// verbs. They sit beside RefreshArgv for the reason its comment gives: the panel shows an argv,
+// sends the same value back and the daemon runs it, so preview and operation must come from ONE
+// source or they drift apart.
 //
-//	opkg: `opkg install <pkg>`   apk: `apk add <pkg>`
-func (m Manager) Install(ctx context.Context, pkg string) (string, error) {
+// They had drifted, and the drift was the whole defect. Upgrade was written as an alias of Install
+// — "same argv as Install by design" — and on apk that is not an upgrade at all: `apk add <pkg>` on
+// an already-installed package keeps the build that is there and exits 0. Measured on the AX3000T,
+// where the panel's Update button ran `apk add sing-box` at 22:02:52 and apk answered
+// "OK: 76.6 MiB in 189 packages" with sing-box still at 1.12.17-r1 while the feed offered
+// 1.13.21-r1. The daemon logged an upgrade, the panel toasted a success, and nothing had changed.
+// apk's own verb for this is `apk upgrade <pkg>`.
+//
+// opkg keeps `opkg install`, which does replace an installed package with a newer feed build — the
+// one manager where the two verbs really are the same command.
+//
+// A nil return means "this manager has no such command", which every caller already treats as
+// blocked; it is never a partially-built argv.
+func (m Manager) InstallArgv(pkg string) []string {
 	if !ValidPkgName(pkg) {
-		return "", fmt.Errorf("pm: refusing unsafe package name %q", pkg)
+		return nil
 	}
 	switch m.Kind {
 	case Opkg:
-		return m.run(ctx, "opkg", "install", pkg)
+		return []string{"opkg", "install", pkg}
 	case Apk:
-		return m.run(ctx, "apk", "add", pkg)
-	default:
-		return "", fmt.Errorf("pm: no package manager detected")
+		return []string{"apk", "add", pkg}
 	}
+	return nil
 }
 
-// Upgrade is the update path. opkg has no per-package upgrade verb (install upgrades in place); apk
-// is a targeted `apk add`. Same argv as Install by design; kept distinct so call sites read clearly.
-func (m Manager) Upgrade(ctx context.Context, pkg string) (string, error) { return m.Install(ctx, pkg) }
-
-// Remove removes a package by name. argv only.  opkg: `opkg remove <pkg>`   apk: `apk del <pkg>`
-func (m Manager) Remove(ctx context.Context, pkg string) (string, error) {
+// UpgradeArgv moves an INSTALLED package to the build the feed offers.
+func (m Manager) UpgradeArgv(pkg string) []string {
 	if !ValidPkgName(pkg) {
-		return "", fmt.Errorf("pm: refusing unsafe package name %q", pkg)
+		return nil
 	}
 	switch m.Kind {
 	case Opkg:
-		return m.run(ctx, "opkg", "remove", pkg)
+		return []string{"opkg", "install", pkg}
 	case Apk:
-		return m.run(ctx, "apk", "del", pkg)
-	default:
+		return []string{"apk", "upgrade", pkg}
+	}
+	return nil
+}
+
+// RemoveArgv deletes an installed package.
+func (m Manager) RemoveArgv(pkg string) []string {
+	if !ValidPkgName(pkg) {
+		return nil
+	}
+	switch m.Kind {
+	case Opkg:
+		return []string{"opkg", "remove", pkg}
+	case Apk:
+		return []string{"apk", "del", pkg}
+	}
+	return nil
+}
+
+// InstallVersionArgv installs one exact build. See ErrNoVersionPin for why opkg has none.
+func (m Manager) InstallVersionArgv(pkg, version string) []string {
+	if !ValidPkgName(pkg) || !ValidVersion(version) || m.Kind != Apk {
+		return nil
+	}
+	// One argv token, `pkg=version`. Built here rather than by the caller so the two halves are both
+	// validated above and cannot be spliced apart.
+	return []string{"apk", "add", pkg + "=" + version}
+}
+
+// Install installs a package by name. argv only.
+func (m Manager) Install(ctx context.Context, pkg string) (string, error) {
+	return m.RunPlanned(ctx, m.InstallArgv(pkg))
+}
+
+// Upgrade is the update path: the installed package moves to the feed's build.
+func (m Manager) Upgrade(ctx context.Context, pkg string) (string, error) {
+	return m.RunPlanned(ctx, m.UpgradeArgv(pkg))
+}
+
+// Remove removes a package by name. argv only.
+func (m Manager) Remove(ctx context.Context, pkg string) (string, error) {
+	return m.RunPlanned(ctx, m.RemoveArgv(pkg))
+}
+
+// RunPlanned executes an argv this package itself built — the one the operator read and approved —
+// instead of re-deriving a command from the action after the fact. Simulate has taken its argv this
+// way since it was written; the execution path had not, and the gap between them is where the
+// upgrade defect lived: plan and dry run agreed on a command while ExecutePM called a method on the
+// side that built its own. There is now one command per step, built once, shown, simulated and run.
+//
+// The allow-list has the same shape as Simulate's, for the same reason: an argv that did not come
+// from a planner must not become an arbitrary root command.
+func (m Manager) RunPlanned(ctx context.Context, argv []string) (string, error) {
+	if !m.Available() {
 		return "", fmt.Errorf("pm: no package manager detected")
 	}
+	if len(argv) != 3 {
+		return "", fmt.Errorf("pm: %q is not a package command this planner builds", strings.Join(argv, " "))
+	}
+	if argv[0] != string(m.Kind) {
+		return "", fmt.Errorf("pm: refusing to run %q with %s", argv[0], m.Kind)
+	}
+	switch argv[1] {
+	case "add", "del", "upgrade", "install", "remove":
+	default:
+		return "", fmt.Errorf("pm: %q is not a package operation", argv[1])
+	}
+	// `apk add <pkg>=<version>` is the one argument that is not a bare name, and both halves are
+	// validated here rather than trusted because they arrived inside a slice.
+	name, version, pinned := strings.Cut(argv[2], "=")
+	if !ValidPkgName(name) || (pinned && !ValidVersion(version)) {
+		return "", fmt.Errorf("pm: refusing unsafe package argument %q", argv[2])
+	}
+	return m.run(ctx, argv[0], argv[1:]...)
 }
 
 func (m Manager) run(ctx context.Context, name string, args ...string) (string, error) {

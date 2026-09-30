@@ -53,10 +53,10 @@ const allow = readRules('publish/pii-allow.json');
 
 // --- what counts as text worth reading -------------------------------------------------------
 const SKIP_DIR = new Set(['.git', 'node_modules', 'vendor', '.idea', '.vscode']);
-// The publisher copies `git ls-files` (see publish/Publish-Public.ps1), so this reads exactly that  (development repository)
-// set: an untracked build output is never published and must not be scanned. Reading the working
-// tree instead produced three "WireGuard keys" that were bytes out of dist/wayhop.exe, a file no
-// publish has ever touched.
+// The publisher copies `git ls-files` (see publish/Publish-Public.ps1), so this reads that set plus  (development repository)
+// the files the next commit would add: an ignored build output is never published and must not be
+// scanned. Reading the working tree instead produced three "WireGuard keys" that were bytes out of
+// dist/wayhop.exe, a file no publish has ever touched.
 const TEXT_EXT = new Set([
   '.go', '.js', '.mjs', '.cjs', '.ts', '.json', '.md', '.txt', '.yml', '.yaml', '.sh', '.ps1',
   '.html', '.css', '.conf', '.cfg', '.ini', '.sql', '.toml', '.mod', '.sum', '.gitignore', '',
@@ -223,10 +223,17 @@ const scrub = (text) => {
 // git ls-files rather than a directory walk, because that is what publish/Publish-Public.ps1 copies.  (development repository)
 // A walk also reads build outputs, editor leftovers and anything else sitting in the tree, and every
 // one of those is a hit the reviewer has to dismiss — noise that trains people to dismiss hits.
+//
+// Tracked plus new-but-not-ignored, as check-published-refs.mjs and check-scrub-output.mjs already
+// read. The index alone skips a file that has not been added, so the verify run before a commit
+// never scanned the new files that commit carried: a pinned upstream commit id in a new build script
+// passed that run and turned this gate red only once it was committed. A check whose subject changes
+// at `git add` measures the index, not the tree being published.
 function listPublishable(root) {
   let tracked;
   try {
-    tracked = execFileSync('git', ['ls-files', '-z'], { cwd: root, maxBuffer: 64 << 20 })
+    tracked = execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'],
+      { cwd: root, maxBuffer: 64 << 20 })
       .toString('utf8').split('\0').filter(Boolean);
   } catch {
     // A prebuilt public tree handed in with --tree may not be a repo yet. Fall back to a walk there,

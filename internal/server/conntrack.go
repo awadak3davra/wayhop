@@ -22,11 +22,18 @@ type Conn struct {
 	Src       string `json:"src"`             // original src (the LAN client)
 	Dst       string `json:"dst"`             // original dst (the remote)
 	Dport     int    `json:"dport"`           // remote service port
+	Sport     int    `json:"-"`               // client port: with the rest, one flow's identity
 	State     string `json:"state,omitempty"` // TCP state ("" for udp/icmp)
 	UpBytes   int64  `json:"up_bytes"`        // original-direction bytes (client → remote)
 	DownBytes int64  `json:"down_bytes"`      // reply-direction bytes (remote → client)
 	Mark      uint32 `json:"mark"`            // connmark = egress fwmark once pbr saves it (0 = general/WAN)
 	Exit      string `json:"exit,omitempty"`  // resolved egress tag (server-side, via the pbr plan)
+	// Offloaded: the flow runs on a flowtable fast path ([OFFLOAD] or [HW_OFFLOAD]). Its byte counts
+	// keep moving only when the flowtable counts, which WayHop's own does not.
+	Offloaded bool `json:"-"`
+	// ReplySrc is the reply tuple's source: the far side on an ordinary flow, the LAN host on one
+	// forwarded in from outside.
+	ReplySrc string `json:"-"`
 }
 
 var tcpStates = map[string]bool{
@@ -52,7 +59,10 @@ func parseConntrackInto(s string, yield func(Conn)) {
 		for _, tok := range f {
 			k, v, ok := strings.Cut(tok, "=")
 			if !ok {
-				if c.State == "" && tcpStates[tok] {
+				switch {
+				case tok == "[OFFLOAD]" || tok == "[HW_OFFLOAD]":
+					c.Offloaded = true
+				case c.State == "" && tcpStates[tok]:
 					c.State = tok
 				}
 				continue
@@ -61,6 +71,8 @@ func parseConntrackInto(s string, yield func(Conn)) {
 			case "src":
 				if c.Src == "" {
 					c.Src = v
+				} else if c.ReplySrc == "" {
+					c.ReplySrc = v
 				}
 			case "dst":
 				if c.Dst == "" {
@@ -69,6 +81,10 @@ func parseConntrackInto(s string, yield func(Conn)) {
 			case "dport":
 				if c.Dport == 0 {
 					c.Dport, _ = strconv.Atoi(v)
+				}
+			case "sport":
+				if c.Sport == 0 {
+					c.Sport, _ = strconv.Atoi(v)
 				}
 			case "bytes":
 				n, _ := strconv.ParseInt(v, 10, 64)

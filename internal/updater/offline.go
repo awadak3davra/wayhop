@@ -86,6 +86,33 @@ func offlineRelease(base, arch, tag string) Release {
 	}
 }
 
+// offlineCompanionVersion is the demo's companion version: the upstream tag
+// scripts/build-amneziawg-go.sh pins (a test holds the two equal), because unlike an engine's
+// invented v1.13.x line, this one names a real build.
+const offlineCompanionVersion = "v3.1.20260828"
+
+// offlineCompanionAssetSize is the real armv7 asset of that build, so the demo's fit arithmetic is a
+// router's.
+const offlineCompanionAssetSize int64 = 1_406_834
+
+// offlineCompanionReleases is a companion's catalogue in demo: one WayHop release carrying the build,
+// named as the build script names it, so companionReleases and pickAsset run exactly as they would.
+func offlineCompanionReleases(prefix, arch string) []Release {
+	if arch == "" {
+		arch = "amd64"
+	}
+	token := arch
+	if arch == "arm" {
+		token = "armv7" // the name the build script gives its GOARM=7 build
+	}
+	name := prefix + offlineCompanionVersion + "-linux-" + token + ".gz"
+	return companionReleases([]Release{{
+		Tag:    "v0.5.7",
+		Name:   "WayHop v0.5.7",
+		Assets: []Asset{{Name: name, URL: "https://example.invalid/" + name, Size: offlineCompanionAssetSize}},
+	}}, prefix)
+}
+
 // offlineReleaseByTag answers a single-tag lookup. An unknown tag is a genuine miss rather than a
 // synthesized hit, so the "no such version" path stays reachable in the demo.
 func offlineReleaseByTag(repo, arch, tag string) (Release, error) {

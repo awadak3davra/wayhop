@@ -30,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	"wayhop/internal/binstore"
 	"wayhop/internal/netdiag"
 	"wayhop/internal/pm"
 )
@@ -68,6 +69,10 @@ type Engine struct {
 	// installed" and offered fifteen GitHub versions it would then refuse to install. Every word true,
 	// and it reads as a missing component when nothing is missing.
 	Provides string `json:"provides,omitempty"`
+	// Companion is the asset-name prefix of a binary WayHop builds and attaches to its own releases
+	// because its upstream publishes none (see companion.go). Repo is then WayHop's, and the versions
+	// are the upstream ones written into the asset names.
+	Companion string `json:"companion,omitempty"`
 }
 
 // RouterUsed reports whether the router actually runs this engine (vs catalog-only).
@@ -80,9 +85,13 @@ var Engines = []Engine{
 	{ID: "xray", Name: "Xray-core", Repo: "XTLS/Xray-core", BinName: "xray", Role: "standalone", VersionArgs: []string{"version"}},
 	{ID: "hysteria", Name: "Hysteria 2", Repo: "apernet/hysteria", BinName: "hysteria", Role: "standalone", VersionArgs: []string{"version"}},
 	{ID: "dnscrypt-proxy", Name: "dnscrypt-proxy", Repo: "DNSCrypt/dnscrypt-proxy", BinName: "dnscrypt-proxy", Role: "standalone", VersionArgs: []string{"-version"}},
-	{ID: "amneziawg-go", Name: "AmneziaWG (userspace)", Repo: "amnezia-vpn/amneziawg-go", BinName: "amneziawg-go", Role: "kernel-plugin", SourceOnly: true,
-		Provides: "amneziawg",
-		Note:     "No prebuilt releases; build from source on-device (the PPA is blocked in RU)."},
+	// Upstream publishes source tags only, so WayHop builds it at a pinned commit and attaches it to its
+	// own releases (scripts/build-amneziawg-go.sh, companion.go). --version proves the downloaded binary
+	// executes here before it replaces anything; the version it prints is upstream's stale constant,
+	// which is why the installed version comes from the record Install writes instead.
+	{ID: "amneziawg-go", Name: "AmneziaWG (userspace)", Repo: DefaultSelfRepo, BinName: "amneziawg-go", Role: "kernel-plugin",
+		VersionArgs: []string{"--version"}, Provides: "amneziawg", Companion: "amneziawg-go-",
+		Note: "AmneziaWG 3 in userspace, for routers whose kernel module is older than the config or absent. Built by WayHop from upstream amneziawg-go, which publishes no binaries, and attached to every WayHop release."},
 	{ID: "olcrtc", Name: "olcRTC (WebRTC tunnel)", Repo: "awadak3davra/olcrtc", BinName: "olcrtc", Role: "socks-plugin", VersionArgs: []string{"version"}, Nightly: true,
 		Note: "Anti-whitelist WebRTC-over-meet tunnel (Jitsi/Telemost/WbStream). Pulled from the awadak3davra/olcrtc fork, which daily auto-syncs upstream openlibrecommunity/olcrtc and publishes prebuilt `olcrtc-linux-<arch>` binaries (upstream ships none; the WebRTC stack is too heavy to build on the router)."},
 }
@@ -106,6 +115,7 @@ type ghCacheEntry struct {
 // Updater performs installed/latest/install operations.
 type Updater struct {
 	BinDir  string   // where binaries live, e.g. /opt/sbin
+	RunDir  string   // tmpfs where a companion kept compressed is unpacked (binstore.DefaultRunDir)
 	Arch    string   // wayhop arch token: amd64|arm64|arm|mipsle|mips
 	Mirrors []string // URL prefixes tried in order; "" = direct
 	// Offline answers release metadata from the built-in catalogue in offline.go instead of the
@@ -126,6 +136,11 @@ type Updater struct {
 	// hourly allowance. See ghCacheTTL.
 	ghMu    sync.Mutex
 	ghCache map[string]ghCacheEntry
+	// availBytes reads free space, as a seam. Production leaves it nil and the package function does
+	// the statfs; a test sets it, because "this router has 20 MiB free" is the entire subject of the
+	// low-space upgrade path and a test that has to fill the dev host's disk to reach it would never
+	// be written. The alternative the gates forbid is a t.Skip on a host-dependent condition.
+	availBytes func(dir string) (uint64, bool)
 	// pmStatusMu serializes package-ownership/catalog reads. The Updater page loads the WayHop row
 	// and engine rows concurrently; Entware opkg can reject even read-only commands while another
 	// opkg process is inspecting its database. A single failed Owner call made a packaged sing-box
@@ -147,7 +162,7 @@ func New(binDir, arch string, mirrors []string) *Updater {
 	// took longer (a multi-MB router binary over a slow link), even though the caller's ctx allowed
 	// it. Bound connect/TLS/first-byte instead (catching a dead or wedged mirror) and let the body
 	// read run as long as the request ctx permits; the size LimitReader still caps total bytes.
-	return &Updater{BinDir: binDir, Arch: arch, Mirrors: mirrors, pm: pm.Detect(), hc: &http.Client{
+	return &Updater{BinDir: binDir, RunDir: binstore.DefaultRunDir, Arch: arch, Mirrors: mirrors, pm: pm.Detect(), hc: &http.Client{
 		Transport: &http.Transport{
 			TLSHandshakeTimeout:   10 * time.Second,
 			ResponseHeaderTimeout: 30 * time.Second,
@@ -206,6 +221,11 @@ func (u *Updater) BoundInterface() string {
 // WithPM overrides the detected package manager (tests inject a mock; production uses Detect()).
 func (u *Updater) WithPM(m pm.Manager) *Updater { u.pm = m; return u }
 
+// WithAvail overrides the free-space reader (tests inject a nearly-full router; production leaves
+// it alone and the statfs answers). The sibling of WithPM, and there for the same reason: the states
+// this code exists to handle cannot be arranged on the machine running the test.
+func (u *Updater) WithAvail(f func(dir string) (uint64, bool)) *Updater { u.availBytes = f; return u }
+
 // PMKind is the detected package manager ("opkg"|"apk"|"") for UI display.
 func (u *Updater) PMKind() pm.Kind { return u.pm.Kind }
 
@@ -225,16 +245,12 @@ func (e *NativeManagedError) Error() string { return e.Msg }
 // non-nil err means the PM couldn't answer (db locked by a concurrent opkg/apk run, timeout):
 // mutating callers fail CLOSED on it. No-op wherever no PM is present (dev/CI).
 func (u *Updater) nativeManaged(e Engine) (owner string, yes bool, err error) {
-	if !u.pm.Available() || e.BinName == "" {
+	if !u.pm.Available() {
 		return "", false, nil
 	}
-	path := filepath.Join(u.BinDir, e.BinName)
-	if _, serr := os.Stat(path); serr != nil {
-		p, lerr := exec.LookPath(e.BinName)
-		if lerr != nil {
-			return "", false, nil // nothing here and nothing on PATH -> nothing to clobber/orphan
-		}
-		path = p // mirror Installed()'s fallback: probe the binary the UI actually shows
+	path, exists := u.enginePath(e)
+	if !exists {
+		return "", false, nil // nothing here and nothing on PATH -> nothing to clobber/orphan
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -286,6 +302,9 @@ func (u *Updater) UninstallPrecheck(e Engine) error {
 	}
 	if err := u.engineManagedErr(e, "remove"); err != nil {
 		return err
+	}
+	if e.Companion != "" && fileExists(binstore.Stored(u.BinDir, e.BinName, true)) {
+		return nil // kept compressed: the gzip is the panel-installed copy
 	}
 	if _, err := os.Stat(filepath.Join(u.BinDir, e.BinName)); err != nil {
 		if os.IsNotExist(err) {
@@ -347,24 +366,21 @@ func parseVersion(s string) string { return verRe.FindString(s) }
 // the Init Server panel formatting a remote `sing-box version` line). "" if none.
 func ParseVersion(s string) string { return parseVersion(s) }
 
-// Installed locates the binary (in BinDir or PATH) and runs its version command.
+// Installed locates the binary (in BinDir or PATH) and runs its version command. The lookup is
+// enginePath's, shared with nativeManaged, so the panel, the ownership probe and the package plan
+// can never name three different files for one engine. The version probe is binaryRunnable's;
+// whether the binary executes is not this caller's question, so its error is dropped and an
+// unrunnable binary simply reports no version.
 func (u *Updater) Installed(e Engine) Installed {
-	path := filepath.Join(u.BinDir, e.BinName)
-	if _, err := os.Stat(path); err != nil {
-		p, err2 := exec.LookPath(e.BinName)
-		if err2 != nil {
-			return Installed{Present: false}
-		}
-		path = p
+	if e.Companion != "" {
+		return u.companionInstalled(e)
 	}
-	in := Installed{Present: true, Path: path}
-	if len(e.VersionArgs) > 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		out, _ := exec.CommandContext(ctx, path, e.VersionArgs...).CombinedOutput()
-		in.Version = parseVersion(string(out))
+	path, exists := u.enginePath(e)
+	if !exists {
+		return Installed{Present: false}
 	}
-	return in
+	v, _ := binaryRunnable(path, e.VersionArgs)
+	return Installed{Present: true, Path: path, Version: v}
 }
 
 // binaryRunnable runs path's version command to confirm it EXECUTES on this arch, returning the
@@ -603,6 +619,18 @@ func (u *Updater) ghStore(path string, body []byte) {
 
 // Latest returns the newest release.
 func (u *Updater) Latest(ctx context.Context, e Engine) (Release, error) {
+	if e.Companion != "" {
+		rs, err := u.List(ctx, e, 0)
+		if err != nil {
+			return Release{}, err
+		}
+		for _, r := range rs {
+			if !r.Prerelease {
+				return r, nil
+			}
+		}
+		return Release{}, fmt.Errorf("no stable WayHop release carries %s", e.ID)
+	}
 	if u.Offline {
 		rs := offlineReleases(e.Repo, u.Arch, 1)
 		if len(rs) == 0 {
@@ -619,6 +647,13 @@ func (u *Updater) Latest(ctx context.Context, e Engine) (Release, error) {
 func (u *Updater) List(ctx context.Context, e Engine, limit int) ([]Release, error) {
 	if limit <= 0 {
 		limit = 15
+	}
+	if e.Companion != "" {
+		rs, err := u.companionList(ctx, e, u.apiGet)
+		if len(rs) > limit {
+			rs = rs[:limit]
+		}
+		return rs, err
 	}
 	if u.Offline {
 		return offlineReleases(e.Repo, u.Arch, limit), nil
@@ -694,6 +729,9 @@ func escapeTagPath(tag string) (string, error) {
 }
 
 func (u *Updater) release(ctx context.Context, e Engine, tag string) (Release, error) {
+	if e.Companion != "" {
+		return u.companionRelease(ctx, e, tag, u.apiGet)
+	}
 	esc, err := escapeTagPath(tag)
 	if err != nil {
 		return Release{}, err
@@ -710,6 +748,10 @@ func (u *Updater) release(ctx context.Context, e Engine, tag string) (Release, e
 // self-update so the asset digest comes from an authenticated channel the mirror can't forge
 // (see apiGetDirect).
 func (u *Updater) releaseDirect(ctx context.Context, e Engine, tag string) (Release, error) {
+	if e.Companion != "" {
+		// The listing that carries the digest comes over the direct API too, for the same reason.
+		return u.companionRelease(ctx, e, tag, u.apiGetDirect)
+	}
 	esc, err := escapeTagPath(tag)
 	if err != nil {
 		return Release{}, err
@@ -737,6 +779,14 @@ func (u *Updater) releaseDirect(ctx context.Context, e Engine, tag string) (Rele
 // shortfallMiB is how many MiB have to be freed before the pre-flight would let the install run.
 // Rounded UP: freeing the floored difference leaves the guard refusing again, which would turn a
 // number presented as an instruction into a second dead end.
+// availAt is AvailBytes through the seam above.
+func (u *Updater) availAt(dir string) (uint64, bool) {
+	if u != nil && u.availBytes != nil {
+		return u.availBytes(dir)
+	}
+	return AvailBytes(dir)
+}
+
 func shortfallMiB(avail, need uint64) uint64 {
 	if need <= avail {
 		return 0
@@ -838,14 +888,27 @@ func (u *Updater) Install(ctx context.Context, e Engine, tag string) (string, er
 	// BinDir as it downloads. On a tiny router overlay a large core simply cannot fit, so refuse
 	// early with an actionable message instead of failing mid-write. (Streaming retired the old
 	// in-RAM compressed+decompressed peak, so RAM is no longer the binding constraint here.)
-	if avail, ok := AvailBytes(u.BinDir); !enoughFlashFor(avail, ok, asset.Size, asset.Name, false) {
-		return "", flashRefusal(e.ID, u.BinDir, avail, peakInstallDisk(asset.Size, asset.Name, false))
+	compressed := false
+	if avail, ok := u.availAt(u.BinDir); !enoughFlashFor(avail, ok, asset.Size, asset.Name, false) {
+		// A companion ships as a gzip; where the unpacked binary does not fit, it can be kept as that
+		// gzip and unpacked into RAM at each start (binstore). The refusal then names the smaller need,
+		// since that is what would get it installed at all.
+		if e.Companion == "" || isBareBinaryAsset(asset.Name) {
+			return "", flashRefusal(e.ID, u.BinDir, avail, peakInstallDisk(asset.Size, asset.Name, false))
+		}
+		if avail < compressedNeed(asset.Size) {
+			return "", companionFlashRefusal(e.ID, u.BinDir, avail, asset.Size)
+		}
+		compressed = true
 	}
 	// Memory pre-flight (the lock): streaming to disk is cheap, but the engine RESTART faults the new
 	// binary in while the old may still be resident — on a tight router that OOM-kills the daemon or
 	// sing-box and drops routing. Refuse early. No-op off Linux / when MemAvailable is unknown.
 	if avail, ok := availMemBytes(); !enoughMemForUpdate(avail, ok, asset.Size, asset.Name) {
 		return "", fmt.Errorf("not enough free memory to install %s safely (~%d MiB free, need ~%d MiB) — free RAM or install over SSH", e.ID, avail>>20, updateMemNeed(asset.Size, asset.Name)>>20)
+	}
+	if compressed {
+		return u.installCompressed(ctx, e, rel, *asset)
 	}
 	dst := filepath.Join(u.BinDir, e.BinName)
 	tmp := dst + ".new"
@@ -879,6 +942,15 @@ func (u *Updater) Install(ctx context.Context, e Engine, tag string) (string, er
 		_ = os.Remove(tmp)
 		return "", err
 	}
+	if e.Companion != "" {
+		// A gzip kept from an earlier install on a fuller flash is no longer the copy that runs.
+		_ = os.Remove(binstore.Stored(u.BinDir, e.BinName, true))
+		// The binary's own --version is upstream's stale constant; the release says what this is.
+		if err := binstore.Write(u.BinDir, e.BinName, rel.Tag, false); err != nil {
+			log.Printf("wayhop: %s installed, but its version record could not be written: %v", e.ID, err)
+		}
+		return rel.Tag, nil
+	}
 	if v != "" {
 		return v, nil // report the REAL running version, not just the release tag
 	}
@@ -893,6 +965,11 @@ func (u *Updater) Install(ctx context.Context, e Engine, tag string) (string, er
 func (u *Updater) Uninstall(e Engine) error {
 	if err := u.UninstallPrecheck(e); err != nil {
 		return err
+	}
+	if e.Companion != "" {
+		// Either stored form, its record, and the copy unpacked into RAM to run.
+		binstore.Remove(u.BinDir, e.BinName, u.RunDir)
+		return nil
 	}
 	dst := filepath.Join(u.BinDir, e.BinName)
 	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) { // IsNotExist: precheck raced a concurrent remove — gone is gone

@@ -33,7 +33,7 @@ func (r *overlapPMStatusRunner) Run(_ context.Context, name string, args ...stri
 		return "sing-box-1.12.17-r1 contains:\n" + strings.TrimPrefix(r.path, "/") + "\n", nil
 	case cmd == "apk list --installed sing-box":
 		return "sing-box-1.12.17-r1 aarch64 {sing-box} [installed]\n", nil
-	case cmd == "apk list sing-box":
+	case cmd == "apk list --available sing-box":
 		return "sing-box-1.12.17-r1 aarch64 {sing-box}\n", nil
 	default:
 		return "", fmt.Errorf("unexpected command %q", cmd)
@@ -97,7 +97,7 @@ func (r *pathPMStatusRunner) Run(_ context.Context, name string, args ...string)
 		return "sing-box-1.12.17-r1 contains:\n" + strings.TrimPrefix(r.path, "/") + "\n", nil
 	case cmd == "apk list --installed sing-box":
 		return "sing-box-1.12.17-r1 aarch64 {sing-box} [installed]\n", nil
-	case cmd == "apk list sing-box":
+	case cmd == "apk list --available sing-box":
 		return r.catalog, r.catalogErr
 	default:
 		return "", fmt.Errorf("unexpected command %q", cmd)
@@ -126,13 +126,14 @@ func TestPackageStatusDistinguishesMissingCatalogAndMissingChannel(t *testing.T)
 		catalog string
 		state   string
 	}{
-		{"indexes missing", "WARNING: opening from cache https://feed.invalid/packages.adb: No such file or directory\n" +
-			"sing-box-1.12.17-r1 aarch64 {sing-box} [installed]\n", PackageStateCatalogError},
-		{"installed local package only", "sing-box-1.12.17-r1 aarch64 {sing-box} [installed]\n", PackageStateChannelMissing},
-		{"same build in repository", "sing-box-1.12.17-r1 aarch64 {sing-box}\n" +
-			"sing-box-1.12.17-r1 aarch64 {sing-box} [installed]\n", PackageStateCurrent},
-		{"installed newer than repository", "sing-box-1.12.16-r0 aarch64 {sing-box}\n" +
-			"sing-box-1.12.17-r1 aarch64 {sing-box} [installed]\n", PackageStateAhead},
+		// Every fixture is what `apk list --available sing-box` prints in that situation, which is the
+		// question Candidates now asks. The installed build appears there when — and only when — a
+		// repository still offers it, carrying the [installed] tag as well; a build the feed has
+		// dropped simply is not listed.
+		{"indexes missing", "WARNING: opening from cache https://feed.invalid/packages.adb: No such file or directory\n", PackageStateCatalogError},
+		{"installed build no longer in any repository", "", PackageStateChannelMissing},
+		{"same build in repository", "sing-box-1.12.17-r1 aarch64 {sing-box} [installed]\n", PackageStateCurrent},
+		{"installed newer than repository", "sing-box-1.12.16-r0 aarch64 {sing-box}\n", PackageStateAhead},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			runner := &pathPMStatusRunner{path: bin, catalog: tc.catalog}

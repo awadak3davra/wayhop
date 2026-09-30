@@ -116,6 +116,30 @@ type CompileOptions struct {
 	// Managed endpoints are allocated only into slots that are not already owned by firmware,
 	// another service, or an adopted tunnel.
 	OccupiedInterfaces map[string]bool
+
+	// Userspace maps an AmneziaWG endpoint ID to the device WayHop's own AmneziaWG engine creates for
+	// it: an endpoint KeeneticOS's AmneziaWG cannot carry (a 3.x setting, or no native AmneziaWG on
+	// this router). NDM does not own that device and cannot name it - `ip route … <netdev>` is refused
+	// (see AdoptNDMNames) and `ip global` is a property of an NDM interface - so the endpoint gets no
+	// interface block, IfaceFor names the device for the planes that route by device (the kernel
+	// policy plane and the compatibility core), and a routing object that would need NDM to reach it
+	// moves the policy into the compatibility core instead (see RoutePlanes).
+	Userspace map[string]string
+}
+
+// RoutePlanes is what the classification needs besides the profile: the planes this router carries
+// and the endpoints only WayHop's userspace AmneziaWG runs. Compile and the Apply review
+// (PlanRequiresCore, CoreReasons) take the same value, so they cannot disagree about when the core
+// is needed.
+type RoutePlanes struct {
+	DomainsViaDNSMasq bool              // see CompileOptions.DomainsViaDNSMasq
+	ListsViaIpset     bool              // see CompileOptions.ListsViaIpset
+	Userspace         map[string]string // see CompileOptions.Userspace
+}
+
+// planes is the classification view of these options.
+func (o CompileOptions) planes() RoutePlanes {
+	return RoutePlanes{DomainsViaDNSMasq: o.DomainsViaDNSMasq, ListsViaIpset: o.ListsViaIpset, Userspace: o.Userspace}
 }
 
 func (o *CompileOptions) defaults() {
@@ -147,7 +171,7 @@ func Compile(p *model.Profile, opt CompileOptions) (*Plan, error) {
 		return nil, fmt.Errorf("nil profile")
 	}
 	opt.defaults()
-	compatibilityRouting := needsCompatibilityRouting(p, opt.DomainsViaDNSMasq)
+	compatibilityRouting := needsCompatibilityRouting(p, opt.planes())
 	plan := &Plan{
 		IfaceFor:             map[string]string{},
 		CompatibilityRouting: compatibilityRouting,
@@ -210,6 +234,17 @@ func Compile(p *model.Profile, opt CompileOptions) (*Plan, error) {
 			}
 			plan.IfaceFor[e.ID] = target
 			kernelBypassOrWarn(e) // anti-loop: adopted peer IP → ISP, or a review warning for a hostname
+			continue
+		}
+		// Run by WayHop's AmneziaWG engine, not by NDM: no interface block, and the device name, not
+		// an NDM one, is what the device-routing planes are given. The peer still gets its bypass -
+		// it is an ISP route, which NDM can express whatever carries the tunnel.
+		if device := opt.Userspace[e.ID]; device != "" {
+			if e.Engine != model.EngineAmneziaWG {
+				return nil, fmt.Errorf("endpoint %q: only an AmneziaWG endpoint can run on the userspace engine", e.ID)
+			}
+			plan.IfaceFor[e.ID] = device
+			kernelBypassOrWarn(e)
 			continue
 		}
 		if !nativeIface(e) {
@@ -318,6 +353,13 @@ func Compile(p *model.Profile, opt CompileOptions) (*Plan, error) {
 	if err := defaultRouteLadder(p, plan, opt, groupIface); err != nil {
 		return nil, err
 	}
+	// The classification sends a default route through a userspace device to the compatibility core,
+	// so none can reach here; if one did, NDM would be asked to raise an interface it does not have.
+	for iface := range plan.GlobalPriority {
+		if isUserspaceDevice(opt.Userspace, iface) {
+			return nil, fmt.Errorf("the default route would need `ip global` on %q, a device WayHop's userspace AmneziaWG runs and NDM does not own", iface)
+		}
+	}
 
 	// 2) Routing lists → static routes (IP-CIDR entries only; domains aren't native routes).
 	var routes []Route
@@ -350,6 +392,11 @@ func Compile(p *model.Profile, opt CompileOptions) (*Plan, error) {
 		// that is not this one.
 		if opt.ListsViaIpset {
 			continue
+		}
+		// Without the ipset plane the classification hands such a list to the compatibility core; a
+		// static route to the device would be refused by NDM at commit.
+		if isUserspaceDevice(opt.Userspace, tgt.Iface) {
+			return nil, fmt.Errorf("list %q: outbound %q runs on WayHop's userspace AmneziaWG, which only the kernel policy plane or the compatibility core can route to", rl.ID, rl.Outbound)
 		}
 		entries := make([]string, 0, len(rl.Manual)+len(rl.CIDRCache))
 		entries = append(entries, rl.Manual...)
@@ -405,11 +452,12 @@ const MaxNativeRouteCommands = 3500
 // true keeps native connections but moves the complete routing policy into one compatibility TUN.
 // needsCompatibilityRouting is the decision; compatibilityReason is the same walk, returning WHY.
 // One function, so the sentence the panel shows can never drift from the branch Apply takes.
-func needsCompatibilityRouting(p *model.Profile, domainsViaDNSMasq bool) bool {
-	return len(compatibilityReasons(p, domainsViaDNSMasq)) > 0
+func needsCompatibilityRouting(p *model.Profile, planes RoutePlanes) bool {
+	return len(compatibilityReasons(p, planes)) > 0
 }
 
-func compatibilityReasons(p *model.Profile, domainsViaDNSMasq bool) []string {
+func compatibilityReasons(p *model.Profile, planes RoutePlanes) []string {
+	domainsViaDNSMasq := planes.DomainsViaDNSMasq
 	var reasons []string
 	for i := range p.Rules {
 		r := &p.Rules[i]
@@ -419,7 +467,7 @@ func compatibilityReasons(p *model.Profile, domainsViaDNSMasq bool) []string {
 		// A default rule with no matchers says "everything goes here", and KeeneticOS says that with
 		// the global-connection ladder (defaultRouteLadder) — no core involved, provided what it
 		// points at is something this backend can route to.
-		if ruleIsPlainDefault(r) && outboundIsNativelyRoutable(p, r.Outbound) {
+		if ruleIsPlainDefault(r) && outboundIsNativelyRoutable(p, r.Outbound, planes.Userspace) {
 			continue
 		}
 		reasons = append(reasons, fmt.Sprintf("rule %q is not a plain default to a natively routable exit", r.ID))
@@ -429,7 +477,7 @@ func compatibilityReasons(p *model.Profile, domainsViaDNSMasq bool) []string {
 	// failing over is re-pointing its routes — which is Compile plus the daemon's election, not a
 	// proxy core. So only a group this backend cannot resolve on its own still needs one.
 	for gi := range p.Groups {
-		if !groupIsNativelyRoutable(p, &p.Groups[gi]) {
+		if !groupIsNativelyRoutable(p, &p.Groups[gi], planes.Userspace) {
 			reasons = append(reasons, fmt.Sprintf("group %q holds a member this router cannot route to natively", p.Groups[gi].ID))
 		}
 	}
@@ -444,8 +492,13 @@ func compatibilityReasons(p *model.Profile, domainsViaDNSMasq bool) []string {
 		}
 		// Pointing a list at a group is only unrepresentable when the GROUP is: a natively routable
 		// one resolves to a member's interface, which is an ordinary static route (see targetFor).
-		if g := p.GroupByID(list.Outbound); g != nil && !groupIsNativelyRoutable(p, g) {
+		if g := p.GroupByID(list.Outbound); g != nil && !groupIsNativelyRoutable(p, g, planes.Userspace) {
 			reasons = append(reasons, fmt.Sprintf("routing list %q points at a group this router cannot route to natively", list.ID))
+		}
+		// A list into a userspace device is a static route NDM cannot write. The ipset plane routes by
+		// device and carries it; without that plane only the core can.
+		if planes.Userspace[list.Outbound] != "" && !planes.ListsViaIpset {
+			reasons = append(reasons, fmt.Sprintf("routing list %q points at connection %q, which runs on WayHop's userspace AmneziaWG, and no kernel policy plane is wired", list.ID, list.Outbound))
 		}
 		// A fetched domain feed is carried by the resolver plane, exactly like a typed name — and it
 		// needs that plane present for the same reason. Without it the list would route nothing and
@@ -498,7 +551,7 @@ func ruleIsPlainDefault(r *model.Rule) bool {
 // without a proxy core. `direct` already is the default route. `block` is not a ladder — dropping
 // everything is a firewall statement, not a connection priority — and neither is a group with a kill
 // switch, whose whole point is that traffic must NOT fall back to the open WAN when its members die.
-func outboundIsNativelyRoutable(p *model.Profile, tag string) bool {
+func outboundIsNativelyRoutable(p *model.Profile, tag string, userspace map[string]string) bool {
 	switch tag {
 	case model.OutboundDirect, "":
 		return true
@@ -506,10 +559,10 @@ func outboundIsNativelyRoutable(p *model.Profile, tag string) bool {
 		return false
 	}
 	if e := p.EndpointByID(tag); e != nil {
-		return e.Enabled && (e.IsExternal() || nativeIface(e))
+		return e.Enabled && (e.IsExternal() || nativeIface(e) && userspace[e.ID] == "")
 	}
 	if g := p.GroupByID(tag); g != nil {
-		return !g.KillSwitch && groupIsNativelyRoutable(p, g)
+		return !g.KillSwitch && groupIsNativelyRoutable(p, g, userspace)
 	}
 	return false
 }
@@ -660,7 +713,7 @@ func dnsPlaneCoreReasons(p *model.Profile) []string {
 // interface by itself — an adopted tunnel or a kernel-native one. A group of those needs no core:
 // its routes are the member's routes. One member that is neither (a VLESS endpoint, a nested group)
 // is enough to need the core, and it is that MEMBER that requires it, not the group.
-func groupIsNativelyRoutable(p *model.Profile, g *model.Group) bool {
+func groupIsNativelyRoutable(p *model.Profile, g *model.Group, userspace map[string]string) bool {
 	if g == nil || len(g.Members) == 0 {
 		return false
 	}
@@ -674,11 +727,22 @@ func groupIsNativelyRoutable(p *model.Profile, g *model.Group) bool {
 		if e.IsExternal() {
 			continue
 		}
-		if !nativeIface(e) {
+		// A userspace member is a device NDM can neither put on the ladder nor route to.
+		if !nativeIface(e) || userspace[e.ID] != "" {
 			return false
 		}
 	}
 	return true
+}
+
+// isUserspaceDevice reports whether iface is a device WayHop's userspace AmneziaWG runs.
+func isUserspaceDevice(userspace map[string]string, iface string) bool {
+	for _, device := range userspace {
+		if device == iface {
+			return true
+		}
+	}
+	return false
 }
 
 // targetFor maps a model outbound tag to a route target: block→reject, direct/""→ISP, a native
@@ -788,8 +852,8 @@ func priorityBlocks(ladder map[string]int) [][]string {
 //
 // It deliberately lives beside needsCompatibilityRouting and nativeIface: the two branches below
 // mirror Compile's own classification, and keeping them in one file is what stops them drifting.
-func PlanRequiresCore(p *model.Profile, domainsViaDNSMasq bool) bool {
-	return len(CoreReasons(p, domainsViaDNSMasq)) > 0
+func PlanRequiresCore(p *model.Profile, planes RoutePlanes) bool {
+	return len(CoreReasons(p, planes)) > 0
 }
 
 // CoreReasons is PlanRequiresCore with its answer in words: every condition in this profile that
@@ -802,12 +866,12 @@ func PlanRequiresCore(p *model.Profile, domainsViaDNSMasq bool) bool {
 // plane. That sentence is the whole difference between a fact and a next step.
 //
 // Derived from the same walk the decision uses, never a second opinion about it.
-func CoreReasons(p *model.Profile, domainsViaDNSMasq bool) []string {
+func CoreReasons(p *model.Profile, planes RoutePlanes) []string {
 	if p == nil {
 		return nil
 	}
 	// Compatibility routing folds the complete policy into one sing-box TUN.
-	reasons := compatibilityReasons(p, domainsViaDNSMasq)
+	reasons := compatibilityReasons(p, planes)
 	for i := range p.Endpoints {
 		e := &p.Endpoints[i]
 		// Disabled endpoints are skipped by Compile's first statement and materialize nothing.

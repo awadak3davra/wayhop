@@ -579,11 +579,6 @@ input[type=checkbox], input[type=radio] { accent-color:var(--accent); }
 .wr-console { background:var(--console-bg); border:1px solid var(--divider); border-radius:var(--radius-sm);
   padding:10px 12px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:var(--fs-small); color:var(--console-ink);
   max-height:240px; overflow:auto; white-space:pre-wrap; margin-top:8px; word-break:break-all; }
-/* QR display — white plate so the code scans against the dark theme */
-.qr-wrap { display:flex; justify-content:center; align-items:center; padding:14px; background:#fff;
-  border-radius:var(--radius-sm); min-height:160px; max-width:100%; }
-/* a fixed-px QR image must scale down inside a narrow (mobile) modal rather than overflow */
-.qr-img { display:block; image-rendering:pixelated; max-width:100%; height:auto; }
 /* Settings — secret reveal row, validation errors, unsaved badge */
 .secret-row { display:flex; gap:8px; align-items:stretch; }
 .secret-row input { flex:1; min-width:0; }
@@ -2117,3 +2112,8 @@ svg.ico { display:block; }
 /* The DNS page's in-page filter — sized like the Routing one, in the block head beside the actions. */
 .dns-filter { margin:0; min-width:15rem; }
 .dns-filter input { width:100%; }
+
+/* ---------- Telegram bot card in Settings; the manager's styles load with page-telegram.js ---------- */
+.tg-card { display:flex; align-items:center; justify-content:space-between; gap:var(--sp-3); flex-wrap:wrap; }
+.tg-card-line { display:flex; align-items:center; gap:var(--sp-2); flex-wrap:wrap; min-width:0; }
+.tg-card-text { margin-top:0; }

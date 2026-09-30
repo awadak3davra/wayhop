@@ -299,23 +299,6 @@ async function delEndpoint(e) {
   }
 }
 
-// QR is rendered server-side (no external service — the config never leaves the
-// router) and POSTed so secrets never hit a URL. Returns an <img> filled async.
-async function qrImg(text, size) {
-  size = size || 300;
-  const img = el("img", { class: "qr-img", alt: "QR", width: size, height: size });
-  try {
-    const r = await fetch("/api/qr", { method: "POST", headers: authRequestHeaders({ "content-type": "application/json" }, true), body: JSON.stringify({ text, size }) });
-    if (!r.ok) throw new Error("qr");
-    const url = URL.createObjectURL(await r.blob());
-    const freeUrl = () => URL.revokeObjectURL(url); // free the blob once it's no longer needed — no per-render leak
-    img.addEventListener("load", freeUrl, { once: true });
-    img.addEventListener("error", freeUrl, { once: true }); // also free if the blob never decodes (bad/empty image)
-    img.src = url;
-  } catch (_) { return el("div", { class: "hint" }, "QR unavailable"); }
-  return img;
-}
-
 function fInput(id, label, value, opts) {
   opts = opts || {};
   return el("div", { class: "field" }, el("label", {}, label),

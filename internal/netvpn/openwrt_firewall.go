@@ -24,6 +24,7 @@ type Zone struct {
 	Ref      string   // uci section reference, e.g. "@zone[2]"
 	Name     string   // the stable handle, e.g. "vpn"
 	Networks []string // interfaces attached to it
+	Devices  []string // raw devices attached to it, netifd or not (see openwrt_bind.go)
 }
 
 // ParseFirewallZones reads `uci show firewall` into the zones it declares, in device order.
@@ -60,6 +61,8 @@ func ParseFirewallZones(out string) []Zone {
 			z.Name = first(splitUCIValues(rhs))
 		case "network":
 			z.Networks = splitUCIValues(rhs)
+		case "device":
+			z.Devices = splitUCIValues(rhs)
 		}
 	}
 	out2 := make([]Zone, 0, len(order))

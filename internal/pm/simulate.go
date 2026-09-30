@@ -55,8 +55,12 @@ func (m Manager) Simulate(ctx context.Context, argv []string) (string, error) {
 		return "", fmt.Errorf("pm: refusing to simulate %q with %s", argv[0], m.Kind)
 	}
 	// Only the verbs that change something are worth simulating, and only those are allowed through.
+	// `upgrade` joined them with the apk update path: it is apk's own verb for moving an installed
+	// package to the feed's build, and while the list did not carry it every upgrade plan failed its
+	// "the effect could be previewed" check and blocked — the preview refusing the one command it
+	// exists to describe.
 	switch argv[1] {
-	case "add", "del", "install", "remove":
+	case "add", "del", "upgrade", "install", "remove":
 	default:
 		return "", fmt.Errorf("pm: %q is not an operation that changes anything", argv[1])
 	}

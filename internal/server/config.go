@@ -90,6 +90,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	if cfg.Auth.PasswordHash != "" {
 		cfg.Auth.PasswordHash = config.RedactedMark
 	}
+	cfg.Telegram = cfg.Telegram.Redacted()
 	writeJSON(w, http.StatusOK, cfg)
 }
 
@@ -352,6 +353,8 @@ func applyConfigFields(dst, in *config.Config) {
 	dst.AllowedHosts = in.AllowedHosts
 	dst.AllowAnyHost = in.AllowAnyHost
 	dst.Backup = in.Backup
+	// NOT copied: Telegram (its own /api/telegram/* endpoints and the bot's pairing write it; the
+	// Settings page sends a masked token, so copying it would store "***" as the token).
 	// NOT copied: Auth (credential setup/rotation only) + Subscription (managed by its import settings endpoint) + Features (per-plugin
 	// toggles/settings persisted via PUT /api/features/{id}, never the bulk Settings PUT)
 	// + IgnoredDrift (dismissed drift warnings, written by setIgnoredDrift). The Settings page

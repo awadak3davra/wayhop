@@ -116,6 +116,11 @@ func parseARP(s string) []deviceInfo {
 // file (ip/mac/hostname — OpenWrt) with /proc/net/arp (ip/mac — any platform, incl. Keenetic), deduped
 // by MAC (a lease's hostname wins). Read-only host probe; both sources absent ⇒ an empty list. GET.
 func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"devices": lanDevices()})
+}
+
+// lanDevices is the merged lease + ARP view, named devices first. Never nil.
+func lanDevices() []deviceInfo {
 	byMAC := map[string]int{}
 	var devs []deviceInfo
 	add := func(d deviceInfo) {
@@ -153,5 +158,5 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 	if devs == nil {
 		devs = []deviceInfo{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"devices": devs})
+	return devs
 }

@@ -85,13 +85,19 @@ func buildExecutionNativeArtifactV1(
 		AdoptNDMNames:      cloneNativeInterfaces(capture.AdoptNDMNames),
 		DomainsViaDNSMasq:  capture.DomainsViaDNSMasq,
 		OwnedInterfaces:    nativeOwnershipFrom(previous),
+		PluginDevices:      nativePluginDevicesFrom(previous),
 		OccupiedInterfaces: cloneNativeInterfaceSet(capture.OccupiedInterfaces),
 		GlobalPriorities:   cloneNativePriorities(capture.GlobalPriorities),
 		ListsViaIpset:      capture.ListsViaIpset,
 	}
 	compiled, err := nativeplan.Compile(&desired.Profile, facts)
-	if err != nil || compiled == nil {
-		return executionNativeArtifactV1{}, fmt.Errorf("%w: %v", errExecutionNativeArtifact, err)
+	if err != nil {
+		// Both wrapped: the caller branches on the planner's typed refusals (MoveError), which a %v
+		// would flatten into text.
+		return executionNativeArtifactV1{}, fmt.Errorf("%w: %w", errExecutionNativeArtifact, err)
+	}
+	if compiled == nil {
+		return executionNativeArtifactV1{}, fmt.Errorf("%w: the native planner returned no plan", errExecutionNativeArtifact)
 	}
 	artifact := executionNativeArtifactV1{
 		SchemaVersion: executionNativeArtifactSchemaV1,
@@ -112,6 +118,22 @@ func buildExecutionNativeArtifactV1(
 		artifact.Plan.Keenetic.RunningConfigRev = capture.KeeneticConfigRev
 	}
 	return artifact, nil
+}
+
+// nativePluginDevicesFrom lists the devices WayHop's AmneziaWG engine ran endpoints on under the
+// previous applied plan, which is what lets the planner see a move between that engine and the
+// router's own AmneziaWG (nativeplan.MoveError).
+func nativePluginDevicesFrom(previous *nativeplan.Plan) map[string]string {
+	devices := make(map[string]string)
+	if previous == nil {
+		return devices
+	}
+	for _, decision := range previous.Decisions {
+		if decision.Path == nativeplan.PathEnginePlugin && decision.EndpointID != "" && decision.Interface != "" {
+			devices[decision.EndpointID] = decision.Interface
+		}
+	}
+	return devices
 }
 
 // nativeOwnershipFrom lists the interfaces the previous applied plan created or managed. Only those

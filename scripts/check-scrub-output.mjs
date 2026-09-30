@@ -80,7 +80,13 @@ const RULES = path.join(ROOT, 'publish', 'scrub-rules.json');
 // private address has no shape that distinguishes one household from another. Thirty replacement
 // rules were added at once, so the coverage over published Go source moved accordingly. The lesson
 // this pin records: a scrub list grows by being ATTACKED, not by being reviewed.
-const EXPECTED_GO_COVERAGE_SHA256 = '7543c3742f34aa0ff1b3abff0b330b33c7af6ef5721a1955870ad761f896f40a';
+// Moved again, routinely this time: internal/pbr/engine_remark_test.go is a new published Go file
+// and it reuses the fixture the pbr tests have always used - the carrier carve-out list and one
+// tunnel endpoint - so four existing rules fire inside it, 5 substitutions in one file. Reviewed
+// for the divergence this gate exists to catch: those rules rewrite the FIXTURE and the asserted
+// rule text together (the zone name is derived from the list id), so the published copy of the
+// test asserts on the published names and passes there exactly as it does here.
+const EXPECTED_GO_COVERAGE_SHA256 = '481aab1f7c4f15e5f8b3061f7a54d08f51d99f0aaad174052b8b58812bb6e607';
 // K5 intentionally retired seven more personal-device-derived Keenetic migration/cutover Go files.
 // Their scrub matches disappeared with the code; pin the reduced subject so any further loss fails.
 const MIN_REWRITTEN_GO_FILES = 108;

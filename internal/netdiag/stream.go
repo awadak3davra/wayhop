@@ -93,30 +93,11 @@ func parsePingMs(out string) int {
 	return 0
 }
 
-// ReachableViaIface sends ONE ICMP echo to host bound to a kernel interface
-// (`ping -I <iface>`) and reports whether a reply came back + the round-trip ms.
-// This is how the health monitor probes native interface-backed endpoints
-// (AmneziaWG/WireGuard nwgN) that are NOT sing-box outbounds, so the Clash delay
-// test cannot see them. Returns (false,0) on a bad iface/target or no reply.
-func ReachableViaIface(ctx context.Context, iface, host string, timeoutS int) (bool, int) {
-	if !ValidIface(iface) || !ValidTarget(host) {
-		return false, 0
-	}
-	if timeoutS < 1 || timeoutS > 10 {
-		timeoutS = 3
-	}
-	// 3 echoes, alive if ANY replies — tolerant of single-packet loss (a 1-packet probe flaps).
-	out, err := exec.CommandContext(ctx, "ping", "-c", "3", "-W", strconv.Itoa(timeoutS), "-I", iface, host).CombinedOutput()
-	if err != nil {
-		return false, 0
-	}
-	return true, parsePingMs(string(out))
-}
-
-// ReachableViaIfaceProbe is ReachableViaIface plus the question it could not previously answer:
-// did the probe RUN.
+// ReachableViaIfaceProbe sends ICMP echoes to host bound to a kernel interface (`ping -I <iface>`)
+// and reports whether a reply came back, the round-trip ms, and the question the bool-only form it
+// replaced could not answer: did the probe RUN.
 //
-// The bool form returns false for a missing ping binary, an interface the kernel does not have, and
+// That bool form returned false for a missing ping binary, an interface the kernel does not have, and
 // a genuine 100%-loss reply — and the health monitor mapped every false to Down. Every native
 // tunnel (AmneziaWG/WireGuard, which are the endpoints probed this way) would therefore be marked
 // dead on a router without ping on the service PATH, and failover reads those states to decide

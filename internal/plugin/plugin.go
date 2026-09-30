@@ -6,10 +6,13 @@
 package plugin
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
+	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +20,8 @@ import (
 	"strings"
 	"sync"
 
+	"wayhop/internal/awg"
+	"wayhop/internal/binstore"
 	"wayhop/internal/model"
 	"wayhop/internal/util"
 )
@@ -36,6 +41,7 @@ type Status struct {
 	NeedsBinary bool   `json:"needs_binary"`
 	SOCKSPort   int    `json:"socks_port"`
 	Reason      string `json:"reason,omitempty"` // why it isn't running, if it failed to start
+	Note        string `json:"note,omitempty"`   // what a running one does differently from its config, and why
 }
 
 // mtuStr / keepaliveStr prefer the typed Endpoint field (the UI's canonical home — it writes
@@ -52,16 +58,20 @@ func mtuStr(e model.Endpoint) string {
 // awgMTU is the MTU to set on an AmneziaWG kernel iface at bring-up (QW2): the configured
 // value, or a safe 1280 floor when the config omits one. The kernel default (1500) fragments
 // or PMTU-blackholes large packets once AmneziaWG's junk + WG encap overhead is added — a
-// dominant slow-site / setup-latency cause. 1280 (the IPv6 minimum) always fits and is only
-// ever locally conservative (never too large for any path); an explicit MTU still wins. The
+// dominant slow-site / setup-latency cause. 1280 (the IPv6 minimum) fits a 1500-byte path with
+// an S4 padding up to 160 and is otherwise only locally conservative; an explicit MTU still wins
+// (amneziawg-go's device is lowered further when even that does not fit: awgUserspaceMTU). The
 // importer deliberately leaves the model MTU unset when the .conf omits it, so this consumer-
 // side default is where the floor is applied.
 func awgMTU(e model.Endpoint) string {
 	if m := mtuStr(e); m != "" {
 		return m
 	}
-	return "1280"
+	return strconv.Itoa(awgDefaultMTU)
 }
+
+// awgDefaultMTU is awgMTU's floor for a config that names no MTU.
+const awgDefaultMTU = 1280
 
 func keepaliveStr(e model.Endpoint) string {
 	if e.PersistentKeepalive > 0 {
@@ -109,6 +119,13 @@ var awgOrder = []struct{ key, name string }{
 	{"s1", "S1"}, {"s2", "S2"}, {"s3", "S3"}, {"s4", "S4"},
 	{"h1", "H1"}, {"h2", "H2"}, {"h3", "H3"}, {"h4", "H4"},
 	{"i1", "I1"}, {"i2", "I2"}, {"i3", "I3"}, {"i4", "I4"}, {"i5", "I5"},
+}
+
+// awgOrder3 are the 3.0 range-valued keys in amneziawg-tools' own order (src/config.c).
+var awgOrder3 = []struct{ key, name string }{
+	{"content_padding_addition", "ContentPaddingAddition"}, {"rekey_after_time", "RekeyAfterTime"},
+	{"rekey_timeout", "RekeyTimeout"}, {"reject_after_time", "RejectAfterTime"},
+	{"keepalive_timeout", "KeepaliveTimeout"}, {"max_handshake_attempts", "MaxHandshakeAttempts"},
 }
 
 // isIKey reports whether an awg param key is one of the I1-I5 magic-packet headers,
@@ -180,6 +197,25 @@ func awgConfig(e model.Endpoint) string {
 		}
 		if v := numStr(p[j.key]); v != "" {
 			b.WriteString(j.name + " = " + confLine(v) + "\n")
+		}
+	}
+	// The 3.x keys, spelled as amneziawg-tools 3.1 reads them. They matter twice: the kernel path
+	// hands this text to `awg setconf` once the loaded module is new enough to take them (awgDecide
+	// keeps a 3.x config off an older module), and Sync compares this text to decide whether a
+	// running tunnel must restart - without them, a changed header protection key would leave the
+	// old one running. RandomTrailers and DisableCookies are written only when on: off is the
+	// default everywhere, and tools older than 3.1 refuse the key outright.
+	if k := confLine(normalizeWGKey(str(p, "header_protection_key"))); k != "" {
+		b.WriteString("HeaderProtectionKey = " + k + "\n")
+	}
+	for _, t := range awgOrder3 {
+		if v := numStr(p[t.key]); v != "" {
+			b.WriteString(t.name + " = " + confLine(v) + "\n")
+		}
+	}
+	for _, sw := range []struct{ key, name string }{{"random_trailers", "RandomTrailers"}, {"disable_cookies", "DisableCookies"}} {
+		if on, set, err := uapiBool(p, sw.key, sw.name); set && err == nil && on {
+			b.WriteString(sw.name + " = on\n")
 		}
 	}
 	b.WriteString("\n[Peer]\n")
@@ -268,14 +304,19 @@ type proc struct {
 	iface    string        // AmneziaWG: the kernel interface we created (for teardown)
 	binName  string        // engine binary to (re)resolve for a supervised long-running proc (olcRTC/nfqws2)
 	runArgs  []string      // argv after the binary, for (re)launch
+	runEnv   []string      // environment added over the daemon's own, for (re)launch (amneziawg-go's GOGC)
 	cmd      *exec.Cmd     // long-running (olcRTC/nfqws2)
 	done     chan struct{} // closed when cmd exits (nil for one-shot awg-quick)
 	running  bool
 	needsBin bool
 	reason   string // why it isn't running (config/exec error), surfaced in Status
+	note     string // what it runs differently from its config (amneziawg-go's lowered MTU), surfaced in Status
 	managed  bool   // a launched long-running olcRTC proc under Supervise crash-restart control
 	restarts int    // consecutive crash-restarts since the last healthy tick (drives backoff)
 	cooldown int    // Supervise ticks to wait before the next relaunch (crash-loop throttle)
+	// setup runs after every launch of a proc that needs configuring once it is up - userspace
+	// AmneziaWG, whose settings live in the process and die with it. nil for the others.
+	setup func(*proc) error
 }
 
 // Manager supervises the running engine plugins.
@@ -283,13 +324,42 @@ type Manager struct {
 	mu        sync.Mutex
 	dir       string // where plugin configs are written
 	binDir    string // where engine binaries live (e.g. /opt/sbin)
+	runDir    string // tmpfs where a binary kept compressed is unpacked to run (binstore.DefaultRunDir)
 	procs     map[string]*proc
 	lastSpecs []Spec // the most recent desired set passed to Sync (for fail-safe baseline snapshot)
+
+	// The AmneziaWG path choice and the userspace path's socket and resolver; tests replace them.
+	awgProbe  func() awg.Probe
+	awgDial   func(p *proc) (awgSocket, error)
+	awgLookup func(ctx context.Context, host string) ([]netip.Addr, error)
+	// awgPathMTU is the MTU of the path to the server (awgRoutePathMTU), 0 when unknown.
+	awgPathMTU func(ipBin string, peer netip.Addr) int
+
+	// awgFirmwareKernel: the router's firmware manages the AmneziaWG kernel module (see
+	// FirmwareOwnsAWGKernel), so the kernel path is never taken.
+	awgFirmwareKernel bool
+}
+
+// FirmwareOwnsAWGKernel marks a router whose firmware manages the AmneziaWG kernel module itself, as
+// KeeneticOS's NDM does. The plugin then never takes the kernel path: a link it added with
+// `ip link add type amneziawg` would be one NDM does not know, on a module NDM configures, and
+// nothing on that router has shown `awg setconf` against NDM's module to be safe. Every AmneziaWG
+// endpoint the plugin runs there runs on amneziawg-go.
+func (m *Manager) FirmwareOwnsAWGKernel() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.awgFirmwareKernel = true
 }
 
 // New builds a Manager. dir is created on first Sync.
 func New(dir, binDir string) *Manager {
-	return &Manager{dir: dir, binDir: binDir, procs: map[string]*proc{}}
+	return &Manager{
+		dir: dir, binDir: binDir, runDir: binstore.DefaultRunDir, procs: map[string]*proc{},
+		awgProbe: awg.ProbeHost, awgDial: dialAWG, awgPathMTU: awgRoutePathMTU,
+		awgLookup: func(ctx context.Context, host string) ([]netip.Addr, error) {
+			return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+		},
+	}
 }
 
 // Sync reconciles running plugins to the desired set: it stops removed/changed
@@ -379,15 +449,33 @@ func (m *Manager) start(id string, s Spec) *proc {
 			return p
 		}
 	case model.EngineAmneziaWG:
-		iface, err := m.awgUp(s.Endpoint, cfg)
-		if err != nil {
-			p.reason = "awg up: " + err.Error()
-			if errors.Is(err, errNoBinary) {
-				p.needsBin = true
+		// The kernel module when it is new enough for this config, amneziawg-go otherwise; the
+		// reason is logged because it is the first thing to know when a tunnel misbehaves.
+		d := m.awgDecide(s.Endpoint)
+		switch d.Path {
+		case awg.PathKernel:
+			iface, err := m.awgUp(s.Endpoint, cfg)
+			if err != nil {
+				p.reason = "awg up: " + err.Error()
+				if errors.Is(err, errNoBinary) {
+					p.needsBin = true
+				}
+				return p
 			}
+			p.iface, p.running = iface, true
+		case awg.PathUserspace:
+			if err := m.awgUserspaceUp(p, s.Endpoint); err != nil {
+				p.reason = "amneziawg-go: " + err.Error()
+				if errors.Is(err, errNoBinary) {
+					p.needsBin = true
+				}
+				return p
+			}
+		default:
+			p.reason = d.Reason
 			return p
 		}
-		p.iface, p.running = iface, true
+		log.Printf("wayhop: awg %s: %s path: %s", util.AWGIface(s.Endpoint.ID), d.Path, d.Reason)
 	}
 	return p
 }
@@ -426,33 +514,40 @@ func (m *Manager) awgUp(e model.Endpoint, cfgText string) (string, error) {
 		_ = exec.Command(ipBin, "link", "del", iface).Run()
 		return "", fmt.Errorf("awg setconf: %v: %s", err, strings.TrimSpace(string(out)))
 	}
+	if err := awgLinkUp(ipBin, iface, e, awgMTU(e)); err != nil {
+		_ = exec.Command(ipBin, "link", "del", iface).Run()
+		return "", err
+	}
+	return iface, nil
+}
+
+// awgLinkUp is the ip-layer half of an AmneziaWG bring-up, the same for the kernel module and for
+// amneziawg-go: addresses, MTU, up. A failure to come up is returned for the caller to clean up its
+// own way (delete the link, or end the process that owns it).
+func awgLinkUp(ipBin, iface string, e model.Endpoint, mtu string) error {
 	// Add each interface address with its own `ip addr add` — a single call rejects
 	// a comma-joined argument ("inet prefix is expected"), so a dual-stack config
 	// (10.x/32 + fd00::x/128) would otherwise come up with NO address (broken).
 	for _, addr := range util.LocalAddrs(e.Params) {
-		// The iface was just re-created (link del+add above), so a failure here is real —
-		// a missing address means a dead tunnel. Log it instead of swallowing it silently;
+		// The iface is brand new (re-created by the kernel path, or just made by a fresh
+		// amneziawg-go), so a failure here is real — a missing address means a dead tunnel. Log
+		// it instead of swallowing it silently;
 		// don't abort, since a dual-stack config may legitimately add only one family.
 		if out, err := exec.Command(ipBin, "addr", "add", addr, "dev", iface).CombinedOutput(); err != nil {
 			log.Printf("wayhop: awg %s: ip addr add %s failed: %v: %s", iface, addr, err, strings.TrimSpace(string(out)))
 		}
 	}
-	// MTU is stripped from the setconf input (awg setconf rejects it) but is a real
-	// ip-layer setting; apply it here like the address, or the tunnel uses the kernel
-	// default and over a constrained path large packets fragment/blackhole.
 	// MTU is stripped from the setconf input (awg setconf rejects it) but is a real ip-layer
-	// setting; apply it here (QW2). awgMTU returns a safe 1280 floor when the config omits one
-	// so the tunnel never falls back to the kernel 1500 (which fragments/blackholes over the
-	// AmneziaWG encap+junk overhead); an explicit MTU still wins.
-	mtu := awgMTU(e)
+	// setting; apply it here (QW2), or the tunnel uses the kernel default 1500 and large packets
+	// fragment or blackhole over the AmneziaWG encap+junk overhead. The kernel path passes awgMTU
+	// (the config's, or a 1280 floor); amneziawg-go gets awgUserspaceMTU, which also fits the path.
 	if out, err := exec.Command(ipBin, "link", "set", iface, "mtu", mtu).CombinedOutput(); err != nil {
 		log.Printf("wayhop: awg %s: set mtu %s failed: %v: %s", iface, mtu, err, strings.TrimSpace(string(out)))
 	}
 	if out, err := exec.Command(ipBin, "link", "set", iface, "up").CombinedOutput(); err != nil {
-		_ = exec.Command(ipBin, "link", "del", iface).Run()
-		return "", fmt.Errorf("ip link set up: %v: %s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("ip link set up: %v: %s", err, strings.TrimSpace(string(out)))
 	}
-	return iface, nil
+	return nil
 }
 
 // awgStrip removes the ip-layer lines (Address/DNS/MTU) from an awg-quick .conf so
@@ -538,12 +633,12 @@ func pluginBackoffTicks(restarts int) int {
 	return pluginMaxCooldown
 }
 
-// Supervise restarts any long-running plugin process (olcRTC, nfqws2) that has crashed,
-// re-launching it from its stored binName + runArgs, with crash-loop backoff
-// (see pluginBackoffTicks) so a plugin that dies every tick is throttled rather
-// than relaunched ~20x/min (each relaunch would spam the router log). AmneziaWG
-// uses a one-shot `awg-quick up` (interface, not a process), so it is left to M7
-// routing health. Best-effort and on-device only (no-op when binaries are absent).
+// Supervise restarts any long-running plugin process (olcRTC, nfqws2, userspace AmneziaWG's
+// amneziawg-go) that has crashed, re-launching it from its stored binName + runArgs, with
+// crash-loop backoff (see pluginBackoffTicks) so a plugin that dies every tick is throttled rather
+// than relaunched ~20x/min (each relaunch would spam the router log). Kernel-path AmneziaWG is a
+// one-shot bring-up (an interface, not a process), so it is left to M7 routing health.
+// Best-effort and on-device only (no-op when binaries are absent).
 func (m *Manager) Supervise() {
 	// Non-blocking: Sync() holds m.mu across blocking external commands (ip/awg setconf)
 	// and the process reap (<-p.done), which can take seconds during an Apply/rollback.
@@ -581,11 +676,15 @@ func (m *Manager) Supervise() {
 	}
 }
 
-// launchProc spawns a supervised long-running engine process (bin + p.runArgs), wires the
-// exit-tracking goroutine, and marks the proc running+managed. Shared by olcRTC and nfqws2. On a
-// Start error it leaves the proc not-running (the caller sets reason) — never running on failure.
+// launchProc spawns a supervised long-running engine process (bin + p.runArgs, p.runEnv over the
+// daemon's environment), wires the exit-tracking goroutine, and marks the proc running+managed.
+// Shared by olcRTC, nfqws2 and amneziawg-go. On a Start error it leaves the proc not-running (the
+// caller sets reason) — never running on failure.
 func launchProc(p *proc, bin string) error {
 	cmd := exec.Command(bin, p.runArgs...)
+	if len(p.runEnv) > 0 {
+		cmd.Env = append(os.Environ(), p.runEnv...)
+	}
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Start(); err != nil {
 		return err
@@ -613,15 +712,31 @@ func (m *Manager) relaunchProc(p *proc) {
 		p.reason = "restart " + p.binName + ": " + err.Error()
 		return
 	}
+	// A relaunched amneziawg-go comes up with a fresh TUN device and no settings; configure it like
+	// the first launch. A failed setup ends the process and is throttled like a crash.
+	if p.setup != nil {
+		if err := p.setup(p); err != nil {
+			killProc(p)
+			p.reason = "restart " + p.binName + ": " + err.Error()
+			return
+		}
+	}
 	p.reason = ""
 }
 
-// resolve finds an engine binary in binDir, then on PATH.
+// resolve finds an engine binary in binDir, then on PATH. A binary the updater kept compressed on a
+// flash too small for it (binstore) is unpacked into runDir first, its digest checked, and that copy
+// is what runs - for the first start and for every crash-relaunch, which resolve again.
 func (m *Manager) resolve(name string) (string, bool) {
 	if m.binDir != "" {
 		pth := filepath.Join(m.binDir, name)
 		if fi, err := os.Stat(pth); err == nil && !fi.IsDir() {
 			return pth, true
+		}
+		if p, err := binstore.Unpack(m.binDir, name, m.runDir); err == nil {
+			return p, true
+		} else if !errors.Is(err, binstore.ErrNotStored) {
+			log.Printf("wayhop: %s is kept compressed but cannot be unpacked to run: %v", name, err)
 		}
 	}
 	if pth, err := exec.LookPath(name); err == nil {
@@ -636,7 +751,7 @@ func (m *Manager) Status() []Status {
 	defer m.mu.Unlock()
 	out := make([]Status, 0, len(m.procs))
 	for id, p := range m.procs {
-		out = append(out, Status{ID: id, Engine: string(p.engine), Running: p.running, NeedsBinary: p.needsBin, SOCKSPort: p.socks, Reason: p.reason})
+		out = append(out, Status{ID: id, Engine: string(p.engine), Running: p.running, NeedsBinary: p.needsBin, SOCKSPort: p.socks, Reason: p.reason, Note: p.note})
 	}
 	return out
 }

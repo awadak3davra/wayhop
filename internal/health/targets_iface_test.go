@@ -8,7 +8,7 @@ import (
 )
 
 // TestTargetsResolveKernelIface: an AmneziaWG endpoint must get its kernel iface so it is probed via
-// ReachableViaIface (a direct ping out the tunnel) rather than a Clash delay test — in fast mode an
+// ReachableViaIfaceProbe (a direct ping out the tunnel) rather than a Clash delay test — in fast mode an
 // AWG endpoint is NOT a sing-box outbound, so the Clash probe can't see it and would report Unknown
 // even when the tunnel is healthy. EngineExternal keeps its params["interface"]; a proxy endpoint has
 // no iface (Clash-probed).

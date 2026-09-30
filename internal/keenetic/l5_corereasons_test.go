@@ -30,8 +30,8 @@ func TestCoreReasonsAgreeWithPlanRequiresCore(t *testing.T) {
 			RoutingLists: []model.RoutingList{{ID: "l", Enabled: true, Outbound: "n", ScopeMode: "only"}}}, true},
 	}
 	for _, c := range cases {
-		reasons := CoreReasons(&c.p, true)
-		if got := PlanRequiresCore(&c.p, true); got != c.want {
+		reasons := CoreReasons(&c.p, RoutePlanes{DomainsViaDNSMasq: true})
+		if got := PlanRequiresCore(&c.p, RoutePlanes{DomainsViaDNSMasq: true}); got != c.want {
 			t.Errorf("%s: PlanRequiresCore=%v want %v", c.name, got, c.want)
 		}
 		if (len(reasons) > 0) != c.want {
@@ -52,7 +52,7 @@ func TestCoreReasonsNameTheObject(t *testing.T) {
 		DNS: &model.DNSSettings{Enabled: true,
 			Servers: []model.DNSServer{{Tag: "doh", Type: "https", Enabled: true}}},
 	}
-	reasons := CoreReasons(&p, true)
+	reasons := CoreReasons(&p, RoutePlanes{DomainsViaDNSMasq: true})
 	if len(reasons) < 2 {
 		t.Fatalf("both the DNS plane and the scoped list must be listed, got %v", reasons)
 	}

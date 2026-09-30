@@ -155,8 +155,11 @@ for (const [label, start, end] of [['A', audit.indexOf('## Table A'), tbStart],
 // firewall it was read from. That same comparison produced AUD-225.
 // AUD-174: the missing obfuscation fields were observed on the AX3000T's own panel, and the form carrying
 // them was inspected there after deploying this build — all 16 present with the right input types.
+// AUD-226/227: the sing-box upgrade was driven through the AX3000T's own panel — plan read, the two
+// commands run, 1.12.17-r1 removed and 1.13.21-r1 installed on a 20.2 MiB overlay — and the row was
+// read again afterwards, which is where 227 came from and where its fix was confirmed.
 const VERIFIED_ON_HARDWARE = new Set(['AUD-43', 'AUD-174', 'AUD-160', 'AUD-161', 'AUD-144', 'AUD-145', 'AUD-142', 'AUD-137', 'AUD-138', 'AUD-11', 'AUD-12', 'AUD-55', 'AUD-75', 'AUD-76', 'AUD-77',
-  'AUD-78', 'AUD-79', 'AUD-80', 'AUD-81', 'AUD-82', 'AUD-83', 'AUD-84', 'AUD-86', 'AUD-87', 'AUD-89', 'AUD-90', 'AUD-91', 'AUD-92', 'AUD-96', 'AUD-97', 'AUD-98', 'AUD-99', 'AUD-101', 'AUD-102', 'AUD-103', 'AUD-104', 'AUD-106', 'AUD-107', 'AUD-108', 'AUD-109', 'AUD-110', 'AUD-111', 'AUD-112', 'AUD-113', 'AUD-114', 'AUD-115', 'AUD-116', 'AUD-117', 'AUD-118', 'AUD-119', 'AUD-120', 'AUD-121']);
+  'AUD-78', 'AUD-79', 'AUD-80', 'AUD-81', 'AUD-82', 'AUD-83', 'AUD-84', 'AUD-86', 'AUD-87', 'AUD-89', 'AUD-90', 'AUD-91', 'AUD-92', 'AUD-96', 'AUD-97', 'AUD-98', 'AUD-99', 'AUD-101', 'AUD-102', 'AUD-103', 'AUD-104', 'AUD-106', 'AUD-107', 'AUD-108', 'AUD-109', 'AUD-110', 'AUD-111', 'AUD-112', 'AUD-113', 'AUD-114', 'AUD-115', 'AUD-116', 'AUD-117', 'AUD-118', 'AUD-119', 'AUD-120', 'AUD-121', 'AUD-226', 'AUD-227']);
 
 // The deliverables spell small counts out, so several claims here have to read a word as a number.
 // ONE table for all of them: this file already records what two copies cost — the list was extended

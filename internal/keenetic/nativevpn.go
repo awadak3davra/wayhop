@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"wayhop/internal/awg"
 	"wayhop/internal/model"
 	"wayhop/internal/util"
 )
@@ -53,6 +54,12 @@ func ndmLine(s string) string {
 var ascBase = []string{"jc", "jmin", "jmax", "s1", "s2", "h1", "h2", "h3", "h4"}
 var ascExt = []string{"s3", "s4", "i1", "i2", "i3", "i4", "i5"}
 
+// AWGGeneration is the newest AmneziaWG generation `wireguard asc` is written for: ascBase is 1.x and
+// ascExt the 2.0 additions (whose argument order is still unconfirmed on a device, above). NDM has no
+// argument for a 3.x setting, so the native planner keeps such an endpoint off this path, and a test
+// holds the constant to the two lists.
+const AWGGeneration = awg.Gen2
+
 // WireguardOpts tune the generated native interface.
 type WireguardOpts struct {
 	Index       int    // the WireguardN slot
@@ -77,6 +84,15 @@ func WireguardCommands(e model.Endpoint, o WireguardOpts) ([]string, error) {
 	priv, peer := str(p, "private_key"), str(p, "peer_public_key")
 	if priv == "" || peer == "" {
 		return nil, fmt.Errorf("endpoint %q: missing private_key/peer_public_key", e.ID)
+	}
+	// Refused, not skipped, for the reason AWGObfuscationDropped exists: a tunnel without the server's
+	// 3.x settings comes up on the router and is never answered. The native planner refuses such an
+	// endpoint first; this is the writer holding the same line.
+	if e.Protocol == model.ProtoAmneziaWG {
+		if beyond := awg.Beyond(p, AWGGeneration); len(beyond) != 0 {
+			return nil, fmt.Errorf("endpoint %q uses AmneziaWG %s settings (%s), which `wireguard asc` has no arguments for",
+				e.ID, awg.Need(p), strings.Join(beyond, ", "))
+		}
 	}
 	if e.Server == "" || e.Port == 0 {
 		return nil, fmt.Errorf("endpoint %q: missing server/port", e.ID)

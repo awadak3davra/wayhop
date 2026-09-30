@@ -5,9 +5,11 @@ import (
 	"errors"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -113,6 +115,39 @@ func TestClientDirect(t *testing.T) {
 	}
 	if httpTr.Proxy != nil {
 		t.Fatal("direct client must not set Proxy")
+	}
+}
+
+// A direct run dials through Direct when it is set (the server's redirect-bypassing dialer); a run
+// through the proxy never does, since its only connection is to the local mixed inbound.
+func TestClientDirectDialer(t *testing.T) {
+	srv := speedtest_downServer(t)
+	var dialed []string
+	tr := New(1080)
+	tr.Direct = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialed = append(dialed, addr)
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
+	}
+	cl, err := tr.client(false, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := cl.Get(srv.URL + "/__down?bytes=10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	cl.CloseIdleConnections()
+	if len(dialed) != 1 || dialed[0] != strings.TrimPrefix(srv.URL, "http://") {
+		t.Fatalf("dialed %v", dialed)
+	}
+	pc, err := tr.client(true, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pc.Transport.(*http.Transport).DialContext != nil {
+		t.Fatal("a run through the proxy used the direct dialer")
 	}
 }
 
@@ -261,15 +296,17 @@ func TestUploadOK(t *testing.T) {
 	cl := speedtest_clientFor(srv, 30*time.Second)
 	tr := New(0)
 	const up = 500_000
-	dur, err := tr.upload(context.Background(), cl, up)
+	sent, dur, err := tr.upload(context.Background(), cl, up)
 	if err != nil {
 		t.Fatalf("upload err: %v", err)
 	}
-	if dur <= 0 {
-		t.Fatalf("duration must be positive, got %v", dur)
+	// Not asserting dur > 0, for the reason TestDownloadKnownPayload gives: on Windows the clock moves
+	// in timer ticks, and a localhost upload can finish inside one. It failed the scrub gate that way.
+	if dur < 0 {
+		t.Fatalf("duration must not be negative, got %v", dur)
 	}
-	if got != up {
-		t.Fatalf("server received %d bytes want %d", got, up)
+	if got != up || sent != up {
+		t.Fatalf("server received %d bytes, sent %d, want %d", got, sent, up)
 	}
 }
 
@@ -283,7 +320,7 @@ func TestUploadNon200(t *testing.T) {
 	t.Cleanup(srv.Close)
 	cl := speedtest_clientFor(srv, 10*time.Second)
 	tr := New(0)
-	_, err := tr.upload(context.Background(), cl, 1000)
+	_, _, err := tr.upload(context.Background(), cl, 1000)
 	if err == nil {
 		t.Fatal("expected an error on a non-2xx upload status")
 	}
@@ -297,7 +334,7 @@ func TestUploadClientError(t *testing.T) {
 	cl := speedtest_clientFor(srv, time.Second)
 	srv.Close()
 	tr := New(0)
-	if _, err := tr.upload(context.Background(), cl, 1000); err == nil {
+	if _, _, err := tr.upload(context.Background(), cl, 1000); err == nil {
 		t.Fatal("expected error against closed server")
 	}
 }
@@ -323,8 +360,8 @@ func TestRunResultViaComponents(t *testing.T) {
 	}
 	res.DownBytes = n
 	res.DownMbps = round2(Mbps(n, dur))
-	if d, err := tr.upload(ctx, cl, 500_000); err == nil {
-		res.UpMbps = round2(Mbps(500_000, d))
+	if sent, d, err := tr.upload(ctx, cl, 500_000); err == nil {
+		res.UpMbps = round2(Mbps(sent, d))
 	}
 
 	if res.Via != "direct" {
@@ -418,5 +455,207 @@ func TestZeroReaderChunks(t *testing.T) {
 	n, err := z.Read(buf)
 	if n != 0 || err != io.EOF {
 		t.Fatalf("post-EOF read n=%d err=%v want 0/EOF", n, err)
+	}
+}
+
+// With a budget, a transfer still running when it runs out stops there and counts what moved: a
+// download trickling in for seconds and an upload with no end both come back in about the budget,
+// with a rate rather than an error.
+func TestBudgetBoundsEachTransfer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/__up") {
+			_, _ = io.Copy(io.Discard, r.Body)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		chunk := make([]byte, 1024)
+		for i := 0; i < 400; i++ {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+			w.(http.Flusher).Flush()
+			time.Sleep(10 * time.Millisecond)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	cl := speedtest_clientFor(srv, 30*time.Second)
+	tr := New(0)
+	tr.Budget = 150 * time.Millisecond
+
+	start := time.Now()
+	n, dur, err := tr.download(context.Background(), cl, 400*1024)
+	if err != nil || n <= 0 || n >= 400*1024 || dur < tr.Budget || time.Since(start) > 2*time.Second {
+		t.Fatalf("download: %d bytes in %v, err %v", n, dur, err)
+	}
+	sent, dur, err := tr.upload(context.Background(), cl, 1<<40)
+	if err != nil || sent <= 0 || sent >= 1<<40 || dur < tr.Budget || dur > 5*time.Second {
+		t.Fatalf("upload: %d bytes in %v, err %v", sent, dur, err)
+	}
+}
+
+// With a budget, waiting for an answer is bounded too: a path that takes a request and never
+// answers (an MTU black hole stalling the handshake, a proxy whose upstream went silent) is "no
+// answer" in about the budget, not the client's 90 s or the caller's deadline.
+func TestBudgetBoundsTheWaitForAnAnswer(t *testing.T) {
+	headersOnly := make(chan struct{})
+	t.Cleanup(func() { close(headersOnly) })
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("bytes") == "7" {
+			w.WriteHeader(http.StatusOK) // the headers, and then nothing
+			w.(http.Flusher).Flush()
+			select {
+			case <-r.Context().Done():
+			case <-headersOnly:
+			}
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/__up") {
+			_, _ = io.Copy(io.Discard, r.Body)
+		}
+		<-r.Context().Done() // never answers
+	}))
+	t.Cleanup(srv.Close)
+	cl := speedtest_clientFor(srv, 90*time.Second)
+	tr := New(0)
+	tr.Budget = 150 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	for _, c := range []struct {
+		name string
+		run  func() error
+		max  time.Duration
+	}{
+		{"latency", func() error { _, err := tr.latency(ctx, cl); return err }, time.Second},
+		{"download", func() error { _, _, err := tr.download(ctx, cl, 1_000_000); return err }, time.Second},
+		{"download body", func() error { _, _, err := tr.download(ctx, cl, 7); return err }, time.Second},
+		{"upload", func() error { _, _, err := tr.upload(ctx, cl, 1<<40); return err }, 2 * time.Second},
+	} {
+		start := time.Now()
+		err := c.run()
+		if took := time.Since(start); !errors.Is(err, ErrNoAnswer) || took > c.max {
+			t.Errorf("%s: %v after %v", c.name, err, took.Round(time.Millisecond))
+		}
+	}
+}
+
+// A budgeted run whose empty probe got no answer stops there: the transfers would only wait out
+// their own budgets. The path here accepts the connection and never answers the TLS handshake.
+func TestBudgetedRunStopsWhenTheProbeGetsNoAnswer(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	accepted := make(chan net.Conn, 4)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- c
+		}
+	}()
+	t.Cleanup(func() {
+		for len(accepted) > 0 {
+			(<-accepted).Close()
+		}
+	})
+	tr := New(0)
+	tr.Budget = 150 * time.Millisecond
+	tr.Direct = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, ln.Addr().String())
+	}
+	start := time.Now()
+	_, err = tr.Run(context.Background(), false, 1_000_000)
+	if took := time.Since(start); !errors.Is(err, ErrNoAnswer) || !strings.HasPrefix(err.Error(), "latency: ") || took > time.Second {
+		t.Fatalf("%v after %v", err, took.Round(time.Millisecond))
+	}
+	if n := len(accepted); n != 1 {
+		t.Fatalf("%d connections: the run went on past the probe", n)
+	}
+}
+
+// sleepingPath answers every request after wait, like a path whose answer lands at the very end of
+// the budget, with a body whose bytes never come: a read waits for the request's context.
+type sleepingPath struct{ wait time.Duration }
+
+func (p sleepingPath) RoundTrip(req *http.Request) (*http.Response, error) {
+	time.Sleep(p.wait)
+	return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1,
+		Header: http.Header{}, Body: ctxBody{req.Context()}, Request: req}, nil
+}
+
+type ctxBody struct{ ctx context.Context }
+
+func (b ctxBody) Read([]byte) (int, error) { <-b.ctx.Done(); return 0, b.ctx.Err() }
+func (b ctxBody) Close() error             { return nil }
+
+// An answer that lands just as the budget runs out is no answer, every time. The budget's timer
+// used to cancel the request after send had handed the answer back as on time, and the leg then
+// failed with a bare "context canceled", which is neither a measurement nor "no answer". One P and
+// an answer in the same timer batch as the budget made that happen within a few tries.
+func TestAnAnswerAtTheBudgetsEdgeIsNoAnswer(t *testing.T) {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	const wait = 20 * time.Millisecond
+	tr := New(0)
+	tr.Budget = wait
+	cl := &http.Client{Transport: sleepingPath{wait}}
+	for i := 0; i < 100; i++ {
+		if _, _, err := tr.download(context.Background(), cl, 1000); !errors.Is(err, ErrNoAnswer) {
+			t.Fatalf("try %d: %v", i, err)
+		}
+	}
+}
+
+// bufferedUplink models an upload behind buffers: the local path (the socket's send buffer, then
+// the modem's queue) takes up to buf bytes more than the uplink has carried, the uplink carries rate
+// bytes a second, and the far side answers once the last byte has crossed it.
+type bufferedUplink struct {
+	buf  int64
+	rate float64
+}
+
+func (u bufferedUplink) RoundTrip(req *http.Request) (*http.Response, error) {
+	start := time.Now()
+	crossed := func() float64 { return u.rate * time.Since(start).Seconds() }
+	var got int64
+	p := make([]byte, 4<<10)
+	for {
+		for float64(got)-crossed() > float64(u.buf) {
+			if req.Context().Err() != nil {
+				return nil, req.Context().Err()
+			}
+			time.Sleep(time.Millisecond)
+		}
+		n, err := req.Body.Read(p)
+		got += int64(n)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	select {
+	case <-time.After(time.Until(start.Add(time.Duration(float64(got) / u.rate * float64(time.Second))))):
+	case <-req.Context().Done():
+		return nil, req.Context().Err()
+	}
+	return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1,
+		Header: http.Header{}, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+}
+
+// A slow uplink behind deep buffers is still measured: what counts as sent includes what the
+// buffers held when sending stopped, and the answer comes once that has crossed too. Scaled: a
+// 0.8 Mbit/s uplink whose buffers hold three budgets of it.
+func TestAnUploadBehindDeepBuffersIsStillMeasured(t *testing.T) {
+	tr := New(0)
+	tr.Budget = 200 * time.Millisecond
+	sent, dur, err := tr.upload(context.Background(), &http.Client{Transport: bufferedUplink{buf: 60_000, rate: 100_000}}, 1_000_000)
+	if mbps := Mbps(sent, dur); err != nil || mbps < 0.7 || mbps > 0.9 {
+		t.Fatalf("%d bytes in %v (%.2f Mbit/s), %v", sent, dur, mbps, err)
 	}
 }

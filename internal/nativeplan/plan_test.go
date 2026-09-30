@@ -266,18 +266,28 @@ func TestCompileRefusesNonsensicalNativeEnginePair(t *testing.T) {
 	}
 }
 
+// Until the NDM writer is wired, a native WireGuard endpoint fails closed - no NDM write happens on an
+// executor nobody connected. An AmneziaWG endpoint no longer has to: WayHop's own engine runs it,
+// which needs no NDM authority at all.
 func TestCompileKeeneticFailsClosedUntilNativeWriterCapabilityIsWired(t *testing.T) {
-	endpoint := managedAWG()
 	caps := platform.Capabilities{
-		Platform: string(platform.Keenetic), Native: map[string]bool{"amneziawg": true},
+		Platform: string(platform.Keenetic), Native: map[string]bool{"amneziawg": true, "wireguard": true},
 		Installable: map[string]string{},
 	}
 	set := platform.Evaluate(caps, platform.RuntimeFacts{})
-	_, err := Compile(&model.Profile{Endpoints: []model.Endpoint{endpoint}}, HostFacts{
+	wireguard := managedAWG()
+	wireguard.Engine, wireguard.Protocol = model.EngineSingBox, model.ProtoWireGuard
+	_, err := Compile(&model.Profile{Endpoints: []model.Endpoint{wireguard}}, HostFacts{
 		Platform: platform.Keenetic, Capabilities: set,
 	})
-	if err == nil || !strings.Contains(err.Error(), "native.operation.amneziawg.create") {
+	if err == nil || !strings.Contains(err.Error(), "native.operation.wireguard.create") {
 		t.Fatalf("error = %v, want exact unwired create capability", err)
+	}
+	plan, err := Compile(&model.Profile{Endpoints: []model.Endpoint{managedAWG()}}, HostFacts{
+		Platform: platform.Keenetic, Capabilities: set, OccupiedInterfaces: map[string]bool{},
+	})
+	if err != nil || plan.Decisions[0].Path != PathEnginePlugin {
+		t.Fatalf("AmneziaWG endpoint on an unwired NDM writer: plan %+v, err %v", plan, err)
 	}
 }
 

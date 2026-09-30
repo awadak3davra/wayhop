@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"wayhop/internal/awg"
 	"wayhop/internal/clash"
 	"wayhop/internal/config"
 	"wayhop/internal/core"
@@ -22,6 +23,7 @@ import (
 	"wayhop/internal/plugin"
 	"wayhop/internal/serverstore"
 	"wayhop/internal/store"
+	"wayhop/internal/tgbot"
 	"wayhop/internal/traffic"
 	"wayhop/internal/updater"
 	"wayhop/internal/watchdog"
@@ -56,6 +58,8 @@ type Server struct {
 	// startedAt bounds what the failover log can possibly contain: it lives in RAM, so an empty log
 	// means "nothing since this time", not "nothing ever". The Failover page says which.
 	startedAt time.Time
+	// feedFails records the routing lists whose feed refreshes keep failing; see feedfailures.go.
+	feedFails feedFailures
 	// The optional-module (Plugins/IPTV) state used to live here as a featurestore handle plus a data
 	// dir, wired by a setter that nothing ever called: its routes were never registered, its start
 	// hook never ran, and the field stayed nil for the life of every process. The subsystem is
@@ -64,6 +68,9 @@ type Server struct {
 	// asserts the routes 404 and the IPTV assets are not embedded.
 	cfgMu   sync.Mutex // serializes all s.cfg field writes + Save() + reads
 	applyMu sync.Mutex // serializes Apply, confirm, rollback, boot converge and the reconcile loop
+	// speedMu lets one throughput test run at a time, the panel's and the Telegram bot's alike: two
+	// at once share the line, and each would report about half of it.
+	speedMu sync.Mutex
 
 	// nativeOperations names the exact NDM operations the Keenetic adapter implements (set at
 	// StartApply on that platform); the capability evaluator offers native adoption/creation only
@@ -114,6 +121,14 @@ type Server struct {
 	// Injected by tests, which cannot make a *core.SingBox report Running() without a live process —
 	// and a running core is the only state that guard is about. See updaterpm.go.
 	pmCoreHook *pmCoreState
+	// awgProbeOf is nil in production (awg.ProbeHost); tests give the AmneziaWG component a router.
+	awgProbeOf func() awg.Probe
+	// routeTables is nil in production (iproute2, see tableIO); tests replace how the list-routing
+	// loop reads and writes table defaults and asks whether a device is up.
+	routeTables *routeTableIO
+	// tableRestoreErr is the last refusal per family/table the route restore logged (under
+	// listFailoverErrMu), so a device that keeps failing is reported once, not every tick.
+	tableRestoreErr map[string]string
 	// platformOf is nil in production (platform.Detect); injected so the refusal paths below can be
 	// exercised on a dev box, which is never OpenWrt and would otherwise stop every test at the door.
 	platformOf      func() platform.Platform
@@ -156,6 +171,15 @@ type Server struct {
 	listFailoverErrMu sync.Mutex
 	listFailoverErr   map[int]string
 
+	// tg is the Telegram bot manager, built on first use (see tgbot.go).
+	tgOnce     sync.Once
+	tg         *tgbot.Manager
+	tgBootOnce sync.Once
+	tgBoot     tgbot.BootInfo
+	// tgDigestDay is the demo's record of the last daily digest; a router keeps it in a file.
+	tgDigestMu  sync.Mutex
+	tgDigestDay string
+
 	allowInternalFetch bool // test-only: skip the subscription-fetch SSRF dial guard so httptest (loopback) servers can be used
 
 }
@@ -181,6 +205,11 @@ func New(cfg *config.Config, hub *traffic.Hub, cl *clash.Client, sb *core.SingBo
 		servers: ss, jobs: initserver.NewJobManager(), ui: ui, pbrRunner: pbr.ExecRunner{}, updErrs: map[string]string{},
 		startedAt: time.Now(), keeneticConfigReader: readKeeneticRunningConfig}
 	s.auth = newAuthManager(s)
+	// NDM owns KeeneticOS's AmneziaWG kernel module: the plugin must not add links on it behind NDM's
+	// back, so every AmneziaWG endpoint it runs there runs on amneziawg-go.
+	if platform.Detect() == platform.Keenetic && !cfg.Demo {
+		s.plugins.FirmwareOwnsAWGKernel()
+	}
 	// Component downloads consult the chosen path per connection, so a saved choice applies from the
 	// first fetch and a group follows its healthy member without waiting for a config write.
 	up.BindVia(s.updaterDownloadIface)
@@ -261,7 +290,6 @@ func (s *Server) Handler() http.Handler {
 	s.route(mux, authRouteProtected, "POST /api/apply", s.handleApply)
 	// Per-connection share / QR plus imported-subscription refresh controls.
 	s.route(mux, authRouteProtected, "GET /api/endpoints/{id}/export", s.handleEndpointExport)
-	s.route(mux, authRouteProtected, "POST /api/qr", s.handleQR)
 	s.route(mux, authRouteProtected, "GET /api/subscription/info", s.handleSubInfo)
 	s.route(mux, authRouteProtected, "POST /api/subscription/autorefresh", s.handleSubAutoRefresh)
 	s.route(mux, authRouteProtected, "POST /api/subscription/refresh", s.handleSubRefreshNow)
@@ -342,6 +370,18 @@ func (s *Server) Handler() http.Handler {
 	s.route(mux, authRouteProtected, "POST /api/backup/restore", s.handleBackupRestore)
 	s.route(mux, authRouteProtected, "GET /api/support-bundle", s.handleSupportBundle)
 	s.route(mux, authRouteProtected, "POST /api/service/restart", s.handleServiceRestart)
+
+	// Telegram bot (tgbot.go): settings, token check, pairing, test message, chats and the chats that
+	// asked to be let in. The token is write-only: no route returns it.
+	s.route(mux, authRouteProtected, "GET /api/telegram", s.handleTelegramGet)
+	s.route(mux, authRouteProtected, "PUT /api/telegram", s.handleTelegramPut)
+	s.route(mux, authRouteProtected, "POST /api/telegram/check", s.handleTelegramCheck)
+	s.route(mux, authRouteProtected, "POST /api/telegram/pair", s.handleTelegramPair)
+	s.route(mux, authRouteProtected, "POST /api/telegram/test", s.handleTelegramTest)
+	s.route(mux, authRouteProtected, "PUT /api/telegram/chats/{id}", s.handleTelegramChatPut)
+	s.route(mux, authRouteProtected, "DELETE /api/telegram/chats/{id}", s.handleTelegramChatDelete)
+	s.route(mux, authRouteProtected, "POST /api/telegram/strangers/{id}/allow", s.handleTelegramStrangerAllow)
+	s.route(mux, authRouteProtected, "DELETE /api/telegram/strangers/{id}", s.handleTelegramStrangerDelete)
 
 	// Engine version manager (Updater) + WayHop self-update.
 	s.route(mux, authRouteProtected, "GET /api/updater/engines", s.handleUpdaterEngines)

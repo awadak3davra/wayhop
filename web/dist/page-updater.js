@@ -658,9 +658,29 @@ function selfUpdateRow() {
 // A blocked plan renders its CHECKS. "Why can't I?" used to be answered with prose; it is now the
 // list of preconditions with the one that failed marked, which is the same list the daemon used.
 //
-// mode picks which actions belong on this row. "owned" is the package-manager-owned engine (update,
-// roll back, remove); "install" is the engine that is NOT there yet, which is a different row in a
-// different state and shares only the ask-then-run discipline.
+// mode picks which actions belong on this row:
+//
+//	"owned"   — package-manager-owned, with a newer build in the feed: update, roll back, remove
+//	"managed" — package-manager-owned, nothing newer offered: roll back and remove, no update
+//	"install" — the engine is NOT there yet, which is a different row in a different state and shares
+//	            only the ask-then-run discipline
+// pmSpaceNote is the disk arithmetic behind the plan, shown whether or not it changed anything.
+//
+// Measured on the AX3000T: /overlay has 20.2 MiB free and the sing-box the feed offers unpacks to
+// 42.4 MiB, so the ordinary one-command upgrade cannot work there by any amount of retrying. A plan
+// that quietly picks the two-command path instead is not much better than one that fails — the
+// operator is the one whose routing stops between those commands — so the figures that forced the
+// choice are shown with the commands rather than behind them.
+function pmSpaceNote(sp, nsteps) {
+  const line = t("{0} needed, {1} free in {2}.", fmtBytes(sp.need_bytes), fmtBytes(sp.avail_bytes), sp.dir || "?");
+  if (nsteps < 2) return el("div", { class: "hint" }, line);
+  return el("div", { class: "upd-target-warn" },
+    el("strong", {}, t("Not enough room for both builds.")),
+    el("span", {}, line + " " +
+      t("The installed build is removed first to make room, then {0} is installed.",
+        sp.target_version || "the new build")));
+}
+
 function pmDelegation(e, pmKind, mode) {
   const box = el("div", { class: "pm-deleg" });
   const status = el("div", { class: "hint" });
@@ -715,8 +735,15 @@ function pmDelegation(e, pmKind, mode) {
       return null;
     }
     status.textContent = "";
-    preview.appendChild(el("div", { class: "hint" }, t("This will run:")));
-    preview.appendChild(el("code", { class: "pm-argv" }, (p.argv || []).join(" ")));
+    // A plan can be more than one command. Two is not a longer version of one: the first takes the
+    // installed build off the disk so the second has room to write the new one, and between them the
+    // router has no core at all. They are listed in order, with the arithmetic that forced the
+    // choice under them — the operator is agreeing to both, and to the window between them.
+    const steps = (p.steps && p.steps.length) ? p.steps : [p.argv || []];
+    preview.appendChild(el("div", { class: "hint" },
+      steps.length > 1 ? t("This will run, in order:") : t("This will run:")));
+    for (const st of steps) preview.appendChild(el("code", { class: "pm-argv" }, (st || []).join(" ")));
+    if (p.space && p.space.measured) preview.appendChild(pmSpaceNote(p.space, steps.length));
     // The command is not the effect. Measured on the AX3000T: `apk del sing-box` reads as one
     // package and removes two, taking kmod-inet-diag with it. A preview that shows only the command
     // asks for consent to something the operator cannot see.
@@ -738,7 +765,8 @@ function pmDelegation(e, pmKind, mode) {
       // answer back with the SAME command — the server re-plans either way, so a yes here approves
       // the stop, never a different operation.
       const run = async (stop) => api.post(url("apply"),
-        { action, version: version || "", argv: p.argv, ...(stop ? { stop: true } : {}) });
+        { action, version: version || "", argv: p.argv, steps: p.steps || [],
+          ...(stop ? { stop: true } : {}) });
       try {
         let r;
         try {
@@ -783,6 +811,11 @@ function pmDelegation(e, pmKind, mode) {
         } else {
           status.className = "hint";
         }
+        // The daemon re-read the package database after the command and found the installed build
+        // unchanged. That is the exact shape of the defect this path was fixed for — `apk add` on an
+        // installed package prints OK and moves nothing — so it is reported as loudly as a failure
+        // rather than left to be spotted in a version column.
+        if (r && r.verify_error) toast(r.verify_error, "err");
         // Same half-finished job on the package-manager path: opkg/apk wrote the files, the applied
         // plan still does not know about them.
         if (mode === "install") { updJustInstalled = e.id; updJustConverged = !!r.converged; updJustDemo = !!r.demo; }
@@ -843,8 +876,13 @@ function pmDelegation(e, pmKind, mode) {
     return box;
   }
 
-  acts.appendChild(act(t("Update"), "upgrade"));
-  if (mode === "update") return box;
+  // "owned" is the package-manager-owned engine with a newer build in the feed; "managed" is the
+  // same engine with nothing to update to. Both may be removed and rolled back — those actions are
+  // about the build that is installed, not about the one the feed offers — and until this line
+  // existed neither was reachable from anywhere: the only call sites passed "install" and "update",
+  // and "update" returned here, one statement before the Remove button was appended. The daemon has
+  // carried a tested `apk del` plan, its collateral list and its stop gate the whole time.
+  if (mode === "owned") acts.appendChild(act(t("Update"), "upgrade"));
   acts.appendChild(act(t("Remove"), "remove"));
   // The package-manager path shows the exact command before it runs anything, which answers "what
   // will happen to the FILES" and says nothing about what will happen to the operator's routing. The
@@ -966,8 +1004,14 @@ function installedNextStep(usedBy, converged, demo) {
 // for a reason that still holds: WayHop's datapath is native tunnels plus sing-box, so installing one
 // of those binaries would change no routing. VLESS/Reality, Hysteria2, TUIC and AnyTLS are not
 // missing from this list — they ride inside sing-box, which is why its row names them.
+//
+// The AmneziaWG 3 component is the exception that proves the rule: it gets a row exactly when a
+// connection here runs on it (e.awg.needed, the daemon's own path decision) or when it is installed
+// and so has something to update or remove. A router whose kernel or firmware carries every AmneziaWG
+// connection still gets the prose below and no button.
 function componentsToShow(engines) {
-  return (engines || []).filter(e => e.role === "core");
+  return (engines || []).filter(e => e.role === "core" ||
+    (e.awg && (e.awg.needed || (e.installed || {}).present)));
 }
 
 // kernelCarriedNote states what this router already carries itself, without offering to install it.
@@ -1123,6 +1167,70 @@ function installCostNote(e, version) {
   return box;
 }
 
+// awgStatusBlock is what the AmneziaWG 3 row is about: the router's own AmneziaWG module, how each
+// AmneziaWG connection here runs - the same decision the plugin and the native planner act on, from
+// the daemon - and, once installed, what the component costs on flash and in RAM.
+function awgStatusBlock(a) {
+  const box = el("div", { class: "upd-awg" }, el("div", { class: "hint" }, awgKernelLine(a)));
+  const conns = a.connections || [];
+  if (!conns.length) {
+    box.appendChild(el("div", { class: "hint" }, t("No AmneziaWG connection is configured.")));
+  } else {
+    const list = el("ul", { class: "hint upd-awg-conns" });
+    conns.forEach(c => list.appendChild(el("li", {},
+      el("strong", {}, c.name), " · ", awgPathLabel(c.path), " · ", t("needs AmneziaWG {0}", c.need), " — ", c.reason)));
+    box.appendChild(list);
+  }
+  if (a.footprint) box.appendChild(el("div", { class: "hint" }, awgFootprintLine(a.footprint)));
+  return box;
+}
+
+function awgKernelLine(a) {
+  if (a.firmware_owned) {
+    return t("The firmware runs its own tunnels on this router's AmneziaWG module, so a connection it cannot carry runs on amneziawg-go.");
+  }
+  if (a.kernel === "unknown") return t("The AmneziaWG kernel module could not be checked: {0}", a.probe_error || "");
+  if (a.kernel === "none") {
+    return a.tun ? t("No AmneziaWG kernel module here; amneziawg-go runs on /dev/net/tun.")
+      : t("No AmneziaWG kernel module and no /dev/net/tun: AmneziaWG cannot run on this router.");
+  }
+  return t("Kernel module: AmneziaWG {0}.", a.kernel);
+}
+
+function awgPathLabel(path) {
+  return ({
+    native: t("the router's own AmneziaWG"), kernel: t("kernel module"),
+    userspace: t("amneziawg-go (userspace)"), unavailable: t("cannot run"),
+  })[path] || path;
+}
+
+function awgFootprintLine(f) {
+  const mb = n => (n / 1048576).toFixed(1) + " MB";
+  let line = f.form === "compressed"
+    ? t("Kept compressed: {0} on flash; it is unpacked into RAM when it starts ({1}).", mb(f.flash_bytes),
+      f.ram_bytes ? mb(f.ram_bytes) : t("not unpacked yet"))
+    : t("{0} on flash.", mb(f.flash_bytes));
+  if (f.running) {
+    line += " " + tn("{0} process running|{0} processes running", f.running);
+    if (f.rss_bytes) line += " · " + t("{0} resident", mb(f.rss_bytes));
+  }
+  return line;
+}
+
+// installLatest is the one-click install the AmneziaWG 3 row offers when a connection needs it: the
+// newest stable version from the release listing, through the same install path as the picker.
+async function installLatest(e, btn) {
+  btn.disabled = true;
+  try {
+    const v = await api.get("/api/updater/" + encodeURIComponent(e.id) + "/versions");
+    if (!v.latest) throw new Error(t("No release carries it yet."));
+    await installVersion(e, v.latest, btn);
+  } catch (err) {
+    btn.disabled = false;
+    updRowErr(updItem(e.id).vbox, err.message);
+  }
+}
+
 function engineRow(e, pmKind, advanced) {
   const p = updItem(e.id);
   const installed = e.installed || {};
@@ -1182,6 +1290,8 @@ function engineRow(e, pmKind, advanced) {
     }
   }
 
+  if (e.awg) p.vbox.appendChild(awgStatusBlock(e.awg));
+
   // What depends on this engine decides both questions the row exists for: whether "not installed"
   // is normal here, and whether removing it would break something. The daemon answers from the saved
   // profile (see coreDependents), so it names the operator's OWN connections rather than a category.
@@ -1216,9 +1326,7 @@ function engineRow(e, pmKind, advanced) {
     p.vbox.appendChild(el("div", { class: "hint upd-pkg-note" },
       t("Installed as {0} package {1}{2}.", pmKind || "system", pkg.package || e.native_owner || e.id,
         pkg.installed_version ? " · " + pkg.installed_version : "")));
-    if (pkg.state === "behind") {
-      p.vbox.appendChild(pmDelegation(e, pmKind, "update"));
-    } else if (pkg.state === "catalog_error") {
+    if (pkg.state === "catalog_error") {
       p.vbox.appendChild(el("div", { class: "upd-remedy" },
         el("strong", {}, t("Package lists are unavailable.")),
         el("span", {}, t("Use “Refresh package lists” above, then check again."))));
@@ -1228,7 +1336,7 @@ function engineRow(e, pmKind, advanced) {
         el("span", {}, t("The installed binary is kept untouched because the package manager has no replacement for it."))));
     } else if (pkg.state === "ahead") {
       p.vbox.appendChild(el("div", { class: "hint" },
-        t("The installed package is newer than the package catalog. No downgrade is offered.")));
+        t("The installed package is newer than anything the catalog offers, so there is nothing to update to.")));
     } else if (pkg.state === "current") {
       // The last state that said nothing. On a live AX3000T the row read "1.12.17 / 1.12.17-r1
       // / current / managed by apk / Installed as apk package sing-box · 1.12.17-r1." and stopped —
@@ -1236,7 +1344,7 @@ function engineRow(e, pmKind, advanced) {
       // and no word about why. The policy is deliberate: the panel does not operate over a package
       // manager that owns the binary. Saying so is what was missing.
       p.vbox.appendChild(el("div", { class: "hint" },
-        t("It matches the package catalog, so there is nothing to update. Removing or changing it belongs to {0}, which owns this binary.", pmKind || "the package manager")));
+        t("It matches the package catalog, so there is nothing to update. Removing it or going back to an older build runs through {0} below.", pmKind || "the package manager")));
     } else if (pkg.error) {
       // Every other state above explains itself; "unknown" fell through to silence. The row then read
       // "Installed as apk package sing-box." with no Update, no Remove, no Roll back and no reason —
@@ -1248,7 +1356,19 @@ function engineRow(e, pmKind, advanced) {
         el("strong", {}, t("No package actions are offered for this one.")),
         el("span", {}, pkg.error)));
     }
-  } else if (!installed.present && !byKernel && !unknownOwner && pmKind) {
+    // One delegation box for every owned row, not only for the row with an update waiting. Remove
+    // and Roll back are about the build that is INSTALLED; hanging them off "is there something
+    // newer in the feed" is why a router whose package matched the catalog — the ordinary state —
+    // offered no way to remove it at all, and why the operator went looking for a button that the
+    // daemon has been able to serve since the day the plan was written.
+    //
+    // The one row that gets nothing is the one just above: a package whose identity the daemon could
+    // not establish. Its plans block on their own checks, and a control that can only be refused is
+    // not an offer.
+    if (pkg.state !== "unknown") {
+      p.vbox.appendChild(pmDelegation(e, pmKind, pkg.state === "behind" ? "owned" : "managed"));
+    }
+  } else if (!installed.present && !byKernel && !unknownOwner && pmKind && !e.companion) {
     // Install is the ONE action that can only apply while the binary is absent — and an absent binary
     // is owned by nobody, so `managed` is false and the branch above never runs for it. That is how
     // the action the operator named ("installing an absent package is not offered at all") stayed
@@ -1356,6 +1476,10 @@ function engineRow(e, pmKind, advanced) {
   // page into an error: header, verdict and the WayHop row still on screen, every engine row and every
   // engine control gone. The Keenetic reports opkg and owns sing-box, so it hit this every time that
   // flag was set; the demo owns nothing through a package manager and never did.
+  if (!noMutate && e.awg && e.awg.needed && !installed.present) {
+    p.acts.appendChild(el("button", { class: "btn btn-sm btn-primary", "aria-label": t("Install {0}", e.name),
+      onclick: ev => installLatest(e, ev.currentTarget) }, t("Install")));
+  }
   if (!noMutate) {
     p.acts.appendChild(el("button", { class: "btn btn-sm", "aria-label": "Check updates for " + e.name,
       onclick: async () => { await rec.check(true); paintUpdVerdict(); } }, "Check updates"));

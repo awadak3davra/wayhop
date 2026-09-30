@@ -194,6 +194,17 @@ func enoughFlashFor(avail uint64, known bool, assetSize int64, assetName string,
 // three paths were tried and the row showed the third. The direct download is the one whose failure
 // usually explains the rest, and it was the one dropped.
 func (u *Updater) streamAssetToFile(ctx context.Context, asset Asset, binName, dstPath string, requireDigest bool) error {
+	return u.streamAsset(ctx, asset, binName, dstPath, requireDigest, false)
+}
+
+// streamAssetVerbatim is streamAssetToFile without the extraction: the asset lands at dstPath as
+// published, hashed as it streams, digest mandatory. It is how a companion is kept compressed on a
+// flash too small for the unpacked binary (see binstore).
+func (u *Updater) streamAssetVerbatim(ctx context.Context, asset Asset, dstPath string) error {
+	return u.streamAsset(ctx, asset, "", dstPath, true, true)
+}
+
+func (u *Updater) streamAsset(ctx context.Context, asset Asset, binName, dstPath string, requireDigest, verbatim bool) error {
 	var lastErr error
 	var attempts []string
 	note := func(m string, err error) {
@@ -212,7 +223,7 @@ func (u *Updater) streamAssetToFile(ctx context.Context, asset Asset, binName, d
 		if m != "" {
 			url = strings.TrimRight(m, "/") + "/" + asset.URL
 		}
-		if err := u.streamOne(ctx, url, asset, binName, dstPath, requireDigest); err == nil {
+		if err := u.streamOne(ctx, url, asset, binName, dstPath, requireDigest, verbatim); err == nil {
 			return nil
 		} else {
 			note(m, err)
@@ -228,7 +239,7 @@ func (u *Updater) streamAssetToFile(ctx context.Context, asset Asset, binName, d
 	return lastErr
 }
 
-func (u *Updater) streamOne(ctx context.Context, url string, asset Asset, binName, dstPath string, requireDigest bool) error {
+func (u *Updater) streamOne(ctx context.Context, url string, asset Asset, binName, dstPath string, requireDigest, verbatim bool) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -262,7 +273,11 @@ func (u *Updater) streamOne(ctx context.Context, url string, asset Asset, binNam
 	}
 	defer out.Close() // safety net for the error paths; success closes explicitly before the digest check
 
-	if strings.HasSuffix(strings.ToLower(asset.Name), ".zip") {
+	if verbatim {
+		if _, err := io.Copy(out, br); err != nil {
+			return err
+		}
+	} else if strings.HasSuffix(strings.ToLower(asset.Name), ".zip") {
 		// zip needs random access → stage the (size-capped, hashed) archive to a temp file on the
 		// SAME filesystem as the target, then extract. Still no whole-archive RAM buffer.
 		tmp := dstPath + ".zip"

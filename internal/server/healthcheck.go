@@ -50,7 +50,13 @@ type healthRow struct {
 // battery folds these rows in next to its client-composed checks
 // (core/tunnels/internet/exit/log).
 func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	writeJSON(w, http.StatusOK, map[string]any{"checks": s.healthBattery(r.Context())})
+}
+
+// healthBattery runs every server-side check at once; the Diagnostics page and the Telegram bot's
+// /diag show the same rows.
+func (s *Server) healthBattery(parent context.Context) []healthRow {
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
 	// The checks are independent + each fans out to remote probes, so run them
 	// concurrently — sequential would risk blowing the request timeout.
@@ -83,7 +89,7 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 		go func(i int, fn func(context.Context) healthRow) { defer wg.Done(); rows[i] = fn(ctx) }(i, fn)
 	}
 	wg.Wait()
-	writeJSON(w, http.StatusOK, map[string]any{"checks": rows})
+	return rows
 }
 
 // clockSkewCheck compares the router clock to a remote server's Date header.
@@ -190,9 +196,10 @@ func ipv6LeakCheck(ctx context.Context) healthRow {
 		// router. In every one of those the global v6 address is still there and may still be carrying
 		// traffic around the v4-only tunnels.
 		//
-		// Every other unreadable-state branch in this file already degrades to warn — the
-		// /proc/net/if_inet6 read a few lines above does. This one is the branch where guessing wrong
-		// costs the most, and it was the only one guessing in the reassuring direction.
+		// This is the branch where guessing wrong costs the most, and it was the only one guessing in
+		// the reassuring direction. Not the same case as the /proc/net/if_inet6 read above, which
+		// reports "na": a host with no IPv6 state at all has nothing to warn ABOUT, while here a
+		// global v6 address demonstrably exists and only the egress verdict is missing.
 		row.Status, row.Summary = "warn", "global IPv6 present; the leak test could not complete"
 		row.Detail = "a direct IPv6 request did not finish, so whether v6 reaches the internet is unknown: " + err.Error()
 		row.Fix = "This router has a global IPv6 address and the check could not determine whether it bypasses the tunnels. Re-run it; if it keeps failing, test from a device on the LAN (e.g. open an IPv6-only address) or disable IPv6 forwarding until you know."
@@ -478,11 +485,7 @@ func (s *Server) endpointReachCheck(ctx context.Context) healthRow {
 		if host == "" || port <= 0 || port > 65535 {
 			continue // nothing dialable
 		}
-		name := e.Name
-		if name == "" {
-			name = e.ID
-		}
-		tgts = append(tgts, tgt{e.ID, name, host, port})
+		tgts = append(tgts, tgt{e.ID, nameOrID(e.Name, e.ID), host, port})
 	}
 	type res struct {
 		name string

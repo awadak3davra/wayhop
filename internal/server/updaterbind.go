@@ -29,7 +29,16 @@ func (s *Server) updaterDownloadIface() string {
 	if s == nil || s.cfg == nil || s.store == nil {
 		return ""
 	}
-	tag := s.config().Updater.DownloadVia
+	return s.outboundIface(s.config().Updater.DownloadVia)
+}
+
+// outboundIface resolves an endpoint or group id to the kernel interface a socket should bind to,
+// "" for the ordinary path. Shared by the component downloader and the Telegram bot, which ask the
+// same question for the same reason: the ordinary path may be the blocked one.
+func (s *Server) outboundIface(tag string) string {
+	if s == nil || s.cfg == nil || s.store == nil {
+		return ""
+	}
 	if tag == "" || tag == model.OutboundDirect {
 		return ""
 	}

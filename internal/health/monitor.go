@@ -112,6 +112,9 @@ type View struct {
 	BytesDown    int64  `json:"bytes_down"`
 	Cause        string `json:"cause,omitempty"` // why it's down (R6)
 	CauseFix     string `json:"cause_fix,omitempty"`
+	// CauseID names the cause for a reader that words it itself: causeEngineMissing, causeNoResponse,
+	// or the kb entry's id.
+	CauseID string `json:"cause_id,omitempty"`
 }
 
 // Monitor probes targets and accumulates their stats.
@@ -149,6 +152,7 @@ type Monitor struct {
 	coreAvailable func() bool
 
 	causeMu      sync.Mutex
+	causeID      string
 	causeTitle   string
 	causeFix     string
 	causeExpires int64 // unix ms; cache valid while nowMS() < causeExpires
@@ -352,6 +356,23 @@ func (m *Monitor) probe(ctx context.Context, id, testURL, iface string) (State, 
 
 type target struct{ id, name, kind, testURL, iface string }
 
+// EndpointIface is the kernel interface an endpoint's traffic leaves by, the one it is probed and
+// measured through. With an authenticated native binding map (known) it is the applied binding, and
+// an empty binding is meaningful: the core carries that endpoint, or it is not in the applied
+// snapshot, so no legacy name is manufactured. Without one, EngineExternal carries it in
+// params["interface"] and EngineAmneziaWG derives it from the id (mirrors pbr.kernelIface). "" for
+// an endpoint with no kernel interface.
+func EndpointIface(e model.Endpoint, native map[string]string, known bool) string {
+	if known {
+		return native[e.ID]
+	}
+	iface, _ := e.Params["interface"].(string)
+	if iface == "" && e.Engine == model.EngineAmneziaWG {
+		iface = util.AWGIface(e.ID)
+	}
+	return iface
+}
+
 // targetsFrom derives the probe targets from an already-fetched profile so a
 // caller that also needs the profile (e.g. Snapshot's group derivation) does not
 // pay for a second deep-cloning store.Profile() on the same tick.
@@ -364,22 +385,11 @@ func (m *Monitor) targetsFrom(p model.Profile) []target {
 			if e.Health != nil {
 				u = e.Health.URL
 			}
-			// The kernel iface this endpoint is probed through (ReachableViaIface) instead of a Clash
-			// delay test. EngineExternal carries it in params["interface"]; EngineAmneziaWG derives it
-			// from the id (mirrors pbr.kernelIface — keep in sync). Without resolving the AWG iface, a
-			// kernel-routed AWG endpoint that is NOT a sing-box outbound (fast mode) falls to the Clash
-			// probe, which can't see it, and shows Unknown health even when the tunnel is up.
-			iface := ""
-			if nativeKnown {
-				// An authenticated empty mapping is meaningful: this endpoint is compatibility-core
-				// carried (or is not in the current applied snapshot). Do not manufacture a legacy name.
-				iface = nativeInterfaces[e.ID]
-			} else {
-				iface, _ = e.Params["interface"].(string)
-				if iface == "" && e.Engine == model.EngineAmneziaWG {
-					iface = util.AWGIface(e.ID)
-				}
-			}
+			// The kernel iface this endpoint is probed through (ReachableViaIfaceProbe) instead of a Clash
+			// delay test. Without resolving the AWG iface, a kernel-routed AWG endpoint that is NOT a
+			// sing-box outbound (fast mode) falls to the Clash probe, which can't see it, and shows
+			// Unknown health even when the tunnel is up.
+			iface := EndpointIface(e, nativeInterfaces, nativeKnown)
 			t = append(t, target{e.ID, e.Name, "endpoint", u, iface})
 		}
 	}
@@ -943,7 +953,7 @@ func (m *Monitor) Snapshot() []View {
 	}
 	// causeFor scans the whole engine log and is identical for every down target,
 	// so compute it once per snapshot rather than re-scanning per down endpoint.
-	var cause, fix string
+	var id, cause, fix string
 	var computed bool
 	// The engine per endpoint, so a down exit whose core is missing is told that instead of the
 	// global log-derived cause. Built from the profile already in hand rather than re-fetching.
@@ -955,14 +965,14 @@ func (m *Monitor) Snapshot() []View {
 	for i := range views {
 		if views[i].State == "down" {
 			if t, f := coreMissingCause(engines[views[i].ID], coreKnown, coreAvail); t != "" {
-				views[i].Cause, views[i].CauseFix = t, f
+				views[i].CauseID, views[i].Cause, views[i].CauseFix = causeEngineMissing, t, f
 				continue
 			}
 			if !computed {
-				cause, fix = m.causeFor()
+				id, cause, fix = m.causeFor()
 				computed = true
 			}
-			views[i].Cause, views[i].CauseFix = cause, fix
+			views[i].CauseID, views[i].Cause, views[i].CauseFix = id, cause, fix
 		}
 	}
 	return views
@@ -987,27 +997,33 @@ func (m *Monitor) viewWithCause(id string) View {
 		}
 	}
 	if t, f := coreMissingCause(engine, coreKnown, coreAvail); t != "" {
-		v.Cause, v.CauseFix = t, f
+		v.CauseID, v.Cause, v.CauseFix = causeEngineMissing, t, f
 		return v
 	}
-	v.Cause, v.CauseFix = m.causeFor()
+	v.CauseID, v.Cause, v.CauseFix = m.causeFor()
 	return v
 }
 
 // causeFor returns the probable failure cause, reusing a recently-derived result
 // within causeTTLms so a persistently-down target does not re-scan the engine log
 // on every tick/snapshot. The cause is global (not per-target) so one entry suffices.
-func (m *Monitor) causeFor() (string, string) {
+func (m *Monitor) causeFor() (id, title, fix string) {
 	now := nowMS()
 	m.causeMu.Lock()
 	defer m.causeMu.Unlock()
 	if now < m.causeExpires {
-		return m.causeTitle, m.causeFix
+		return m.causeID, m.causeTitle, m.causeFix
 	}
-	title, fix := m.deriveCause()
-	m.causeTitle, m.causeFix, m.causeExpires = title, fix, now+causeTTLms
-	return title, fix
+	id, title, fix = m.deriveCause()
+	m.causeID, m.causeTitle, m.causeFix, m.causeExpires = id, title, fix, now+causeTTLms
+	return id, title, fix
 }
+
+// The causes the monitor words itself, as CauseID names them; a kb match is named by its entry.
+const (
+	causeEngineMissing = "engine-missing"
+	causeNoResponse    = "no-response"
+)
 
 // coreMissingCause answers a question the log-derived cause cannot: is this endpoint down because
 // the engine that would carry it is not installed?
@@ -1033,16 +1049,16 @@ func coreMissingCause(engine model.Engine, coreKnown, coreAvailable bool) (title
 
 // deriveCause scans recent engine log lines (newest first) for a known error and
 // returns its title + fix; falls back to a generic timeout explanation.
-func (m *Monitor) deriveCause() (string, string) {
+func (m *Monitor) deriveCause() (id, title, fix string) {
 	if m.logs != nil {
 		lines := m.logs.LogLines()
 		for i := len(lines) - 1; i >= 0; i-- {
 			if mm := kb.Match(lines[i]); len(mm) > 0 {
-				return mm[0].Title, mm[0].Fix
+				return mm[0].ID, mm[0].Title, mm[0].Fix
 			}
 		}
 	}
-	return "No response (timed out or blocked)",
+	return causeNoResponse, "No response (timed out or blocked)",
 		"Run Diagnostics (ping/traceroute) to the server. If the path is filtered (DPI/TSPU), try a camouflaged transport (Reality/WS-CDN) or AmneziaWG."
 }
 

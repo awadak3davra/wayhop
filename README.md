@@ -5,7 +5,7 @@
 **A router web panel for modern VPN and proxy protocols, with failover, selective routing and an Apply that undoes itself.**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-22a06b?style=flat-square)](LICENSE)
-[![Release](https://img.shields.io/badge/release-v0.5.6-0097dc?style=flat-square)](../../releases/latest)
+[![Release](https://img.shields.io/badge/release-v0.5.7-0097dc?style=flat-square)](../../releases/latest)
 [![Go](https://img.shields.io/badge/go-1.22+-00ADD8?style=flat-square&logo=go&logoColor=white)](go.mod)
 [![Platforms](https://img.shields.io/badge/router-OpenWrt%20%C2%B7%20Keenetic%20%C2%B7%20Entware-151c28?style=flat-square)](#supported-platforms-and-cpus)
 [![Arches](https://img.shields.io/badge/arch-mipsle%20%C2%B7%20mips%20%C2%B7%20arm%20%C2%B7%20arm64%20%C2%B7%20amd64-555?style=flat-square)](#supported-platforms-and-cpus)
@@ -93,7 +93,7 @@ installer takes a backup before it swaps the binary.
 | **TUIC v5** | QUIC, selectable congestion control, `native`/`quic` UDP relay | sing-box |
 | **AnyTLS** | TLS with SNI and uTLS fingerprint options | sing-box |
 | **WireGuard** | kernel interface where available, otherwise a sing-box endpoint | kernel / sing-box |
-| **AmneziaWG** | WireGuard plus junk-packet obfuscation (1.x and 2.0 parameters) | kernel / `amneziawg-go` |
+| **AmneziaWG** | WireGuard plus junk-packet obfuscation (1.x, 2.0 and 3.x parameters) | kernel / `amneziawg-go` |
 | **olcRTC** | tunnel over a WebRTC conferencing service — **import and store only in this build**: the engine is installable from Components, but WayHop has no executor for it, so such a connection cannot be enabled | `olcrtc` |
 
 Import from: `vless://`, `vmess://`, `trojan://`, `ss://`, `hysteria2://`, `hy2://`, `tuic://`,
@@ -226,7 +226,8 @@ The exit code reflects the real outcome: a UI that did not come up exits non-zer
    hold it. If you declined or the router had no package for it, add it later with `opkg install
    sing-box`, or from the **Components** page, which can install and update sing-box,
    `amneziawg-go` and `olcrtc` on the router. WayHop detects the core and enables Apply. (WireGuard
-   and AmneziaWG route natively in the kernel and need none of this.)
+   and AmneziaWG route natively in the kernel and need none of this, except an AmneziaWG 3
+   connection the router's own AmneziaWG cannot carry: that one runs on `amneziawg-go`.)
 
 3. **Add a connection**: paste a link, a subscription URL, a `.conf` or a Clash config.
 
@@ -352,6 +353,49 @@ offload state, and config validation via `sing-box check`. A check that could no
 reports `n/a` and is not counted as a pass. There is also a redacted support bundle and a Prometheus
 scrape at `GET /metrics`.
 
+## Telegram bot
+
+A bot you create yourself answers from your phone: the router's status, its exits and failover log,
+alerts as they happen, and a few controls. The router long-polls the Bot API, so nothing listens for
+Telegram and no port is opened. Where Telegram is blocked, the bot's own API traffic can leave
+through one of your tunnels, or go to a Bot API server you host.
+
+Set it up in **Settings → Telegram bot**:
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) and paste its token. The token is
+   write-only: the panel never shows it again, and it is not sent to a different Bot API server
+   unless you type it again.
+2. Pair each chat with a one-time code, or its QR code, as **owner**, **viewer** or **alerts only**.
+   A group can be a viewer or an alert channel, never an owner. Anyone else who writes to the bot
+   is refused, at most once every ten minutes, and listed in the panel for a day (in memory, the
+   last twenty), where you can let them in.
+
+**What it answers.** `/status` (which also names a routing list whose feed keeps failing: such a
+list has only what it last got, or nothing if it never loaded), `/exits` (each exit's card has
+*Test now*), `/events`, `/summary` of the last 24 hours, `/route youtube.com` (the rule and the exit
+a site takes, and the live connections to it), `/devices` (who is on the network and who is using
+the line right now), `/diag`, `/ping` and `/dns`. It speaks English, Russian and Ukrainian, chosen
+per chat.
+
+**Alerts.** An exit going down and coming back (the recovery replies to the outage), a group
+switching exits, no internet on the uplink, a sing-box crash, a test Apply waiting for Keep or Roll
+back, the router back after an outage, memory running low, a WayHop update. A burst of failures
+arrives as one message; quiet hours hold what can wait and sum it up afterwards; `/mute` silences a
+chat for an hour, critical alerts excepted; each chat switches the kinds it wants in `/alerts`. A
+daily summary at a time you choose is optional.
+
+**Owners** can also keep or roll back a test Apply from the chat while its countdown runs, apply
+the saved changes as a test, refresh routing lists and the subscription, receive a backup file,
+restart WayHop and install an update. Applying, restarting, updating and sending a backup ask
+first, with a button that expires; a refresh only stages new content until the next Apply.
+
+`/speed` measures the provider's line against the route the test's site takes through WayHop, or
+against one WireGuard or AmneziaWG tunnel from its card, bound to that tunnel so nobody's traffic is
+moved. Where the test's site would go straight out, by a rule of its own or because sites with no
+rule go straight out, it says which instead of measuring the line twice. A line leg whose own
+connections left by a tunnel is reported as that tunnel, and a path that does not answer reads "no
+answer" after 8 seconds.
+
 ## Access and security
 
 **WayHop is a LAN admin panel served over plain HTTP.** It has no TLS of its own.
@@ -387,10 +431,13 @@ every start that uses it. Do not run a router with it.
 
 ## Limitations
 
-- No TLS on the panel, and no built-in remote access.
+- No TLS on the panel, and no built-in remote access to it; the [Telegram bot](#telegram-bot) covers
+  status, alerts and a few controls from outside.
 - `fast` mode cannot apply domain lists to general LAN traffic on OpenWrt; use `hybrid` or `tun` if
   you need them.
-- `amneziawg-go` has no prebuilt upstream releases and is built from source on the device.
+- `amneziawg-go` has no prebuilt upstream releases; WayHop's own releases carry a build for each
+  router arch. Under sustained traffic it holds its packet buffers, measured at 60-120 MiB on a
+  test stand, so on a router with little free memory prefer a kernel module that carries the config.
 - ARMv6, ARMv5 and 32-bit x86 are not supported.
 - Root is required: the installer writes to system directories and installs kernel routing rules.
 - The plugin catalogue and the IPTV module are not part of this build.
@@ -411,7 +458,7 @@ One arch by hand:
 
 ```sh
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
-  -ldflags "-s -w -X wayhop/internal/version.Version=0.5.6" \
+  -ldflags "-s -w -X wayhop/internal/version.Version=0.5.7" \
   -o wayhop-arm64 ./cmd/wayhop
 ```
 

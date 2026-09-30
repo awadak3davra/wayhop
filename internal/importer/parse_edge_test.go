@@ -41,6 +41,77 @@ func TestParse_EmptyAndWhitespace(t *testing.T) {
 	}
 }
 
+// TestParse_BareIPv6Rejected pins the bracket requirement. u.Hostname()/u.Port() split at the
+// LAST colon without counting them, so before this guard a bare IPv6 literal parsed "successfully"
+// into a server address that cannot exist: `::1` became Server ":" port 1 and `fe80::1` became
+// Server "fe80:" port 1 -- both returned 200 by /api/import and both copied into the generated
+// config's server AND sni, so the connection could only ever fail at runtime.
+func TestParse_BareIPv6Rejected(t *testing.T) {
+	for _, link := range []string{
+		"trojan://s@::1#loopback",
+		"trojan://s@fe80::1#linklocal",
+		"vless://11111111-1111-1111-1111-111111111111@::1#v",
+		"hysteria2://s@fe80::1#h",
+	} {
+		e, err := Parse(link)
+		if err == nil {
+			t.Errorf("Parse(%q) = %+v, want an error telling the user to bracket the address", link, e)
+			continue
+		}
+		if !strings.Contains(err.Error(), "brackets") {
+			t.Errorf("Parse(%q): error %q should say what to do (mention brackets)", link, err)
+		}
+	}
+}
+
+// TestParse_BracketedIPv6Accepted keeps the guard from over-reaching: the correct form still
+// parses, keeps the bare address (no brackets left for sing-box to DNS-resolve), and takes its
+// port from the link rather than a default.
+func TestParse_BracketedIPv6Accepted(t *testing.T) {
+	for _, tc := range []struct {
+		link string
+		host string
+		port int
+	}{
+		{"trojan://s@[::1]:443#a", "::1", 443},
+		{"trojan://s@[2001:db8::1]:8443#b", "2001:db8::1", 8443},
+		{"vless://11111111-1111-1111-1111-111111111111@[fe80::1]:443#c", "fe80::1", 443},
+	} {
+		e, err := Parse(tc.link)
+		if err != nil {
+			t.Errorf("Parse(%q): unexpected error %v", tc.link, err)
+			continue
+		}
+		if e.Server != tc.host {
+			t.Errorf("Parse(%q): Server = %q, want %q", tc.link, e.Server, tc.host)
+		}
+		if e.Port != tc.port {
+			t.Errorf("Parse(%q): Port = %d, want %d", tc.link, e.Port, tc.port)
+		}
+	}
+}
+
+// TestParse_HostnamesUnaffected guards the colon rule itself: it must not touch ordinary hosts.
+func TestParse_HostnamesUnaffected(t *testing.T) {
+	for _, tc := range []struct {
+		link string
+		host string
+	}{
+		{"trojan://s@example.com:443#a", "example.com"},
+		{"trojan://s@192.0.2.10:443#b", "192.0.2.10"},
+		{"trojan://s@example.com#c", "example.com"},
+	} {
+		e, err := Parse(tc.link)
+		if err != nil {
+			t.Errorf("Parse(%q): unexpected error %v", tc.link, err)
+			continue
+		}
+		if e.Server != tc.host {
+			t.Errorf("Parse(%q): Server = %q, want %q", tc.link, e.Server, tc.host)
+		}
+	}
+}
+
 func TestParse_UnknownScheme(t *testing.T) {
 	e, err := Parse("foo://bar:123")
 	if err == nil {
