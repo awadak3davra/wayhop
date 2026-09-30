@@ -2100,24 +2100,6 @@ function connRow(e) {
       causeLine(e)));
 }
 
-// Order a connection stack worst-first so problems surface at the top: down → slow →
-// unknown → healthy → disabled, tie-broken by latency. Uses health known at render time
-// (re-evaluated on the next full render); falls back to config order when health is absent.
-function severityRank(e) {
-  if (!e.enabled) return 4;                 // disabled sinks to the bottom
-  const h = healthMap[e.id];
-  if (h && h.state === "down") return 0;    // broken first
-  if (h && h.state === "alive") return h.latency_ms >= 600 ? 1 : 3; // slow before healthy
-  return 2;                                 // unknown / not yet probed
-}
-function bySeverity(a, b) {
-  const ra = severityRank(a), rb = severityRank(b);
-  if (ra !== rb) return ra - rb;
-  const la = (healthMap[a.id] || {}).latency_ms || 9999;
-  const lb = (healthMap[b.id] || {}).latency_ms || 9999;
-  return la - lb;
-}
-
 // Optimistic in-place toggle: flip the switch (smooth CSS) + local state IMMEDIATELY, persist in the
 // background, and revert only if the POST fails. No route() — a full re-render killed the animation,
 // jumped the row (disabled sinks to the bottom) and lost scroll position. The dashboard "N enabled"
@@ -2271,25 +2253,39 @@ function dependentsOf(id) {
     note: t("failover group") + " · " + tn("{0} member|{0} members", (g.members || []).length),
     weak: (g.members || []).length > 1,
   }));
+  // A list is FETCHED through an exit as well as routed through one. Both matter: a list that
+  // downloads over a tunnel — the whole point of RuleSetDetour on a censored network — is a real
+  // dependency, and missing it made the panel say switching that exit off changes nothing.
+  //
+  // But they are ONE line per list, not one per relationship. Emitting a row for each printed the
+  // same list name twice whenever it both routed and fetched through this exit — which is the
+  // ordinary setup, so every list in the panel appeared doubled and read as a rendering bug. The
+  // fetch row also dropped the "via <group>" qualifier the routing row carried, so the two looked
+  // like a bare duplicate rather than two facts. One row now names every role the list plays.
   (state.profile.routing_lists || []).forEach(rl => {
-    if (viaIds.includes(rl.outbound)) {
-      out.push({
-        icon: "≡", label: rl.name || rl.id,
-        note: t("routing list") + (rl.enabled ? "" : " · " + t("disabled")) +
-          (rl.outbound === id ? "" : " · " + t("via {0}", nameOf(rl.outbound) || rl.outbound)),
-        weak: rl.outbound !== id,
-      });
+    const routes = viaIds.includes(rl.outbound);
+    const fetches = !!rl.download_via && viaIds.includes(rl.download_via);
+    if (!routes && !fetches) return;
+    // "via X" is what separates "this exit IS the target" from "a group that may elect it".
+    const qual = (target) => target === id ? "" : " · " + t("via {0}", nameOf(target) || target);
+    // Both roles are spelled with the SAME two existing phrases in every combination — a new
+    // "and downloads..." variant would have meant nine more translations for one merged line.
+    let note;
+    if (routes && fetches) {
+      note = rl.outbound === rl.download_via
+        ? t("routing list") + " · " + t("downloads its list through this") + qual(rl.outbound)
+        : t("routing list") + qual(rl.outbound) + " · " + t("downloads its list through this") + qual(rl.download_via);
+    } else if (routes) {
+      note = t("routing list") + qual(rl.outbound);
+    } else {
+      note = t("downloads its list through this") + qual(rl.download_via);
     }
-    // A list is also FETCHED through an exit. Missing this meant a list that downloads over a
-    // tunnel — the whole point of RuleSetDetour on a censored network — counted as no dependency
-    // at all, and the panel would have said switching that exit off changes nothing.
-    if (rl.download_via && viaIds.includes(rl.download_via)) {
-      out.push({
-        icon: "↓", label: rl.name || rl.id,
-        note: t("downloads its list through this") + (rl.enabled ? "" : " · " + t("disabled")),
-        weak: rl.download_via !== id,
-      });
-    }
+    if (!rl.enabled) note += " · " + t("disabled");
+    out.push({
+      icon: routes ? "≡" : "↓", label: rl.name || rl.id, note,
+      // Weak only when EVERY role it plays is indirect: one direct role pins this exit.
+      weak: (!routes || rl.outbound !== id) && (!fetches || rl.download_via !== id),
+    });
   });
   // DNS resolvers route through exits too, and a resolver is the least visible dependency of all:
   // nothing on the Connections page hints at it, so "nothing routes through this exit" was a
@@ -3636,21 +3632,6 @@ function redactSecrets(raw) {
 
 
 
-function parsedView(e) {
-  const wrap = el("div", {});
-  if (e.engine && e.engine !== "singbox")
-    wrap.appendChild(el("div", { class: "toast info", style: "margin:0 0 12px" }, t("Uses the {0} engine (chained into sing-box).", e.engine)));
-  const kv = el("div", { class: "kv" });
-  const add = (k, v) => { kv.appendChild(el("div", { class: "k" }, k)); kv.appendChild(el("div", { class: "v" }, String(v))); };
-  add("Name", e.name || e.id);
-  add("Protocol", e.protocol);
-  add("Server", e.server + ":" + e.port);
-  if (e.tls && e.tls.type) add("Security", e.tls.type + (e.tls.sni ? " (" + e.tls.sni + ")" : ""));
-  if (e.transport && e.transport.type) add("Transport", e.transport.type);
-  wrap.appendChild(kv);
-  return wrap;
-}
-
 // memberPicker builds the failover-group member list: a checkbox row per endpoint with ▲/▼ arrows
 // that reorder the rows. DOM order IS the saved preference order (both group modals collect checked
 // members via $$("input:checked").map(value) in DOM order), so moving a row changes its priority.
@@ -4289,41 +4270,6 @@ async function renderDNS(view) {
 
 
 
-function dnsRuleRow(r, i) {
-  const via = r.server === "reject" ? el("span", { class: "pill err" }, t("block")) : el("span", { class: "pill" }, r.server);
-  const parts = (r.rule_sets || []).map(x => nameOf(x) || x)
-    .concat(r.domain_suffix || [], r.geosite || [], (r.query_type || []).map(q => "type:" + q));
-  const match = parts.length ? parts.join(", ") : t("(no match)");
-  return el("div", { class: "dns-rule" },
-    // Serialize through dnsSaveChain for the reason the rule editor states: a bare PUT here
-    // races a concurrent save. Rule ORDER is meaning - sing-box takes the first match - and
-    // two quick arrow clicks sent two writes stamped with the same rev, so the second was
-    // refused as stale and rolled back to a snapshot the first had already superseded: the
-    // panel showed one order while the router enforced another. Mutating INSIDE the chain
-    // operates on the latest state, and adopting r.dns keeps this path identical to every
-    // other DNS write.
-    orderControls(i, dnsState.rules.length, "DNS rule " + match, (from, to) => {
-      dnsSaveChain = dnsSaveChain.then(async () => {
-        const prev = dnsState.rules.slice();
-        dnsState.rules = moveInArray(dnsState.rules, from, to);
-        try { const r = await dnsPut(); if (r && r.dns) dnsState = r.dns; route(); }
-        catch (e) { dnsState.rules = prev; dnsWriteFailed(e); }
-      });
-      return dnsSaveChain;
-    }),
-    // Match and destination are siblings, not nested, so the row is one grid line instead of two.
-    // The old two-column grid held three children, which pushed the order controls onto a row of
-    // their own and made every rule 113px tall — four rules were a quarter of the page.
-    el("div", { class: "match" }, el("div", { class: "m" }, match)),
-    el("div", { class: "via" }, "→", via),
-    el("div", { class: "acts" },
-      el("button", { class: "btn btn-sm", "aria-label": t("Edit") + " rule " + match, onclick: () => openDNSRule(i) }, t("Edit")),
-      // Identity first, then by unique id (validateDNS rejects empty rule ids) — same stale-
-      // closure hazard as dnsServerRow: a non-rerendering saveDNS reassigns dnsState, orphaning
-      // the rule instances the rendered rows captured.
-      el("button", { class: "btn btn-danger btn-sm", onclick: async () => { if (!await modalConfirm(t("Delete this DNS rule?"))) return; let idx = dnsState.rules.indexOf(r); if (idx < 0 && r.id) idx = dnsState.rules.findIndex(x => x && x.id === r.id); if (idx < 0) return; dnsState.rules.splice(idx, 1); saveDNS(t("rule ✕"), true); } , "aria-label": t("Delete") + " rule " + match }, t("Delete"))));
-}
-
 // dnsNativeCard renders the router's ADOPTED native DNS stack (read-only) — the resolvers the device
 // actually serves, in tier order — so WayHop reflects the router's reality, not a hidden second config.
 const DNS_TIER_LABEL = { 1: "via VPN", 2: "WAN-encrypted", 3: "geo-fallback" };
@@ -4511,6 +4457,7 @@ function paintPluginBadge(span, e) {
   const st = pluginMap[e.id];
   if (!st) { span.style.display = "none"; return; } // no run-state yet (not applied)
   span.style.display = "";
+  span.title = st.reason || st.note || "";
   if (st.running) { span.textContent = t("running ✓"); span.style.color = "var(--ok)"; span.style.background = "var(--ok-tint)"; }
   else if (st.needs_binary) { span.textContent = t("needs binary"); span.style.color = "var(--warn)"; span.style.background = "var(--warn-tint)"; }
   else { span.textContent = e.engine; span.style.color = "var(--ink-2)"; span.style.background = "var(--card-2)"; }
@@ -4728,18 +4675,6 @@ function refreshPills(sys) {
 // 15 function(s) for the diagnostics page now live in web/dist/page-diagnostics.js,
 // loaded on demand by loadChunk(). See PAGES.diagnostics.chunk.
 
-async function runEndpointSpeedtest(e, btn, out) {
-  const label = btn.textContent;
-  btn.setAttribute("disabled", "true"); btn.textContent = "…";
-  if (out) { out.textContent = "testing…"; out.style.color = "var(--ink-2)"; }
-  try {
-    const r = await api.post("/api/speedtest", { id: e.id, bytes: 10000000 });
-    const txt = "↓ " + r.down_mbps + (r.up_mbps ? "  ↑ " + r.up_mbps : "") + " Mbps" + (r.pinned ? "" : " " + t("(active route)"));
-    speedResults[e.id] = { text: txt, ts: Date.now(), ok: true };
-    if (out) { out.textContent = txt; out.style.color = "var(--ok)"; } else toast((e.name || e.id) + ": " + txt, "ok");
-  } catch (err) { speedResults[e.id] = { text: t("failed"), ts: Date.now(), ok: false }; if (out) { out.textContent = t("failed"); out.style.color = "var(--err)"; } toast(t("Speedtest: {0}", err.message), "err"); }
-  finally { btn.removeAttribute("disabled"); btn.textContent = label; }
-}
 // When the last successful /api/health/endpoints read landed. Separate from the reconnect banner
 // on purpose: the banner answers "is the daemon reachable", this answers "is what you are looking
 // at still being confirmed". A daemon replying 500 is reachable and useless, and only this catches it.
@@ -6077,6 +6012,24 @@ function settingsIndex(view, defaults) {
   apply();
 }
 
+// telegramCard — the Telegram bot's row in Settings. Only the frame lives here: page-telegram.js,
+// loaded as the page renders, fills in the state and opens the manager, so the bot adds almost nothing
+// to the initial payload. No inputs in the card: the bot's settings have their own routes, and a field
+// here would count towards this page's "unsaved changes" that its Save does not store.
+function telegramCard() {
+  const card = el("div", { class: "card", "data-section": "Telegram" });
+  card.appendChild(el("div", { class: "card-title", style: "margin-bottom:8px" }, t("Telegram bot")));
+  card.appendChild(el("div", { class: "hint", style: "margin-bottom:10px" },
+    t("Status, alerts and Keep / Roll back from your phone. The router talks to Telegram itself, so no port has to be opened.")));
+  const slot = el("div", { class: "tg-card" }, el("span", { class: "hint" }, t("loading…")));
+  card.appendChild(slot);
+  loadChunk("page-telegram").then(() => telegramCardFill(slot)).catch(e => {
+    slot.innerHTML = "";
+    slot.appendChild(el("span", { class: "hint" }, e.message));
+  });
+  return card;
+}
+
 // accountCard — the operator's own account: who is signed in, changing the password, signing out.
 //
 // It fills from /api/auth/status after mount, so a slow answer never holds up the rest of Settings,
@@ -6225,6 +6178,7 @@ async function renderSettings(view) {
   // Read next to the config above, before anything is appended: the card must be complete by the time
   // settingsIndex walks the page.
   view.appendChild(accountCard(authState));
+  view.appendChild(telegramCard());
 
   // Appearance — client-side prefs (theme + language persist in localStorage, not server config).
   const themeSel = el("select", {},

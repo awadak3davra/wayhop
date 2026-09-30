@@ -94,30 +94,6 @@ func TestExportMultiPeerConf(t *testing.T) {
 	}
 }
 
-// TestClashWireGuardKeepalive: the clash export must carry persistent-keepalive (from the typed
-// field or Params), else a mihomo WG proxy behind NAT silently dies when its idle UDP mapping
-// expires. Parity with the .conf and sing-box export paths.
-func TestClashWireGuardKeepalive(t *testing.T) {
-	// typed field.
-	typed := model.Endpoint{
-		Name: "WGk", Engine: model.EngineSingBox, Protocol: model.ProtoWireGuard,
-		Server: "203.0.113.7", Port: 51820, PersistentKeepalive: 25,
-		Params: map[string]any{"private_key": "PRIV=", "peer_public_key": "PUB=", "local_address": []string{"10.0.0.2/32"}},
-	}
-	if yaml, skipped := ClashConfig([]model.Endpoint{typed}); len(skipped) != 0 || !strings.Contains(yaml, "persistent-keepalive: 25") {
-		t.Errorf("clash WG export missing persistent-keepalive (typed): skipped=%v\n%s", skipped, yaml)
-	}
-	// Params fallback (un-migrated config).
-	legacy := model.Endpoint{
-		Name: "WGk2", Engine: model.EngineSingBox, Protocol: model.ProtoWireGuard,
-		Server: "203.0.113.7", Port: 51820,
-		Params: map[string]any{"private_key": "PRIV=", "peer_public_key": "PUB=", "local_address": []string{"10.0.0.2/32"}, "persistent_keepalive": 30},
-	}
-	if yaml, skipped := ClashConfig([]model.Endpoint{legacy}); len(skipped) != 0 || !strings.Contains(yaml, "persistent-keepalive: 30") {
-		t.Errorf("clash WG export missing persistent-keepalive (Params): skipped=%v\n%s", skipped, yaml)
-	}
-}
-
 func TestRoundTripAmneziaWGConf(t *testing.T) {
 	e := model.Endpoint{
 		Name: "AWG", Engine: model.EngineAmneziaWG, Protocol: model.ProtoAmneziaWG,

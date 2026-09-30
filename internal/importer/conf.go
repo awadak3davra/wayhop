@@ -2,8 +2,10 @@ package importer
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
+	"wayhop/internal/awg"
 	"wayhop/internal/model"
 )
 
@@ -14,6 +16,28 @@ import (
 // packets, always stored as strings.
 var awgKeys = []string{"jc", "jmin", "jmax", "s1", "s2", "s3", "s4", "h1", "h2", "h3", "h4"}
 var awgKeysHex = []string{"i1", "i2", "i3", "i4", "i5"}
+
+// awgKeys3 are the AmneziaWG 3.x [Interface] keys (amneziawg-tools src/config.c at v3.1.20260812),
+// with the Params name each is stored under - the name UAPI uses for it too. Until they were read
+// here a 3.x .conf imported without them, and upstream requires every parameter except Jc/Jmin/Jmax
+// to match the server's: a tunnel without the server's header protection key or trailer setting does
+// not come up. Values are kept as written; the plugin validates them for the path that runs them.
+var awgKeys3 = []struct{ conf, param string }{
+	{"headerprotectionkey", "header_protection_key"},
+	{"contentpaddingaddition", "content_padding_addition"},
+	{"rekeyaftertime", "rekey_after_time"},
+	{"rekeytimeout", "rekey_timeout"},
+	{"rejectaftertime", "reject_after_time"},
+	{"keepalivetimeout", "keepalive_timeout"},
+	{"maxhandshakeattempts", "max_handshake_attempts"},
+}
+
+// awgBools3 are the 3.1 switches, parsed now because a boolean has no "as written" form to keep. A
+// value the tools would refuse fails the import, as it fails `awg setconf`.
+var awgBools3 = []struct{ conf, param, name string }{
+	{"randomtrailers", "random_trailers", "RandomTrailers"},
+	{"disablecookies", "disable_cookies", "DisableCookies"},
+}
 
 // parseConf parses a WireGuard / AmneziaWG .conf (INI) into an endpoint.
 func parseConf(text string) (*model.Endpoint, error) {
@@ -84,6 +108,14 @@ func parseConf(text string) (*model.Endpoint, error) {
 			isAWG = true
 			break
 		}
+	}
+	for _, k := range awgKeys3 {
+		_, ok := iface[k.conf]
+		isAWG = isAWG || ok
+	}
+	for _, k := range awgBools3 {
+		_, ok := iface[k.conf]
+		isAWG = isAWG || ok
 	}
 
 	e := &model.Endpoint{
@@ -182,6 +214,20 @@ func parseConf(text string) (*model.Endpoint, error) {
 		for _, k := range awgKeysHex {
 			if v, ok := iface[k]; ok {
 				e.Params[k] = v // I1-I5 hex magic
+			}
+		}
+		for _, k := range awgKeys3 {
+			if v, ok := iface[k.conf]; ok {
+				e.Params[k.param] = v
+			}
+		}
+		for _, k := range awgBools3 {
+			if v, ok := iface[k.conf]; ok {
+				b, err := awg.ParseBool(v)
+				if err != nil {
+					return nil, fmt.Errorf("conf: %s: %v", k.name, err)
+				}
+				e.Params[k.param] = b
 			}
 		}
 		e.Name = "AmneziaWG " + host

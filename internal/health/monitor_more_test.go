@@ -272,9 +272,9 @@ func TestCauseForPicksNewestMatch(t *testing.T) {
 		"error: connection refused by server", // older -> "Connection refused"
 		"error: no such host: relay.example",  // newest -> "DNS resolution failed"
 	}}}
-	title, fix := m.causeFor()
-	if !strings.Contains(title, "DNS resolution failed") {
-		t.Fatalf("title=%q want DNS resolution failed (newest line wins)", title)
+	id, title, fix := m.causeFor()
+	if !strings.Contains(title, "DNS resolution failed") || id == "" || id == causeNoResponse {
+		t.Fatalf("id=%q title=%q want the DNS entry (newest line wins)", id, title)
 	}
 	if fix == "" {
 		t.Fatal("expected a fix from kb")
@@ -284,8 +284,8 @@ func TestCauseForPicksNewestMatch(t *testing.T) {
 // TestCauseForFallback verifies the generic fallback when no log source is set.
 func TestCauseForFallback(t *testing.T) {
 	m := &Monitor{logs: nil}
-	title, fix := m.causeFor()
-	if !strings.Contains(title, "timed out") {
+	id, title, fix := m.causeFor()
+	if !strings.Contains(title, "timed out") || id != causeNoResponse {
 		t.Fatalf("fallback title=%q want a timeout explanation", title)
 	}
 	if fix == "" {

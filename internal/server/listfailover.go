@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"os/exec"
 	"strings"
 	"sync"
@@ -77,18 +78,23 @@ func (s *Server) listFailoverTick(ctx context.Context) {
 	// listFailoverTargets only yields a table that the CURRENT compiled plan owns for a GROUP egress
 	// of kind EgressInterface. A group the core carries produces no such egress, so there is nothing
 	// here to fight the core over.
-	if !iprouteAvailable() {
+	if s.routeTables == nil && !iprouteAvailable() {
 		return
 	}
-	for _, target := range s.listFailoverTargets() {
+	io := s.tableIO()
+	// One read serves both halves below, and a table that could not be read is not an empty one.
+	// Treated as empty, every group's table looked unpointed and was written on every tick, and every
+	// endpoint's table would look like it had lost its route.
+	live, ok := s.liveTableDefaults(ctx, false)
+	if !ok {
+		return
+	}
+	for _, target := range s.listFailoverTargetsFrom(live) {
 		want := target.Elected
 		if want == "" || want == target.Current {
 			continue
 		}
-		ctxCmd, cancel := context.WithTimeout(ctx, listFailoverTimeout)
-		_, err := runHostCommandBounded(ctxCmd, listFailoverTimeout, kernelCounterOutputLimit,
-			applyHostCommandWaitDelay, "ip", "route", "replace", "default", "dev", want, "table", fmt.Sprint(target.Table))
-		cancel()
+		err := io.write(ctx, false, want, target.Table)
 		if err != nil {
 			// A refusal is not a switch: the table still holds what it held, and claiming otherwise in
 			// the log would make the page report a move that did not happen.
@@ -103,6 +109,156 @@ func (s *Server) listFailoverTick(ctx context.Context) {
 		s.noteListFailoverWrite(target.Table, nil)
 		s.monitor.RecordSwitch(target.Group, target.Name, orNone(target.Current), want)
 	}
+	s.restoreLostTableRoutes(ctx, live)
+}
+
+// A single-endpoint egress has nothing to elect between, so the loop above leaves it alone - and for
+// a long time that was the whole story, because its device outlived everything. It no longer does.
+// WayHop's userspace AmneziaWG recreates its TUN every time the supervisor relaunches amneziawg-go,
+// and a tunnel the firmware bounces goes down with its routes. The kernel drops every route through
+// a device that disappears or goes down, so the table's `default dev <iface>` vanishes and the
+// fwmark lookup falls through to main - the provider - or, under a kill switch, into the blackhole,
+// until the next Apply. Nothing else puts it back: Apply ran before the relaunch, the netfilter.d
+// hook and the reconcile loop re-assert sets and rules (their postchecks do not look at routes), and
+// the seed in the plane's own script only runs when the plane is installed.
+//
+// restoreLostTableRoutes is that re-seed, as narrow as the rest of this file. The table must belong
+// to an interface egress of the APPLIED kernel plan - not the saved profile: its table numbers are
+// the ones the router holds, and a pending edit can number them differently. It must have lost its
+// device route outright; a route to another device was put there by someone and is left alone. The
+// device must exist and be up again. And it steps aside while an Apply runs, like the reconcile loop:
+// Apply may be retiring that very table, and a route put back into it would outlive the plan.
+func (s *Server) restoreLostTableRoutes(ctx context.Context, live4 map[int]string) {
+	if s.config().Demo || s.applyInProgress.Load() {
+		return
+	}
+	base := s.appliedBaseline()
+	if base == nil || base.Desired == nil || !base.Materialization.known() {
+		return
+	}
+	kernel := base.Materialization.Kernel
+	if kernel.Action != ExecutionEnsurePresent || kernel.Plan == nil {
+		return
+	}
+	if !s.applyMu.TryLock() {
+		return
+	}
+	defer s.applyMu.Unlock()
+	io := s.tableIO()
+	families := []bool{false}
+	if kernel.Plan.HasV6() {
+		families = append(families, true) // the plane seeds `ip -6 route … table N` next to each v4 one
+	}
+	for _, v6 := range families {
+		live, ok := live4, true
+		if v6 {
+			live, ok = s.liveTableDefaults(ctx, true)
+		}
+		if !ok {
+			continue // unread is not empty: restoring on an unknown would re-seed routes that are there
+		}
+		for _, lost := range lostTableRoutes(kernel.Plan, &base.Desired.Profile, live, io.up) {
+			err := io.write(ctx, v6, lost.Iface, lost.Table)
+			s.noteTableRestore(v6, lost, err)
+		}
+	}
+}
+
+// tableRestore is a routing table that lost its device route, and the device to put back.
+type tableRestore struct {
+	Table int
+	Iface string
+}
+
+// lostTableRoutes is the rule itself, apart from the router so it can be asserted directly: every
+// interface egress of plan that belongs to one endpoint (a group's is the election's), whose table
+// holds no device route now, and whose device is up.
+func lostTableRoutes(plan *pbr.Plan, profile *model.Profile, live map[int]string, up func(string) bool) []tableRestore {
+	var out []tableRestore
+	for _, egress := range plan.Egresses {
+		if egress.Kind != pbr.EgressInterface || egress.Table == 0 || egress.Iface == "" {
+			continue
+		}
+		if profile.GroupByID(egress.Tag) != nil {
+			continue // re-pointed from health by the loop above
+		}
+		if live[egress.Table] != "" {
+			continue // there, or pointing where someone else put it
+		}
+		if !up(egress.Iface) {
+			continue // not back yet; the next tick looks again
+		}
+		out = append(out, tableRestore{Table: egress.Table, Iface: egress.Iface})
+	}
+	return out
+}
+
+// noteTableRestore logs a restored route every time - it marks a device that went away, which is
+// worth a line - and a refusal only when it changes, so a device that keeps failing does not fill
+// the router's bounded log.
+func (s *Server) noteTableRestore(v6 bool, lost tableRestore, err error) {
+	family := "IPv4"
+	if v6 {
+		family = "IPv6"
+	}
+	key := fmt.Sprintf("%s/%d", family, lost.Table)
+	s.listFailoverErrMu.Lock()
+	defer s.listFailoverErrMu.Unlock()
+	if s.tableRestoreErr == nil {
+		s.tableRestoreErr = map[string]string{}
+	}
+	if err == nil {
+		delete(s.tableRestoreErr, key)
+		log.Printf("list routing: table %d lost its %s route through %s (the device went away or down); restored", lost.Table, family, lost.Iface)
+		return
+	}
+	if msg := err.Error(); s.tableRestoreErr[key] != msg {
+		s.tableRestoreErr[key] = msg
+		log.Printf("list routing: cannot restore table %d's %s route through %s, so its list has no exit: %v", lost.Table, family, lost.Iface, err)
+	}
+}
+
+// routeTableIO is how the list-routing loop reads and writes table defaults and asks whether a
+// device is up: iproute2 and the kernel's own interface list in production, a fake in tests.
+type routeTableIO struct {
+	read  func(ctx context.Context, v6 bool) (string, error)
+	write func(ctx context.Context, v6 bool, iface string, table int) error
+	up    func(iface string) bool
+}
+
+func (s *Server) tableIO() routeTableIO {
+	if s.routeTables != nil {
+		return *s.routeTables
+	}
+	return routeTableIO{read: readTableRoutes, write: writeTableDefault, up: linkIsUp}
+}
+
+func readTableRoutes(ctx context.Context, v6 bool) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, listFailoverTimeout)
+	defer cancel()
+	return runHostCommandBounded(ctx, listFailoverTimeout, kernelCounterOutputLimit,
+		applyHostCommandWaitDelay, "ip", familyArgs(v6, "route", "show", "table", "all")...)
+}
+
+func writeTableDefault(ctx context.Context, v6 bool, iface string, table int) error {
+	ctx, cancel := context.WithTimeout(ctx, listFailoverTimeout)
+	defer cancel()
+	_, err := runHostCommandBounded(ctx, listFailoverTimeout, kernelCounterOutputLimit,
+		applyHostCommandWaitDelay, "ip", familyArgs(v6, "route", "replace", "default", "dev", iface, "table", fmt.Sprint(table))...)
+	return err
+}
+
+func familyArgs(v6 bool, args ...string) []string {
+	if v6 {
+		return append([]string{"-6"}, args...)
+	}
+	return args
+}
+
+// linkIsUp reports a device that exists and is administratively up - what a `dev` route needs.
+func linkIsUp(name string) bool {
+	iface, err := net.InterfaceByName(name)
+	return err == nil && iface.Flags&net.FlagUp != 0
 }
 
 // kernelElectableMembers reports, per GROUP whose routing lists the KERNEL carries, which members
@@ -207,14 +363,22 @@ type listFailoverTarget struct {
 	Elected string
 }
 
-// listFailoverTargets pairs the compiled plan with live health.
+// listFailoverTargets is listFailoverTargetsFrom over a fresh read of the tables, for callers outside
+// the loop. The health report asks which groups this loop owns, and a read that failed does not
+// change that, so an unread table is passed on as holding nothing - the report never writes.
+func (s *Server) listFailoverTargets() []listFailoverTarget {
+	live, _ := s.liveTableDefaults(context.Background(), false)
+	return s.listFailoverTargetsFrom(live)
+}
+
+// listFailoverTargetsFrom pairs the compiled plan with live health.
 //
 // The election is the operator's ORDER, first healthy member wins — the same fallback semantics the
 // Failover page states for a native group, and the same rule Compile uses when it pins the table at
 // Apply. A group whose members are all down elects nothing and the table is left exactly as it is:
 // moving to a member that is also dead would be churn, and the fail-closed question (drop vs leak)
 // is Apply's to answer, not this loop's.
-func (s *Server) listFailoverTargets() []listFailoverTarget {
+func (s *Server) listFailoverTargetsFrom(live map[int]string) []listFailoverTarget {
 	profile := s.store.Profile()
 	plan, _, err := pbr.Compile(&profile, s.pbrCompileOptions(s.config()))
 	if err != nil || plan == nil {
@@ -226,7 +390,6 @@ func (s *Server) listFailoverTargets() []listFailoverTarget {
 	// exactly what this loop chooses between, had no entry at all. Measured on the router with the
 	// elected tunnel down: the table stayed empty for 72 seconds while every other member was alive.
 	ifaceOf := kernelIfaceByEndpoint(&profile)
-	live := s.liveTableIfaces()
 	var out []listFailoverTarget
 	for _, egress := range plan.Egresses {
 		if egress.Kind != pbr.EgressInterface || egress.Table == 0 {
@@ -297,22 +460,15 @@ func electMember(group model.Group, ifaceOf map[string]string, alive map[string]
 	return "", false
 }
 
-// liveTableIfaces reads which interface each routing table currently defaults to, so the loop writes
-// only on a real change. A table it cannot read is absent rather than empty: writing on an unknown
-// would make every tick a write.
-func (s *Server) liveTableIfaces() map[int]string {
-	out := map[int]string{}
-	ctx, cancel := context.WithTimeout(context.Background(), listFailoverTimeout)
-	defer cancel()
-	text, err := runHostCommandBounded(ctx, listFailoverTimeout, kernelCounterOutputLimit,
-		applyHostCommandWaitDelay, "ip", "route", "show", "table", "all")
+// liveTableDefaults reads which interface each routing table of one family currently defaults to, so
+// the loop writes only on a real change. ok is false when the tables could not be read at all: the
+// caller must then write nothing, because an unknown table is not an empty one.
+func (s *Server) liveTableDefaults(ctx context.Context, v6 bool) (map[int]string, bool) {
+	text, err := s.tableIO().read(ctx, v6)
 	if err != nil {
-		return out
+		return nil, false
 	}
-	for table, iface := range parseTableDefaults(text) {
-		out[table] = iface
-	}
-	return out
+	return parseTableDefaults(text), true
 }
 
 // parseTableDefaults picks `default dev <iface> ... table <N>` lines out of `ip route show table all`.

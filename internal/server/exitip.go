@@ -56,46 +56,54 @@ var exitIPEchos = []string{
 // default route IS the exit — so a DIRECT probe yields the real exit IP). Degrades
 // to {available:false} in demo or when no core is up.
 func (s *Server) handleExitIP(w http.ResponseWriter, r *http.Request) {
-	if s.config().Demo {
+	ip, geo, cached, ok := s.exitIPNow(r.Context())
+	if !ok {
 		writeJSON(w, http.StatusOK, map[string]any{"available": false})
 		return
+	}
+	writeJSON(w, http.StatusOK, exitIPResponse(ip, geo, cached))
+}
+
+// exitIPNow is the exit-IP lookup behind the Dashboard hero and the Telegram status: the cached
+// answer while it is fresh, otherwise a probe through the live core. ok is false in demo mode, with
+// no core up, or when no echo service answered.
+func (s *Server) exitIPNow(ctx context.Context) (ip string, geo exitGeo, cached, ok bool) {
+	if s.config().Demo {
+		return "", exitGeo{}, false, false
 	}
 	// Serve a fresh cached IP without any outbound call (and without the coreUp probe).
 	s.exitIP.mu.Lock()
 	if s.exitIP.ip != "" && time.Since(s.exitIP.at) < exitIPTTL {
 		ip, geo := s.exitIP.ip, s.exitIP.geo
 		s.exitIP.mu.Unlock()
-		writeJSON(w, http.StatusOK, exitIPResponse(ip, geo, true))
-		return
+		return ip, geo, true, true
 	}
 	s.exitIP.mu.Unlock()
 
 	// Refresh requires a live proxy core: the daemon's own sing-box OR an external one.
 	if !s.coreUp() {
-		writeJSON(w, http.StatusOK, map[string]any{"available": false})
-		return
+		return "", exitGeo{}, false, false
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	mixed := s.config().Ports.Mixed
-	ip := lookupExitIP(ctx, mixed)
+	ip = lookupExitIP(ctx, mixed)
 	if ip == "" {
 		// Monitor mode (no local mixed proxy): probe DIRECTLY — the daemon's request
 		// follows the device's default route, which is the active exit tunnel.
 		ip = lookupExitIP(ctx, 0)
 	}
 	if ip == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"available": false})
-		return
+		return "", exitGeo{}, false, false
 	}
 	// Geo is a best-effort enrichment: a failed lookup leaves geo empty but the IP
 	// (and available:true) still stand — never let geo turn a working exit "down".
-	geo := lookupExitGeo(ctx, mixed, ip)
+	geo = lookupExitGeo(ctx, mixed, ip)
 	s.exitIP.mu.Lock()
 	s.exitIP.ip, s.exitIP.geo, s.exitIP.at = ip, geo, time.Now()
 	s.exitIP.mu.Unlock()
-	writeJSON(w, http.StatusOK, exitIPResponse(ip, geo, false))
+	return ip, geo, false, true
 }
 
 // coreUp reports whether a proxy core is live: the daemon's OWN sing-box, or an

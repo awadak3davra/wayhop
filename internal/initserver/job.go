@@ -13,7 +13,6 @@ const (
 	StepRunning StepState = "running"
 	StepOK      StepState = "ok"
 	StepError   StepState = "error"
-	StepSkipped StepState = "skipped"
 )
 
 // Step is one line in the smart console: a named action with its state and, on
@@ -99,14 +98,6 @@ func (j *Job) Fail(detail, hint string) {
 	if hint != "" {
 		j.console = append(j.console, "    → "+hint)
 	}
-	j.mu.Unlock()
-}
-
-// Skip records a step that was not run.
-func (j *Job) Skip(name, detail string) {
-	j.mu.Lock()
-	j.steps = append(j.steps, Step{Name: name, State: StepSkipped, Detail: detail})
-	j.console = append(j.console, "∅ "+name+" — "+detail)
 	j.mu.Unlock()
 }
 

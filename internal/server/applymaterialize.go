@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 
 	"wayhop/internal/generator"
 	"wayhop/internal/model"
@@ -71,6 +72,7 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 	}
 	if in.native != nil && !desired.Config.Demo && (gotPlatform == platform.OpenWrt || gotPlatform == platform.Keenetic) {
 		artifact, nativeErr := buildExecutionNativeArtifactV1(desired, host.Host, *in.native, previousNative)
+		var move *nativeplan.MoveError
 		switch {
 		case nativeErr == nil:
 			delta, deltaErr := buildExecutionNativeDeltaV1(previousNative, artifact, host.Host.CapabilitySet)
@@ -85,6 +87,13 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 			}
 			backend = executionBackendNativeFirst
 			nativeMaterialization = &executionNativeMaterializationV1{Delta: delta}
+		case errors.As(nativeErr, &move):
+			// Not handed to the generic path below. That path takes the whole profile: every other
+			// tunnel would leave the router's own AmneziaWG with it, and the interfaces a previous
+			// native Apply created would stay configured while the plugin creates links under the same
+			// names - the very collision the move refusal names.
+			return executionMaterializationV1{}, nil, newMaterializeError("native", move.Error(),
+				"Switch this connection off and apply, then switch it on and apply again.")
 		case gotPlatform == platform.OpenWrt:
 			// OpenWrt has a complete generic path (sing-box + engine plugins) that predates the
 			// native one; a profile the native planner cannot express still works through it.
@@ -138,10 +147,21 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 		if target.Keenetic == nil || len(target.OpenWrt) != 0 {
 			return executionMaterializationV1{}, nil, newMaterializeError("native", "the Keenetic native plan is incomplete", "")
 		}
-		if len(expectedPlugins) != 0 {
+		// The engine plugins KeeneticOS runs are exactly the endpoints the native plan handed to
+		// WayHop's own AmneziaWG engine. Any other plugin would be a tunnel NDM also believes it owns.
+		pluginRun := make(map[string]bool)
+		for _, decision := range target.Decisions {
+			if decision.Path == nativeplan.PathEnginePlugin {
+				pluginRun[decision.EndpointID] = true
+			}
+		}
+		agree := len(pluginRun) == len(expectedPlugins)
+		for id := range expectedPlugins {
+			agree = agree && pluginRun[id]
+		}
+		if !agree {
 			return executionMaterializationV1{}, nil, newMaterializeError("native",
-				"KeeneticOS runs AmneziaWG/WireGuard tunnels natively; an engine plugin cannot be combined with the native plan",
-				"Let KeeneticOS own the tunnel (default) or disable the connection.")
+				"the KeeneticOS native plan and the engine plugins disagree about which connections WayHop runs itself", "")
 		}
 		// Native NDM interfaces remain the connection authority. When NDM cannot represent the
 		// complete routing policy, generate one full compatibility TUN from the already-bound
@@ -155,8 +175,15 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 			if generateErr != nil {
 				return executionMaterializationV1{}, nil, newMaterializeError("core", "the sing-box config could not be generated: "+generateErr.Error(), "")
 			}
-			if result == nil || result.Config == nil || len(result.Plugins) != 0 {
+			if result == nil || result.Config == nil {
 				return executionMaterializationV1{}, nil, newMaterializeError("core", "the sing-box config could not be generated for the compatibility TUN", "")
+			}
+			// The core egresses through the userspace devices, so their plugins are the ones it names.
+			plugins, err = captureExecutionPlugins(result.Plugins, expectedPlugins, executionExternalInterfaces(bindings))
+			if err != nil {
+				return executionMaterializationV1{}, nil, newMaterializeError("plugins",
+					"the engine plugins for this configuration could not be prepared (an interface name collides or an endpoint is not WayHop-owned)",
+					"Check the AmneziaWG connections' names and ownership.")
 			}
 			if err := bindKeeneticCompatibilityTUN(result.Config); err != nil {
 				return executionMaterializationV1{}, nil, newMaterializeError("core", "the generated config has no TUN inbound to bind to wrtun0", "")
@@ -174,7 +201,14 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 				return executionMaterializationV1{}, nil, newMaterializeError("core", "the sing-box config could not be encoded: "+err.Error(), "")
 			}
 		}
-		plugins = []executionPluginSpecV1{}
+		if !target.Keenetic.CompatibilityRouting {
+			plugins, err = keeneticEnginePlugins(expectedPlugins, bindings)
+			if err != nil {
+				return executionMaterializationV1{}, nil, newMaterializeError("plugins",
+					"the engine plugins for this configuration could not be prepared (an interface name collides or an endpoint is not WayHop-owned)",
+					"Check the AmneziaWG connections' names and ownership.")
+			}
+		}
 	} else {
 		opts, optionsErr := executionGeneratorOptions(desired, in.kernelPlan)
 		if optionsErr != nil {
@@ -252,8 +286,10 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 			return executionMaterializationV1{}, nil, newMaterializeError("kernel",
 				"the WAN uplink interface could not be determined, so the policy plane cannot be rendered", "")
 		}
+		ipsetOptions := keeneticPBROptionsFor(host.KernelWANIface, &in.desired.Profile)
+		ipsetOptions.MasqDevices = keeneticUserspaceDevices(nativeMaterialization)
 		ipsetArtifact, err := buildKeeneticKernelIpsetArtifact(
-			in.kernelPlan, exactKernelOptions(), keeneticPBROptionsFor(host.KernelWANIface, &in.desired.Profile),
+			in.kernelPlan, exactKernelOptions(), ipsetOptions,
 			executionKernelIpsetArtifactV1{
 				IpsetTool: host.KernelIpset, IptablesTool: host.KernelIptables,
 				IP6Tool: host.KernelIp6tables, IPTool: host.KernelIP,
@@ -309,6 +345,33 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 		m.Plugins = []executionPluginSpecV1{}
 	}
 	return m, warnings, nil
+}
+
+// keeneticEnginePlugins is the plugin set for the endpoints KeeneticOS hands to WayHop's AmneziaWG
+// engine when no core is generated to name them: the same specs and the same checks (engine, owner,
+// device collisions with the external bindings) the generator's plugin list goes through.
+func keeneticEnginePlugins(expected map[string]model.Endpoint, bindings []ExecutionExternalBindingV1) ([]executionPluginSpecV1, error) {
+	generated := make([]generator.Plugin, 0, len(expected))
+	for _, endpoint := range expected {
+		generated = append(generated, generator.Plugin{Endpoint: endpoint})
+	}
+	return captureExecutionPlugins(generated, expected, executionExternalInterfaces(bindings))
+}
+
+// keeneticUserspaceDevices lists, sorted, the devices of the endpoints the native plan handed to
+// WayHop's AmneziaWG engine.
+func keeneticUserspaceDevices(native *executionNativeMaterializationV1) []string {
+	var out []string
+	if native == nil || native.Delta.Reconcile.Target == nil {
+		return out
+	}
+	for _, decision := range native.Delta.Reconcile.Target.Decisions {
+		if decision.Path == nativeplan.PathEnginePlugin {
+			out = append(out, decision.Interface)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // bindKernelRetire adds the previous plane's teardown commands the new plane does not already cover

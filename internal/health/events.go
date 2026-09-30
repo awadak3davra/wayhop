@@ -128,6 +128,15 @@ func (m *Monitor) EventCount() int {
 	return len(m.events)
 }
 
+// EventLogFull reports whether the ring is at capacity, after which every new entry drops the oldest:
+// the log then covers only the span of what it holds, from OldestEventAt on, however long the daemon
+// has run.
+func (m *Monitor) EventLogFull() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.events) >= eventCap
+}
+
 // OldestEventAt returns the timestamp of the earliest entry still held, or 0 when the log is empty.
 // The API pairs it with the daemon start time so the stated coverage window actually contains every
 // event shown — the monitor begins ticking before the HTTP server is constructed, so a window that
@@ -197,14 +206,6 @@ func (m *Monitor) nameForLocked(id string) string {
 		return s.name
 	}
 	return id
-}
-
-// SampleElectionForTest drives one election sample with an explicit deadline. Exported for tests in
-// other packages that wire a fake proxy core.
-func (m *Monitor) SampleElectionForTest(ctx context.Context, timeout time.Duration) {
-	c, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	m.sampleElection(c)
 }
 
 // RecordSwitch logs an election the DAEMON made — as opposed to one the proxy core reported. The

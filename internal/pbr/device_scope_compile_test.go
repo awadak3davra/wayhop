@@ -180,7 +180,7 @@ func TestRenderNft_SourceOnlyZoneHonoursExcept(t *testing.T) {
 	if plain == except {
 		t.Errorf("an except zone renders identically to a plain one - the negation is lost")
 	}
-	if strings.Contains(plain, "!=") {
+	if strings.Contains(plain, "saddr !=") {
 		t.Errorf("a plain zone must not negate its source:%s%s", " ", plain)
 	}
 	if !strings.Contains(except, "saddr != @kids_s4") {

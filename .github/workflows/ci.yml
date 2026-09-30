@@ -65,27 +65,6 @@ jobs:
       - name: sing-box ${{ matrix.singbox }} check on all-protocols + transport + clash + WG-conf configs
         run: go test -run 'TestAllProtocolsGenerate|TestGeneratorTransportMatrix|TestClashSubscriptionGenerate|TestWireGuardConfGenerate|TestSourceRuleSingBoxCheck' -count=1 ./internal/generator/
 
-  # --- validate the clash subscription EXPORT against the real mihomo (clash-meta) client ---
-  # The export was previously only round-trip tested (re-imported into WayHop); this runs
-  # `mihomo -t` on a generated subscription (incl. the failover proxy-groups) so a field a real
-  # clash client rejects is caught before users are. mihomo is pinned; bump deliberately.
-  clash-export-check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with: { go-version: '${{ env.GO_VERSION }}', cache: false}
-      - name: Fetch mihomo
-        run: |
-          set -euo pipefail
-          ver='1.19.27'
-          curl -fsSL "https://github.com/MetaCubeX/mihomo/releases/download/v${ver}/mihomo-linux-amd64-compatible-v${ver}.gz" -o mihomo.gz
-          gunzip mihomo.gz
-          chmod +x mihomo
-          echo "WR_MIHOMO=$PWD/mihomo" >> "$GITHUB_ENV"
-      - name: mihomo -t on the exported clash subscription
-        run: go test -run TestClashExportMihomo -count=1 ./internal/exporter/
-
   # --- source-build the engine binaries WayHop orchestrates ---
   # Heavy (olcRTC pulls a large WebRTC stack and needs Go 1.26), so it is skipped
   # on PRs to keep them fast and runs on push / the weekly schedule / manual.
@@ -103,17 +82,17 @@ jobs:
       # this is a persistent self-hosted runner, so the second run met its own leftovers and the job
       # died on `destination path 'awg' already exists and is not an empty directory` — leaving main
       # red for reasons that had nothing to do with the commit that triggered it.
-      - name: amneziawg-go binary cross-builds (arm64)
+      # The AmneziaWG 3 component, built exactly as it is shipped: pinned to a tag AND a full commit
+      # (the script refuses a moved tag), every router arch WayHop supports, size-first flags. This
+      # step used to clone upstream HEAD and build arm64 only - unreproducible, and not the binary a
+      # router would install.
+      # Invoked exactly as scripts/verify.mjs invokes it (no arguments; output lands in the ignored
+      # dist/), so check-gate-parity sees the same gate on both sides. The script itself fails
+      # unless all five arches were built.
+      - name: amneziawg-go (AmneziaWG 3) builds for every router arch
         run: |
           set -euo pipefail
-          work="$(mktemp -d "${RUNNER_TEMP:-/tmp}/awg.XXXXXX")"
-          trap 'rm -rf "$work"' EXIT
-          git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-go "$work/awg"
-          cd "$work/awg"
-          # Build the binary (.), NOT ./... — a transitive dep (outline-sdk/x/smart)
-          # fails to cross-compile but is not imported by the amneziawg-go binary.
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o "${RUNNER_TEMP:-/tmp}/amneziawg-go" .
-          ls -la "${RUNNER_TEMP:-/tmp}/amneziawg-go"
+          TMPDIR="${RUNNER_TEMP:-/tmp}" sh scripts/build-amneziawg-go.sh
       - name: olcRTC cross-builds (arm64 + mipsle)
         run: |
           set -euo pipefail

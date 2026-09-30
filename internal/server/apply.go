@@ -579,23 +579,28 @@ func (s *Server) handleApplyStatus(w http.ResponseWriter, _ *http.Request) {
 // handleApplyConfirm (POST /api/apply/confirm) keeps a live (Test) configuration: the native state
 // is persisted, the live record becomes committed and the fail-safe window closes.
 func (s *Server) handleApplyConfirm(w http.ResponseWriter, r *http.Request) {
+	code, resp := s.applyConfirm(r.Context())
+	writeJSONNoStore(w, code, resp)
+}
+
+// applyConfirm is Keep, for the panel and the Telegram bot alike: it answers with the HTTP status and
+// body the panel expects.
+func (s *Server) applyConfirm(ctx context.Context) (int, map[string]any) {
 	s.applyMu.Lock()
 	live := s.liveRevision()
 	if live == nil {
 		s.applyMu.Unlock()
-		writeJSONNoStore(w, http.StatusConflict, map[string]any{"code": "NO_WINDOW",
-			"error": "there is no unsaved configuration to keep"})
-		return
+		return http.StatusConflict, map[string]any{"code": "NO_WINDOW",
+			"error": "there is no unsaved configuration to keep"}
 	}
 	ops := s.productionExecOps()
 	if live.Materialization.Native != nil && !s.config().Demo && ops.persistNative != nil {
-		if err := ops.persistNative(r.Context(), live.Materialization.Native.Delta.Reconcile); err != nil {
+		if err := ops.persistNative(ctx, live.Materialization.Native.Delta.Reconcile); err != nil {
 			s.applyMu.Unlock()
 			// The window stays armed: the configuration runs and the user can retry.
 			log.Printf("apply/confirm: native persist failed, keeping the window armed: %v", err)
-			writeJSONNoStore(w, http.StatusInternalServerError, map[string]any{"code": applyCodeApplyFailed,
-				"stage": stepNativePersist, "error": "the router-native configuration could not be saved", "detail": err.Error()})
-			return
+			return http.StatusInternalServerError, map[string]any{"code": applyCodeApplyFailed,
+				"stage": stepNativePersist, "error": "the router-native configuration could not be saved", "detail": err.Error()}
 		}
 	}
 	s.recordCommit()
@@ -608,20 +613,24 @@ func (s *Server) handleApplyConfirm(w http.ResponseWriter, r *http.Request) {
 	if s.failsafe != nil {
 		resp["failsafe"] = s.failsafe.Status()
 	}
-	writeJSONNoStore(w, http.StatusOK, resp)
+	return http.StatusOK, resp
 }
 
 // handleApplyRollback (POST /api/apply/rollback) restores the committed configuration. It works
 // whether or not a window is armed: with no live state there is nothing to roll back and it says so.
 func (s *Server) handleApplyRollback(w http.ResponseWriter, r *http.Request) {
+	code, resp := s.applyRollback(r.Context())
+	writeJSONNoStore(w, code, resp)
+}
+
+// applyRollback is Roll back, for the panel and the Telegram bot alike.
+func (s *Server) applyRollback(ctx context.Context) (int, map[string]any) {
 	if s.failsafe != nil && s.failsafe.Status().Pending {
 		if err := s.failsafe.RollbackNow(); err != nil {
-			writeJSONNoStore(w, http.StatusInternalServerError, map[string]any{"code": applyCodeApplyFailed,
-				"rolled_back": false, "error": err.Error(), "failsafe": s.failsafe.Status()})
-			return
+			return http.StatusInternalServerError, map[string]any{"code": applyCodeApplyFailed,
+				"rolled_back": false, "error": err.Error(), "failsafe": s.failsafe.Status()}
 		}
-		writeJSONNoStore(w, http.StatusOK, map[string]any{"rolled_back": true, "failsafe": s.failsafe.Status()})
-		return
+		return http.StatusOK, map[string]any{"rolled_back": true, "failsafe": s.failsafe.Status()}
 	}
 	s.applyMu.Lock()
 	live := s.liveRevision()
@@ -631,20 +640,18 @@ func (s *Server) handleApplyRollback(w http.ResponseWriter, r *http.Request) {
 		if s.failsafe != nil {
 			resp["failsafe"] = s.failsafe.Status()
 		}
-		writeJSONNoStore(w, http.StatusOK, resp)
-		return
+		return http.StatusOK, resp
 	}
-	err := s.rollbackTo(r.Context(), s.productionExecOps(), s.committedRevision(), &live.Materialization)
+	err := s.rollbackTo(ctx, s.productionExecOps(), s.committedRevision(), &live.Materialization)
 	s.recordRollback()
 	s.applyMu.Unlock()
 	if err != nil {
-		writeJSONNoStore(w, http.StatusInternalServerError, map[string]any{"code": applyCodeApplyFailed,
-			"rolled_back": false, "error": "the committed configuration could not be fully restored", "detail": err.Error()})
-		return
+		return http.StatusInternalServerError, map[string]any{"code": applyCodeApplyFailed,
+			"rolled_back": false, "error": "the committed configuration could not be fully restored", "detail": err.Error()}
 	}
 	resp := map[string]any{"rolled_back": true}
 	if s.failsafe != nil {
 		resp["failsafe"] = s.failsafe.Status()
 	}
-	writeJSONNoStore(w, http.StatusOK, resp)
+	return http.StatusOK, resp
 }

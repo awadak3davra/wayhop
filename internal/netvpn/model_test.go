@@ -3,8 +3,10 @@ package netvpn
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
+	"wayhop/internal/awg"
 	"wayhop/internal/model"
 )
 
@@ -71,6 +73,30 @@ func TestProtoForModelIsNativeWireGuardFamilyOnly(t *testing.T) {
 		got, ok := ProtoForModel(test.protocol)
 		if got != test.want || ok != test.ok {
 			t.Errorf("ProtoForModel(%q) = %q,%v; want %q,%v", test.protocol, got, ok, test.want, test.ok)
+		}
+	}
+}
+
+// AWGGeneration is what the UCI writer writes, not a label: every setting of that generation or older
+// reaches the interface, and every newer one is refused by name rather than left out.
+func TestAWGGenerationIsWhatTheWriterWrites(t *testing.T) {
+	for _, key := range awg.Settings() {
+		value := any("7")
+		if key == "random_trailers" || key == "disable_cookies" {
+			value = "on"
+		}
+		e := nativeModelEndpoint()
+		e.Params[key] = value
+		got, err := InterfaceFromEndpoint(e, InterfaceName(e), ProtoAmneziaWG)
+		need := awg.Need(map[string]any{key: value})
+		if need <= AWGGeneration {
+			if err != nil {
+				t.Errorf("%s (generation %v) was refused: %v", key, need, err)
+			} else if got.Obfuscation[key] != "7" {
+				t.Errorf("%s (generation %v) was not written: %v", key, need, got.Obfuscation)
+			}
+		} else if err == nil || !strings.Contains(err.Error(), key) {
+			t.Errorf("%s (generation %v) was not refused by name: %v", key, need, err)
 		}
 	}
 }

@@ -41,6 +41,10 @@ type InstallFit struct {
 	// Shortfall is how many MiB must be freed before the install would be allowed. Zero when it fits,
 	// or when the free space could not be measured — never a number invented from an unknown.
 	ShortfallMiB uint64 `json:"shortfall_mib,omitempty"`
+	// Mode "compressed" says the unpacked binary would not fit, so the gzip is kept on flash instead and
+	// unpacked into RAM at each start: Need is then the gzip's, and the running binary costs its
+	// unpacked size in RAM. Empty for an ordinary install.
+	Mode string `json:"mode,omitempty"`
 }
 
 // Fit reports what installing `tag` of `e` would need on this router.
@@ -64,8 +68,17 @@ func (u *Updater) Fit(ctx context.Context, e Engine, tag string) (InstallFit, er
 	f.Version = rel.Tag
 	f.Asset, f.Download = asset.Name, asset.Size
 	f.Need = peakInstallDisk(asset.Size, asset.Name, false)
-	f.Avail, f.AvailKnown = AvailBytes(u.BinDir)
+	f.Avail, f.AvailKnown = u.availAt(u.BinDir) // the reading Install takes, seam included
 	f.Fits = enoughFlashFor(f.Avail, f.AvailKnown, asset.Size, asset.Name, false)
+	// A companion the unpacked binary would not fit can still be installed kept as its gzip - Install
+	// makes the same choice, with the same numbers. The need reported is then the gzip's, fitting or not,
+	// because that is the least that gets it installed.
+	if !f.Fits && e.Companion != "" && !isBareBinaryAsset(asset.Name) {
+		f.Need = compressedNeed(asset.Size)
+		if f.Avail >= f.Need {
+			f.Fits, f.Mode = true, "compressed"
+		}
+	}
 	if f.AvailKnown && !f.Fits {
 		f.ShortfallMiB = shortfallMiB(f.Avail, f.Need)
 	}

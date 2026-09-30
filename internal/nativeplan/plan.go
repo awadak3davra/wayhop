@@ -6,11 +6,14 @@ package nativeplan
 import (
 	"fmt"
 	"sort"
+	"strings"
 
+	"wayhop/internal/awg"
 	"wayhop/internal/keenetic"
 	"wayhop/internal/model"
 	"wayhop/internal/netvpn"
 	"wayhop/internal/platform"
+	"wayhop/internal/util"
 )
 
 type Path string
@@ -22,6 +25,11 @@ const (
 	PathNativeAdopt   Path = "native_adopt"
 	PathCompatibility Path = "compatibility_addon"
 	PathExternal      Path = "external_binding"
+	// PathEnginePlugin is an endpoint WayHop's own engine plugin runs because the router's native
+	// writer cannot carry it (see KeeneticUserspace): no native resource is created, updated or
+	// removed for it, so it carries no native authority, and its Interface is the device the plugin
+	// creates.
+	PathEnginePlugin Path = "engine_plugin"
 )
 
 type EndpointDecision struct {
@@ -61,6 +69,10 @@ type HostFacts struct {
 	// ListsViaIpset: the kernel policy plane carries routing lists, so the NDM plane must not also
 	// emit their destinations as static routes.
 	ListsViaIpset bool
+	// PluginDevices comes only from the authenticated previous plan: endpoint -> the device WayHop's
+	// AmneziaWG engine ran it on. On OpenWrt that device and the native interface share one name, so
+	// an endpoint moving from one to the other is refused (see MoveError).
+	PluginDevices map[string]string
 }
 
 // Plan is credential-bearing. It must never be exposed through the public review DTO.
@@ -68,7 +80,10 @@ type Plan struct {
 	Platform  platform.Platform
 	Decisions []EndpointDecision
 	OpenWrt   []netvpn.Plan
-	Keenetic  *keenetic.Plan
+	// OpenWrtBindings put each engine-plugin device into the reviewed firewall zone, one per
+	// PathEnginePlugin decision on OpenWrt.
+	OpenWrtBindings []netvpn.DeviceBinding `json:",omitempty"`
+	Keenetic        *keenetic.Plan
 }
 
 func Compile(profile *model.Profile, facts HostFacts) (*Plan, error) {
@@ -90,6 +105,7 @@ func Compile(profile *model.Profile, facts HostFacts) (*Plan, error) {
 
 func compileOpenWrt(profile *model.Profile, facts HostFacts) (*Plan, error) {
 	plan := &Plan{Platform: platform.OpenWrt}
+	userspace := OpenWrtUserspace(profile, facts.Capabilities)
 	existing := netvpn.ParseUCIShow(facts.NetworkUCI)
 	claimedInterfaces := make(map[string]string)
 	for _, endpoint := range profile.Endpoints {
@@ -124,6 +140,18 @@ func compileOpenWrt(profile *model.Profile, facts HostFacts) (*Plan, error) {
 		}
 		if endpoint.Engine != model.EngineAmneziaWG && endpoint.Engine != model.EngineSingBox {
 			return nil, fmt.Errorf("native plan: endpoint %q uses engine %q, which cannot materialize a native WireGuard-family interface", endpoint.ID, endpoint.Engine)
+		}
+		if lane, ok := userspace[endpoint.ID]; ok {
+			decision, binding, err := compileOpenWrtUserspaceEndpoint(endpoint, lane, facts, existing)
+			if err == nil {
+				err = reserveInterface(claimedInterfaces, decision.Interface, endpoint.ID)
+			}
+			if err != nil {
+				return nil, err
+			}
+			plan.Decisions = append(plan.Decisions, decision)
+			plan.OpenWrtBindings = append(plan.OpenWrtBindings, binding)
+			continue
 		}
 		decision, devicePlan, err := compileOpenWrtNativeEndpoint(endpoint, protocol, facts, existing)
 		if err == nil {
@@ -163,6 +191,9 @@ func compileOpenWrtNativeEndpoint(
 			fmt.Errorf("native plan: endpoint %q ownership is not writable", endpoint.ID)
 	}
 	name := netvpn.InterfaceName(endpoint)
+	if device := facts.PluginDevices[endpoint.ID]; device != "" {
+		return EndpointDecision{}, netvpn.Plan{}, &MoveError{EndpointID: endpoint.ID, Device: device, ToNative: true}
+	}
 	operation := platform.NativeCreate
 	path := PathNativeCreate
 	if _, found := existing[name]; found {
@@ -214,6 +245,7 @@ func reserveInterface(claimed map[string]string, name, endpointID string) error 
 
 func compileKeenetic(profile *model.Profile, facts HostFacts) (*Plan, error) {
 	plan := &Plan{Platform: platform.Keenetic}
+	userspace := UserspaceDevices(KeeneticUserspace(profile, facts.Capabilities))
 	for _, endpoint := range profile.Endpoints {
 		if !endpoint.Enabled {
 			continue
@@ -244,6 +276,14 @@ func compileKeenetic(profile *model.Profile, facts HostFacts) (*Plan, error) {
 		if !endpoint.OwnsResource() {
 			return nil, fmt.Errorf("native plan: endpoint %q ownership is not writable", endpoint.ID)
 		}
+		// NDM cannot carry it, so WayHop's AmneziaWG engine does; this set holds every endpoint with
+		// settings beyond NDM's writer, so none reaches the native branch below.
+		if device := userspace[endpoint.ID]; device != "" {
+			plan.Decisions = append(plan.Decisions, EndpointDecision{
+				EndpointID: endpoint.ID, Protocol: endpoint.Protocol, Path: PathEnginePlugin, Interface: device,
+			})
+			continue
+		}
 		capability := platform.NativeOperationCapabilityID(string(endpoint.Protocol), platform.NativeCreate)
 		if err := requireCapability(facts.Capabilities, capability, endpoint.ID); err != nil {
 			return nil, err
@@ -264,6 +304,7 @@ func compileKeenetic(profile *model.Profile, facts HostFacts) (*Plan, error) {
 		GlobalPriorityNow:  cloneIntMap(facts.GlobalPriorities),
 		ListsViaIpset:      facts.ListsViaIpset,
 		OccupiedInterfaces: cloneBoolMap(facts.OccupiedInterfaces),
+		Userspace:          userspace,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("native plan: keenetic: %w", err)
@@ -336,6 +377,220 @@ func compatibilityDecision(endpoint model.Endpoint, capabilities platform.Capabi
 	}, nil
 }
 
+// MoveError is an OpenWrt endpoint that would change hands within one Apply between the router's own
+// AmneziaWG and WayHop's userspace engine. Both run it on a device of the same name (util.AWGIface),
+// and the executor starts the plugins after the native prepare and removes native interfaces at the
+// commit: netifd's teardown of the old interface would delete the plugin's new TUN by that name, and
+// a new native interface cannot be created while the old TUN still holds it. Refused, with the way
+// round it: two Applies, one without the connection and one with it.
+type MoveError struct {
+	EndpointID string
+	Device     string
+	ToNative   bool // the engine ran it and OpenWrt's own AmneziaWG would now; false is the other way
+}
+
+func (e *MoveError) Error() string {
+	from, to := "OpenWrt's own AmneziaWG", "WayHop's userspace AmneziaWG"
+	if e.ToNative {
+		from, to = to, from
+	}
+	return fmt.Sprintf("native plan: endpoint %q would move from %s to %s in one Apply, and both run it on device %s; "+
+		"switch the connection off and apply, then switch it on and apply again", e.EndpointID, from, to, e.Device)
+}
+
+// Userspace is the userspace-lane set for the platform - KeeneticUserspace or OpenWrtUserspace - and
+// empty for a platform with no native plan.
+func Userspace(profile *model.Profile, p platform.Platform, capabilities platform.CapabilitySet) map[string]UserspaceEndpoint {
+	switch p {
+	case platform.Keenetic:
+		return KeeneticUserspace(profile, capabilities)
+	case platform.OpenWrt:
+		return OpenWrtUserspace(profile, capabilities)
+	}
+	return map[string]UserspaceEndpoint{}
+}
+
+// OpenWrtUserspace is the set of AmneziaWG endpoints OpenWrt runs on WayHop's own engine next to its
+// native tunnels: settings beyond the UCI writer, on a router whose native AmneziaWG would otherwise
+// take them. Without a usable native AmneziaWG the endpoint is not in the set - the capability
+// refusal hands the whole profile to the generic path, where the plugin runs it anyway. The planner
+// decides by this set and the review explains by it.
+func OpenWrtUserspace(profile *model.Profile, capabilities platform.CapabilitySet) map[string]UserspaceEndpoint {
+	out := map[string]UserspaceEndpoint{}
+	if profile == nil {
+		return out
+	}
+	for _, endpoint := range profile.Endpoints {
+		if !endpoint.Enabled || endpoint.Engine != model.EngineAmneziaWG || !endpoint.OwnsResource() {
+			continue
+		}
+		settings := BeyondNative(endpoint, platform.OpenWrt)
+		if len(settings) == 0 || !nativeAWGUsable(endpoint, capabilities) {
+			continue
+		}
+		out[endpoint.ID] = UserspaceEndpoint{
+			Device: util.AWGIface(endpoint.ID),
+			Reason: fmt.Sprintf("it uses AmneziaWG %s settings (%s) that OpenWrt's own AmneziaWG cannot carry",
+				awg.Need(endpoint.Params), strings.Join(settings, ", ")),
+			Code: platform.ReasonPlatformUnsupported,
+		}
+	}
+	return out
+}
+
+// nativeAWGUsable reports whether the router's own AmneziaWG could create and remove this endpoint's
+// interface - the capabilities the native writer is gated on.
+func nativeAWGUsable(endpoint model.Endpoint, capabilities platform.CapabilitySet) bool {
+	for _, operation := range []platform.NativeOperation{platform.NativeCreate, platform.NativeRemove} {
+		if !capabilities.Get(platform.NativeOperationCapabilityID(string(endpoint.Protocol), operation)).State.Usable() {
+			return false
+		}
+	}
+	return true
+}
+
+// compileOpenWrtUserspaceEndpoint gives an endpoint in the OpenWrt userspace lane its decision and
+// the binding that puts its device into the reviewed firewall zone. An interface of the same name on
+// the router - WayHop's own from a previous Apply, or anyone's - is a move this Apply cannot make.
+func compileOpenWrtUserspaceEndpoint(
+	endpoint model.Endpoint,
+	lane UserspaceEndpoint,
+	facts HostFacts,
+	existing map[string]netvpn.AWGInterface,
+) (EndpointDecision, netvpn.DeviceBinding, error) {
+	if _, found := existing[lane.Device]; found || facts.OwnedInterfaces[endpoint.ID] != "" {
+		return EndpointDecision{}, netvpn.DeviceBinding{}, &MoveError{EndpointID: endpoint.ID, Device: lane.Device}
+	}
+	if facts.FirewallZone == "" {
+		return EndpointDecision{}, netvpn.DeviceBinding{},
+			fmt.Errorf("native plan: endpoint %q requires an explicitly reviewed OpenWrt firewall zone", endpoint.ID)
+	}
+	binding, err := netvpn.BuildDeviceBinding(lane.Device, facts.FirewallZone, facts.FirewallUCI)
+	if err != nil {
+		return EndpointDecision{}, netvpn.DeviceBinding{}, fmt.Errorf("native plan: endpoint %q: %w", endpoint.ID, err)
+	}
+	return EndpointDecision{
+		EndpointID: endpoint.ID, Protocol: endpoint.Protocol, Path: PathEnginePlugin, Interface: lane.Device,
+	}, binding, nil
+}
+
+// UserspaceEndpoint is an AmneziaWG endpoint WayHop runs on its own engine instead of the router's
+// AmneziaWG.
+type UserspaceEndpoint struct {
+	Device string              // the device WayHop's AmneziaWG engine creates for it
+	Reason string              // why the router's own AmneziaWG does not carry it, in words for the review
+	Code   platform.ReasonCode // the same, as a stable code
+	Remedy string              // what would let the router carry it natively, when anything would
+}
+
+// KeeneticUserspace is the set of AmneziaWG endpoints KeeneticOS runs on WayHop's own AmneziaWG
+// engine rather than on NDM: an endpoint whose settings NDM's writer cannot carry, or one NDM cannot
+// create at all - no AmneziaWG in this firmware, its WireGuard component not installed. Either way
+// the plugin runs it on amneziawg-go, so the connection comes up instead of being refused or written
+// without the settings its server requires. The native planner decides by this set and the Apply
+// review explains by it, so the two cannot disagree.
+//
+// Only WayHop's own AmneziaWG endpoints qualify: an adopted tunnel stays the router's, and a
+// sing-box WireGuard endpoint has no userspace engine here. A previously native endpoint that lands
+// in the set is torn down natively by the reconcile, whose remove authority it still needs - a
+// capability probe that merely failed cannot move a working tunnel.
+func KeeneticUserspace(profile *model.Profile, capabilities platform.CapabilitySet) map[string]UserspaceEndpoint {
+	out := map[string]UserspaceEndpoint{}
+	if profile == nil {
+		return out
+	}
+	for _, endpoint := range profile.Endpoints {
+		if u, ok := keeneticUserspaceReason(endpoint, capabilities); ok {
+			u.Device = util.AWGIface(endpoint.ID)
+			out[endpoint.ID] = u
+		}
+	}
+	return out
+}
+
+// UserspaceDevices is the endpoint → device view that keenetic.CompileOptions.Userspace and
+// keenetic.RoutePlanes take.
+func UserspaceDevices(set map[string]UserspaceEndpoint) map[string]string {
+	out := make(map[string]string, len(set))
+	for id, endpoint := range set {
+		out[id] = endpoint.Device
+	}
+	return out
+}
+
+func keeneticUserspaceReason(endpoint model.Endpoint, capabilities platform.CapabilitySet) (UserspaceEndpoint, bool) {
+	// OwnsResource is the ownership gate: an adopted or imported tunnel stays the router's.
+	if !endpoint.Enabled || endpoint.Engine != model.EngineAmneziaWG || !endpoint.OwnsResource() {
+		return UserspaceEndpoint{}, false
+	}
+	if _, native := netvpn.ProtoForModel(endpoint.Protocol); !native {
+		return UserspaceEndpoint{}, false
+	}
+	if settings := BeyondNative(endpoint, platform.Keenetic); len(settings) != 0 {
+		return UserspaceEndpoint{
+			Reason: fmt.Sprintf("it uses AmneziaWG %s settings (%s) that KeeneticOS's own AmneziaWG cannot carry",
+				awg.Need(endpoint.Params), strings.Join(settings, ", ")),
+			Code: platform.ReasonPlatformUnsupported,
+		}, true
+	}
+	for _, operation := range []platform.NativeOperation{platform.NativeCreate, platform.NativeRemove} {
+		capability := capabilities.Get(platform.NativeOperationCapabilityID(string(endpoint.Protocol), operation))
+		if capability.State.Usable() {
+			continue
+		}
+		// Only a definite answer moves the endpoint: this firmware has no AmneziaWG, its component is
+		// not installed, or this build does not drive NDM for it. A probe that failed is not an answer;
+		// the endpoint stays on the native path, which then refuses for want of the capability.
+		switch capability.Reason {
+		case platform.ReasonPlatformUnsupported, platform.ReasonMissingFirmwareComp, platform.ReasonBackendNotWired:
+			why := capability.Detail
+			if why == "" {
+				why = string(capability.Reason)
+			}
+			return UserspaceEndpoint{
+				Reason: "KeeneticOS cannot run it natively (" + why + ")",
+				Code:   capability.Reason, Remedy: capability.Remedy,
+			}, true
+		}
+		return UserspaceEndpoint{}, false
+	}
+	return UserspaceEndpoint{}, false
+}
+
+// NativeAWGGeneration is the newest AmneziaWG generation the platform's native writer expresses:
+// NDM's `wireguard asc` on KeeneticOS, the UCI interface on OpenWrt. Each writer states its own, next
+// to the settings it writes and held to them by its tests; GenNone is a platform with no writer.
+func NativeAWGGeneration(p platform.Platform) awg.Generation {
+	switch p {
+	case platform.Keenetic:
+		return keenetic.AWGGeneration
+	case platform.OpenWrt:
+		return netvpn.AWGGeneration
+	}
+	return awg.GenNone
+}
+
+// BeyondNative lists, sorted, the endpoint's AmneziaWG settings that the platform's native writer
+// cannot express, or nil when a native tunnel carries the endpoint as configured. The review asks it
+// before Apply and Compile refuses on it, so the two cannot disagree. Only an AmneziaWG endpoint is
+// asked: a WireGuard one has no such settings to lose.
+func BeyondNative(endpoint model.Endpoint, p platform.Platform) []string {
+	if endpoint.Protocol != model.ProtoAmneziaWG {
+		return nil
+	}
+	return awg.Beyond(endpoint.Params, NativeAWGGeneration(p))
+}
+
+func platformName(p platform.Platform) string {
+	switch p {
+	case platform.Keenetic:
+		return "KeeneticOS"
+	case platform.OpenWrt:
+		return "OpenWrt"
+	}
+	return string(p)
+}
+
 func requireCapability(capabilities platform.CapabilitySet, id, endpointID string) error {
 	capability := capabilities.Get(id)
 	if !capability.State.Usable() {
@@ -347,6 +602,7 @@ func requireCapability(capabilities platform.CapabilitySet, id, endpointID strin
 func canonicalize(plan *Plan) {
 	sort.Slice(plan.Decisions, func(i, j int) bool { return plan.Decisions[i].EndpointID < plan.Decisions[j].EndpointID })
 	sort.Slice(plan.OpenWrt, func(i, j int) bool { return plan.OpenWrt[i].Iface < plan.OpenWrt[j].Iface })
+	sort.Slice(plan.OpenWrtBindings, func(i, j int) bool { return plan.OpenWrtBindings[i].Device < plan.OpenWrtBindings[j].Device })
 }
 
 // cloneIntMap is cloneMap for the observed `ip global` ladder.

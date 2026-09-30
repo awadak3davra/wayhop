@@ -5,9 +5,10 @@
       "why": "WR_SINGBOX not set — ran generation-only (set it to a sing-box binary for a real `check`)",
       "when": "env:WR_SINGBOX"
     },
-    "TestClashExportMihomo": {
-      "why": "WR_MIHOMO not set — exported + structurally checked only (set it to a mihomo binary for a real -t check)",
-      "when": "env:WR_MIHOMO"
+
+    "TestLoaderPathHelperProcess": {
+      "why": "helper process for TestChildrenDoNotInheritLoaderPath",
+      "when": "env:WAYHOP_LOADERENV_HELPER"
     },
     "TestClashSubscriptionGenerate": {
       "why": "WR_SINGBOX not set — ran clash-import+generate only",

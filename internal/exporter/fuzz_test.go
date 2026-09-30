@@ -149,18 +149,6 @@ func FuzzExportRoundTrip(f *testing.F) {
 			return ShareLink(e)
 		}()
 
-		// ClashConfig must not panic on any endpoint (export symmetry with the
-		// importer-side FuzzParseClash); a non-clash-mappable endpoint is skipped,
-		// never a crash.
-		func() {
-			defer func() {
-				if rec := recover(); rec != nil {
-					t.Fatalf("ClashConfig PANICKED: %v\nendpoint=%+v", rec, e)
-				}
-			}()
-			_, _ = ClashConfig([]model.Endpoint{e})
-		}()
-
 		if !ok {
 			// Link protocols always export ok; if not, nothing more to check.
 			return

@@ -206,9 +206,22 @@ func TestUpdaterinstall_InstallMissingVersion400(t *testing.T) {
 	}
 }
 
+// withSourceOnlyEngine adds a source-only engine to the catalogue for one test. amneziawg-go was the
+// catalogue's only such engine until WayHop began building it (it is now a companion of WayHop's own
+// releases), and the handlers' source-only branch still has to answer for the next one.
+func withSourceOnlyEngine(t *testing.T) string {
+	t.Helper()
+	saved := updater.Engines
+	updater.Engines = append(append([]updater.Engine(nil), saved...), updater.Engine{
+		ID: "src-only", Name: "Source-only engine", Repo: "example/src-only", BinName: "src-only",
+		Role: "standalone", SourceOnly: true, Note: "No prebuilt releases; build from source on-device.",
+	})
+	t.Cleanup(func() { updater.Engines = saved })
+	return "src-only"
+}
+
 // TestUpdaterinstall_InstallSourceOnlyEngineIsNotAGatewayFailure drives Install on a SourceOnly
-// engine (amneziawg-go). Install() short-circuits with a "no prebuilt releases" error BEFORE any
-// network access.
+// engine. Install() short-circuits with a "no prebuilt releases" error BEFORE any network access.
 //
 // This asserted 502 BadGateway, and the status was in the test's own name. It changed deliberately:
 // 502 says an upstream failed, and no upstream was ever contacted — the answer is a permanent
@@ -218,13 +231,14 @@ func TestUpdaterinstall_InstallMissingVersion400(t *testing.T) {
 // request cannot be satisfied for this engine, and nothing is wrong with the router or the network.
 func TestUpdaterinstall_InstallSourceOnlyEngineIsNotAGatewayFailure(t *testing.T) {
 	s := updaterinstall_serverWithUpdater(t, "amd64")
+	id := withSourceOnlyEngine(t)
 
-	w := updaterinstall_postWithID(s.handleUpdaterInstall, "amneziawg-go", `{"version":"v0.2.13"}`)
+	w := updaterinstall_postWithID(s.handleUpdaterInstall, id, `{"version":"v0.2.13"}`)
 	if w.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("source-only install: got %d, want 422 (%s)", w.Code, w.Body.String())
 	}
 	// And it must NOT be filed as an install failure: nothing failed, and nothing could clear it.
-	if got := s.updErr("amneziawg-go"); got != "" {
+	if got := s.updErr(id); got != "" {
 		t.Errorf("the refusal was persisted as last_error (%q) — the row would show a permanent "+
 			"'Install failed' the operator cannot clear", got)
 	}
@@ -236,7 +250,7 @@ func TestUpdaterinstall_InstallSourceOnlyEngineIsNotAGatewayFailure(t *testing.T
 		t.Errorf("error = %q, want it to mention no prebuilt releases", resp["error"])
 	}
 	// The error must name the engine id (the Install error format is "<id> has no...").
-	if !strings.Contains(resp["error"], "amneziawg-go") {
+	if !strings.Contains(resp["error"], id) {
 		t.Errorf("error = %q, want it to name the engine id", resp["error"])
 	}
 }
@@ -249,11 +263,12 @@ func TestUpdaterinstall_InstallSourceOnlyEngineIsNotAGatewayFailure(t *testing.T
 // network yet still exercises the source_only branch end to end.
 func TestUpdaterinstall_VersionsSourceOnlyShapeWithoutNetwork(t *testing.T) {
 	s, _ := sharehandlers_server(t)
+	id := withSourceOnlyEngine(t)
 	// Unreachable mirror -> Tags() fails fast; the handler still returns 200.
 	s.updater = updater.New(t.TempDir(), "amd64", []string{"http://127.0.0.1:0"})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/updater/amneziawg-go/versions", nil)
-	req.SetPathValue("id", "amneziawg-go")
+	req := httptest.NewRequest(http.MethodGet, "/api/updater/"+id+"/versions", nil)
+	req.SetPathValue("id", id)
 	w := httptest.NewRecorder()
 	s.handleUpdaterVersions(w, req)
 
@@ -270,7 +285,7 @@ func TestUpdaterinstall_VersionsSourceOnlyShapeWithoutNetwork(t *testing.T) {
 	// The engine's note is echoed.
 	note, _ := resp["note"].(string)
 	if !strings.Contains(note, "build from source") {
-		t.Errorf("note = %q, want the amneziawg-go source note", note)
+		t.Errorf("note = %q, want the engine's source note", note)
 	}
 	// The failed lookup is reported via an "error" field (not a non-200), and no
 	// versions/latest were produced.

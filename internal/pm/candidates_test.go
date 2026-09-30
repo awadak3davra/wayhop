@@ -45,7 +45,10 @@ func TestCandidates_Apk_ParsesVersionsNewestFirst(t *testing.T) {
 	if !got[0].Installed || got[1].Installed {
 		t.Fatalf("installed flag wrong: %+v", got)
 	}
-	if got[0].Available || !got[1].Available {
+	// Every line of `apk list --available` came FROM a repository, the tagged one included: the tag
+	// says the build is on disk, not that the line came out of the installed database. Reading it the
+	// other way marked the feed's own newest build unavailable as soon as it was the installed one.
+	if !got[0].Available || !got[1].Available {
 		t.Fatalf("repository availability wrong: %+v", got)
 	}
 	// sing-box-doc must NOT be folded into sing-box: the prefix is "<pkg>-", and "sing-box-doc-…"
@@ -55,15 +58,28 @@ func TestCandidates_Apk_ParsesVersionsNewestFirst(t *testing.T) {
 			t.Fatalf("a different package leaked into the candidate list: %+v", got)
 		}
 	}
-	if want := []string{"apk", "list", "sing-box"}; !equal(f.argv, want) {
+	if want := []string{"apk", "list", "--available", "sing-box"}; !equal(f.argv, want) {
 		t.Fatalf("argv = %v, want %v", f.argv, want)
 	}
 }
 
-func TestApkCandidates_InstalledDatabaseRowIsNotAnAvailableBuild(t *testing.T) {
-	got := apkCandidates("sing-box-1.12.17-r1 aarch64 {sing-box} [installed]\n", "sing-box")
-	if len(got) != 1 || !got[0].Installed || got[0].Available {
-		t.Fatalf("installed-only row = %+v", got)
+// An installed build the repositories no longer carry is not a candidate for anything: it cannot be
+// installed, so it cannot be an update target and cannot be rolled back to. apk answers this itself —
+// verified on the test router by listing with no repositories configured at all, where
+// `apk list --available sing-box` prints NOTHING while plain `apk list sing-box` still prints the
+// installed row. Asking the right question is what makes the empty answer meaningful.
+func TestCandidates_Apk_AsksTheRepositoriesNotTheInstalledDatabase(t *testing.T) {
+	f := &fakeRunner{out: ""}
+	m := Manager{Kind: Apk, Runner: f}
+	got, err := m.Candidates(context.Background(), "sing-box")
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("a repository that offers nothing produced candidates: %+v", got)
+	}
+	if want := []string{"apk", "list", "--available", "sing-box"}; !equal(f.argv, want) {
+		t.Fatalf("argv = %v, want %v", f.argv, want)
 	}
 }
 

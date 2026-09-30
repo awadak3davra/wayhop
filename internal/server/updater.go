@@ -41,6 +41,9 @@ func (s *Server) handleUpdaterEngines(w http.ResponseWriter, r *http.Request) {
 		// would stop working. Populated for the core only — the other entries have no equivalent
 		// question yet (a plugin is used by the connection that names it, which the row already says).
 		UsedBy []string `json:"used_by,omitempty"`
+		// AWG is the AmneziaWG 3 component's own block (awgcomponent.go): the one engine whose
+		// "needed here" depends on the configured connections, not only on the router.
+		AWG *awgComponentStatus `json:"awg,omitempty"`
 	}
 	// One capability probe for the whole list rather than one per engine: it reads /proc, /lib and the
 	// package database, and doing that seven times to answer the same question would show up as a
@@ -50,7 +53,8 @@ func (s *Server) handleUpdaterEngines(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	// Read the profile once, for the same reason: coreDependents walks endpoints and DNS servers, and
 	// that answer is identical for every engine in the list.
-	coreUsers := coreDependents(s.store.Profile(), caps)
+	prof := s.store.Profile()
+	coreUsers := coreDependents(prof, caps)
 	out := make([]item, 0, len(updater.Engines))
 	for _, e := range updater.Engines {
 		pkg := s.updater.EnginePackageStatus(ctx, e)
@@ -59,6 +63,11 @@ func (s *Server) handleUpdaterEngines(w http.ResponseWriter, r *http.Request) {
 			CarriedByKernel: e.Provides != "" && caps.Native[e.Provides]}
 		if e.Role == "core" {
 			it.UsedBy = coreUsers
+		}
+		if e.Provides == "amneziawg" {
+			st := s.awgComponent(ctx, prof)
+			it.AWG = &st
+			it.CarriedByKernel = awgCarriedByKernel(it.CarriedByKernel, st)
 		}
 		out = append(out, it)
 	}
@@ -452,6 +461,11 @@ func selfChannelMissing(attempts []updater.Attempt) bool {
 
 // handleSelfStatus reports WayHop's own version and whether a newer release exists.
 func (s *Server) handleSelfStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.selfStatus(r.Context()))
+}
+
+// selfStatus is the self-update check behind the Components page and the Telegram bot.
+func (s *Server) selfStatus(parent context.Context) map[string]any {
 	c := s.config()
 	repo := c.Updater.SelfRepo
 	if repo == "" {
@@ -464,7 +478,7 @@ func (s *Server) handleSelfStatus(w http.ResponseWriter, r *http.Request) {
 		"auto_update": c.Updater.AutoUpdate,
 	}
 	out["package_manager"] = string(s.updater.PMKind())
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 20*time.Second)
 	defer cancel()
 	if exe, exeErr := os.Executable(); exeErr == nil {
 		pkg := s.updater.SelfPackageStatus(ctx, exe)
@@ -479,8 +493,7 @@ func (s *Server) handleSelfStatus(w http.ResponseWriter, r *http.Request) {
 			out["update_available"] = pkg.State == updater.PackageStateBehind
 			out["version_comparable"] = pkg.State == updater.PackageStateBehind ||
 				pkg.State == updater.PackageStateCurrent || pkg.State == updater.PackageStateAhead
-			writeJSON(w, http.StatusOK, out)
-			return
+			return out
 		}
 	}
 	rel, err := s.updater.SelfLatest(ctx, repo)
@@ -516,7 +529,7 @@ func (s *Server) handleSelfStatus(w http.ResponseWriter, r *http.Request) {
 			out["update_available"] = newer
 		}
 	}
-	writeJSON(w, http.StatusOK, out)
+	return out
 }
 
 // handleSelfUpdate downloads + swaps the WayHop binary for the latest (or a given)
@@ -528,26 +541,31 @@ func (s *Server) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
 		Version string `json:"version"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	code, out := s.selfInstall(r.Context(), body.Version)
+	writeJSON(w, code, out)
+}
+
+// selfInstall is the self-update itself, for the Components page and the Telegram bot. An error
+// comes back as {"error": ...} with its status, like writeErr writes it.
+func (s *Server) selfInstall(parent context.Context, tag string) (int, map[string]any) {
+	fail := func(code int, msg string) (int, map[string]any) { return code, map[string]any{"error": msg} }
 	c := s.config()
 	repo := c.Updater.SelfRepo
 	if repo == "" {
 		repo = updater.DefaultSelfRepo
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 180*time.Second)
 	defer cancel()
-	tag := body.Version
 	if tag == "" {
 		rel, err := s.updater.SelfLatest(ctx, repo)
 		if err != nil {
-			writeErr(w, http.StatusBadGateway, err.Error())
-			return
+			return fail(http.StatusBadGateway, err.Error())
 		}
 		tag = rel.Tag
 	}
 	exe, err := os.Executable()
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "cannot locate the running binary: "+err.Error())
-		return
+		return fail(http.StatusInternalServerError, "cannot locate the running binary: "+err.Error())
 	}
 	// The binary swap and a router Apply must never overlap. The currently running process remains
 	// valid if restart fails, but no Apply may begin under one executable identity and finish after
@@ -558,23 +576,19 @@ func (s *Server) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var nm *updater.NativeManagedError
 		if errors.As(err, &nm) {
-			writeErr(w, http.StatusConflict, err.Error()) // policy: wayhop is PM-owned — upgrade via opkg/apk
-			return
+			return fail(http.StatusConflict, err.Error()) // policy: wayhop is PM-owned — upgrade via opkg/apk
 		}
-		writeErr(w, http.StatusBadGateway, err.Error())
-		return
+		return fail(http.StatusBadGateway, err.Error())
 	}
 	cmd := restartCommand()
 	if cmd == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"installed": installed, "restarting": false,
-			"note": "binary swapped; restart the service manually to apply (or this is the demo)"})
-		return
+		return http.StatusOK, map[string]any{"installed": installed, "restarting": false,
+			"note": "binary swapped; restart the service manually to apply (or this is the demo)"}
 	}
 	if err := cmd.Start(); err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"installed": installed, "restarting": false, "note": "restart failed: " + err.Error()})
-		return
+		return http.StatusOK, map[string]any{"installed": installed, "restarting": false, "note": "restart failed: " + err.Error()}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"installed": installed, "restarting": true})
+	return http.StatusOK, map[string]any{"installed": installed, "restarting": true}
 }
 
 // handleSelfAuto toggles background auto-update of WayHop itself.

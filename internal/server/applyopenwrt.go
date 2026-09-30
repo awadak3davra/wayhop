@@ -104,6 +104,20 @@ func (adapter *exactOpenWrtNativeAdapter) prepare(
 			return fmt.Errorf("%w: prepare interface %q: %v", errExactOpenWrtPlan, plan.Iface, err)
 		}
 	}
+	// The engine-plugin devices join the reviewed zone before the plugins start, so the first packet
+	// forwarded into a new TUN already has a policy.
+	for _, binding := range target.OpenWrtBindings {
+		if err := context.Cause(ctx); err != nil {
+			return err
+		}
+		result, err := binding.Apply(exactOpenWrtPlanRunner{ctx: ctx, runner: adapter.runner})
+		if err != nil || !result.Applied {
+			if err == nil {
+				err = errExactOpenWrtPlan
+			}
+			return fmt.Errorf("%w: bind device %q: %v", errExactOpenWrtPlan, binding.Device, err)
+		}
+	}
 	return nil
 }
 
@@ -144,6 +158,23 @@ func (adapter *exactOpenWrtNativeAdapter) commit(
 				err = errExactOpenWrtPlan
 			}
 			return fmt.Errorf("%w: remove interface %q: %v", errExactOpenWrtPlan, removal.Iface, err)
+		}
+	}
+	unbound := make(map[string]bool, len(reconcile.OpenWrtUnbindings))
+	for _, unbinding := range reconcile.OpenWrtUnbindings {
+		if !validExactOpenWrtUnbinding(unbinding) || unbound[unbinding.Device] {
+			return errExactOpenWrtPlan
+		}
+		unbound[unbinding.Device] = true
+		if err := context.Cause(ctx); err != nil {
+			return err
+		}
+		result, err := unbinding.Apply(exactOpenWrtPlanRunner{ctx: ctx, runner: adapter.runner})
+		if err != nil || !result.Applied {
+			if err == nil {
+				err = errExactOpenWrtPlan
+			}
+			return fmt.Errorf("%w: unbind device %q: %v", errExactOpenWrtPlan, unbinding.Device, err)
 		}
 	}
 	return nil
@@ -243,6 +274,41 @@ func validExactOpenWrtWritePlan(plan netvpn.Plan) bool {
 	return true
 }
 
+// validExactOpenWrtBinding holds a device binding to the one shape it may have: a safe device name, a
+// zone and its reference, firewall commands only, and the firewall commit.
+func validExactOpenWrtBinding(binding netvpn.DeviceBinding) bool {
+	if netvpn.ValidInterfaceName(binding.Device) != nil || binding.Zone == "" || binding.ZoneRef == "" ||
+		len(binding.Commit) == 0 || len(binding.Commands) > 1 {
+		return false
+	}
+	return validExactOpenWrtFirewallCommands(binding.Commands, binding.Commit)
+}
+
+func validExactOpenWrtUnbinding(unbinding netvpn.DeviceUnbinding) bool {
+	if netvpn.ValidInterfaceName(unbinding.Device) != nil || len(unbinding.Commands) == 0 ||
+		len(unbinding.Commands) != len(unbinding.Zones) || len(unbinding.Commit) == 0 {
+		return false
+	}
+	return validExactOpenWrtFirewallCommands(unbinding.Commands, unbinding.Commit)
+}
+
+// validExactOpenWrtFirewallCommands admits only firewall staging commands and the firewall commit:
+// a binding never touches /etc/config/network.
+func validExactOpenWrtFirewallCommands(commands, commit []string) bool {
+	for _, command := range commands {
+		if !validExactOpenWrtCommand(command) ||
+			!strings.HasPrefix(command, "uci add_list firewall.") && !strings.HasPrefix(command, "uci del_list firewall.") {
+			return false
+		}
+	}
+	for _, command := range commit {
+		if command != "uci commit firewall" && command != "/etc/init.d/firewall reload" {
+			return false
+		}
+	}
+	return true
+}
+
 func validExactOpenWrtRemovalPlan(plan netvpn.RemovalPlan) bool {
 	if netvpn.ValidInterfaceName(plan.Iface) != nil || plan.Expected.Name != plan.Iface ||
 		len(plan.Commands) == 0 || len(plan.Commit) == 0 {
@@ -331,7 +397,14 @@ func validateExactOpenWrtTarget(target nativeplan.Plan) error {
 		}
 		plans[plan.Iface] = true
 	}
-	managed := 0
+	bindings := make(map[string]bool, len(target.OpenWrtBindings))
+	for _, binding := range target.OpenWrtBindings {
+		if !validExactOpenWrtBinding(binding) || bindings[binding.Device] || plans[binding.Device] {
+			return errExactOpenWrtPlan
+		}
+		bindings[binding.Device] = true
+	}
+	managed, plugins := 0, 0
 	seenEndpoints := make(map[string]bool, len(target.Decisions))
 	for _, decision := range target.Decisions {
 		if decision.EndpointID == "" || seenEndpoints[decision.EndpointID] {
@@ -354,11 +427,18 @@ func validateExactOpenWrtTarget(target nativeplan.Plan) error {
 			if decision.Interface != "" {
 				return errExactOpenWrtPlan
 			}
+		case nativeplan.PathEnginePlugin:
+			// WayHop's engine runs it on its own device, which the plan binds to the reviewed zone and
+			// never writes to /etc/config/network.
+			plugins++
+			if !bindings[decision.Interface] {
+				return errExactOpenWrtPlan
+			}
 		default:
 			return errExactOpenWrtPlan
 		}
 	}
-	if managed != len(plans) {
+	if managed != len(plans) || plugins != len(bindings) {
 		return errExactOpenWrtPlan
 	}
 	return nil

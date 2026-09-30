@@ -1,15 +1,12 @@
 package server
 
 import (
-	"encoding/json"
 	"mime"
 	"net"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
-
-	qrcode "github.com/skip2/go-qrcode"
 
 	"wayhop/internal/exporter"
 	"wayhop/internal/importer"
@@ -28,38 +25,13 @@ func (s *Server) handleEndpointExport(w http.ResponseWriter, r *http.Request) {
 			}
 			// The export is the endpoint's full share link / .conf — UUID, password,
 			// reality keys, WireGuard private key. Keep it out of any browser/proxy cache,
-			// matching handleQR and the backup/config/job-snapshot exports.
+			// matching the backup/config/job-snapshot exports.
 			w.Header().Set("Cache-Control", "no-store")
 			writeJSON(w, http.StatusOK, res)
 			return
 		}
 	}
 	writeErr(w, http.StatusNotFound, "endpoint not found")
-}
-
-// handleQR renders arbitrary text as a QR PNG. POST (not GET) so the payload —
-// which may be a secret config — never lands in a URL or the access log.
-func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {
-	var b struct {
-		Text string `json:"text"`
-		Size int    `json:"size"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&b); err != nil || b.Text == "" {
-		writeErr(w, http.StatusBadRequest, "text is required")
-		return
-	}
-	size := b.Size
-	if size < 128 || size > 1024 {
-		size = 320
-	}
-	png, err := qrcode.Encode(b.Text, qrcode.Medium, size)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "could not encode QR: "+err.Error())
-		return
-	}
-	w.Header().Set("Content-Type", "image/png")
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write(png)
 }
 
 // subscriptionTitle extracts a human display name from a fetched subscription's

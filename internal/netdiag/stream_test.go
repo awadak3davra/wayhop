@@ -2,7 +2,7 @@ package netdiag
 
 import "testing"
 
-// TestParsePingMs covers the latency extraction used by ReachableViaIface (the native-iface
+// TestParsePingMs covers the latency extraction used by ReachableViaIfaceProbe (the native-iface
 // health probe): prefer the summary AVG over all echoes, fall back to the first per-packet
 // time=, round (not truncate), and return 0 when nothing is parseable.
 func TestParsePingMs(t *testing.T) {

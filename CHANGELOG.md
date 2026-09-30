@@ -3,6 +3,99 @@
 All notable changes to WayHop are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.7] — 2026-09-29
+
+### Added
+- **A Telegram bot for the router** (Settings → Telegram bot). Status, exits and the failover log
+  from the phone, and alerts that read as a story: a recovery replies to its outage, a burst of
+  failures is one message, quiet hours hold what can wait and sum it up afterwards. `/route` says
+  where a site goes and why, `/devices` who is using the line right now, `/diag` runs the
+  Diagnostics. Owners can keep or roll back a test Apply while its countdown runs, apply saved
+  changes as a test, refresh lists and the subscription, receive a backup, restart, update, and run
+  `/speed`: the provider's line against the route through WayHop, or against one WireGuard or
+  AmneziaWG tunnel, measured bound to it so nobody's traffic moves. Chats pair with a one-time code
+  or its QR code as owner, viewer or alerts only; a daily summary is optional; English, Russian and
+  Ukrainian. The router long-polls Telegram, so no port is opened, and the bot can reach Telegram
+  through a tunnel where it is blocked. The token is write-only.
+- **AmneziaWG 3.** A `.conf` carrying the 3.x settings (header protection key, random trailers,
+  disabled cookies, content padding and the new timers) imports with them instead of losing them,
+  and the connection runs. Where the router's own AmneziaWG cannot carry it (KeeneticOS and
+  OpenWrt's native writers stop at 2.0, and a kernel module can be older than the config needs),
+  WayHop runs it on `amneziawg-go` next to the tunnels the firmware keeps. The generation is read
+  from the loaded kernel module itself, never from a package version, and the review says before
+  Apply which path a connection takes. Upstream publishes no `amneziawg-go` binaries, so every
+  WayHop release now carries a reproducible build for each router arch (v3.1.20260828, pinned by
+  commit), installed and updated from Components; on a flash too small for it the compressed build
+  is stored and unpacked into RAM at start. A relaunched `amneziawg-go` gets its routing-list routes
+  back, and its device MTU is lowered when padding would push a full-size packet past the path to
+  the server, where the kernel drops its batched sends outright.
+
+### Fixed
+- **Apply works on a Keenetic with Entware.** Every Apply stopped at "capture - the router state
+  could not be read". Entware starts its services with its own libraries first on the library path,
+  and the daemon passed that on to the firmware's `ndmc`, which then failed to start
+  (`system failed [0xcffd0062]`); the configuration writer, interface discovery and the capability
+  probe broke the same way. The daemon is statically linked and never used the variable, so it now
+  drops it before it starts anything; Entware's own tools were checked to run without it.
+- **UDP and ICMP to a routed list leave through its tunnel.** sing-box's auto-redirect rewrites the
+  packet mark on UDP and ICMP after WayHop has classified the packet, so on a kernel-routed list
+  every UDP service, calls included, and every traceroute left by the WAN while TCP to the same
+  address went through the tunnel. The classification is now applied again after the engine's chain
+  for UDP and ICMP; TCP is untouched.
+- **The dashboard no longer shows the router's own WAN address as a tunnel's exit.** On a gateway
+  router the engine's transparent redirect caught the exit probe before it entered the tunnel and
+  answered with the uplink's address, flag and provider included. The probe now carries the
+  engine's bypass mark, an answer equal to the router's own exit is not believed, and the probe
+  leads with an echo service that is not behind Cloudflare. A kernel tunnel that records no server
+  address falls back to its live peer instead of vanishing from the grid.
+- **Each tunnel's exit tile is measured through the device the router runs it on**, taken from the
+  applied plan as the health monitor and the bot's speed test take it. An AmneziaWG tunnel imported
+  from a `.conf` and a tunnel a native Apply created under its own name were never measured before,
+  and an interface edited but not yet applied was probed in place of the tunnel's.
+- **Update on a package-managed component updates it.** On apk routers the panel ran
+  `apk add <package>`, which keeps the installed build and exits 0, and reported success. Each
+  action now has its own command, the command shown is the one that runs, and afterwards the panel
+  says so when the build did not move.
+- **A component that does not fit twice can still be updated.** A package manager writes the new
+  build beside the old one, so on a small overlay an upgrade could never succeed. When the new build
+  fits only in the room the installed one holds, the panel plans removal then install, shows the
+  arithmetic, asks before taking the core down and restarts it afterwards; when not even that fits,
+  it says how much must be freed.
+- **Remove and Roll back are offered for a package-managed component**; no control led to them, so
+  an engine owned by opkg or apk could only be removed over SSH.
+- **A component that matches its feed no longer reports that no repository offers it.**
+- **A routing list given a new feed is fetched within the hour.** The refresh loop kept the list's
+  old schedule, so the new feed waited up to its interval (a day by default) while the list held
+  nothing and Apply refused it. A feed that has never loaded is now asked on every hourly pass
+  until it does, and after a restart a list with a name feed only is scheduled from that feed's
+  last load instead of being fetched again at every boot.
+- **A feed's credentials stay out of the log and the panel's errors.** A failed list refresh wrote
+  the feed's full address, user, password and tokens included, to the log, the refresh answer and
+  the lists' status; the address is now cut to its host there.
+- **Speed tests run one at a time.** Two started together shared the line and each reported about
+  half of it; the second is now refused with "a speed test is already running". A test that asks for
+  the direct path is no longer carried into sing-box by the engine's transparent redirect on a
+  gateway router; it leaves by the router's own routes, over IPv4.
+- **An SSH port outside 1-65535 is refused when a server is saved**, naming the field. Any value an
+  integer could hold was stored before, and the first symptom was a dial failing much later, during
+  provisioning, with an error that named neither the field nor the value.
+- **A share link carrying a bare IPv6 address is refused, and the message says what to do**
+  (`[2001:db8::1]:443`). It used to import "successfully" as a server that cannot exist — `::1`
+  became host `:` on port 1 — and the generated config carried that into both server and SNI.
+- **Engine log lines reach `logread` and the Diagnostics page without colour codes.** sing-box
+  colours its output unconditionally and has no switch for it; the escape sequences are stripped on
+  the way through, including one split across two writes.
+- **"Depended on by" names each routing list once**, listing every role it plays — routes through
+  this exit, downloads its list through it — instead of printing the same list twice.
+
+### Removed
+- `POST /api/qr`, a server-side QR renderer no screen ever called, and with it the only dependency
+  outside `golang.org/x` (`go-qrcode`). The Clash-Meta config renderer, complete but never wired to
+  a route, is set aside the same way. Both are parked, not deleted, and can return with a caller.
+- Code the daemon could not reach: the functions named by the reachability analyzer, the unused
+  Keenetic `kernel.go` plane with its tests, and five panel functions left behind by the page-chunk
+  split (about 1.7 KB less initial payload).
+
 ## [0.5.6] — 2026-08-22
 
 ### Added

@@ -68,6 +68,9 @@ func routerConfigPathAllowed(got platform.Platform, configPath string) bool {
 }
 
 func main() {
+	// First, before anything can spawn a child: see loaderenv.go for why a static daemon must not
+	// hand Entware's library path to the firmware binaries it runs.
+	dropInheritedLoaderPath()
 	var (
 		configPath = flag.String("config", "/opt/etc/wayhop/config.json", "path to the wayhop config file")
 		listen     = flag.String("listen", "", "override the UI listen address (e.g. :8088)")
@@ -233,6 +236,7 @@ func main() {
 	go srv.BackupLoop(ctx)              // scheduled local whole-setup backup when Backup.AutoHours>0 (opt-in, off by default)
 	go srv.SampleInterfacesLoop(ctx)    // RAM-only per-iface counter history so a fresh dashboard seeds recent throughput (no flash writes)
 	go srv.CIDRRefreshLoop(ctx)         // updates the saved routing-list caches only; activation is Apply
+	srv.StartTelegram(ctx)              // the Telegram bot, when enabled in Settings (off by default)
 	go srv.AutoUpdateLoop(ctx)          // opt-in binary update, serialized with Apply
 	// Crash-restart supervision for sing-box (+ best-effort engine plugins).
 	wdDone := make(chan struct{})

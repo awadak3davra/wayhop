@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"wayhop/internal/binstore"
 	"wayhop/internal/changeset"
 	"wayhop/internal/config"
 	"wayhop/internal/core"
@@ -23,6 +24,7 @@ import (
 	"wayhop/internal/generator"
 	"wayhop/internal/keenetic"
 	"wayhop/internal/model"
+	"wayhop/internal/nativeplan"
 	"wayhop/internal/pbr"
 	"wayhop/internal/platform"
 )
@@ -459,9 +461,22 @@ func (s *Server) rawFindings(ctx context.Context, desired DesiredSnapshot, capse
 // predicate has no reason walk, so elsewhere the battery keeps its old sentence rather than invent one.
 func (s *Server) datapathCoreReasons(cfg config.Config, prof model.Profile) []string {
 	if s.detectedPlatform() == platform.Keenetic && !cfg.Demo {
-		return keenetic.CoreReasons(&prof, keeneticDomainsViaDNSMasq())
+		return keenetic.CoreReasons(&prof, s.keeneticRoutePlanes(prof))
 	}
 	return nil
+}
+
+// keeneticRoutePlanes is the keenetic.RoutePlanes the native plan compiles with, from the same
+// probes the Apply capture reads (keeneticDomainsViaDNSMasq, keeneticKernelPBRPresent) and the same
+// userspace decision the native planner makes (nativeplan.KeeneticUserspace), judged against the
+// review's capability set.
+func (s *Server) keeneticRoutePlanes(prof model.Profile) keenetic.RoutePlanes {
+	return keenetic.RoutePlanes{
+		DomainsViaDNSMasq: keeneticDomainsViaDNSMasq(),
+		ListsViaIpset:     keeneticKernelPBRPresent(),
+		Userspace: nativeplan.UserspaceDevices(
+			nativeplan.KeeneticUserspace(&prof, s.capabilitySet(context.Background(), false))),
+	}
 }
 
 // authFieldMissing names the credential this protocol authenticates with when it is empty, or "" .
@@ -486,7 +501,7 @@ func authFieldMissing(e model.Endpoint) string {
 
 func (s *Server) datapathRequiresCore(cfg config.Config, prof model.Profile) bool {
 	if s.detectedPlatform() == platform.Keenetic && !cfg.Demo {
-		return keenetic.PlanRequiresCore(&prof, keeneticDomainsViaDNSMasq())
+		return keenetic.PlanRequiresCore(&prof, s.keeneticRoutePlanes(prof))
 	}
 	return !generator.DatapathNativeOnly(&prof, desiredRoutingMode(cfg))
 }
@@ -549,14 +564,80 @@ func (s *Server) pluginBinaryPresent(name string) bool {
 	return err == nil
 }
 
+// openWrtUserspaceMoves is the review's view of nativeplan.MoveError on OpenWrt, from the applied
+// plan: an endpoint the router's own AmneziaWG ran that the userspace lane would now take, or one the
+// lane ran that the native writer would now take back. Both run it on one device name, which is why
+// the planner refuses the move within one Apply. Keyed by endpoint, valued by where it would go.
+func (s *Server) openWrtUserspaceMoves(prof model.Profile, capset platform.CapabilitySet,
+	userspace map[string]nativeplan.UserspaceEndpoint) map[string]string {
+	moves := map[string]string{}
+	base := s.appliedBaseline()
+	if base == nil {
+		return moves
+	}
+	previous := nativeBaselineFromMaterialization(&base.Materialization)
+	if previous == nil {
+		return moves
+	}
+	was := make(map[string]nativeplan.Path, len(previous.Decisions))
+	for _, decision := range previous.Decisions {
+		was[decision.EndpointID] = decision.Path
+	}
+	for _, e := range prof.Endpoints {
+		if !e.Enabled || e.Engine != model.EngineAmneziaWG || !e.OwnsResource() {
+			continue
+		}
+		_, lane := userspace[e.ID]
+		switch path := was[e.ID]; {
+		case lane && (path == nativeplan.PathNativeCreate || path == nativeplan.PathNativeManage || path == nativeplan.PathNativeUpdate):
+			moves[e.ID] = "WayHop's userspace AmneziaWG"
+		case !lane && path == nativeplan.PathEnginePlugin && nativeAWGCreatable(e, capset):
+			moves[e.ID] = "OpenWrt's own AmneziaWG"
+		}
+	}
+	return moves
+}
+
+// nativeAWGCreatable reports whether the router's own AmneziaWG can create and remove e's interface.
+func nativeAWGCreatable(e model.Endpoint, capset platform.CapabilitySet) bool {
+	protocol := string(e.Protocol)
+	return capset.Usable(platform.NativeOperationCapabilityID(protocol, platform.NativeCreate)) &&
+		capset.Usable(platform.NativeOperationCapabilityID(protocol, platform.NativeRemove))
+}
+
 // endpointFindings judges every enabled endpoint's engine/protocol against what this router and this
 // build can run. A missing engine binary is a feature-level finding (the endpoint will not come up;
 // Apply still proceeds and reports the plugin as a problem); an engine this build has no executor
 // for, or an external Keenetic tunnel whose NDM identity is unknown, is a hard blocker because the
 // materialization cannot express it at all.
+// awgUserspaceInstalled reports whether amneziawg-go can be started: the plugin manager's own lookup,
+// or the gzip the updater keeps on a flash too small for the binary, which the plugin unpacks into
+// RAM at every start (binstore).
+func (s *Server) awgUserspaceInstalled() bool {
+	if s.pluginBinaryPresent("amneziawg-go") {
+		return true
+	}
+	if s.binaryPresentOf != nil {
+		return false // a test that owns the lookup owns the answer
+	}
+	if bin := s.config().SingBox.Bin; bin != "" {
+		_, stored := binstore.Read(filepath.Dir(bin), "amneziawg-go")
+		return stored
+	}
+	return false
+}
+
 func (s *Server) endpointFindings(prof model.Profile, capset platform.CapabilitySet) []PlanFinding {
 	var out []PlanFinding
 	keeneticHost := s.detectedPlatform() == platform.Keenetic
+	var userspace map[string]nativeplan.UserspaceEndpoint
+	moves := map[string]string{}
+	if !s.config().Demo {
+		userspace = nativeplan.Userspace(&prof, s.detectedPlatform(), capset)
+		if s.detectedPlatform() == platform.OpenWrt {
+			moves = s.openWrtUserspaceMoves(prof, capset, userspace)
+		}
+	}
 	name := func(e model.Endpoint) string {
 		if e.Name != "" {
 			return e.Name
@@ -626,6 +707,45 @@ func (s *Server) endpointFindings(prof model.Profile, capset platform.Capability
 				})
 			}
 		case model.EngineAmneziaWG:
+			if move, ok := moves[e.ID]; ok {
+				// The Apply would be refused by the planner (nativeplan.MoveError); say it here, where it
+				// is one click from the fix.
+				out = append(out, PlanFinding{
+					ID: "endpoint.amneziawg.move", Setting: "AmneziaWG engine", Item: name(e),
+					Requested: move, Effective: "not moved",
+					Severity: platform.SeverityBlocked, Reason: platform.ReasonModeConflict,
+					Blocks: platform.BlocksApply,
+					Detail: "This connection would move to " + move + " in one Apply, and on OpenWrt both run it on the " +
+						"same device name, so the old tunnel's teardown would take the new one down with it.",
+					Remedy: "Switch the connection off and apply, then switch it on and apply again.",
+				})
+				continue
+			}
+			// The router hands it to WayHop's userspace engine: what matters then is amneziawg-go, not the
+			// router's module or the awg tools, and the operator should know it is not native.
+			if u, ok := userspace[e.ID]; ok {
+				if !s.awgUserspaceInstalled() {
+					out = append(out, PlanFinding{
+						ID: "endpoint.engine.amneziawg_go", Setting: "engine", Item: name(e),
+						Requested: "amneziawg-go", Effective: "not started",
+						Severity: platform.SeverityBlocked, Reason: platform.ReasonMissingBinary,
+						Blocks: platform.BlocksFeature,
+						Detail: "This connection runs on WayHop's userspace AmneziaWG because " + u.Reason +
+							", and amneziawg-go is not installed, so it cannot come up.",
+						Remedy: "Install AmneziaWG 3 (amneziawg-go) through the Updater, or disable the connection.",
+					})
+					continue
+				}
+				out = append(out, PlanFinding{
+					ID: "endpoint.amneziawg.userspace", Setting: "engine", Item: name(e),
+					Requested: "native AmneziaWG", Effective: "amneziawg-go",
+					Severity: platform.SeverityDegraded, Reason: u.Code, Blocks: platform.BlocksNothing,
+					Detail: "This connection runs on WayHop's userspace AmneziaWG (amneziawg-go) because " + u.Reason +
+						". It works, with less throughput than a native tunnel.",
+					Remedy: u.Remedy,
+				})
+				continue
+			}
 			if capset.Usable(platform.CapEngineAmneziaWG) || s.pluginBinaryPresent("awg") || s.pluginBinaryPresent("awg-quick") {
 				continue
 			}
@@ -753,8 +873,10 @@ func (s *Server) planPlatform() planPlatform {
 
 // foldFindings groups the raw findings by (id, severity, blocks) — the id already names the code and
 // setting — names the affected objects in items[] and applies the acknowledgement policy: a hard
-// blocker is never acknowledgeable, a feature-level or privacy finding needs one, everything else is
-// informational. Blockers come first, then acknowledgements, then notes.
+// blocker is never acknowledgeable, a feature-level finding needs one, and everything else —
+// privacy findings included — is informational. Blockers come first, then acknowledgements, then
+// notes. (This said "a feature-level OR PRIVACY finding needs one" long after the code stopped
+// asking for a privacy signature; the reasoning for that is spelled out at the branch below.)
 func foldFindings(raw []PlanFinding, acked func(id string) bool) []Finding {
 	type key struct{ id, severity, blocks string }
 	order := make([]key, 0, len(raw))
@@ -766,7 +888,6 @@ func foldFindings(raw []PlanFinding, acked func(id string) bool) []Finding {
 		// something while doing it. It used to be promoted to "blocks a feature" and then demanded a
 		// signature per finding before Apply would light up — five checkboxes for a disclosure the
 		// operator never asked to change. Telling them is the job; making them countersign it is not.
-		_ = severity
 		k := key{f.ID, severity, blocks}
 		item := f.Item
 		if item == "" && f.Setting != "" && f.Setting != f.ID {
@@ -789,13 +910,14 @@ func foldFindings(raw []PlanFinding, acked func(id string) bool) []Finding {
 		if f.Remedy != "" {
 			remedy = f.Remedy
 		}
-		hard := blocks == platform.BlocksApply
 		g := &Finding{
 			ID: f.ID, Code: code, Severity: severity, Blocks: blocks,
 			// Acknowledgement is for a configuration that will NOT do what it says — a feature the
 			// router silently drops. A privacy note is not that: it is reported, counted and left in
 			// plain sight, and Apply stays available.
-			AckRequired: !hard && blocks == platform.BlocksFeature && severity != platform.SeverityPrivacy,
+			// BlocksFeature and BlocksApply are distinct values, so this test already excludes a hard
+			// blocker; the "!hard &&" that used to lead it restated that and needed a variable to do it.
+			AckRequired: blocks == platform.BlocksFeature && severity != platform.SeverityPrivacy,
 			Title:       title, Detail: detail, Remedy: remedy, Count: 1, Items: []string{},
 			Fix: f.Fix,
 		}

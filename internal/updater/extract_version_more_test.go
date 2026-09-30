@@ -180,10 +180,10 @@ func TestUpdater_EngineByIDHitMissAndRegistry(t *testing.T) {
 		t.Errorf("EngineByID(\"\") = %+v, want nil", *got)
 	}
 
-	// The two source-only engines are flagged as such, and at least one
-	// asset-bearing engine is not.
-	if e := EngineByID("amneziawg-go"); e == nil || !e.SourceOnly || e.Note == "" {
-		t.Errorf("amneziawg-go should be SourceOnly with a Note: %+v", e)
+	// amneziawg-go was the catalogue's source-only engine until WayHop began building it: it is now a
+	// companion, installed from WayHop's own releases, and no longer refused as source-only.
+	if e := EngineByID("amneziawg-go"); e == nil || e.SourceOnly || e.Companion != "amneziawg-go-" || e.Repo != DefaultSelfRepo || e.Note == "" {
+		t.Errorf("amneziawg-go should be a companion of WayHop's releases with a Note: %+v", e)
 	}
 	if e := EngineByID("sing-box"); e == nil || e.SourceOnly {
 		t.Errorf("sing-box should not be SourceOnly: %+v", e)
@@ -348,7 +348,10 @@ func TestUpdater_AssetScoreArmv6(t *testing.T) {
 // --- Install: SourceOnly + early error branches ---------------------------
 
 func TestUpdater_InstallSourceOnlyRefused(t *testing.T) {
-	e := *EngineByID("amneziawg-go") // SourceOnly
+	// No catalogue engine is source-only any more (amneziawg-go became a companion), but the refusal
+	// stays for the next one.
+	e := Engine{ID: "src-only", Repo: "example/src-only", BinName: "src-only", SourceOnly: true,
+		Note: "No prebuilt releases; build from source."}
 	u := New(t.TempDir(), "amd64", nil)
 	// No transport needed: SourceOnly is rejected before any network call.
 	_, err := u.Install(context.Background(), e, "v1.0.0")

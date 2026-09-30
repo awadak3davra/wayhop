@@ -251,7 +251,13 @@ jobs:
                  "dist/wayhop-${version}-${tok}.apk"
             done
           done < packaging/feed/arch-map.txt
-          ( cd dist && for f in *.tar.gz *.ipk *.apk; do [ -e "$f" ] && sha256sum "$f"; done > SHA256SUMS.txt )
+          # The AmneziaWG 3 userspace component, built at its pinned upstream commit by the same script
+          # CI and verify.mjs run, and attached to every release: upstream publishes no binaries, and
+          # the updater installs it from WayHop's own releases (internal/updater, Engine.Companion).
+          # Listed in SHA256SUMS.txt, so the signed manifest covers it like every other asset.
+          TMPDIR="${RUNNER_TEMP:-/tmp}" sh scripts/build-amneziawg-go.sh
+          cp dist/amneziawg-go/amneziawg-go-*-linux-*.gz dist/
+          ( cd dist && for f in *.tar.gz *.ipk *.apk amneziawg-go-*.gz; do [ -e "$f" ] && sha256sum "$f"; done > SHA256SUMS.txt )
           # Online one-command installer. Unversioned asset name so the copy-paste
           # `releases/latest/download/bootstrap.sh` one-liner always resolves; kept out
           # of SHA256SUMS.txt (which lists only the tarballs the bootstrap verifies).
@@ -341,6 +347,11 @@ jobs:
           for f in dist/SHA256SUMS.txt dist/SHA256SUMS.txt.sig dist/bootstrap.sh; do
             [ -s "$f" ] || { echo "::error::missing or empty release asset: $f"; missing=1; }
           done
+          # One amneziawg-go asset per arch the updater can be asked for; two would make the pick ambiguous.
+          for tok in amd64 arm64 armv7 mips mipsle; do
+            n="$(find dist -maxdepth 1 -name "amneziawg-go-*-linux-${tok}.gz" -size +0 | wc -l)"
+            [ "$n" -eq 1 ] || { echo "::error::expected one amneziawg-go asset for ${tok}, found ${n}"; missing=1; }
+          done
           [ "$missing" = 0 ] || { echo "release is INCOMPLETE — refusing to publish"; exit 1; }
           "$WAYHOP_RELEASE_SIGNER" verify -pub packaging/feed/keys/wayhop.pub \
             -m dist/SHA256SUMS.txt -sig dist/SHA256SUMS.txt.sig
@@ -356,7 +367,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          assets=(dist/*.tar.gz dist/*.ipk dist/*.apk dist/SHA256SUMS.txt dist/SHA256SUMS.txt.sig dist/bootstrap.sh)
+          assets=(dist/*.tar.gz dist/*.ipk dist/*.apk dist/amneziawg-go-*.gz dist/SHA256SUMS.txt dist/SHA256SUMS.txt.sig dist/bootstrap.sh)
           gh release create "${GITHUB_REF_NAME}" "${assets[@]}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "WayHop ${GITHUB_REF_NAME}" \

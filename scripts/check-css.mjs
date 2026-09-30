@@ -29,7 +29,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const ROOT = process.cwd();
-const FILES = ['web/dist/styles.css'];
+// page-telegram.css travels with its route chunk (see page-telegram.js) and is checked like the rest.
+const FILES = ['web/dist/styles.css', 'web/dist/page-telegram.css'];
 const MIN_RULES = 400;
 
 let fails = 0;

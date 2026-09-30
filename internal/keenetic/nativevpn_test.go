@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"wayhop/internal/awg"
 	"wayhop/internal/model"
 )
 
@@ -260,5 +261,47 @@ func TestWireguardCommands_BareV6AllowIPs(t *testing.T) {
 	// The bare v6 address is also configured on the interface (synthesized /128).
 	if !strings.Contains(joined, "ip address fd00::2 128") {
 		t.Errorf("bare v6 interface address must be emitted as /128:\n%s", joined)
+	}
+}
+
+// AWGGeneration is what `wireguard asc` carries, not a label: every setting of that generation or
+// older lands in its positional slot, and every newer one is refused by name rather than left out.
+func TestAWGGenerationIsWhatAscWrites(t *testing.T) {
+	slots := append(append([]string{}, ascBase...), ascExt...)
+	for _, key := range awg.Settings() {
+		value := any("77")
+		if key == "random_trailers" || key == "disable_cookies" {
+			value = "on"
+		}
+		e := awgEndpoint()
+		e.Protocol = model.ProtoAmneziaWG
+		e.Params[key] = value
+		cmds, err := WireguardCommands(e, WireguardOpts{Index: 3})
+		need := awg.Need(map[string]any{key: value})
+		if need > AWGGeneration {
+			if err == nil || !strings.Contains(err.Error(), key) {
+				t.Errorf("%s (generation %v) was not refused by name: %v", key, need, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s (generation %v) was refused: %v", key, need, err)
+			continue
+		}
+		var args []string
+		for _, c := range cmds {
+			if rest, ok := strings.CutPrefix(c, "wireguard asc "); ok {
+				args = strings.Fields(rest)
+			}
+		}
+		slot := -1
+		for i, k := range slots {
+			if k == key {
+				slot = i
+			}
+		}
+		if slot < 0 || slot >= len(args) || args[slot] != "77" {
+			t.Errorf("%s (generation %v) is not in its asc slot %d: %v", key, need, slot, args)
+		}
 	}
 }

@@ -140,17 +140,20 @@ func TestRenderNftSourceOnly(t *testing.T) {
 		t.Fatalf("Compile: %v", err)
 	}
 	nft := plan.RenderNft()
+	// Count inside ONE chain: the classification rules are emitted twice (wr_mark and the
+	// ICMP/UDP wr_mark_late pass), so a whole-ruleset count doubles every expectation here.
+	chain := nftChain(t, nft, "wr_mark")
 	if !strings.Contains(nft, "ip saddr @rule_devall_s4 meta mark set") {
 		t.Errorf("missing source-only saddr line:\n%s", nft)
 	}
 	if strings.Contains(nft, "ip saddr @rule_devall_s4 ip daddr") || strings.Contains(nft, "@rule_devall_4") {
 		t.Errorf("source-only zone must carry no dest set:\n%s", nft)
 	}
-	if n := strings.Count(nft, "ip daddr @bypass4 meta mark set"); n != 2 {
-		t.Errorf("want the bypass4 mark line twice (initial + re-assert), got %d:\n%s", n, nft)
+	if n := strings.Count(chain, "ip daddr @bypass4 meta mark set"); n != 2 {
+		t.Errorf("want the bypass4 mark line twice per chain (initial + re-assert), got %d:\n%s", n, nft)
 	}
 	// The re-assert (last bypass line) must come AFTER the source-only line so it wins for peers.
-	if strings.LastIndex(nft, "ip daddr @bypass4 meta mark set") < strings.Index(nft, "ip saddr @rule_devall_s4") {
+	if strings.LastIndex(chain, "ip daddr @bypass4 meta mark set") < strings.Index(chain, "ip saddr @rule_devall_s4") {
 		t.Errorf("bypass re-assert must follow the source-only line:\n%s", nft)
 	}
 }

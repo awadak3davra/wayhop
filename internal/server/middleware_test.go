@@ -45,14 +45,14 @@ func TestGzipMiddlewareSkipsImageAndNoAccept(t *testing.T) {
 		}))
 	}
 	// image/png: gzip-capable client, but content is not compressible -> passthrough.
-	req := httptest.NewRequest(http.MethodGet, "/api/qr", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/state", nil) // any path: the stub below is what answers
 	req.Header.Set("Accept-Encoding", "gzip")
 	rec := httptest.NewRecorder()
 	mk().ServeHTTP(rec, req)
 	if rec.Header().Get("Content-Encoding") == "gzip" {
 		t.Fatal("image/png must not be gzipped")
 	}
-	if string(rec.Body.Bytes()) != string(png) {
+	if rec.Body.String() != string(png) {
 		t.Fatal("png body altered")
 	}
 	// No Accept-Encoding: never gzip, even for JSON.

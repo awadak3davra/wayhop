@@ -215,6 +215,9 @@ func TestEvents_OldestAndCount(t *testing.T) {
 	if got := m.EventCount(); got != 2 {
 		t.Errorf("want 2 events, got %d", got)
 	}
+	if m.EventLogFull() {
+		t.Error("two entries reported as a full ring")
+	}
 
 	at := int64(1000)
 	for i := 0; i < eventCap; i++ {
@@ -225,6 +228,9 @@ func TestEvents_OldestAndCount(t *testing.T) {
 	}
 	if got := m.EventCount(); got != eventCap {
 		t.Fatalf("ring should be full at %d, got %d", eventCap, got)
+	}
+	if !m.EventLogFull() {
+		t.Error("a wrapped ring not reported as full: its coverage would be overstated")
 	}
 	oldest := m.OldestEventAt()
 	newest := m.Events(1)[0].At

@@ -124,6 +124,134 @@ func (r *ringLog) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// ansiStripWriter removes ANSI escape sequences on their way to w.
+//
+// sing-box colours its level tag and its per-connection id unconditionally: it
+// does not probe for a terminal, and its log block has no colour switch at all
+// (verified against 1.12.17, which accepts only disabled/level/output/timestamp
+// and rejects `disable_color` as an unknown field). Here that stdout is a pipe
+// that ends up in logd on OpenWrt and in the ring buffer the Diagnostics page
+// renders, so `logread` and the panel were showing literal ESC[31m...ESC[0m.
+// Stripping on the way through fixes both, and keeps holding for a
+// user-replaced engine binary that colours on its own terms.
+//
+// The parser covers the 7-bit ECMA-48 forms a logger can emit, not just the SGR
+// colours sing-box uses today: CSI (ESC [ ... final byte), the string forms
+// OSC/DCS/SOS/PM/APC (ESC ] ... BEL or ST), nF sequences such as a charset
+// designation (ESC ( B), and the two-byte escapes (ESC c, ESC 7). A control byte
+// such as a newline ends whatever sequence is in progress and passes through, so
+// a sequence the engine never finished — killed mid-write, or a logger bug — can
+// lose at most the rest of its own line, never the lines after it. This is a
+// log: the ring buffer splits on newlines and the classifier reads whole lines.
+//
+// The parser state survives across calls, so a sequence split over two writes
+// is still removed. Write always reports the caller's full length: the dropped
+// bytes were consumed, not short-written.
+type ansiStripWriter struct {
+	mu    sync.Mutex
+	w     io.Writer
+	state ansiState
+	out   []byte
+}
+
+type ansiState uint8
+
+const (
+	ansiText      ansiState = iota // plain bytes pass through
+	ansiEsc                        // just after ESC: the next byte names the form
+	ansiCSI                        // inside ESC [ ... : parameters and intermediates until a final byte
+	ansiString                     // inside OSC/DCS/SOS/PM/APC: until BEL or ST (ESC \)
+	ansiStringEsc                  // ESC seen inside a string form: a backslash completes ST
+	ansiNF                         // inside ESC <intermediate> ... : until a final byte
+)
+
+const (
+	asciiBEL = 0x07
+	asciiESC = 0x1b
+)
+
+func (a *ansiStripWriter) Write(p []byte) (int, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.out = a.out[:0]
+	for _, b := range p {
+		a.feed(b)
+	}
+	if len(a.out) > 0 {
+		if _, err := a.w.Write(a.out); err != nil {
+			return 0, err
+		}
+	}
+	return len(p), nil
+}
+
+// feed advances the parser by one byte, appending to a.out whatever is text.
+func (a *ansiStripWriter) feed(b byte) {
+	switch a.state {
+	case ansiText:
+		if b == asciiESC {
+			a.state = ansiEsc
+			return
+		}
+		a.out = append(a.out, b)
+	case ansiEsc:
+		switch {
+		case b == '[':
+			a.state = ansiCSI
+		case b == ']' || b == 'P' || b == 'X' || b == '^' || b == '_':
+			a.state = ansiString
+		case b >= 0x20 && b <= 0x2f:
+			a.state = ansiNF
+		case b >= 0x30 && b <= 0x7e:
+			a.state = ansiText // a two-byte escape (ESC c, ESC 7, ESC =): consumed whole
+		default:
+			a.abort(b) // a control or non-ASCII byte: this was not an escape sequence
+		}
+	case ansiCSI:
+		switch {
+		case b >= 0x40 && b <= 0x7e:
+			a.state = ansiText // the final byte
+		case b >= 0x20 && b <= 0x3f:
+			// parameter (0x30-0x3F) and intermediate (0x20-0x2F) bytes continue the sequence
+		default:
+			a.abort(b)
+		}
+	case ansiNF:
+		switch {
+		case b >= 0x30 && b <= 0x7e:
+			a.state = ansiText // the final byte
+		case b >= 0x20 && b <= 0x2f:
+			// further intermediate bytes
+		default:
+			a.abort(b)
+		}
+	case ansiString:
+		switch {
+		case b == asciiBEL:
+			a.state = ansiText
+		case b == asciiESC:
+			a.state = ansiStringEsc
+		case b < 0x20:
+			a.abort(b) // a newline inside an unterminated string form: one line lost, not the log
+		}
+	case ansiStringEsc:
+		if b == '\\' {
+			a.state = ansiText // ST
+			return
+		}
+		// Not ST: the string form ended without its terminator, and a new escape begins here.
+		a.state = ansiEsc
+		a.feed(b)
+	}
+}
+
+// abort ends a sequence that cannot continue with b — a control byte such as a newline, a
+// non-ASCII byte, or a fresh ESC — and lets b take its normal path as text.
+func (a *ansiStripWriter) abort(b byte) {
+	a.state = ansiText
+	a.feed(b)
+}
+
 func (r *ringLog) Lines() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -233,7 +361,9 @@ func (s *SingBox) startLocked() error {
 		return fmt.Errorf("sing-box binary not found at %q", s.bin)
 	}
 	cmd := exec.Command(s.bin, "run", "-c", s.config)
-	mw := io.MultiWriter(os.Stdout, s.log)
+	// One writer value for both streams: os/exec then shares a single pipe and a
+	// single copier goroutine for stdout and stderr, so the strip state stays linear.
+	mw := &ansiStripWriter{w: io.MultiWriter(os.Stdout, s.log)}
 	cmd.Stdout = mw
 	cmd.Stderr = mw
 	if err := cmd.Start(); err != nil {

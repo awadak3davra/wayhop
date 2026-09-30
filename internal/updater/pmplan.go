@@ -61,11 +61,34 @@ type PMPlan struct {
 	Effect     string      `json:"effect,omitempty"`
 	Collateral []string    `json:"collateral,omitempty"` // other packages the operation would remove
 	Checks     []PlanCheck `json:"checks"`
-	Blocked    string      `json:"blocked,omitempty"` // non-empty: the reason, and Argv is empty
+	// Steps is the whole sequence, in order. It is normally one command and Argv is that command; the
+	// low-space upgrade is two — remove the installed build, then install the new one — because on a
+	// 60 MiB overlay the new build fits only in the space the old one is holding (see pmspace.go).
+	// Argv stays Steps[0] so the approval protocol is unchanged, and because the first command is the
+	// one whose effect is worth simulating: on the two-step path it is the removal.
+	Steps [][]string `json:"steps,omitempty"`
+	// Space is the disk arithmetic behind that choice, carried whether or not it changed anything, so
+	// the panel can show the figures instead of announcing a verdict.
+	Space *PMSpace `json:"space,omitempty"`
+	// Non-empty: the reason this plan must not run. Argv may still be POPULATED beside it — a late
+	// block (the simulation that could not preview the effect) lands after the argv is built and does
+	// not clear it. Never read one field alone; Runnable() below is the only safe test.
+	Blocked string `json:"blocked,omitempty"`
 }
 
 // Runnable reports whether the plan may proceed.
 func (p PMPlan) Runnable() bool { return p.Blocked == "" && len(p.Argv) > 0 }
+
+// DeletesInstalled reports whether running this plan takes the installed binary away, even
+// temporarily. A remove obviously does; so does the low-space replace, whose first command is that
+// same `apk del`. The acknowledgement gate and the stop that precedes it are about the datapath
+// going down, not about which verb the operator picked, so both answer yes here.
+func (p PMPlan) DeletesInstalled() bool {
+	if p.Action == PlanRemove {
+		return true
+	}
+	return p.Space != nil && p.Space.Strategy == PMSpaceReplace
+}
 
 // check records a precondition. note is the reason it would FAIL, which is why it is kept only when
 // it does: every one of these strings is written in the past tense of something going wrong, so a
@@ -96,9 +119,11 @@ func (p *PMPlan) noteOK(name, note string) {
 	p.Checks = append(p.Checks, PlanCheck{Name: name, OK: true, Note: note})
 }
 
-// enginePath resolves the binary the daemon would actually run for e, mirroring nativeManaged's
-// resolution exactly. Two different answers to "which file is this engine" is how a delegation ends
-// up upgrading a package that owns a different file from the one in use.
+// enginePath resolves the binary the daemon would actually run for e: BinDir first, then PATH.
+// It is the ONE resolution — Installed (what the panel shows), nativeManaged (what the package
+// manager owns) and the package plan all call it. Two different answers to "which file is this
+// engine" is how a delegation ends up upgrading a package that owns a different file from the one
+// in use, and until these shared it the same six lines were written three times.
 func (u *Updater) enginePath(e Engine) (string, bool) {
 	if e.BinName == "" {
 		return "", false
@@ -168,10 +193,12 @@ func (u *Updater) PlanPM(ctx context.Context, e Engine, action PlanAction, versi
 			}
 		}
 		if len(cands) == 0 && pkg == e.ID {
-			if !p.check("the feed has this package", false,
-				fmt.Sprintf("%s has no package called %q and nothing provides it, so there is nothing to install under that name", u.pm.Kind, pkg)) {
-				return p
-			}
+			// check returns its ok argument, so wrapping a literal false in `if !` was a constant
+			// condition with an unreachable fall-through. The three other false-checks in this file
+			// already call it plainly and then proceed.
+			p.check("the feed has this package", false,
+				fmt.Sprintf("%s has no package called %q and nothing provides it, so there is nothing to install under that name", u.pm.Kind, pkg))
+			return p
 		}
 	} else {
 		owner, owned, err := u.pm.Owner(ctx, path)
@@ -209,18 +236,31 @@ func (u *Updater) PlanPM(ctx context.Context, e Engine, action PlanAction, versi
 
 	switch action {
 	case PlanInstall, PlanUpgrade:
-		switch u.pm.Kind {
-		case pm.Apk:
-			p.Argv = []string{"apk", "add", pkg}
-		case pm.Opkg:
-			p.Argv = []string{"opkg", "install", pkg}
+		// WHICH build would be written? The verb does not say — the feed does — and the answer is what
+		// the space assessment measures and what the operator is agreeing to. An unreadable catalogue
+		// leaves it empty, which skips the guard rather than blocking on it.
+		target := ""
+		if cands, cerr := u.pm.Candidates(ctx, pkg); cerr == nil {
+			for _, c := range cands {
+				if c.Available {
+					target = c.Version
+					break
+				}
+			}
+		}
+		if action == PlanUpgrade {
+			// The installed build is what a removal would give back, so an upgrade — and only an
+			// upgrade — has something to reclaim. A fresh install reclaims nothing, which is why it can
+			// never plan the two-command path however full the router is.
+			installedVer, _ := u.pm.InstalledPackageVersion(ctx, pkg)
+			u.planWrite(ctx, &p, pkg, path, installedVer, target, u.pm.UpgradeArgv(pkg), u.pm.InstallArgv(pkg))
+		} else {
+			u.planWrite(ctx, &p, pkg, path, "", target, u.pm.InstallArgv(pkg), u.pm.InstallArgv(pkg))
 		}
 	case PlanRemove:
-		switch u.pm.Kind {
-		case pm.Apk:
-			p.Argv = []string{"apk", "del", pkg}
-		case pm.Opkg:
-			p.Argv = []string{"opkg", "remove", pkg}
+		if rm := u.pm.RemoveArgv(pkg); len(rm) > 0 {
+			p.Steps = [][]string{rm}
+			p.Argv = rm
 		}
 	case PlanRollback:
 		if !p.check("a version was named", version != "", "no version was given to roll back to") {
@@ -248,7 +288,12 @@ func (u *Updater) PlanPM(ctx context.Context, e Engine, action PlanAction, versi
 			return p
 		}
 		p.Version = version
-		p.Argv = []string{"apk", "add", pkg + "=" + version}
+		installedVer, _ := u.pm.InstalledPackageVersion(ctx, pkg)
+		// A rollback writes a build too, and on this hardware an older sing-box is the same order of
+		// magnitude as a newer one — so it gets the same assessment and the same two-step path when the
+		// only room for it is the room the current build occupies.
+		pinned := u.pm.InstallVersionArgv(pkg, version)
+		u.planWrite(ctx, &p, pkg, path, installedVer, version, pinned, pinned)
 	default:
 		p.check("action is known", false, fmt.Sprintf("unknown action %q", action))
 		return p
@@ -296,6 +341,14 @@ func (u *Updater) PMCandidates(ctx context.Context, pkg string) ([]pm.Candidate,
 	return u.pm.Candidates(ctx, pkg)
 }
 
+// PMInstalledVersion is what the package database says is installed RIGHT NOW, for the caller that
+// has just run a package command and wants to know whether the build actually moved. "The command
+// exited 0" and "the installed version changed" are separate facts, and treating the first as the
+// second is the whole shape of the defect this path was fixed for.
+func (u *Updater) PMInstalledVersion(ctx context.Context, pkg string) (string, bool) {
+	return u.pm.InstalledPackageVersion(ctx, pkg)
+}
+
 // ExecutePM runs a plan that was already built and checked. It re-plans first and refuses if the
 // answer changed: a plan the operator read a minute ago describes the box as it was, and a package
 // database is shared with whatever else is running on the router.
@@ -313,6 +366,20 @@ func (u *Updater) PreflightPM(ctx context.Context, e Engine, action PlanAction, 
 		return now, fmt.Errorf("%w: the command changed since it was shown (%s -> %s)",
 			ErrPMRefused, strings.Join(approved.Argv, " "), strings.Join(now.Argv, " "))
 	}
+	// A plan can be more than one command, and consent has to cover all of them. Comparing only the
+	// first would let an approval of `apk del sing-box` — read as a removal — carry an install the
+	// operator never saw, or the other way round.
+	if len(approved.Steps) > 0 && !sameSteps(now.Steps, approved.Steps) {
+		return now, fmt.Errorf("%w: the commands changed since they were shown (%s -> %s)",
+			ErrPMRefused, joinSteps(approved.Steps), joinSteps(now.Steps))
+	}
+	// An approval that names no sequence at all can only have been given for a single command. If the
+	// box now needs two — free space fell away between the plan and the click — that is a different
+	// operation with a different cost, and it goes back for review rather than through.
+	if len(approved.Steps) == 0 && len(now.Steps) > 1 {
+		return now, fmt.Errorf("%w: this now takes %d commands (%s) and the approval covered one; review it again",
+			ErrPMRefused, len(now.Steps), joinSteps(now.Steps))
+	}
 	return now, nil
 }
 
@@ -321,23 +388,56 @@ func (u *Updater) ExecutePM(ctx context.Context, e Engine, action PlanAction, ve
 	if err != nil {
 		return "", now, err
 	}
-	runCtx, cancel := context.WithTimeout(ctx, 4*time.Minute)
+	// Two commands can mean two package downloads on a line that manages a few hundred KiB/s, and the
+	// budget is per call rather than per command.
+	runCtx, cancel := context.WithTimeout(ctx, 6*time.Minute)
 	defer cancel()
-	var out string
-	switch action {
-	case PlanInstall, PlanUpgrade:
-		out, err = u.pm.Install(runCtx, now.Package)
-	case PlanRemove:
-		out, err = u.pm.Remove(runCtx, now.Package)
-	case PlanRollback:
-		out, err = u.pm.InstallVersion(runCtx, now.Package, version)
-		if errors.Is(err, pm.ErrNoVersionPin) {
-			return out, now, fmt.Errorf("%w: %w", ErrPMRefused, err)
+	// The plan's own commands are what run. ExecutePM used to re-derive them from the action — calling
+	// Install for an upgrade — so the argv that was shown, simulated and approved and the argv that
+	// executed were built in two different places, and they disagreed for as long as the upgrade path
+	// existed. There is no second derivation left to drift.
+	var out strings.Builder
+	for i, step := range now.Steps {
+		stepOut, rerr := u.pm.RunPlanned(runCtx, step)
+		if trimmed := strings.TrimSpace(stepOut); trimmed != "" {
+			if out.Len() > 0 {
+				out.WriteString("\n")
+			}
+			out.WriteString(trimmed)
 		}
-	default:
-		return "", now, fmt.Errorf("unknown action %q", action)
+		if rerr != nil {
+			if len(now.Steps) == 1 {
+				return out.String(), now, rerr
+			}
+			// WHICH command failed is the difference between "nothing happened" and "the installed build
+			// is gone and the new one never arrived". The caller decides what to tell the operator and
+			// whether the datapath can be restored, and it cannot decide either from a bare error.
+			return out.String(), now, fmt.Errorf("command %d of %d (%s) failed: %w",
+				i+1, len(now.Steps), strings.Join(step, " "), rerr)
+		}
 	}
-	return out, now, err
+	return out.String(), now, nil
+}
+
+// joinSteps renders a sequence the way a refusal has to read it: one line, in order.
+func joinSteps(steps [][]string) string {
+	parts := make([]string, 0, len(steps))
+	for _, s := range steps {
+		parts = append(parts, strings.Join(s, " "))
+	}
+	return strings.Join(parts, " && ")
+}
+
+func sameSteps(a, b [][]string) bool {
+	if len(a) != len(b) || len(a) == 0 {
+		return false
+	}
+	for i := range a {
+		if !sameArgv(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func containsPath(files []string, want string) bool {

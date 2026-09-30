@@ -53,7 +53,19 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if sv.Port == 0 {
+		// 0 means "not supplied": the panel sends `parseInt(field) || 22`, and an imported
+		// config may omit the field entirely. Default it before the range check below, so
+		// an absent port stays a convenience rather than becoming a validation error.
 		sv.Port = 22
+	}
+	if sv.Port < 1 || sv.Port > 65535 {
+		// Host and user are validated above; the port was not, so anything an int could hold
+		// was stored verbatim — -1, 65536 and 4294967296 all came back 200 "Server saved".
+		// Nothing downstream re-checks it either, so the first sign of trouble was a dial
+		// failing much later, during provisioning, with an error that named neither the field
+		// nor the value. Reject it where the user can still see which field is wrong.
+		writeErr(w, http.StatusBadRequest, "enter an SSH port between 1 and 65535")
+		return
 	}
 	if sv.User == "" {
 		sv.User = "root"

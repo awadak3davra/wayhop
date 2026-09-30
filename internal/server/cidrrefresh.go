@@ -27,7 +27,9 @@ func (s *Server) handleRoutingRefresh(w http.ResponseWriter, r *http.Request) {
 	changed, errs := s.refreshAll(ctx)
 	errStrs := make([]string, 0, len(errs))
 	for _, e := range errs {
-		errStrs = append(errStrs, e.Error())
+		// A feed's address can carry its credential (a token in the path or query, a user in it),
+		// and these strings end up in screenshots and bug reports.
+		errStrs = append(errStrs, redactSubscriptionError(e.Error()))
 	}
 	type listInfo struct {
 		ID     string `json:"id"`
@@ -140,7 +142,18 @@ func (s *Server) refreshAll(ctx context.Context) (changed bool, errs []error) {
 		if (rl.CIDRSource == "" && rl.DomainSource == "") || !rl.Enabled {
 			continue
 		}
+		if ctx.Err() != nil {
+			// Out of time: the rest were not asked, so they neither failed nor changed.
+			errs = append(errs, fmt.Errorf("refresh %q: %w", rl.ID, errFeedNotTried))
+			continue
+		}
 		ch, err := s.refreshOne(ctx, rl)
+		if err != nil && ctx.Err() != nil {
+			// The time ran out while this one was being asked: no answer from its feed either way.
+			errs = append(errs, fmt.Errorf("refresh %q: %w", rl.ID, errFeedNotTried))
+			continue
+		}
+		s.noteFeedRefresh(rl, time.Now(), err)
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -150,6 +163,29 @@ func (s *Server) refreshAll(ctx context.Context) (changed bool, errs []error) {
 		}
 	}
 	return changed, errs
+}
+
+// feedNeverLoaded reports a list with a feed whose content has never been written: its timestamp is
+// zero, as the store leaves it for a new list and resets it when that feed's source changes.
+func feedNeverLoaded(rl model.RoutingList) bool {
+	return (rl.CIDRSource != "" && rl.CIDRRefreshed == 0) || (rl.DomainSource != "" && rl.DomainRefreshed == 0)
+}
+
+// lastLoaded is when the list's feeds were last written, the older of the two where it has both, so a
+// restart schedules the list by the more overdue one. Unchanged content is not written, so this can
+// be older than the last fetch that worked; that only brings the first refresh after a restart
+// forward.
+func lastLoaded(rl model.RoutingList) int64 {
+	var last int64
+	for _, f := range []struct {
+		src string
+		at  int64
+	}{{rl.CIDRSource, rl.CIDRRefreshed}, {rl.DomainSource, rl.DomainRefreshed}} {
+		if f.src != "" && (last == 0 || f.at < last) {
+			last = f.at
+		}
+	}
+	return last
 }
 
 // cidrIntervalHours is a routing list's effective auto-refresh cadence in hours: 0 → 24h default,
@@ -219,13 +255,18 @@ func (s *Server) cidrRefreshTick(ctx context.Context, due map[string]time.Time, 
 		eligible[rl.ID] = true
 		interval := time.Duration(cidrIntervalHours(rl)) * time.Hour
 		nd, ok := due[rl.ID]
-		if !ok {
-			// First sighting (boot, or a newly added/re-enabled list): schedule from the persisted
-			// last-refresh so restarts don't push refreshes forever; never refreshed -> due now.
+		switch {
+		case feedNeverLoaded(rl):
+			// A feed that has never loaded is due on every tick until it does: a new list, one whose
+			// source was just changed in the panel (the store clears that feed's timestamp, and the
+			// new source must not wait out the old one's schedule), or one whose feed has not
+			// answered yet. Until it loads the list has nothing of it, and Apply refuses it.
 			nd = now
-			if rl.CIDRRefreshed > 0 {
-				nd = time.Unix(rl.CIDRRefreshed, 0).Add(interval)
-			}
+			due[rl.ID] = nd
+		case !ok:
+			// First sighting (boot, or a newly added/re-enabled list): schedule from the persisted
+			// last-refresh so restarts don't push refreshes forever.
+			nd = time.Unix(lastLoaded(rl), 0).Add(interval)
 			due[rl.ID] = nd
 		}
 		if nd.After(now.Add(interval)) {
@@ -243,6 +284,7 @@ func (s *Server) cidrRefreshTick(ctx context.Context, due map[string]time.Time, 
 			delete(due, id)
 		}
 	}
+	s.forgetFeeds(eligible)
 	if len(dueList) == 0 {
 		return
 	}
@@ -257,9 +299,10 @@ func (s *Server) cidrRefreshTick(ctx context.Context, due map[string]time.Time, 
 		domains, domainChanged, domainErr := s.fetchDomainsOne(fctx, rl)
 		cancel()
 		due[rl.ID] = now.Add(time.Duration(cidrIntervalHours(rl)) * time.Hour)
+		s.noteFeedRefresh(rl, now, errors.Join(cidrErr, domainErr))
 		for _, err := range []error{cidrErr, domainErr} {
 			if err != nil {
-				log.Printf("list auto-refresh: %v", err)
+				log.Printf("list auto-refresh: %s", redactSubscriptionError(err.Error()))
 			}
 		}
 		if !cidrChanged && !domainChanged {

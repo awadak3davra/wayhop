@@ -43,6 +43,27 @@ type IpsetOptions struct {
 	// nobody can distinguish without breaking TLS, and pretending otherwise would be a lie about
 	// what this feature covers.
 	DNSRejectEncrypted bool
+
+	// MasqDevices are tunnel devices NDM does not own - the ones WayHop's userspace AmneziaWG
+	// creates - that need forwarded-LAN MASQUERADE. NDM NATs its own interfaces; nobody NATs these,
+	// and a forwarded LAN packet would leave with its private source, which the server's cryptokey
+	// routing drops (the peer's allowed IPs are the tunnel address). The router's own tunnels are
+	// deliberately not listed: their NAT stays NDM's. v4 only, like every MASQUERADE on this plane.
+	MasqDevices []string
+}
+
+// masqDevices is MasqDevices de-duplicated and sorted, so a re-render is byte-identical.
+func (o IpsetOptions) masqDevices() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, d := range o.MasqDevices {
+		if d != "" && !seen[d] {
+			seen[d] = true
+			out = append(out, d)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // WellKnownDoHEndpoints are the public resolvers a device is most likely to have baked in. Refusing
@@ -425,6 +446,9 @@ func (pl *Plan) RenderIptablesScript(io IpsetOptions) string {
 		fmt.Fprintf(&b, "iptables -t nat -C POSTROUTING -o %s -m mark --mark %s/%s -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o %s -m mark --mark %s/%s -j MASQUERADE\n",
 			io.WanIface, hexMark(e.Mark), mask, io.WanIface, hexMark(e.Mark), mask)
 	}
+	for _, dev := range io.masqDevices() {
+		fmt.Fprintf(&b, "iptables -t nat -C POSTROUTING -o %s -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o %s -j MASQUERADE\n", dev, dev)
+	}
 	// DNS interception: clients' plain DNS is answered by THIS router, whatever server they asked
 	// for. REDIRECT (not DNAT) because the destination is the router itself — it rewrites to the
 	// interface's own address without us having to know it, which matters on a box whose LAN address
@@ -576,6 +600,9 @@ func (pl *Plan) RenderTeardownScript(opt Options, io IpsetOptions) string {
 			continue
 		}
 		fmt.Fprintf(&b, "iptables -t nat -D POSTROUTING -o %s -m mark --mark %s/%s -j MASQUERADE 2>/dev/null || true\n", io.WanIface, hexMark(e.Mark), mask)
+	}
+	for _, dev := range io.masqDevices() {
+		fmt.Fprintf(&b, "iptables -t nat -D POSTROUTING -o %s -j MASQUERADE 2>/dev/null || true\n", dev)
 	}
 	// TCP MSS clamping teardown (QW1): remove TCPMSS rules from the FORWARD chain.
 	seenMSS := map[string]bool{}

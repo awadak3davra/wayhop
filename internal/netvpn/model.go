@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"wayhop/internal/awg"
 	"wayhop/internal/model"
 	"wayhop/internal/util"
 )
@@ -14,6 +15,12 @@ var awgObfuscationKeys = []string{
 	"h1", "h2", "h3", "h4",
 	"i1", "i2", "i3", "i4", "i5",
 }
+
+// AWGGeneration is the newest AmneziaWG generation this writer expresses: awgObfuscationKeys stops at
+// 2.0 (S3/S4, H ranges, I1-I5), and the interface it writes has no option for a 3.x setting. The
+// native planner checks endpoints against it before choosing the UCI path, and a test holds it to the
+// key list above.
+const AWGGeneration = awg.Gen2
 
 // ProtoForModel reports whether a WayHop protocol has a router-native WireGuard-family form.
 func ProtoForModel(protocol model.Protocol) (Proto, bool) {
@@ -61,6 +68,15 @@ func InterfaceFromEndpoint(endpoint model.Endpoint, name string, protocol Proto)
 		iface.MTU = modelParamInt(endpoint.Params, "mtu")
 	}
 	if endpoint.Protocol == model.ProtoAmneziaWG {
+		// A setting with no option here is refused, not skipped: upstream requires every setting except
+		// Jc/Jmin/Jmax to match the server's, so the interface would be written, come up and never be
+		// answered. The native planner refuses such an endpoint first, with a better message; this is
+		// the writer holding the same line for every other caller.
+		if beyond := awg.Beyond(endpoint.Params, AWGGeneration); len(beyond) != 0 {
+			return AWGInterface{}, fmt.Errorf(
+				"endpoint %q uses AmneziaWG %s settings (%s), which the UCI interface WayHop writes has no options for",
+				endpoint.Name, awg.Need(endpoint.Params), strings.Join(beyond, ", "))
+		}
 		for _, key := range awgObfuscationKeys {
 			if value := modelParamString(endpoint.Params, key); value != "" {
 				iface.Obfuscation[key] = value
