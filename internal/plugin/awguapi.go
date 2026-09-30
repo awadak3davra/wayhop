@@ -60,7 +60,7 @@ func awgUAPI(e model.Endpoint, endpoint netip.AddrPort) (lines []awg.KV, warning
 		return nil, nil, err
 	}
 	if jc > 0 && jmin > jmax {
-		return nil, nil, fmt.Errorf("Jmin %d is above Jmax %d: amneziawg-go would try to allocate a near-4 GiB junk packet on every handshake", jmin, jmax)
+		return nil, nil, fmt.Errorf("junk packet sizes: Jmin %d is above Jmax %d, and amneziawg-go would try to allocate a near-4 GiB junk packet on every handshake", jmin, jmax)
 	}
 	for _, f := range []struct {
 		key string
@@ -102,7 +102,7 @@ func awgUAPI(e model.Endpoint, endpoint netip.AddrPort) (lines []awg.KV, warning
 		}
 		lo, hi, err := awg.ParseRange(v, math.MaxUint32)
 		if err != nil {
-			return nil, nil, fmt.Errorf("H%d: %v", i+1, err)
+			return nil, nil, fmt.Errorf("header range H%d: %v", i+1, err)
 		}
 		h[i] = span{lo, hi}
 		hRange = hRange || lo < hi
@@ -111,7 +111,7 @@ func awgUAPI(e model.Endpoint, endpoint netip.AddrPort) (lines []awg.KV, warning
 	for i := range h {
 		for j := i + 1; j < len(h); j++ {
 			if h[i].lo <= h[j].hi && h[j].lo <= h[i].hi {
-				return nil, nil, fmt.Errorf("H%d and H%d overlap; every message type needs its own header range", i+1, j+1)
+				return nil, nil, fmt.Errorf("header ranges H%d and H%d overlap; every message type needs its own", i+1, j+1)
 			}
 		}
 	}
@@ -127,7 +127,7 @@ func awgUAPI(e model.Endpoint, endpoint netip.AddrPort) (lines []awg.KV, warning
 		}
 		spec, note, err := awg.GoIPacket(raw)
 		if err != nil {
-			return nil, nil, fmt.Errorf("I%d: %v", i, err)
+			return nil, nil, fmt.Errorf("special junk packet I%d: %v", i, err)
 		}
 		if note != "" {
 			warnings = append(warnings, fmt.Sprintf("I%d: %s", i, note))
@@ -146,7 +146,7 @@ func awgUAPI(e model.Endpoint, endpoint netip.AddrPort) (lines []awg.KV, warning
 		// the check is made here to name the field (amneziawg-go's message counts them from S0).
 		for i, v := range s {
 			if v < 12 {
-				return nil, nil, fmt.Errorf("S%d is %d; with a HeaderProtectionKey every S1-S4 must be at least 12, the size of the nonce it carries", i+1, v)
+				return nil, nil, fmt.Errorf("padding S%d is %d; with a HeaderProtectionKey every S1-S4 must be at least 12, the size of the nonce it carries", i+1, v)
 			}
 		}
 		add("header_protection_key", hpk)
