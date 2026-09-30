@@ -1,6 +1,7 @@
 package qr
 
 import (
+	"bytes"
 	"fmt"
 	"strconv"
 	"strings"
@@ -12,7 +13,7 @@ import (
 func TestReedSolomonKnownAnswer(t *testing.T) {
 	data := []byte{32, 91, 11, 120, 209, 114, 220, 77, 67, 64, 236, 17, 236, 17, 236, 17}
 	want := []byte{196, 35, 39, 119, 235, 215, 231, 226, 93, 23}
-	if got := rsRemainder(data, 10); fmt.Sprint(got) != fmt.Sprint(want) {
+	if got := rsRemainder(data, 10); !bytes.Equal(got, want) {
 		t.Fatalf("EC %v, want %v", got, want)
 	}
 }

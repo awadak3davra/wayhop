@@ -20,7 +20,7 @@ func TestParseAgreesWithTheZoneDatabase(t *testing.T) {
 		{"EST5EDT,M3.2.0,M11.1.0", "America/New_York"},       // west of Greenwich: positive offset
 		{"AEST-10AEDT,M10.1.0,M4.1.0/3", "Australia/Sydney"}, // DST wraps the new year
 		{"IST-5:30", "Asia/Kolkata"},                         // a half-hour offset
-		{"<+0330>-3:30", "Asia/Tehran"},                      // quoted name with minutes
+		{"<+0545>-5:45", "Asia/Kathmandu"},                   // quoted name with minutes
 	} {
 		loc, err := Parse(c.posix)
 		if err != nil {

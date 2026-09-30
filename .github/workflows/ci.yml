@@ -72,6 +72,12 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: [self-hosted, Linux, X64]
     steps:
+      # The amneziawg-go step runs this repository's own build script, so the job needs the commit it
+      # is testing. Without a checkout the persistent runner's workspace held whatever an earlier job
+      # left there, and the step failed with "cannot open scripts/build-amneziawg-go.sh".
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       # cache:false like every other job — this job builds EXTERNAL clones (awg/olc),
       # so there is nothing in this repo for setup-go to cache, and a stale module-cache
       # tarball on the self-hosted runner was failing the restore (tar exit 2).

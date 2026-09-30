@@ -192,12 +192,6 @@ func (f *fakeBackend) Pulse(context.Context) Pulse {
 	return f.pulse
 }
 
-func (f *fakeBackend) setPulse(p Pulse) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.pulse = p
-}
-
 func (f *fakeBackend) Boot() BootInfo {
 	f.mu.Lock()
 	defer f.mu.Unlock()

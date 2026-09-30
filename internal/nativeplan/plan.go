@@ -581,16 +581,6 @@ func BeyondNative(endpoint model.Endpoint, p platform.Platform) []string {
 	return awg.Beyond(endpoint.Params, NativeAWGGeneration(p))
 }
 
-func platformName(p platform.Platform) string {
-	switch p {
-	case platform.Keenetic:
-		return "KeeneticOS"
-	case platform.OpenWrt:
-		return "OpenWrt"
-	}
-	return string(p)
-}
-
 func requireCapability(capabilities platform.CapabilitySet, id, endpointID string) error {
 	capability := capabilities.Get(id)
 	if !capability.State.Usable() {
