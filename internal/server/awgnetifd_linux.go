@@ -12,11 +12,15 @@ import (
 // networkRestartCommand is the detached restart of OpenWrt's network service, nil where there is none.
 // Its own session (Setsid), so neither the end of the request nor anything that signals the daemon's
 // process group stops it halfway; the leading sleep lets the HTTP answer flush before links drop.
-func networkRestartCommand() *exec.Cmd {
-	if !isFile("/etc/init.d/network") {
+func networkRestartCommand() *exec.Cmd { return networkRestartCommandFor("/etc/init.d/network") }
+
+// networkRestartCommandFor is networkRestartCommand for the init script at script, so a test can
+// prove the detached shape on any Linux host rather than only on an OpenWrt one.
+func networkRestartCommandFor(script string) *exec.Cmd {
+	if !isFile(script) {
 		return nil
 	}
-	cmd := exec.Command("/bin/sh", "-c", "sleep 1; exec /etc/init.d/network restart")
+	cmd := exec.Command("/bin/sh", "-c", "sleep 1; exec "+script+" restart")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	return cmd
 }
