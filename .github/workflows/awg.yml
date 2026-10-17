@@ -247,7 +247,11 @@ jobs:
         run: |
           set -euo pipefail
           base="https://downloads.openwrt.org/releases/$REL/targets/$TGT"
-          name="$(curl -fsSL --retry 3 "$base/sha256sums" | awk '{ sub(/^\*/, "", $2) } $2 ~ /^openwrt-sdk-.*\.tar\.(zst|xz)$/ { print $2; exit }')"
+          # Read the whole list before picking: an awk that exits on its first match closes the pipe
+          # while curl is still writing a large sha256sums, and pipefail turns curl's SIGPIPE into a
+          # failed job (seen on ath79, ipq40xx and qualcommax).
+          sums="$(curl -fsSL --retry 3 "$base/sha256sums")"
+          name="$(printf '%s\n' "$sums" | awk '{ sub(/^\*/, "", $2) } !n && $2 ~ /^openwrt-sdk-.*\.tar\.(zst|xz)$/ { print $2; n = 1 }')"
           [ -n "$name" ] || { echo "::error::no SDK listed in $base/sha256sums"; exit 1; }
           echo "url=$base/$name" >> "$GITHUB_OUTPUT"
           echo "SDK: $base/$name"
