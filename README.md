@@ -5,7 +5,7 @@
 **A router web panel for modern VPN and proxy protocols, with failover, selective routing and an Apply that undoes itself.**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-22a06b?style=flat-square)](LICENSE)
-[![Release](https://img.shields.io/badge/release-v0.5.7-0097dc?style=flat-square)](../../releases/latest)
+[![Release](https://img.shields.io/badge/release-v0.5.8-0097dc?style=flat-square)](../../releases/latest)
 [![Go](https://img.shields.io/badge/go-1.22+-00ADD8?style=flat-square&logo=go&logoColor=white)](go.mod)
 [![Platforms](https://img.shields.io/badge/router-OpenWrt%20%C2%B7%20Keenetic%20%C2%B7%20Entware-151c28?style=flat-square)](#supported-platforms-and-cpus)
 [![Arches](https://img.shields.io/badge/arch-mipsle%20%C2%B7%20mips%20%C2%B7%20arm%20%C2%B7%20arm64%20%C2%B7%20amd64-555?style=flat-square)](#supported-platforms-and-cpus)
@@ -301,6 +301,35 @@ There is also a signed package feed. See the
 `opkg install wayhop` or `apk add wayhop`. Every release additionally attaches the `.ipk` and `.apk`
 packages directly for offline package installs.
 
+### AmneziaWG 3.1
+
+The same feed carries the newest AmneziaWG (3.1), built by WayHop's own CI from pinned upstream
+commits:
+
+- **OpenWrt: the kernel module.** `kmod-amneziawg`, `amneziawg-tools` (with netifd's `amneziawg`
+  protocol) and `luci-proto-amneziawg`, built per release and target, because a kernel module only
+  loads on the exact kernel it was built for. Built for OpenWrt 24.10.8 and 25.12.5 on ramips/mt7621,
+  ramips/mt76x8, mediatek/filogic, mediatek/mt7622, ath79/generic, ipq40xx/generic,
+  qualcommax/ipq807x, mvebu/cortexa9, bcm27xx/bcm2711, x86/64, rockchip/armv8, malta/le and
+  armsr/armv8 (packaging/awg/targets.txt has the full list). About 0.3 MB installed and no RAM to speak of, so
+  this is the path for routers with little flash or memory.
+- **Everywhere else** (other OpenWrt releases or targets, Keenetic and other Entware routers):
+  `amneziawg-go`, the userspace engine, about 1.4 MB to download and 3.3-3.8 MB installed, built
+  with a patch that caps its packet buffers (see [Limitations](#limitations)).
+
+From the router's shell, `install-awg.sh` picks the path, checks flash and RAM first, verifies what
+it installed and rolls back on failure:
+
+```sh
+curl -fsSL https://github.com/awadak3davra/wayhop/releases/latest/download/install-awg.sh | sh -s -- --dry-run
+curl -fsSL https://github.com/awadak3davra/wayhop/releases/latest/download/install-awg.sh | sh -s -- --yes
+```
+
+`--mode kmod` or `--mode userspace` forces a path, `--uninstall` removes what it installed, and
+`--restart-network` restarts netifd so a new `amneziawg` protocol takes effect at once (otherwise it
+does at the next reboot; restarting briefly drops every link). The WayHop installers take
+`--with-awg`, and the **Components** page plans, installs and removes the same packages.
+
 ## Routing
 
 Lists match by domain, IP/CIDR, GeoSite/GeoIP, source IP, source port, source MAC or ingress
@@ -435,9 +464,13 @@ every start that uses it. Do not run a router with it.
   status, alerts and a few controls from outside.
 - `fast` mode cannot apply domain lists to general LAN traffic on OpenWrt; use `hybrid` or `tun` if
   you need them.
-- `amneziawg-go` has no prebuilt upstream releases; WayHop's own releases carry a build for each
-  router arch. Under sustained traffic it holds its packet buffers, measured at 60-120 MiB on a
-  test stand, so on a router with little free memory prefer a kernel module that carries the config.
+- `amneziawg-go` has no prebuilt upstream releases; WayHop's own releases and feed carry a build for
+  each router arch. Under sustained traffic it holds packet buffers, which WayHop caps by the
+  router's RAM: on a test stand the peak was about 28 MiB below 128 MB of RAM, 33-39 MiB below
+  256 MB and about 75 MiB above (unpatched, it passed 1 GiB). It cannot go much lower, so on a router
+  with 64-128 MB prefer the kernel module.
+  A connection runs on it automatically when its settings need a newer AmneziaWG than the router's
+  own, or always when its editor sets the AmneziaWG engine to amneziawg-go.
 - ARMv6, ARMv5 and 32-bit x86 are not supported.
 - Root is required: the installer writes to system directories and installs kernel routing rules.
 - The plugin catalogue and the IPTV module are not part of this build.
@@ -458,7 +491,7 @@ One arch by hand:
 
 ```sh
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
-  -ldflags "-s -w -X wayhop/internal/version.Version=0.5.7" \
+  -ldflags "-s -w -X wayhop/internal/version.Version=0.5.8" \
   -o wayhop-arm64 ./cmd/wayhop
 ```
 

@@ -8,7 +8,7 @@ import "strings"
 // running a dirty build from a commit that no longer existed, with no way to tell from the binary
 // itself. Commit, Date and Dirty exist so that question has an answer.
 var (
-	Version = "0.5.7"
+	Version = "0.5.8"
 	Commit  = "unknown"
 	Date    = "unknown"
 	// Dirty is "true" when the working tree carried uncommitted changes at build time, "false" when

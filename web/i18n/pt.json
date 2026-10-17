@@ -1949,5 +1949,14 @@
   "Or point the phone's camera at this code.": "Ou aponte a câmera do celular para este código.",
   "Daily summary at": "Resumo diário às",
   "Router clock: {0}; quiet hours and the summary follow it.": "Relógio do roteador: {0}; o horário de silêncio e o resumo seguem esse relógio.",
-  "Outages, switches, traffic by exit. Silent, even in quiet hours.": "Quedas, comutações, tráfego por saída. Sem som, mesmo no horário de silêncio."
+  "Outages, switches, traffic by exit. Silent, even in quiet hours.": "Quedas, comutações, tráfego por saída. Sem som, mesmo no horário de silêncio.",
+  "This will install:": "Será instalado:",
+  "Install from WayHop's feed: {0}?": "Instalar a partir do repositório do WayHop: {0}?",
+  "Install amneziawg-go from a WayHop release instead": "Em vez disso, instalar o amneziawg-go a partir de uma versão do WayHop",
+  "Installer log": "Registro do instalador",
+  "Remove the AmneziaWG packages": "Remover os pacotes do AmneziaWG",
+  "Installed from a WayHop release ({0}).": "Instalado a partir de uma versão do WayHop ({0}).",
+  "Restart the network service now": "Reiniciar o serviço de rede agora",
+  "Restart the network service after installing (every link drops for a few seconds)": "Reiniciar o serviço de rede após instalar (todas as ligações caem por alguns segundos)",
+  "AmneziaWG 3.x settings reach netifd's new handler only after the network service restarts: now (every link drops for a few seconds) or at the next reboot.": "As definições do AmneziaWG 3.x só chegam ao novo manipulador do netifd depois de reiniciar o serviço de rede: agora (todas as ligações caem por alguns segundos) ou no próximo reinício."
 }

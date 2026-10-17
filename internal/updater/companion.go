@@ -54,6 +54,11 @@ func companionReleases(rels []Release, prefix string) []Release {
 	picks := map[string]*pick{}
 	var order []string
 	for _, r := range rels {
+		// Only WayHop's own builds carry the companion. An awg-v* release (an AmneziaWG package set for
+		// the feed) shares the repository and must never be read for one, whatever its assets are named.
+		if !IsWayHopReleaseTag(r.Tag) {
+			continue
+		}
 		byVer := map[string][]Asset{}
 		var vers []string // in asset order, so one release carrying two versions still lists stably
 		for _, a := range r.Assets {
@@ -172,13 +177,14 @@ func (u *Updater) installCompressed(ctx context.Context, e Engine, rel Release, 
 // and "present, version unknown" for a binary the panel did not put there or that was replaced since.
 func (u *Updater) companionInstalled(e Engine) Installed {
 	if rec, ok := binstore.Read(u.BinDir, e.BinName); ok {
-		return Installed{Present: true, Path: binstore.Stored(u.BinDir, e.BinName, rec.Compressed), Version: rec.Version}
+		return Installed{Present: true, Path: binstore.Stored(u.BinDir, e.BinName, rec.Compressed), Version: rec.Version,
+			Source: SourceRelease}
 	}
 	if path, exists := u.enginePath(e); exists {
-		return Installed{Present: true, Path: path}
+		return Installed{Present: true, Path: path, Source: SourceOther}
 	}
 	if gz := binstore.Stored(u.BinDir, e.BinName, true); fileExists(gz) {
-		return Installed{Present: true, Path: gz}
+		return Installed{Present: true, Path: gz, Source: SourceOther}
 	}
 	return Installed{Present: false}
 }

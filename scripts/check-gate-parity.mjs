@@ -50,9 +50,19 @@ if (statics.length === 0) {
 // it was written; four reached CI and the fifth did not, and this reported green throughout — the
 // drift it exists to catch, hidden by its own stated limit. A shell gate is exactly as decidable as
 // a node one, so there was never a reason for the line to be there.
+//
+// A gate is named by its repository path, not by a file name under scripts/. Matching only
+// `scripts/<name>` left every harness that lives beside what it tests (packaging/test/, the AmneziaWG
+// installer's packaging/awg/test/) outside this comparison: verify.mjs ran them, and nothing here
+// asked whether CI did. Exemption keys are repository paths for the same reason.
+const SCRIPT_PATH = /\b((?:scripts|packaging)\/[\w./-]+\.(?:mjs|sh))/;
 const nodeGates = statics
-  .map((g) => ({ ...g, script: (g.cmd.match(/scripts[\\/]([\w.-]+\.(?:mjs|sh))/) || [])[1] }))
+  .map((g) => ({ ...g, script: (g.cmd.match(SCRIPT_PATH) || [])[1] }))
   .filter((g) => /^(node|sh) /.test(g.cmd) && g.script);
+// Where gate scripts live: directly in scripts/, or in a test/ directory. Workflows also run build
+// and packing scripts (scripts/awg/build-*.sh, packaging/feed/pack-*.sh); those are not gates, and a
+// CI call to one is not a gate the runner lacks.
+const isGatePath = (p) => /^scripts\/[\w.-]+\.(?:mjs|sh)$/.test(p) || /(?:^|\/)test\/[\w.-]+\.(?:mjs|sh)$/.test(p);
 
 if (!fs.existsSync(WORKFLOWS)) {
   console.error(`FAIL  ${WORKFLOWS} is missing — there is nothing to compare the runner against`);
@@ -97,7 +107,7 @@ for (const g of nodeGates) {
 // treating it as a gate would demand the runner "check" a string substitution. That is decided by
 // where the call sits, not by a list of names to ignore.
 const ciCalls = new Map();
-for (const m of workflowText.matchAll(/\b(node|sh) +(scripts\/[\w.-]+\.(?:mjs|sh))([^\n|&;)]*)/g)) {
+for (const m of workflowText.matchAll(/\b(node|sh) +((?:scripts|packaging)\/[\w./-]+\.(?:mjs|sh))([^\n|&;)]*)/g)) {
   const lineStart = workflowText.lastIndexOf('\n', m.index) + 1;
   const before = workflowText.slice(lineStart, m.index);
   if (before.includes('$(') || before.includes('`')) continue;
@@ -111,9 +121,9 @@ for (const m of workflowText.matchAll(/\b(node|sh) +(scripts\/[\w.-]+\.(?:mjs|sh
 // check-package-manifests.sh was in exactly that state — CI asserted 27 packaging guarantees that no
 // local run ever touched. verify.mjs itself is excluded because it IS the runner; a list that
 // contained itself would be a tautology, not a comparison.
-const runnerScripts = new Set(nodeGates.map((g) => `scripts/${g.script}`));
+const runnerScripts = new Set(nodeGates.map((g) => g.script));
 const ciOnly = [...ciCalls.keys()]
-  .filter((s) => s !== 'scripts/verify.mjs' && !runnerScripts.has(s));
+  .filter((s) => s !== 'scripts/verify.mjs' && isGatePath(s) && !runnerScripts.has(s));
 
 // Some gates only EXIST when verify.mjs is given a url: the UI tier needs --ui, the apply tier needs
 // --apply. Listing without those flags therefore describes a smaller suite than the runner can run,
@@ -148,7 +158,7 @@ if (!tiers.has('static')) {
 const argDrift = [];
 for (const g of covered) {
   const wanted = g.cmd.replace(/\s+/g, ' ').trim();
-  const seen = ciCalls.get(`scripts/${g.script}`);
+  const seen = ciCalls.get(g.script);
   if (!seen || seen.has(wanted)) continue;
   argDrift.push({ name: g.name, wanted, found: [...seen] });
 }

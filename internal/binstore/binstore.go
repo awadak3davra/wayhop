@@ -117,6 +117,53 @@ func Remove(dir, name, runDir string) {
 	}
 }
 
+// RemoveStaleCompressed deletes the compressed copy of name the updater kept in dir - the gzip, its
+// record, and the copy unpacked from it into runDir - for when a package (opkg, apk, Entware) has taken
+// name over. The copy is then stale twice over: it costs flash and tmpfs for a binary the router
+// already has, and the plugin, which looks in dir before PATH, would keep starting WayHop's older build
+// instead of the package's.
+//
+// It never removes the binary itself (Stored(dir, name, false)): a package that installs into dir owns
+// that file. A record describing such a binary is removed only when it no longer matches the file - the
+// package wrote over it - and one that still matches is left with its binary. An unpacked copy in runDir
+// is removed only beside the marker Unpack writes, which proves Unpack made it. It returns the paths it
+// removed; a path that is already gone is not an error.
+func RemoveStaleCompressed(dir, name, runDir string) ([]string, error) {
+	var removed []string
+	var errs []error
+	drop := func(p string) {
+		switch err := os.Remove(p); {
+		case err == nil:
+			removed = append(removed, p)
+		case !errors.Is(err, os.ErrNotExist):
+			errs = append(errs, err)
+		}
+	}
+	if gz := Stored(dir, name, true); isRegular(gz) {
+		drop(gz)
+	}
+	if b, err := os.ReadFile(recordPath(dir, name)); err == nil {
+		f := strings.Fields(string(b))
+		raw := len(f) == 5 && f[1] == "0"
+		if _, current := Read(dir, name); !raw || !current {
+			drop(recordPath(dir, name))
+		}
+	}
+	if runDir != "" {
+		target := filepath.Join(runDir, name)
+		if filepath.Clean(target) != filepath.Clean(Stored(dir, name, false)) && isRegular(target+".src") {
+			drop(target)
+			drop(target + ".src")
+		}
+	}
+	return removed, errors.Join(errs...)
+}
+
+func isRegular(p string) bool {
+	fi, err := os.Lstat(p)
+	return err == nil && fi.Mode().IsRegular()
+}
+
 // Unpack makes the compressed copy of name runnable and returns its path: the gzip's digest checked
 // against the record first - flash does wear, and a binary that runs as root is not unpacked on
 // trust - then inflated into runDir. A copy already unpacked from the same stored file is reused, so

@@ -486,6 +486,11 @@ func (s *Server) handleUpdaterPMApply(w http.ResponseWriter, r *http.Request) {
 	// procs that DIED, so an upgraded plugin would keep serving the previous build until the next
 	// Apply, with the page showing the new version. The core is simply the half that was noticed
 	// first.
+	if action != updater.PlanRemove && e.ID == awgGoEngine {
+		// The package now owns amneziawg-go: the compressed copy WayHop kept would shadow it at the
+		// restart below (the plugin looks in the bin directory before PATH).
+		s.awgDropStaleStore(s.updater.EnginePackageStatus(ctx, *e))
+	}
 	if action != updater.PlanRemove && e.ID != "sing-box" {
 		// A plugin STOPPED to make room is a different case from one merely re-exec'd after its file
 		// changed: restartPlugin re-syncs only when it finds procs to stop, and there are none left to

@@ -43,6 +43,11 @@ type executionNativeCaptureV1 struct {
 	// captured, so a replay compiles the same plan that was reviewed rather than one that suddenly
 	// wants thousands of static routes because ipset went missing in between.
 	ListsViaIpset bool `json:"lists_via_ipset,omitempty"`
+	// AWGKernel is OpenWrt's HostFacts.AWGKernel with the evidence it was decided on (awgkernel.go), so
+	// a replay compiles the UCI interfaces at the generation that was reviewed, and a later capture whose
+	// probe fails can tell whether that generation still holds. nil on KeeneticOS, which keeps its
+	// capture encoding byte-identically.
+	AWGKernel *awgKernelCaptureV1 `json:"awg_kernel,omitempty"`
 }
 
 // executionNativeArtifactV1 is the compiled native plan plus the capture it was compiled from. It is
@@ -89,6 +94,7 @@ func buildExecutionNativeArtifactV1(
 		OccupiedInterfaces: cloneNativeInterfaceSet(capture.OccupiedInterfaces),
 		GlobalPriorities:   cloneNativePriorities(capture.GlobalPriorities),
 		ListsViaIpset:      capture.ListsViaIpset,
+		AWGKernel:          capture.AWGKernel.generation(),
 	}
 	compiled, err := nativeplan.Compile(&desired.Profile, facts)
 	if err != nil {
@@ -111,6 +117,7 @@ func buildExecutionNativeArtifactV1(
 			OccupiedInterfaces: cloneNativeInterfaceSet(capture.OccupiedInterfaces),
 			GlobalPriorities:   cloneNativePriorities(capture.GlobalPriorities),
 			ListsViaIpset:      capture.ListsViaIpset,
+			AWGKernel:          cloneAWGKernelCapture(capture.AWGKernel),
 		},
 		Plan: *compiled,
 	}

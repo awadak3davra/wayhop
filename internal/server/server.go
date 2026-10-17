@@ -123,6 +123,18 @@ type Server struct {
 	pmCoreHook *pmCoreState
 	// awgProbeOf is nil in production (awg.ProbeHost); tests give the AmneziaWG component a router.
 	awgProbeOf func() awg.Probe
+	// awgKernelReadsOf is nil in production (the netifd handler and /sys/module/amneziawg); tests give
+	// the AmneziaWG kernel capture a router. See awgkernel.go.
+	awgKernelReadsOf *awgKernelReads
+	// netifdStaleOf and networkRestartOf are nil in production (/proc and the handler's ctime; the
+	// detached /etc/init.d/network restart); tests inject. awgNetifdPending is what the last AmneziaWG
+	// install reported about netifd, for when its state cannot be measured. See awgnetifd.go.
+	netifdStaleOf    func() (stale, known bool)
+	networkRestartOf func() error
+	awgNetifdPending atomic.Bool
+	// awgUserspaceRunningOf is nil in production (the plugin manager's amneziawg-go procs); tests say
+	// which AmneziaWG connections run on amneziawg-go now.
+	awgUserspaceRunningOf func() []string
 	// routeTables is nil in production (iproute2, see tableIO); tests replace how the list-routing
 	// loop reads and writes table defaults and asks whether a device is up.
 	routeTables *routeTableIO
@@ -399,6 +411,9 @@ func (s *Server) Handler() http.Handler {
 	s.route(mux, authRouteProtected, "GET /api/updater/{id}/pm/plan", s.handleUpdaterPMPlan)
 	s.route(mux, authRouteProtected, "GET /api/updater/{id}/pm/candidates", s.handleUpdaterPMCandidates)
 	s.route(mux, authRouteProtected, "POST /api/updater/{id}/pm/apply", s.handleUpdaterPMApply)
+	// netifd reads AmneziaWG's handler only when it starts: the restart the AmneziaWG row offers after
+	// a kernel-module install. See awgnetifd.go.
+	s.route(mux, authRouteProtected, "POST /api/updater/awg/restart-network", s.handleAWGRestartNetwork)
 	s.route(mux, authRouteProtected, "POST /api/updater/{id}/install", s.handleUpdaterInstall)
 	s.route(mux, authRouteProtected, "DELETE /api/updater/{id}", s.handleUpdaterUninstall)
 

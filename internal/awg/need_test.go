@@ -103,5 +103,31 @@ func TestSettings(t *testing.T) {
 		if n := Need(map[string]any{key: value}); n != max(settingGen[key], Gen1) {
 			t.Errorf("%s alone needs %v, the table says %v", key, n, settingGen[key])
 		}
+		if Introduced(key) != settingGen[key] {
+			t.Errorf("Introduced(%s) = %v, the table says %v", key, Introduced(key), settingGen[key])
+		}
+	}
+	if Introduced("private_key") != GenNone {
+		t.Error("a key that is not an AmneziaWG setting was given a generation")
+	}
+}
+
+// SettingText reads a value exactly as Need weighs it, in every shape the model stores one: a writer
+// that renders by it cannot drop what Need counted, nor write what Need ignored.
+func TestSettingText(t *testing.T) {
+	for _, c := range []struct {
+		in   any
+		want string
+	}{
+		{"100-200", "100-200"}, {7, "7"}, {int64(3_000_000_000), "3000000000"},
+		{float64(3_000_000_000), "3000000000"}, {true, ""}, {nil, ""}, {[]any{"1"}, ""},
+	} {
+		if got := SettingText(c.in); got != c.want {
+			t.Errorf("SettingText(%#v) = %q, want %q", c.in, got, c.want)
+		}
+		weighed := Need(map[string]any{"rekey_timeout": c.in}) == Gen30
+		if weighed != (c.want != "") {
+			t.Errorf("Need weighs %#v as %v while SettingText reads %q", c.in, weighed, c.want)
+		}
 	}
 }

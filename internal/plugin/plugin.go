@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -311,9 +312,11 @@ type proc struct {
 	needsBin bool
 	reason   string // why it isn't running (config/exec error), surfaced in Status
 	note     string // what it runs differently from its config (amneziawg-go's lowered MTU), surfaced in Status
-	managed  bool   // a launched long-running olcRTC proc under Supervise crash-restart control
-	restarts int    // consecutive crash-restarts since the last healthy tick (drives backoff)
-	cooldown int    // Supervise ticks to wait before the next relaunch (crash-loop throttle)
+	// awgUserspace is the endpoint's AWGUserspace when it started: Sync restarts the proc when it changes.
+	awgUserspace bool
+	managed      bool // a launched long-running olcRTC proc under Supervise crash-restart control
+	restarts     int  // consecutive crash-restarts since the last healthy tick (drives backoff)
+	cooldown     int  // Supervise ticks to wait before the next relaunch (crash-loop throttle)
 	// setup runs after every launch of a proc that needs configuring once it is up - userspace
 	// AmneziaWG, whose settings live in the process and die with it. nil for the others.
 	setup func(*proc) error
@@ -384,7 +387,9 @@ func (m *Manager) Sync(specs []Spec) {
 			delete(m.procs, id)
 			continue
 		}
-		if cfg, _, err := NativeConfig(s.Endpoint, s.SOCKSPort); err == nil && cfg != p.config {
+		// The config text alone misses a moved AmneziaWG connection: the same settings run on the
+		// kernel module or on amneziawg-go, and the operator's choice between them is not in the text.
+		if cfg, _, err := NativeConfig(s.Endpoint, s.SOCKSPort); err == nil && (cfg != p.config || s.Endpoint.AWGUserspace != p.awgUserspace) {
 			m.stop(id, p)
 			delete(m.procs, id)
 			continue
@@ -412,7 +417,7 @@ func (m *Manager) Sync(specs []Spec) {
 
 func (m *Manager) start(id string, s Spec) *proc {
 	cfg, fname, err := NativeConfig(s.Endpoint, s.SOCKSPort)
-	p := &proc{engine: s.Endpoint.Engine, socks: s.SOCKSPort, config: cfg}
+	p := &proc{engine: s.Endpoint.Engine, socks: s.SOCKSPort, config: cfg, awgUserspace: s.Endpoint.AWGUserspace}
 	if err != nil {
 		p.reason = "native config: " + err.Error()
 		return p
@@ -743,6 +748,23 @@ func (m *Manager) resolve(name string) (string, bool) {
 		return pth, true
 	}
 	return "", false
+}
+
+// UserspaceAWGEndpoints lists, sorted, the ids of the AmneziaWG connections running on amneziawg-go
+// now. The path is chosen when a connection starts and kept while it runs, so after a kernel module is
+// installed these are the connections still on amneziawg-go until their next start - which the panel
+// reports rather than restarting a working tunnel to move it.
+func (m *Manager) UserspaceAWGEndpoints() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []string
+	for id, p := range m.procs {
+		if p.binName == "amneziawg-go" && p.running && p.cmd != nil && p.cmd.Process != nil && !procDied(p) {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Status returns the current plugin states.

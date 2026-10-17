@@ -3,6 +3,66 @@
 All notable changes to WayHop are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.8] — 2026-10-17
+
+### Added
+- **AmneziaWG 3.1 from WayHop's own feed, kernel module included.** WayHop's CI now builds the
+  newest AmneziaWG from pinned upstream commits (kernel module 3.1.20260906, tools 3.1.20260812,
+  amneziawg-go 3.1.20260828) and the feed carries it: on OpenWrt `kmod-amneziawg`,
+  `amneziawg-tools` with netifd's `amneziawg` protocol and `luci-proto-amneziawg`, built per release
+  and target (24.10.8 and 25.12.5 on thirteen targets, listed in packaging/awg/targets.txt);
+  for every other router `amneziawg-go`, and on Entware also a static `awg`. The kernel module is
+  about 0.3 MB installed, which makes it the path for routers with little flash or RAM. Every build
+  is tested on real OpenWrt in QEMU, a 64 MB mipsel router among them: install from the feed, an
+  AmneziaWG 3.1 tunnel with every 3.1 setting, and an uninstall that leaves nothing behind.
+- **`install-awg.sh`, one installer for all of it.** It picks the kernel module where the feed has
+  one for the router's exact kernel and `amneziawg-go` otherwise, checks flash and RAM before
+  anything is downloaded, verifies what it installed, rolls back on failure, and with `--uninstall`
+  removes exactly what it added. `--dry-run` shows the plan, `--mode` forces a path,
+  `--restart-network` restarts netifd so a new protocol takes effect at once. The WayHop installers
+  take `--with-awg`, and the release carries the script next to `bootstrap.sh`, listed in the
+  signed `SHA256SUMS.txt`.
+- **Components installs AmneziaWG 3.1.** The AmneziaWG row says which path this router gets and
+  why ("kernel module AmneziaWG 3.1 for OpenWrt 25.12.5 x86/64, about 0.3 MB", or userspace with
+  its memory profile, or why it does not fit), installs and removes it, offers to restart the
+  network service when the new protocol needs it, and says which connections still run on
+  amneziawg-go and when they move to the kernel module. A running tunnel is never moved by force.
+- **OpenWrt runs AmneziaWG 3 connections as its own interfaces** once its kernel module carries
+  them: the header protection key, content padding, the timers, random trailers and disabling
+  cookies are written to netifd only when both the module and the installed protocol handler carry
+  them. Older modules keep such a connection on amneziawg-go, as before.
+- **Choose the AmneziaWG engine per connection.** A connection's editor now has an AmneziaWG engine
+  setting: Automatic runs it on the router's own AmneziaWG (the kernel module, or KeeneticOS's and
+  OpenWrt's native tunnels) whenever that can carry its settings, as before; amneziawg-go runs it on
+  the newest AmneziaWG WayHop ships (3.1) even where the router's own could carry it. The router's own
+  AmneziaWG is often generation 1 or 2. The Apply review says which engine each connection runs on
+  and why. A running connection moves on the next Apply, except on OpenWrt when it already runs on
+  OpenWrt's own AmneziaWG: both use the same device name there, so the review asks for two Applies,
+  one with the connection off and one with it back on.
+
+### Changed
+- **amneziawg-go uses a fraction of the memory.** WayHop's build caps its packet buffers and queues
+  through a small patch, and WayHop sizes them by the router's RAM. Under sustained traffic on a
+  test stand the peak went from over 1 GiB unpatched to about 28 MiB below 128 MB of RAM, 33-39 MiB
+  below 256 MB and about 75 MiB above.
+- **`awg` and amneziawg-go agree on where the userspace socket lives** through one variable,
+  `AWG_SOCKET_DIR`, so netifd's fallback to amneziawg-go works with either build of `awg`.
+- **Go 1.26.9** for every build, which closes the `net/http` advisories reported against 1.26.6.
+
+### Fixed
+- **The feed page's apk line works.** It lacked `/packages.adb`, so apk 3 read it as an old-style
+  repository and fetched an index that does not exist. The Entware snippet no longer runs
+  `opkg-key`, which writes under `/etc` and does nothing there: Entware does not check feed
+  signatures.
+- **Self-update and the amneziawg-go list read only `v` releases.** The AmneziaWG package releases
+  (`awg-v…`, never marked latest) cannot be mistaken for a WayHop version.
+- **The Components page no longer says a generation-2 router carries AmneziaWG with nothing to
+  install.** "This router's kernel carries AmneziaWG itself" appeared over a module that cannot carry
+  a single 3.x setting. The page now names the generation the router's own AmneziaWG carries next to
+  the one amneziawg-go runs, and where the router's is older it offers amneziawg-go as optional,
+  with what it is for and what it costs. Only a router whose own AmneziaWG is already the newest
+  generation gets "nothing to install".
+
 ## [0.5.7] — 2026-09-29
 
 ### Added

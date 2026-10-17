@@ -41,27 +41,114 @@ const (
 
 // awgGOGC is the collector target amneziawg-go runs with. Its memory is its packet buffers - 64 KiB
 // each, one per packet in flight whatever the packet's size - which the Go runtime pools and, at the
-// default GOGC=100, lets grow to twice what is live before it collects. Measured on the pinned build
-// carrying an AmneziaWG 3.1 tunnel, 1 GiB each way with the router side held to one CPU: GOGC=25 took
-// a download's peak from about 100 to 64 MiB, and what stayed resident after an upload from 105-179
-// to about 70 MiB, at the same throughput, for 4x the collections and 20% more allocation. Collecting
-// is cheap here: the buffers hold no pointers to scan.
-//
-// GOMEMLIMIT is deliberately not set. Most of that memory is live - packets queued between the reader
-// and the crypto workers - and no collector can free it: a 26 MiB limit made the collector run without
-// pause (22,791 cycles against 12), cut the throughput to between a fifth and a half, and still let an
-// upload peak at 194 MiB. Only a bound on the buffers themselves holds the peak down.
+// default GOGC=100, lets grow to twice what is live before it collects. Collecting is cheap here: the
+// buffers hold no pointers to scan.
 const awgGOGC = "25"
 
-// awgRuntimeEnv is what amneziawg-go's environment adds to the daemon's: GOGC, unless the daemon was
-// started with one - amneziawg-go inherits that, as the operator's choice.
-func awgRuntimeEnv(environ []string) []string {
-	for _, kv := range environ {
-		if v, ok := strings.CutPrefix(kv, "GOGC="); ok && v != "" {
-			return nil
+// awgSocketDir is the directory internal/awg dials amneziawg-go's UAPI sockets in (its uapiSocketDir;
+// a test holds the two equal). WayHop's build links the same directory in, and passing it as
+// AWG_SOCKET_DIR as well keeps the daemon and the binary together even for a build linked otherwise.
+const awgSocketDir = "/tmp/wayhop/amneziawg"
+
+// awgTier is the amneziawg-go settings for routers whose MemTotal is below maxKiB (0: no bound).
+//
+// Upstream's Linux build never bounds its packet buffers (PreallocatedBuffersPerPool = 0), so its
+// memory is whatever is in flight: upstream peaked at about 1.7 GiB under load on the stand of
+// docs/AWG_LOWMEM.md (development repository), and no collector setting helps - that memory is
+// live. WayHop's build (the patch in packaging/awg/patches/amneziawg-go) makes the cap
+// AWG_GO_BUFFERS_PER_POOL and the queue length AWG_GO_QUEUE_SIZE startup settings, and the cap is
+// what bounds the peak.
+type awgTier struct {
+	name   string
+	maxKiB int64
+	env    []string
+}
+
+// awgTiers, smallest first, from docs/AWG_LOWMEM.md (development repository). Peak resident memory
+// under saturating load on the stand:
+//   - lowmem: about 28 MiB, at about 30% less throughput than without GOMEMLIMIT. 512 is the cap's
+//     floor; the limit (below the live buffers, so the collector works hard) and one P buy the last
+//     5-11 MiB, which on a 64-128 MB router matter more than speed its CPU cannot reach anyway.
+//   - small: 33 MiB on one core, 39 on two, at full throughput.
+//   - normal: 73-75 MiB; on two cores about 35% more throughput than a cap of 512.
+//
+// Once the buffers are bounded, the queue length and GOGC hardly move the peak; 256 and 25 are what
+// was measured. Without MemTotal the small tier is taken: bounded, and about as fast as upstream.
+var awgTiers = []awgTier{
+	{"lowmem (MemTotal < 128 MiB)", 128 << 10, []string{
+		"AWG_GO_BUFFERS_PER_POOL=512", "AWG_GO_QUEUE_SIZE=256", "GOMEMLIMIT=24MiB", "GOGC=" + awgGOGC, "GOMAXPROCS=1"}},
+	{"small (MemTotal < 256 MiB)", 256 << 10, []string{
+		"AWG_GO_BUFFERS_PER_POOL=512", "AWG_GO_QUEUE_SIZE=256", "GOGC=" + awgGOGC}},
+	{"normal (MemTotal >= 256 MiB)", 0, []string{
+		"AWG_GO_BUFFERS_PER_POOL=1024", "AWG_GO_QUEUE_SIZE=256", "GOGC=" + awgGOGC}},
+}
+
+// awgTierUnknown is the tier taken when MemTotal cannot be read.
+const awgTierUnknown = 1
+
+// awgTierFor is the tier of a router with memTotalKiB of memory; 0 means unknown.
+func awgTierFor(memTotalKiB int64) awgTier {
+	if memTotalKiB <= 0 {
+		return awgTiers[awgTierUnknown]
+	}
+	for _, t := range awgTiers {
+		if t.maxKiB == 0 || memTotalKiB < t.maxKiB {
+			return t
 		}
 	}
-	return []string{"GOGC=" + awgGOGC}
+	return awgTiers[len(awgTiers)-1]
+}
+
+// awgMeminfo reads the kernel's memory summary; a variable so tests can stand in a router.
+var awgMeminfo = func() ([]byte, error) { return os.ReadFile("/proc/meminfo") }
+
+// awgMemTotalKiB is MemTotal from /proc/meminfo in KiB, 0 when it cannot be read.
+func awgMemTotalKiB() int64 {
+	b, err := awgMeminfo()
+	if err != nil {
+		return 0
+	}
+	return parseMemTotalKiB(string(b))
+}
+
+// parseMemTotalKiB reads the "MemTotal:  123456 kB" line; 0 when there is none or it does not parse.
+func parseMemTotalKiB(meminfo string) int64 {
+	for _, line := range strings.Split(meminfo, "\n") {
+		rest, ok := strings.CutPrefix(line, "MemTotal:")
+		if !ok {
+			continue
+		}
+		f := strings.Fields(rest)
+		if len(f) == 0 {
+			return 0
+		}
+		n, err := strconv.ParseInt(f[0], 10, 64)
+		if err != nil || n < 0 {
+			return 0
+		}
+		return n
+	}
+	return 0
+}
+
+// awgRuntimeEnv is what amneziawg-go's environment adds to the daemon's: the settings of the router's
+// memory tier, each one unless the daemon was started with that variable set (amneziawg-go inherits
+// it, as the operator's choice; an empty value is no choice), and always AWG_SOCKET_DIR, the
+// directory the daemon dials - an inherited one would put the socket where the daemon never looks.
+func awgRuntimeEnv(environ []string, memTotalKiB int64) []string {
+	operator := map[string]bool{}
+	for _, kv := range environ {
+		if k, v, ok := strings.Cut(kv, "="); ok && v != "" {
+			operator[k] = true
+		}
+	}
+	var out []string
+	for _, kv := range awgTierFor(memTotalKiB).env {
+		if k, _, _ := strings.Cut(kv, "="); !operator[k] {
+			out = append(out, kv)
+		}
+	}
+	return append(out, "AWG_SOCKET_DIR="+awgSocketDir)
 }
 
 // awgSocket is the part of *awg.UAPI bring-up uses; a field of Manager, so tests can stand in a fake.
@@ -92,7 +179,17 @@ func (m *Manager) awgDecide(e model.Endpoint) awg.Decision {
 // MODULE_ALIAS_GENL_FAMILY, and the controller request_module()s an unknown family before it answers,
 // so "no module" here means none is installed. When the probe itself fails (the Windows demo build, a
 // kernel without generic netlink) the kernel path is kept - what ran before this path existed.
+//
+// A connection set to run on amneziawg-go (Endpoint.AWGUserspace) takes it whatever the module can
+// do: the operator chose the newest AmneziaWG over the router's own, and a module new enough for the
+// settings is no reason to overrule that.
 func AWGDecision(probe awg.Probe, firmwareOwned bool, e model.Endpoint) awg.Decision {
+	if e.AWGUserspace {
+		if !probe.TUN {
+			return awg.Decision{Path: awg.PathUnavailable, Reason: "this connection is set to run on amneziawg-go, and /dev/net/tun is missing, so amneziawg-go cannot run"}
+		}
+		return awg.Decision{Path: awg.PathUserspace, Reason: "this connection is set to run on amneziawg-go; using it on /dev/net/tun"}
+	}
 	if firmwareOwned {
 		if !probe.TUN {
 			return awg.Decision{Path: awg.PathUnavailable, Reason: "this router's firmware owns the AmneziaWG kernel module, and /dev/net/tun is missing, so amneziawg-go cannot run either"}
@@ -162,7 +259,9 @@ func (m *Manager) awgUserspaceUp(p *proc, e model.Endpoint) error {
 
 	p.iface, p.note = iface, note
 	m.awgClearStale(ipBin, p)
-	p.binName, p.runArgs, p.runEnv = "amneziawg-go", []string{"-f", iface}, awgRuntimeEnv(os.Environ())
+	mem := awgMemTotalKiB()
+	p.binName, p.runArgs, p.runEnv = "amneziawg-go", []string{"-f", iface}, awgRuntimeEnv(os.Environ(), mem)
+	log.Printf("wayhop: awg %s: amneziawg-go runs with the %s settings (MemTotal %d KiB)", iface, awgTierFor(mem).name, mem)
 	p.setup = func(p *proc) error { return m.awgUserspaceSetup(p, ipBin, e, lines, strconv.Itoa(mtu)) }
 	if err := launchProc(p, bin); err != nil {
 		return fmt.Errorf("start amneziawg-go: %w", err)

@@ -21,13 +21,23 @@
 # them here, in the run verify.mjs and CI make too, means the names the updater parses are the names
 # every gate run produces - not a second spelling in the workflow that only a release would exercise.
 #
+# Why it is patched: upstream's Linux build lets its packet buffers grow without bound (64 KiB per
+# packet in flight; 95-194 MiB measured under an upload), more than a 128 MB router has to give. The
+# patches in packaging/awg/patches/amneziawg-go/ make the buffer cap, the queue length and the socket
+# directory startup-tunable from the environment; with none of the variables set the binary behaves as
+# upstream's. They are applied after the commit check, in name order, and each one's sha256 goes into
+# MANIFEST, so "what was built" stays the pinned commit plus exactly those files.
+#
 # Usage: scripts/build-amneziawg-go.sh [outdir]      (default: dist/amneziawg-go)
 #        GO=/path/to/go scripts/build-amneziawg-go.sh
 set -eu
 
-AWG_GO_REPO="https://github.com/amnezia-vpn/amneziawg-go"
-AWG_GO_TAG="v3.1.20260828"
-AWG_GO_COMMIT="b5928efb6ca19f0153958460c3d141f04abc5c2e"
+here="$(cd "$(dirname "$0")" && pwd)"
+# The pins (AWG_GO_REPO, AWG_GO_TAG, AWG_GO_COMMIT) live in one shell-sourceable file for every
+# AmneziaWG build WayHop makes.
+# shellcheck source=packaging/awg/VERSIONS
+. "$here/../packaging/awg/VERSIONS"
+patches="$here/../packaging/awg/patches/amneziawg-go"
 
 # Where the binary serves its UAPI socket (internal/awg reads the same path). Upstream's default is
 # /var/run/amneziawg, and amneziawg-go stops at startup when it cannot create that directory - passing
@@ -43,13 +53,26 @@ GO="${GO:-go}"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/awg-go.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
+work="$(cd "$work" && pwd)"
 
-git clone --quiet --depth 1 --branch "$AWG_GO_TAG" "$AWG_GO_REPO" "$work/src"
+# core.autocrlf=false: a Windows git would otherwise check the tree out with CRLF, and the patches,
+# like upstream's files, are LF.
+git -c core.autocrlf=false -c advice.detachedHead=false clone --quiet --depth 1 --branch "$AWG_GO_TAG" "$AWG_GO_REPO" "$work/src"
 got="$(git -C "$work/src" rev-parse HEAD)"
 if [ "$got" != "$AWG_GO_COMMIT" ]; then
   echo "build-amneziawg-go: tag $AWG_GO_TAG resolves to $got, not the pinned $AWG_GO_COMMIT - refusing" >&2
   exit 1
 fi
+
+: > "$work/patches"
+for p in "$patches"/*.patch; do
+  [ -e "$p" ] || continue
+  if ! git -C "$work/src" apply --whitespace=nowarn - < "$p"; then
+    echo "build-amneziawg-go: $(basename "$p") does not apply to $AWG_GO_TAG@$AWG_GO_COMMIT - refusing" >&2
+    exit 1
+  fi
+  echo "patch=$(basename "$p") sha256=$(sha256sum < "$p" | cut -c1-64)" >> "$work/patches"
+done
 
 mkdir -p "$OUT"
 out_abs="$(cd "$OUT" && pwd)"
@@ -88,6 +111,7 @@ done
   {
     echo "tag=$AWG_GO_TAG"
     echo "commit=$AWG_GO_COMMIT"
+    cat "$work/patches"
     echo "socket_dir=$AWG_GO_SOCKET_DIR"
     echo "go=$("$GO" env GOVERSION)"
     for f in amneziawg-go-*; do
@@ -98,8 +122,15 @@ done
 cat "$out_abs/MANIFEST"
 # The count verify.mjs reads as evidence: a run that built fewer arches than WayHop ships is a failure,
 # not a pass with a shorter list - and so is one that packed fewer release assets than it built.
-built="$(ls "$out_abs"/amneziawg-go-* | grep -vc '\.gz$')"
-packed="$(ls "$out_abs"/amneziawg-go-*-linux-*.gz | wc -l | tr -d ' ')"
-echo "amneziawg-go: $built arches built from $AWG_GO_TAG@$(echo "$AWG_GO_COMMIT" | cut -c1-12), $packed packed as release assets"
+built=0 packed=0
+for f in "$out_abs"/amneziawg-go-*; do
+  case "$f" in
+    *-linux-*.gz) packed=$((packed + 1)) ;;
+    *.gz) ;;
+    *) built=$((built + 1)) ;;
+  esac
+done
+npatch="$(wc -l < "$work/patches" | tr -d ' ')"
+echo "amneziawg-go: $built arches built from $AWG_GO_TAG@$(echo "$AWG_GO_COMMIT" | cut -c1-12) with $npatch patch(es), $packed packed as release assets"
 [ "$built" -eq 5 ] || { echo "build-amneziawg-go: expected 5 arches, built $built" >&2; exit 1; }
 [ "$packed" -eq 5 ] || { echo "build-amneziawg-go: expected 5 release assets, packed $packed" >&2; exit 1; }

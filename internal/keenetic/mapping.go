@@ -13,7 +13,7 @@ import (
 //
 // Why not derive it: on a hand-configured router the native interfaces were created by hand
 // with arbitrary NDM names — the kernel name "nwg5" does NOT guarantee the NDM name is
-// "Wireguard5". Deriving would risk toggling the WRONG interface and could bounce the family's
+// "Wireguard5". Deriving would risk toggling the WRONG interface and could bounce a
 // working datapath. So when ndm_name is absent we return known=false and the caller must
 // surface "re-adopt to capture the NDM name" rather than act blind.
 //

@@ -183,6 +183,12 @@ type Endpoint struct {
 	// PersistentKeepalive is the WireGuard/AmneziaWG keepalive interval in seconds.
 	// 0 = unset (omitted; no keepalive). Useful behind NAT to keep the tunnel warm.
 	PersistentKeepalive int `json:"persistent_keepalive,omitempty"`
+	// AWGUserspace runs a WayHop-owned AmneziaWG connection on amneziawg-go, the newest AmneziaWG WayHop
+	// ships, even where the router's own AmneziaWG (its kernel module, or KeeneticOS's and OpenWrt's
+	// native tunnels) could carry the settings. false = automatic: the router's own AmneziaWG when it
+	// can, amneziawg-go when the settings need a newer generation than it has. Only an AmneziaWG
+	// endpoint may set it (Validate); an adopted tunnel is the router's and has no such choice.
+	AWGUserspace bool `json:"awg_userspace,omitempty"`
 }
 
 // GroupType selects how a group chooses among its members.

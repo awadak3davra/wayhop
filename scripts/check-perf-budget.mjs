@@ -27,7 +27,28 @@ const DIST = 'web/dist';
 //
 // Headroom is deliberately thin (about 1%): this number exists to make growth a decision, and a
 // budget with room to spare stops doing that.
-const BUDGET = 262 * 1000;
+//
+// Raised by 200 B for the AmneziaWG 3.1 install from WayHop's own feed, planned in
+// docs/AWG_FULL_INSTALL.md (development repository).
+// Its code is in the route-scoped page-updater.js and costs the first visit nothing; what does cost
+// it is six new strings, translated in all nine languages, in the one dictionary every visitor loads
+// (+157 B gzip in ru, the largest). At 0.5.7 the payload stood 20 B under 262000, so no feature with
+// any words could land without this decision. The sentences that describe a plan (packages, paths,
+// versions, the installer's reason) are the daemon's and are not translated, which is what kept the
+// growth to six labels. Trimming dictionary keys the code no longer uses was the alternative; it was
+// left alone because the client also translates sentences the daemon sends, and a key that reads as
+// dead in the source can still be live through one of those.
+//
+// Raised by another 200 B for the network-service restart the AmneziaWG row offers after a kernel
+// module install (netifd reads AmneziaWG's handler only when it starts). Three strings, in all nine
+// languages (+212 B gzip in ru): the restart button, the opt-in to restart with the install, and the
+// sentence saying the new handler is read only after a restart or at the next reboot. That sentence is
+// the one an operator has to understand in their own language before cutting every link on the router,
+// which is why it is not left to the daemon's English. The rest of the new text - which connections
+// still run on amneziawg-go and when they switch, the installer's notes - is the daemon's and is not
+// translated, like the plan sentences above, which kept the growth to three labels. Trimming was ruled
+// out for the reason given above. The payload stood 63 B under the previous figure.
+const BUDGET = 262 * 1000 + 400;
 
 const gz = (buf) => zlib.gzipSync(buf, { level: 9 }).length;
 const read = (f) => fs.readFileSync(path.join(DIST, f));

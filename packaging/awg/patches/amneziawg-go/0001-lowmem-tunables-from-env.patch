@@ -1,0 +1,278 @@
+WayHop low-memory patch for amneziawg-go v3.1.20260828 (b5928efb6ca19f0153958460c3d141f04abc5c2e).
+
+Turns three link-time/compile-time settings into values read once at startup from the environment.
+With none of the variables set the binary behaves exactly as upstream's.
+
+  AWG_GO_BUFFERS_PER_POOL  cap of every buffer pool (upstream PreallocatedBuffersPerPool, 0 on
+                           Linux = unbounded). 0 keeps upstream's unbounded pools; 1..511 is raised
+                           to 512, because the TUN reader and the IPv4 and IPv6 socket readers each
+                           hold a whole batch of 128 buffers for as long as they run and a cap must
+                           leave a batch in flight beyond those. A full pool blocks the reader that
+                           asks (backpressure), as upstream's Android and iOS builds already do.
+  AWG_GO_QUEUE_SIZE        length of the inbound, outbound and handshake queues (upstream 1024),
+                           clamped to 16..65536.
+  AWG_SOCKET_DIR           directory of the UAPI sockets, overriding the link-time default
+                           (WayHop links /tmp/wayhop/amneziawg); absolute paths only.
+
+Values that do not parse are ignored and named. When any variable is set, the process that runs the
+device logs one INFO line with the effective values (unless LOG_LEVEL=silent).
+
+Applied by scripts/build-amneziawg-go.sh after the pinned-commit check, with `git apply`; its sha256
+is recorded in the build's MANIFEST. Upstream's own device tests pass with it (TestAWGDevicePing is
+flaky upstream as well, unpatched: 4 of 6 runs failed on the pinned commit).
+
+diff --git a/device/queueconstants_default.go b/device/queueconstants_default.go
+index 80d3117..a61e4d6 100644
+--- a/device/queueconstants_default.go
++++ b/device/queueconstants_default.go
+@@ -10,10 +10,15 @@ package device
+ import "github.com/amnezia-vpn/amneziawg-go/v3/conn"
+ 
+ const (
+-	QueueStagedSize            = conn.IdealBatchSize
+-	QueueOutboundSize          = 1024
+-	QueueInboundSize           = 1024
+-	QueueHandshakeSize         = 1024
+-	MaxSegmentSize             = (1 << 16) - 1 // largest possible UDP datagram
+-	PreallocatedBuffersPerPool = 0             // Disable and allow for infinite memory growth
++	QueueStagedSize = conn.IdealBatchSize
++	MaxSegmentSize  = (1 << 16) - 1 // largest possible UDP datagram
++)
++
++// Vars rather than consts, as on iOS, so that queueconstants_env.go can set them from the
++// environment at startup. The values here are upstream's and stay in force when it sets nothing.
++var (
++	QueueOutboundSize                 = 1024
++	QueueInboundSize                  = 1024
++	QueueHandshakeSize                = 1024
++	PreallocatedBuffersPerPool uint32 = 0 // Disable and allow for infinite memory growth
+ )
+diff --git a/device/queueconstants_env.go b/device/queueconstants_env.go
+new file mode 100644
+index 0000000..91457aa
+--- /dev/null
++++ b/device/queueconstants_env.go
+@@ -0,0 +1,91 @@
++//go:build !android && !ios && !windows
++
++/* SPDX-License-Identifier: MIT
++ *
++ * Startup-tunable buffer cap and queue length (WayHop's low-memory patch).
++ */
++
++package device
++
++import (
++	"fmt"
++	"os"
++	"strconv"
++	"strings"
++
++	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
++)
++
++const (
++	// envBuffersPerPool caps every buffer pool (PreallocatedBuffersPerPool); 0 is upstream's unbounded.
++	envBuffersPerPool = "AWG_GO_BUFFERS_PER_POOL"
++	// envQueueSize sets the inbound, outbound and handshake queue lengths (upstream 1024).
++	envQueueSize = "AWG_GO_QUEUE_SIZE"
++
++	// The TUN reader and the receive routine of each bind socket (IPv4 and IPv6) hold a whole batch
++	// of message buffers for as long as they run, so a cap must leave at least one more batch in
++	// flight: below that the device stalls waiting for buffers nothing will return.
++	minBuffersPerPool = 4 * conn.IdealBatchSize
++	// minQueueSize keeps the handshake load check (a queue 1/8 full) meaningful.
++	minQueueSize = 16
++	maxQueueSize = 1 << 16
++)
++
++var tunablesSummary string
++var tunablesSet bool
++
++func init() {
++	tunablesSummary, tunablesSet = applyTunables(os.LookupEnv)
++}
++
++// applyTunables sets the pool cap and the queue lengths from the environment, clamped to what the
++// device can run with. Nothing is changed when neither variable is set.
++func applyTunables(lookup func(string) (string, bool)) (string, bool) {
++	var notes []string
++	set := false
++	if v, ok := lookup(envBuffersPerPool); ok && v != "" {
++		set = true
++		n, err := strconv.ParseUint(strings.TrimSpace(v), 10, 32)
++		switch {
++		case err != nil:
++			notes = append(notes, fmt.Sprintf("%s=%q ignored: not a whole number below 2^32", envBuffersPerPool, v))
++		case n != 0 && n < minBuffersPerPool:
++			notes = append(notes, fmt.Sprintf("%s=%d raised to %d", envBuffersPerPool, n, minBuffersPerPool))
++			PreallocatedBuffersPerPool = minBuffersPerPool
++		default:
++			PreallocatedBuffersPerPool = uint32(n)
++		}
++	}
++	if v, ok := lookup(envQueueSize); ok && v != "" {
++		set = true
++		n, err := strconv.ParseUint(strings.TrimSpace(v), 10, 32)
++		size := int(n)
++		switch {
++		case err != nil:
++			notes = append(notes, fmt.Sprintf("%s=%q ignored: not a whole number", envQueueSize, v))
++		case n < minQueueSize:
++			notes = append(notes, fmt.Sprintf("%s=%d raised to %d", envQueueSize, n, minQueueSize))
++			size = minQueueSize
++		case n > maxQueueSize:
++			notes = append(notes, fmt.Sprintf("%s=%d lowered to %d", envQueueSize, n, maxQueueSize))
++			size = maxQueueSize
++		}
++		if err == nil {
++			QueueOutboundSize, QueueInboundSize, QueueHandshakeSize = size, size, size
++		}
++	}
++	summary := fmt.Sprintf("buffers_per_pool=%d queue_size=%d", PreallocatedBuffersPerPool, QueueOutboundSize)
++	if PreallocatedBuffersPerPool == 0 {
++		summary += " (unbounded)"
++	}
++	if len(notes) > 0 {
++		summary += " (" + strings.Join(notes, "; ") + ")"
++	}
++	return summary, set
++}
++
++// Tunables describes the effective pool cap and queue length; set is false when neither
++// variable was set, so the values are upstream's.
++func Tunables() (summary string, set bool) {
++	return tunablesSummary, tunablesSet
++}
+diff --git a/device/queueconstants_env_test.go b/device/queueconstants_env_test.go
+new file mode 100644
+index 0000000..25520ea
+--- /dev/null
++++ b/device/queueconstants_env_test.go
+@@ -0,0 +1,54 @@
++//go:build !android && !ios && !windows
++
++/* SPDX-License-Identifier: MIT
++ *
++ * Startup-tunable buffer cap and queue length (WayHop's low-memory patch).
++ */
++
++package device
++
++import (
++	"strings"
++	"testing"
++)
++
++func TestApplyTunables(t *testing.T) {
++	saved := [4]int{int(PreallocatedBuffersPerPool), QueueOutboundSize, QueueInboundSize, QueueHandshakeSize}
++	defer func() {
++		PreallocatedBuffersPerPool = uint32(saved[0])
++		QueueOutboundSize, QueueInboundSize, QueueHandshakeSize = saved[1], saved[2], saved[3]
++	}()
++	// Upstream's values, whatever the test process itself was started with.
++	upstream := func() {
++		PreallocatedBuffersPerPool = 0
++		QueueOutboundSize, QueueInboundSize, QueueHandshakeSize = 1024, 1024, 1024
++	}
++	for _, c := range []struct {
++		env     map[string]string
++		buffers uint32
++		queue   int
++		set     bool
++		note    string
++	}{
++		{nil, 0, 1024, false, "buffers_per_pool=0 queue_size=1024 (unbounded)"},
++		{map[string]string{"AWG_GO_BUFFERS_PER_POOL": ""}, 0, 1024, false, "(unbounded)"},
++		{map[string]string{"AWG_GO_BUFFERS_PER_POOL": "1024", "AWG_GO_QUEUE_SIZE": "256"}, 1024, 256, true, "buffers_per_pool=1024 queue_size=256"},
++		{map[string]string{"AWG_GO_BUFFERS_PER_POOL": "0"}, 0, 1024, true, "(unbounded)"},
++		{map[string]string{"AWG_GO_BUFFERS_PER_POOL": "100"}, 512, 1024, true, "AWG_GO_BUFFERS_PER_POOL=100 raised to 512"},
++		{map[string]string{"AWG_GO_BUFFERS_PER_POOL": " 2048 "}, 2048, 1024, true, "buffers_per_pool=2048"},
++		{map[string]string{"AWG_GO_BUFFERS_PER_POOL": "-1"}, 0, 1024, true, `AWG_GO_BUFFERS_PER_POOL="-1" ignored`},
++		{map[string]string{"AWG_GO_BUFFERS_PER_POOL": "4294967296"}, 0, 1024, true, "ignored"},
++		{map[string]string{"AWG_GO_QUEUE_SIZE": "4"}, 0, 16, true, "AWG_GO_QUEUE_SIZE=4 raised to 16"},
++		{map[string]string{"AWG_GO_QUEUE_SIZE": "100000"}, 0, 65536, true, "AWG_GO_QUEUE_SIZE=100000 lowered to 65536"},
++		{map[string]string{"AWG_GO_QUEUE_SIZE": "lots"}, 0, 1024, true, `AWG_GO_QUEUE_SIZE="lots" ignored`},
++	} {
++		upstream()
++		summary, set := applyTunables(func(k string) (string, bool) { v, ok := c.env[k]; return v, ok })
++		if PreallocatedBuffersPerPool != c.buffers || QueueOutboundSize != c.queue || QueueInboundSize != c.queue || QueueHandshakeSize != c.queue {
++			t.Errorf("%v: buffers %d, queues %d/%d/%d; want %d, %d", c.env, PreallocatedBuffersPerPool, QueueOutboundSize, QueueInboundSize, QueueHandshakeSize, c.buffers, c.queue)
++		}
++		if set != c.set || !strings.Contains(summary, c.note) {
++			t.Errorf("%v: summary %q set %v; want %q set %v", c.env, summary, set, c.note, c.set)
++		}
++	}
++}
+diff --git a/ipc/uapi_unix.go b/ipc/uapi_unix.go
+index 79604ee..2a05510 100644
+--- a/ipc/uapi_unix.go
++++ b/ipc/uapi_unix.go
+@@ -12,6 +12,7 @@ import (
+ 	"fmt"
+ 	"net"
+ 	"os"
++	"path/filepath"
+ 
+ 	"golang.org/x/sys/unix"
+ )
+@@ -28,6 +29,32 @@ const (
+ // flag in wireguard-android.
+ var socketDirectory = "/var/run/amneziawg"
+ 
++// envSocketDir overrides socketDirectory at startup (WayHop's low-memory patch); an absolute path
++// only, so the socket never lands relative to wherever the process was started.
++const envSocketDir = "AWG_SOCKET_DIR"
++
++var socketDirectoryNote string
++var socketDirectorySet bool
++
++func init() {
++	d, ok := os.LookupEnv(envSocketDir)
++	if !ok || d == "" {
++		return
++	}
++	socketDirectorySet = true
++	if !filepath.IsAbs(d) {
++		socketDirectoryNote = fmt.Sprintf(" (%s=%q ignored: not an absolute path)", envSocketDir, d)
++		return
++	}
++	socketDirectory = filepath.Clean(d)
++}
++
++// SocketDirectory describes the directory the UAPI sockets are served from; set is false when
++// AWG_SOCKET_DIR was not set, so it is the built-in one.
++func SocketDirectory() (summary string, set bool) {
++	return "socket_dir=" + socketDirectory + socketDirectoryNote, socketDirectorySet
++}
++
+ func sockPath(iface string) string {
+ 	return fmt.Sprintf("%s/%s.sock", socketDirectory, iface)
+ }
+diff --git a/main.go b/main.go
+index b0d479c..3fe8389 100644
+--- a/main.go
++++ b/main.go
+@@ -9,6 +9,7 @@ package main
+ 
+ import (
+ 	"fmt"
++	"log"
+ 	"os"
+ 	"os/signal"
+ 	"runtime"
+@@ -222,6 +223,14 @@ func main() {
+ 		return
+ 	}
+ 
++	// WayHop's low-memory patch: once, in the process that runs the device, the values the
++	// AWG_GO_BUFFERS_PER_POOL, AWG_GO_QUEUE_SIZE and AWG_SOCKET_DIR variables set, when any is set.
++	if tunables, tset := device.Tunables(); logLevel != device.LogLevelSilent {
++		if dir, dset := ipc.SocketDirectory(); tset || dset {
++			log.New(os.Stdout, "INFO: "+fmt.Sprintf("(%s) ", interfaceName), log.Ldate|log.Ltime).Printf("%s %s", tunables, dir)
++		}
++	}
++
+ 	device := device.NewDevice(tdev, conn.NewDefaultBind(), logger)
+ 
+ 	logger.Verbosef("Device started")

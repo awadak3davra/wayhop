@@ -1005,13 +1005,15 @@ function installedNextStep(usedBy, converged, demo) {
 // of those binaries would change no routing. VLESS/Reality, Hysteria2, TUIC and AnyTLS are not
 // missing from this list — they ride inside sing-box, which is why its row names them.
 //
-// The AmneziaWG 3 component is the exception that proves the rule: it gets a row exactly when a
-// connection here runs on it (e.awg.needed, the daemon's own path decision) or when it is installed
-// and so has something to update or remove. A router whose kernel or firmware carries every AmneziaWG
-// connection still gets the prose below and no button.
+// The AmneziaWG 3 component is the exception that proves the rule: it gets a row when a connection
+// here runs on it (e.awg.needed, the daemon's own path decision), when it is installed and so has
+// something to update or remove, or when it would add something the router lacks (e.awg.optional:
+// the router's own AmneziaWG is older than amneziawg-go's). That last row says it is optional and
+// why, so its Install reads as an offer rather than a fix. Only a router whose own AmneziaWG is
+// already the newest generation gets the prose below and no button.
 function componentsToShow(engines) {
   return (engines || []).filter(e => e.role === "core" ||
-    (e.awg && (e.awg.needed || (e.installed || {}).present)));
+    (e.awg && (e.awg.needed || e.awg.optional || (e.installed || {}).present)));
 }
 
 // kernelCarriedNote states what this router already carries itself, without offering to install it.
@@ -1025,14 +1027,26 @@ function kernelCarriedNote(engines) {
   const managed = (engines || []).filter(e => e.native_managed && !e.carried_by_kernel && e.role !== "core");
   const lines = [];
   if (kernel.length) {
+    // The generation goes with the name where the daemon knows it: "carries AmneziaWG" alone once
+    // stood over a generation-2 module that cannot carry a 3.x setting.
+    const label = e => (PROTO_LABEL[e.provides] || e.provides || e.name) +
+      (e.awg && e.awg.builtin && !["none", "unknown"].includes(e.awg.builtin) ? " " + e.awg.builtin : "");
     lines.push(t("This router's kernel carries {0} itself — nothing to install for it.",
-      kernel.map(e => PROTO_LABEL[e.provides] || e.provides || e.name).join(", ")));
+      kernel.map(label).join(", ")));
   }
   if (managed.length) {
     lines.push(t("{0} is installed and owned by the package manager — update it there, not here.",
       managed.map(e => e.name || e.id).join(", ")));
   }
-  return lines.length ? el("div", { class: "hint upd-carried" }, lines.join(" ")) : null;
+  // A kernel path WayHop's installer can take back out: its packages are installed and the installer
+  // applies here. The way out sits behind a closed disclosure - nothing is missing on this router.
+  const removable = kernel.find(e => e.awg && (e.awg.feed_modes || []).includes("kmod") &&
+    (e.awg.packages || []).some(k => k.name === "kmod-amneziawg"));
+  // What the connections or netifd have not caught up with yet: the row that would say it is gone.
+  const pending = kernel.find(e => e.awg && (e.awg.switching || e.awg.netifd_restart));
+  return lines.length ? el("div", { class: "hint upd-carried" }, lines.join(" "),
+    pending ? awgPendingBlock(pending.awg) : null,
+    removable ? awgFeedRemoval(removable) : null) : null;
 }
 
 // PROTO_LABEL is display only: the daemon speaks lowercase proto ids and an operator reads brand
@@ -1171,7 +1185,7 @@ function installCostNote(e, version) {
 // AmneziaWG connection here runs - the same decision the plugin and the native planner act on, from
 // the daemon - and, once installed, what the component costs on flash and in RAM.
 function awgStatusBlock(a) {
-  const box = el("div", { class: "upd-awg" }, el("div", { class: "hint" }, awgKernelLine(a)));
+  const box = el("div", { class: "upd-awg" }, el("div", { class: "hint" }, awgKernelLine(a)), awgBuiltinLine(a));
   const conns = a.connections || [];
   if (!conns.length) {
     box.appendChild(el("div", { class: "hint" }, t("No AmneziaWG connection is configured.")));
@@ -1182,6 +1196,38 @@ function awgStatusBlock(a) {
     box.appendChild(list);
   }
   if (a.footprint) box.appendChild(el("div", { class: "hint" }, awgFootprintLine(a.footprint)));
+  const pending = awgPendingBlock(a);
+  if (pending) box.appendChild(pending);
+  return box;
+}
+
+// awgPendingBlock is what the router now carries and the running connections or netifd have not caught
+// up with: connections still on amneziawg-go, which switch at their next start or by two Applies (the
+// daemon's sentence - nothing restarts a working tunnel to move it), and a netifd still running an
+// older AmneziaWG handler, with the restart offered and the next reboot named as the other way.
+function awgPendingBlock(a) {
+  if (!a || (!a.switching && !a.netifd_restart)) return null;
+  const box = el("div", { class: "pm-deleg" });
+  if (a.switching) box.appendChild(el("div", { class: "hint" }, a.switching));
+  if (a.netifd_restart) {
+    const why = t("AmneziaWG 3.x settings reach netifd's new handler only after the network service restarts: now (every link drops for a few seconds) or at the next reboot.");
+    box.appendChild(el("div", { class: "hint upd-usage" }, why));
+    box.appendChild(el("div", { class: "acts" }, el("button", { class: "btn btn-sm", type: "button",
+      onclick: async ev => {
+        const btn = ev.currentTarget;
+        if (!await modalConfirm(t("Restart the network service now") + "? " + why)) return;
+        btn.disabled = true;
+        try {
+          const r = await api.post("/api/updater/awg/restart-network", {});
+          toast(r.summary, "ok");
+          // The links come back within seconds; the row is read again once netifd has restarted.
+          setTimeout(route, r.restarting ? 8000 : 0);
+        } catch (err) {
+          toast(err.message, "err");
+          btn.disabled = false;
+        }
+      } }, t("Restart the network service now"))));
+  }
   return box;
 }
 
@@ -1195,6 +1241,21 @@ function awgKernelLine(a) {
       : t("No AmneziaWG kernel module and no /dev/net/tun: AmneziaWG cannot run on this router.");
   }
   return t("Kernel module: AmneziaWG {0}.", a.kernel);
+}
+
+// awgBuiltinLine sets the router's own AmneziaWG against amneziawg-go's, and when the component is
+// optional here says so and what it is for - the row must not read as a gap on a working router.
+function awgBuiltinLine(a) {
+  const own = a.builtin && !["none", "unknown"].includes(a.builtin);
+  const parts = [];
+  if (own && a.newest && a.builtin !== a.newest) {
+    parts.push(t("This router's own AmneziaWG carries settings up to generation {0}; amneziawg-go runs generation {1}.",
+      a.builtin, a.newest));
+  }
+  if (a.optional) {
+    parts.push(t("Optional: no connection needs it yet. Install it to run connections with AmneziaWG 3.x settings, or to run any connection on it: choose amneziawg-go as the engine in the connection's editor. Under load it holds 60-120 MB of RAM."));
+  }
+  return parts.length ? el("div", { class: "hint upd-awg-builtin" }, parts.join(" ")) : null;
 }
 
 function awgPathLabel(path) {
@@ -1215,6 +1276,134 @@ function awgFootprintLine(f) {
     if (f.rss_bytes) line += " · " + t("{0} resident", mb(f.rss_bytes));
   }
   return line;
+}
+
+// awgFeedBox offers AmneziaWG 3.1 from WayHop's own feed, through the installer the daemon embeds
+// (GET /api/updater/awg/fit is its dry run). The plan comes first and says which path the installer
+// would take here and why - the kernel module for this release and target, userspace amneziawg-go
+// with its memory profile, or a refusal with the reason - and Install then runs exactly that path.
+// When a connection needs it and nothing is installed the plan is asked at once; otherwise on first
+// open, because the dry run reads the package database and the feed, which a router that is not
+// waiting on it should not pay for on every visit. With amneziawg-go already there the feed is a
+// choice (the kernel path, a packaged build), not a gap.
+function awgFeedBox(e) {
+  const box = el("div", { class: "pm-deleg" });
+  const out = el("div", { class: "pm-cmd" });
+  const status = el("div", { class: "hint" });
+  box.appendChild(out);
+  box.appendChild(status);
+  const plan = async () => {
+    out.innerHTML = "";
+    status.textContent = t("Checking what would run…");
+    let ans;
+    try { ans = await api.get("/api/updater/awg/fit"); } catch (err) { status.textContent = err.message; return; }
+    status.textContent = "";
+    out.appendChild(el("div", { class: ans.installable ? "hint" : "hint upd-err" },
+      (ans.installable ? t("This will install:") : t("Not possible here:")) + " " + ans.summary));
+    awgFeedLog(out, ans.run);
+    // The install changes netifd's AmneziaWG handler: restarting the network service with it is the
+    // operator's call (it drops every link), so it is offered and left off.
+    const restart = ans.installable && ans.netifd_restart ? el("input", { type: "checkbox" }) : null;
+    if (restart) {
+      out.appendChild(el("label", { class: "check" }, restart,
+        t("Restart the network service after installing (every link drops for a few seconds)")));
+    }
+    const acts = el("div", { class: "acts" });
+    if (ans.installable) {
+      acts.appendChild(el("button", { class: e.awg.needed ? "btn btn-sm btn-primary" : "btn btn-sm",
+        "aria-label": t("Install {0}", "AmneziaWG " + (ans.run.generation || e.awg.newest || "")),
+        onclick: ev => awgFeedInstall(ans, ev.currentTarget, out, status, restart) }, t("Install")));
+    }
+    // The way round, named as such: the release asset has its own flash, compressed-store and memory
+    // pre-flights, so offering it after a refusal is an offer the daemon will still check.
+    if (ans.fallback && !(e.installed || {}).present) {
+      acts.appendChild(el("button", { class: "btn btn-sm", onclick: ev => installLatest(e, ev.currentTarget) },
+        t("Install amneziawg-go from a WayHop release instead")));
+    }
+    if (acts.childNodes.length) out.appendChild(acts);
+  };
+  if (e.awg.needed && !(e.installed || {}).present) {
+    plan();
+    return box;
+  }
+  // The same disclosure collapsedOffer gives the optional core, under the same words.
+  const det = el("details", { class: "upd-offer" }, el("summary", {}, t("What installing it would add")));
+  let asked = false;
+  det.addEventListener("toggle", () => {
+    if (asked || !det.open) return;
+    asked = true;
+    det.appendChild(box);
+    plan();
+  });
+  return det;
+}
+
+// awgFeedInstall runs the approved path. The outcome is the daemon's own sentence, in a toast,
+// because route() rebuilds the page: after a kernel-module install the row itself goes, replaced by
+// the note that the kernel carries AmneziaWG 3.1. It does not take installedNextStep's note, whose
+// "nothing is waiting on it" is about the core's dependents and would be false for a connection that
+// needs amneziawg-go; the demo's sentence already says that nothing was installed. A failure stays
+// on the row with the installer's log, which is what to act on.
+async function awgFeedInstall(ans, btn, out, status, restart) {
+  if (!await modalConfirm(t("Install from WayHop's feed: {0}?", ans.summary))) return;
+  const restartNetwork = !!(restart && restart.checked);
+  btn.disabled = true;
+  status.textContent = t("Running…");
+  try {
+    const r = await api.post("/api/updater/awg/install", { mode: ans.run.path, restart_network: restartNetwork });
+    toast(r.summary, "ok");
+    route();
+  } catch (err) {
+    // The restart the operator asked for can drop this very connection before the answer arrives; the
+    // page is read again (and the reconnect banner covers the seconds the router is away).
+    if (restartNetwork && isNetworkError(err)) {
+      status.textContent = "";
+      setTimeout(route, 8000);
+      return;
+    }
+    status.textContent = "";
+    out.innerHTML = "";
+    out.appendChild(el("div", { class: "hint upd-err" }, t("Install failed:") + " " + err.message));
+    awgFeedLog(out, err.data && err.data.answer && err.data.answer.run);
+    toast(t("{0} install failed: {1}", "AmneziaWG", err.message), "err");
+    btn.disabled = false;
+  }
+}
+
+// awgFeedLog is the installer's own account of a run, closed by default: the summary above is the
+// answer, and the log is the evidence for when the answer is a failure.
+function awgFeedLog(box, run) {
+  if (!run || !(run.log || []).length) return;
+  box.appendChild(el("details", { class: "pm-why" }, el("summary", { class: "hint" }, t("Installer log")),
+    el("pre", { class: "pm-argv pm-effect" }, run.log.join("\n"))));
+}
+
+// awgFeedRemoval is the way back from a kernel-module install, kept behind a closed disclosure under
+// the note that the kernel carries AmneziaWG: nothing is missing there, so removal must be asked for.
+// It names the packages and the connections that run on them before anything is removed.
+function awgFeedRemoval(e) {
+  const pkgs = (e.awg.packages || []).map(k => k.name + " " + k.version).join(", ");
+  const onKernel = (e.awg.connections || []).filter(c => c.path === "kernel" || c.path === "native").map(c => c.name);
+  const det = el("details", { class: "upd-offer" }, el("summary", {}, t("Remove the AmneziaWG packages")));
+  det.appendChild(el("div", { class: "hint" }, pkgs));
+  if (onKernel.length) det.appendChild(el("div", { class: "hint upd-usage" }, t("Removing it stops: {0}.", onKernel.join(", "))));
+  det.appendChild(el("button", { class: "btn btn-sm btn-danger", "aria-label": t("Remove the AmneziaWG packages"),
+    onclick: async ev => {
+      const btn = ev.currentTarget;
+      const ask = t("Remove the AmneziaWG packages") + ": " + pkgs + "?" +
+        (onKernel.length ? " " + t("Removing it stops: {0}.", onKernel.join(", ")) : "");
+      if (!await modalConfirm(ask)) return;
+      btn.disabled = true;
+      try {
+        const r = await api.del("/api/updater/awg");
+        toast((r.answer && r.answer.summary) || t("Done."), "ok");
+        route();
+      } catch (err) {
+        toast(t("Remove failed:") + " " + err.message, "err");
+        btn.disabled = false;
+      }
+    } }, t("Remove")));
+  return det;
 }
 
 // installLatest is the one-click install the AmneziaWG 3 row offers when a connection needs it: the
@@ -1261,7 +1450,7 @@ function engineRow(e, pmKind, advanced) {
   const byKernel = !!e.carried_by_kernel && !installed.present;
   const managedState = ({ behind: "behind", current: "current", ahead: "ahead",
     catalog_error: "error", channel_missing: "channel_missing" })[pkg.state] || "undecidable";
-  const rec = { id: e.id, failed: e.last_error || "", managed, optional: e.id === "sing-box",
+  const rec = { id: e.id, failed: e.last_error || "", managed, optional: e.id === "sing-box" || !!(e.awg && !e.awg.needed),
     state: managed ? managedState : unknownOwner ? "undecidable" : installed.present ? "unchecked"
       : byKernel ? "kernel" : "absent" };
   if (managed) p.latest.textContent = pkg.latest_version || "—";
@@ -1290,7 +1479,23 @@ function engineRow(e, pmKind, advanced) {
     }
   }
 
-  if (e.awg) p.vbox.appendChild(awgStatusBlock(e.awg));
+  if (e.awg) {
+    p.vbox.appendChild(awgStatusBlock(e.awg));
+    // Where each piece came from, in the package manager's words: the kernel path's packages, and an
+    // amneziawg-go the panel installed from a release asset (a package-owned one is named by the
+    // managed note below). Version strings, not the binary's own claim: amneziawg-go prints a stale one.
+    for (const k of e.awg.packages || []) {
+      p.vbox.appendChild(el("div", { class: "hint" }, t("Installed as {0} package {1}{2}.", pmKind || "system", k.name, " · " + k.version)));
+    }
+    if (installed.source === "release") {
+      p.vbox.appendChild(el("div", { class: "hint" }, t("Installed from a WayHop release ({0}).", installed.version || "?")));
+    }
+    // WayHop's own installer, where it applies here. Offered beside a package-owned amneziawg-go too:
+    // the kernel module is a separate install, and the package manager owns only the binary.
+    if (!unknownOwner && (e.awg.feed_modes || []).length && (e.awg.needed || e.awg.optional)) {
+      p.vbox.appendChild(awgFeedBox(e));
+    }
+  }
 
   // What depends on this engine decides both questions the row exists for: whether "not installed"
   // is normal here, and whether removing it would break something. The daemon answers from the saved
@@ -1476,8 +1681,11 @@ function engineRow(e, pmKind, advanced) {
   // page into an error: header, verdict and the WayHop row still on screen, every engine row and every
   // engine control gone. The Keenetic reports opkg and owns sing-box, so it hit this every time that
   // flag was set; the demo owns nothing through a package manager and never did.
-  if (!noMutate && e.awg && e.awg.needed && !installed.present) {
-    p.acts.appendChild(el("button", { class: "btn btn-sm btn-primary", "aria-label": t("Install {0}", e.name),
+  // Where WayHop's installer applies, its box above carries Install and offers this release-asset
+  // install itself as the way round when the feed cannot serve the router.
+  if (!noMutate && e.awg && (e.awg.needed || e.awg.optional) && !installed.present && !(e.awg.feed_modes || []).length) {
+    // Primary only when a connection needs it: an optional component is offered, not urged.
+    p.acts.appendChild(el("button", { class: e.awg.needed ? "btn btn-sm btn-primary" : "btn btn-sm", "aria-label": t("Install {0}", e.name),
       onclick: ev => installLatest(e, ev.currentTarget) }, t("Install")));
   }
   if (!noMutate) {

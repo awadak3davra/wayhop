@@ -146,6 +146,8 @@ type Updater struct {
 	// opkg process is inspecting its database. A single failed Owner call made a packaged sing-box
 	// look unowned and removed every usable package-manager action from the page.
 	pmStatusMu sync.Mutex
+	// awgRun runs WayHop's AmneziaWG installer (awginstall.go), as a seam: nil runs it for real.
+	awgRun AWGRunFunc
 }
 
 // New builds an Updater. An empty arch autodetects from the running binary
@@ -356,6 +358,35 @@ type Installed struct {
 	Present bool   `json:"present"`
 	Version string `json:"version"`
 	Path    string `json:"path"`
+	// Source says who put the binary there, where that is known: SourceRelease, SourcePackage or
+	// SourceOther. Empty for an engine whose version the binary itself reports truthfully.
+	Source string `json:"source,omitempty"`
+}
+
+// Where an installed binary came from.
+const (
+	SourceRelease = "release" // a WayHop release asset the panel installed and recorded (binstore)
+	SourcePackage = "package" // a file opkg/apk owns; its version is the package database's
+	SourceOther   = "other"   // present, put there by neither, so its version is unknown
+)
+
+// InstalledFor is Installed with the package manager's answer folded in. A binary opkg/apk owns is
+// reported as the package's, at the package's version - for a companion that is the only truthful
+// version there is: amneziawg-go's own --version prints upstream's stale constant, and the record
+// the panel keeps describes only what the panel installed.
+func (u *Updater) InstalledFor(e Engine, pkg PackageStatus) Installed {
+	in := u.Installed(e)
+	if !pkg.Managed {
+		return in
+	}
+	in.Present, in.Source = true, SourcePackage
+	if pkg.Path != "" {
+		in.Path = pkg.Path
+	}
+	if e.Companion != "" || in.Version == "" {
+		in.Version = pkg.InstalledVersion
+	}
+	return in
 }
 
 var verRe = regexp.MustCompile(`\d+\.\d+\.\d+`)
@@ -1251,6 +1282,26 @@ func verifyDigestRequired(data []byte, digest string) error {
 // leaves Updater.SelfRepo empty (the maintainer's fork, CI-built on every v* tag).
 const DefaultSelfRepo = "awadak3davra/wayhop"
 
+// wayhopReleaseTagRe is the shape of a WayHop release tag: v<major>.<minor>.<patch>, optionally with a
+// prerelease or package-revision suffix (v0.6.0-rc1, v0.5.5-r2) or build metadata.
+var wayhopReleaseTagRe = regexp.MustCompile(`^v\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?(?:\+[0-9A-Za-z.-]+)?$`)
+
+// IsWayHopReleaseTag reports whether tag names a WayHop build.
+//
+// The same release repository also carries awg-v* releases: AmneziaWG package sets for the feed
+// (kmod, tools, LuCI, userspace packages), published with --latest=false. They are not WayHop builds,
+// and every reader of WayHop's own releases must pass over them - the self-update, which would
+// otherwise read "awg-v3.1.20260906-1" as version 3.1 and call it newer than any WayHop there is, and
+// the companion listing, which reads amneziawg-go binaries out of WayHop releases only. The test is
+// on the tag and not on the assets: an asset name that happens to match is no reason to trust a
+// release that is not a WayHop build.
+func IsWayHopReleaseTag(tag string) bool { return wayhopReleaseTagRe.MatchString(tag) }
+
+// errNotWayHopTag refuses a self-update or self-fit to a tag that is not a WayHop build.
+func errNotWayHopTag(tag string) error {
+	return fmt.Errorf("%q is not a WayHop release (v<major>.<minor>.<patch>); this repository's awg-v* releases carry AmneziaWG packages, not WayHop", tag)
+}
+
 // selfAsset picks the WayHop release tarball for arch, preferring the OpenWrt
 // package over the generic one. The leading "-"+arch avoids "arm" matching "arm64".
 func selfAsset(assets []Asset, arch string) *Asset {
@@ -1298,7 +1349,7 @@ func (u *Updater) SelfLatest(ctx context.Context, repo string) (Release, error) 
 func pickSelfRelease(rels []Release, arch string) (Release, bool) {
 	var fallback *Release
 	for i := range rels {
-		if selfAsset(rels[i].Assets, arch) == nil {
+		if !IsWayHopReleaseTag(rels[i].Tag) || selfAsset(rels[i].Assets, arch) == nil {
 			continue
 		}
 		if !rels[i].Prerelease {
@@ -1335,6 +1386,9 @@ func (u *Updater) SelfUpdate(ctx context.Context, repo, tag, exePath string) (st
 	}
 	if repo == "" {
 		repo = DefaultSelfRepo
+	}
+	if !IsWayHopReleaseTag(tag) {
+		return "", errNotWayHopTag(tag)
 	}
 	// Fetch the digest-bearing release JSON over the DIRECT GitHub API, not a mirror: the binary is
 	// verified against asset.Digest below, so the digest MUST come from a channel a mirror can't forge

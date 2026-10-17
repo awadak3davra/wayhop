@@ -182,6 +182,10 @@ type executionMaterializationV1 struct {
 
 type executionNativeMaterializationV1 struct {
 	Delta executionNativeDeltaV1 `json:"delta"`
+	// AWGKernel is the AmneziaWG kernel capture the target was compiled with (OpenWrt only), kept in the
+	// apply-state record because the next capture falls back on it when its own probe fails
+	// (awgkernel.go). It is evidence, not something executed.
+	AWGKernel *awgKernelCaptureV1 `json:"awg_kernel,omitempty"`
 }
 
 // nativeTarget returns the native plan this materialization installs, or nil when it has none.

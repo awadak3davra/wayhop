@@ -372,6 +372,8 @@ func revertEndpointField(e *model.Endpoint, b model.Endpoint, field string) bool
 		e.Enabled = b.Enabled
 	case "MTU":
 		e.MTU = b.MTU
+	case fieldAWGEngine:
+		e.AWGUserspace = b.AWGUserspace
 	case "Owner":
 		e.Owner = b.Owner
 	default:

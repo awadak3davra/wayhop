@@ -16,6 +16,7 @@
 #   WAYHOP_PRERELEASE=1     or  --prerelease        allow the newest pre-release
 #   WAYHOP_ARCH=<arch>      or  --arch <arch>       force arch: mipsle|mips|arm|arm64|amd64
 #   WAYHOP_FLAVOUR=…        or  --openwrt|--entware force the build flavour (default: auto)
+#   --with-awg[=auto|kmod|userspace]                then install AmneziaWG 3.1 (install-awg.sh)
 #   -- <install.sh flags…>                          forward the rest verbatim, e.g.  -- --port 8089
 set -eu
 
@@ -35,6 +36,7 @@ FORCE_ARCH="${WAYHOP_ARCH:-}"
 FORCE_TAG="${WAYHOP_VERSION:-}"
 FLAVOUR="${WAYHOP_FLAVOUR:-}"        # "", "openwrt", or "entware"
 PRERELEASE="${WAYHOP_PRERELEASE:-0}"
+WITH_AWG=0; AWG_MODE=auto            # --with-awg: install-awg.sh after install.sh succeeded
 
 die()  { printf 'wayhop-bootstrap: %s\n' "$*" >&2; exit 1; }
 info() { printf '  %s\n' "$*" >&2; }
@@ -51,11 +53,14 @@ while [ $# -gt 0 ]; do
     --prerelease) PRERELEASE=1 ;;
     --openwrt)    FLAVOUR=openwrt ;;
     --entware)    FLAVOUR=entware ;;
+    --with-awg)   WITH_AWG=1 ;;
+    --with-awg=*) WITH_AWG=1; AWG_MODE="${arg#*=}" ;;
     -h|--help)    sed -n '2,29p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
     --)           break ;;
     *)            die "unknown option '$arg' (install.sh flags go after a literal --, e.g. -- --port 8089)" ;;
   esac
 done
+case "$AWG_MODE" in auto|kmod|userspace) ;; *) die "invalid --with-awg mode '$AWG_MODE' (want auto, kmod or userspace)" ;; esac
 
 # --- must be root: install writes /opt/sbin (or /usr/sbin), the init dir, and kernel routing rules ---
 if command -v id >/dev/null 2>&1 && [ "$(id -u)" != 0 ]; then
@@ -195,6 +200,34 @@ mkdir -p "$TMP/x"
 tar -xzf "$TMP/$ASSET" -C "$TMP/x" 2>/dev/null || die "extract failed (unexpected after a verified checksum)."
 [ -f "$TMP/x/install.sh" ] || die "install.sh not found inside $ASSET (bad archive layout)."
 
+# --with-awg: resolve install-awg.sh BEFORE anything is installed, so a release that cannot provide a
+# verified copy stops here. The tarball's copy is covered by the tarball's verified digest; otherwise
+# the release asset must be listed in the same (signature-checked) SHA256SUMS.txt and match it.
+AWG_SCRIPT=""
+if [ "$WITH_AWG" = 1 ]; then
+  if [ -f "$TMP/x/install-awg.sh" ]; then
+    AWG_SCRIPT="$TMP/x/install-awg.sh"
+    info "install-awg.sh: from the verified tarball"
+  else
+    AWG_MATCHES="$(awk '{ name=$2; sub(/^\*/, "", name); if (name == "install-awg.sh") print }' "$TMP/SHA256SUMS.txt")"
+    [ -n "$AWG_MATCHES" ] || die "--with-awg: this release lists no install-awg.sh in SHA256SUMS.txt -- re-run without --with-awg, or pick a release that ships it."
+    [ "$(printf '%s\n' "$AWG_MATCHES" | wc -l | tr -d ' ')" = 1 ] || die "--with-awg: install-awg.sh has multiple entries in SHA256SUMS.txt -- refusing an ambiguous manifest."
+    AWG_WANT="$(printf '%s\n' "$AWG_MATCHES" | awk '{print $1}')"
+    if [ "${#AWG_WANT}" != 64 ] || printf '%s' "$AWG_WANT" | grep -q '[^0-9A-Fa-f]'; then
+      die "--with-awg: install-awg.sh has a malformed SHA-256 digest in SHA256SUMS.txt -- refusing."
+    fi
+    AWG_WANT="$(printf '%s' "$AWG_WANT" | tr 'A-F' 'a-f')"
+    info "downloading install-awg.sh …"
+    dl "$BASE/install-awg.sh" "$TMP/install-awg.sh" || die "--with-awg: download failed: $BASE/install-awg.sh"
+    AWG_GOT="$(sha256_of "$TMP/install-awg.sh")"
+    [ "$AWG_WANT" = "$AWG_GOT" ] || die "--with-awg: SHA-256 MISMATCH for install-awg.sh -- refusing to run it.
+  expected $AWG_WANT
+  got      $AWG_GOT"
+    AWG_SCRIPT="$TMP/install-awg.sh"
+    info "install-awg.sh: sha256 verified"
+  fi
+fi
+
 # Pass the arch we actually downloaded (install.sh would otherwise re-detect, risking a MIPS LE/BE
 # mismatch). We deliberately do NOT force -y: when there is no TTY (curl|sh) install.sh already runs
 # non-interactively using each prompt's SAFE default — it moves WayHop to a free port if 8088 is busy
@@ -208,4 +241,17 @@ sh ./install.sh "$@"
 rc=$?
 set -e
 [ "$rc" = 0 ] || die "install.sh exited with code $rc — see the messages above."
+if [ -n "$AWG_SCRIPT" ]; then
+  echo >&2
+  info "installing AmneziaWG 3.1 (install-awg.sh --mode $AWG_MODE) …"
+  set +e
+  sh "$AWG_SCRIPT" --mode "$AWG_MODE" --yes
+  rc=$?
+  set -e
+  case "$rc" in
+    0) ;;
+    2) warn "WayHop is installed; AmneziaWG was NOT (refused, see above)."; exit 2 ;;
+    *) die "WayHop is installed; install-awg.sh exited with code $rc (AmneziaWG not installed, see above)." ;;
+  esac
+fi
 exit 0

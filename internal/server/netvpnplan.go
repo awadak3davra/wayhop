@@ -105,7 +105,9 @@ func (s *Server) buildNetvpnPlan(r *http.Request) (netvpn.Plan, int, error) {
 			"interface name %q cannot be used for endpoint %s: the routing plane derives %q for it, "+
 				"and a tunnel written under any other name would carry no routes", ifname, ep.ID, derived)
 	}
-	intended, err := netvpn.InterfaceFromEndpoint(*ep, ifname, proto)
+	// Written up to the generation the Apply's capture would compile with (awgkernel.go): the 3.x
+	// settings the module and the netifd handler carry are written, and those they do not are refused.
+	intended, err := netvpn.InterfaceFromEndpointFor(*ep, ifname, proto, s.awgKernelGeneration())
 	if err != nil {
 		return netvpn.Plan{}, http.StatusUnprocessableEntity, err
 	}

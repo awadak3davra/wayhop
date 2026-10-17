@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -50,6 +51,16 @@ func main() {
 	if f := os.Getenv("WAYHOP_TEST_AWGENV"); f != "" {
 		if h, err := os.OpenFile(f, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
 			h.WriteString("GOGC=" + os.Getenv("GOGC") + "\n")
+			h.Close()
+		}
+	}
+	if f := os.Getenv("WAYHOP_TEST_AWGTIER"); f != "" {
+		if h, err := os.OpenFile(f, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+			var kv []string
+			for _, k := range []string{"AWG_GO_BUFFERS_PER_POOL", "AWG_GO_QUEUE_SIZE", "GOMEMLIMIT", "GOMAXPROCS", "AWG_SOCKET_DIR"} {
+				kv = append(kv, k+"="+os.Getenv(k))
+			}
+			h.WriteString(strings.Join(kv, " ") + "\n")
 			h.Close()
 		}
 	}
@@ -162,6 +173,14 @@ func awgus_endpoint(id string) model.Endpoint {
 	}
 }
 
+// awgus_meminfo stands in /proc/meminfo for the rest of the test.
+func awgus_meminfo(t *testing.T, content string) {
+	t.Helper()
+	old := awgMeminfo
+	awgMeminfo = func() ([]byte, error) { return []byte(content), nil }
+	t.Cleanup(func() { awgMeminfo = old })
+}
+
 func awgus_lines(t *testing.T, path string) []string {
 	t.Helper()
 	b, err := os.ReadFile(path)
@@ -183,6 +202,10 @@ func TestAWGUserspace(t *testing.T) {
 	kernel := t.TempDir() // ip and awg, both recording into the same log
 	awgus_build(t, kernel, "ip", awgus_ipSource)
 	awgus_build(t, kernel, "awg", awgus_ipSource)
+	both := t.TempDir() // the kernel tools and amneziawg-go side by side, as on a router that has both
+	awgus_build(t, both, "ip", awgus_ipSource)
+	awgus_build(t, both, "awg", awgus_ipSource)
+	awgus_build(t, both, "amneziawg-go", awgus_blockerSource)
 	// resolve() looks in binDir, then on PATH; on Windows only the PATH lookup adds .exe. An empty
 	// directory on PATH first keeps a host's real awg or ip out of the way.
 	pathWith := func(dir string) string { return dir + string(os.PathListSeparator) + t.TempDir() }
@@ -192,16 +215,23 @@ func TestAWGUserspace(t *testing.T) {
 		rec          *awgus_recorder
 		ipLog, awLog string
 		envLog       string
+		tierLog      string
 	}
 	newRig := func(t *testing.T, bins string, probe awg.Probe) rig {
 		t.Setenv("PATH", pathWith(bins))
 		logs := t.TempDir()
 		r := rig{rec: &awgus_recorder{}, ipLog: filepath.Join(logs, "ip.log"), awLog: filepath.Join(logs, "awg.log"),
-			envLog: filepath.Join(logs, "awgenv.log")}
+			envLog: filepath.Join(logs, "awgenv.log"), tierLog: filepath.Join(logs, "awgtier.log")}
 		t.Setenv("WAYHOP_TEST_IPLOG", r.ipLog)
 		t.Setenv("WAYHOP_TEST_AWGLOG", r.awLog)
 		t.Setenv("WAYHOP_TEST_AWGENV", r.envLog)
+		t.Setenv("WAYHOP_TEST_AWGTIER", r.tierLog)
 		t.Setenv("GOGC", "") // the daemon started without one
+		for _, k := range []string{"GOMEMLIMIT", "GOMAXPROCS", "AWG_GO_BUFFERS_PER_POOL", "AWG_GO_QUEUE_SIZE", "AWG_SOCKET_DIR"} {
+			t.Setenv(k, "") // nor any of these
+		}
+		// A router with 239 MiB, the AX3000T's MemTotal, unless a subtest sets another.
+		awgus_meminfo(t, "MemTotal:         244736 kB\nMemFree:           53000 kB\n")
 		r.m = New(t.TempDir(), bins)
 		r.m.awgProbe = func() awg.Probe { return probe }
 		r.m.awgDial = func(p *proc) (awgSocket, error) { return awgus_socket{p: p, rec: r.rec, awLog: r.awLog}, nil }
@@ -273,6 +303,54 @@ func TestAWGUserspace(t *testing.T) {
 			t.Errorf("amneziawg-go started with %q, want the operator's GOGC=80", got)
 		}
 	})
+
+	// The tier comes from MemTotal, and the socket directory is always the one the daemon dials.
+	// The line the stub writes for a tier's settings, with the operator's own values over them.
+	tierLine := func(env []string, operator map[string]string) string {
+		var parts []string
+		for _, k := range []string{"AWG_GO_BUFFERS_PER_POOL", "AWG_GO_QUEUE_SIZE", "GOMEMLIMIT", "GOMAXPROCS"} {
+			v := operator[k]
+			for _, kv := range env {
+				if tv, ok := strings.CutPrefix(kv, k+"="); ok && v == "" {
+					v = tv
+				}
+			}
+			parts = append(parts, k+"="+v)
+		}
+		return strings.Join(parts, " ") + " AWG_SOCKET_DIR=" + awgSocketDir
+	}
+	for _, c := range []struct {
+		name     string
+		meminfo  string
+		tier     int
+		gomemlim string
+	}{
+		{"a 64 MB router", "MemTotal:   59392 kB\n", 0, ""},
+		{"a 128 MB router", "MemTotal:  124000 kB\n", 0, ""},
+		{"a 256 MB router", "MemTotal:  244736 kB\n", 1, ""},
+		{"a 512 MB router", "MemTotal:  503316 kB\n", 2, ""},
+		{"a router whose meminfo cannot be read", "", awgTierUnknown, ""},
+		{"an operator's GOMEMLIMIT", "MemTotal:  124000 kB\n", 0, "48MiB"},
+	} {
+		t.Run("the memory tier reaches amneziawg-go: "+c.name, func(t *testing.T) {
+			r := newRig(t, binDir, userspace)
+			awgus_meminfo(t, c.meminfo)
+			t.Setenv("AWG_SOCKET_DIR", "/var/run/elsewhere") // inherited, and overridden
+			operator := map[string]string{}
+			if c.gomemlim != "" {
+				t.Setenv("GOMEMLIMIT", c.gomemlim)
+				operator["GOMEMLIMIT"] = c.gomemlim
+			}
+			want := tierLine(awgTiers[c.tier].env, operator)
+			r.m.Sync([]Spec{{ID: "t", Endpoint: awgus_endpoint("t")}})
+			if s := status(r.m, "t"); !s.Running {
+				t.Fatalf("status %+v", s)
+			}
+			if got := awgus_lines(t, r.tierLog); strings.Join(got, "|") != want {
+				t.Errorf("amneziawg-go started with\n%q\nwant\n%q", got, want)
+			}
+		})
+	}
 
 	t.Run("a module new enough for the config keeps the kernel path", func(t *testing.T) {
 		r := newRig(t, binDir, awg.Probe{Kernel: awg.Gen31, TUN: true, GenlVersion: 3, GenlMaxAttr: 34})
@@ -466,6 +544,38 @@ func TestAWGUserspace(t *testing.T) {
 		}
 		if r.rec.count() != 2 {
 			t.Errorf("%d sets, want one per process", r.rec.count())
+		}
+	})
+
+	// The config text is the same on both paths, so the choice itself has to restart the connection:
+	// without that, a connection set to amneziawg-go kept running on the kernel module until the
+	// daemon restarted, and the panel said otherwise.
+	t.Run("choosing amneziawg-go moves a running connection, and Automatic moves it back", func(t *testing.T) {
+		r := newRig(t, both, awg.Probe{Kernel: awg.Gen31, TUN: true, GenlVersion: 3, GenlMaxAttr: 34})
+		iface := util.AWGIface("e")
+		r.m.Sync([]Spec{{ID: "e", Endpoint: awgus_endpoint("e")}})
+		if s := status(r.m, "e"); !s.Running || r.m.procs["e"].cmd != nil {
+			t.Fatalf("automatic on a 3.1 module: %+v; want the kernel path", s)
+		}
+		chosen := awgus_endpoint("e")
+		chosen.AWGUserspace = true
+		r.m.Sync([]Spec{{ID: "e", Endpoint: chosen}})
+		p := r.m.procs["e"]
+		if s := status(r.m, "e"); !s.Running || p == nil || p.cmd == nil {
+			t.Fatalf("after choosing amneziawg-go: %+v", s)
+		}
+		if got := awgus_lines(t, r.awLog); len(got) != 1 || !strings.HasSuffix(got[0], " -f "+iface) {
+			t.Errorf("amneziawg-go started as %q", got)
+		}
+		done := p.done
+		r.m.Sync([]Spec{{ID: "e", Endpoint: awgus_endpoint("e")}})
+		if s := status(r.m, "e"); !s.Running || r.m.procs["e"].cmd != nil {
+			t.Fatalf("back to automatic: %+v; want the kernel path again", s)
+		}
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("amneziawg-go still runs after the connection went back to the kernel path")
 		}
 	})
 
@@ -664,24 +774,127 @@ func TestAWGDecision(t *testing.T) {
 			t.Errorf("%s: %+v, want %v", c.name, got, c.want)
 		}
 	}
+
+	// A connection set to run on amneziawg-go takes it wherever /dev/net/tun is, however new the
+	// module - and says why, since the module could have carried it.
+	chosen := awg31Endpoint()
+	chosen.AWGUserspace = true
+	for _, c := range []struct {
+		name     string
+		probe    awg.Probe
+		firmware bool
+		want     awg.Path
+	}{
+		{"a module new enough", awg.Probe{Kernel: awg.Gen31, TUN: true}, false, awg.PathUserspace},
+		{"the firmware's module", awg.Probe{Kernel: awg.Gen2, TUN: true}, true, awg.PathUserspace},
+		{"a probe that failed", awg.Probe{Err: "no netlink", TUN: true}, false, awg.PathUserspace},
+		{"no TUN", awg.Probe{Kernel: awg.Gen31}, false, awg.PathUnavailable},
+	} {
+		got := AWGDecision(c.probe, c.firmware, chosen)
+		if got.Path != c.want || !strings.Contains(got.Reason, "set to run on amneziawg-go") {
+			t.Errorf("chosen, %s: %+v, want %v", c.name, got, c.want)
+		}
+	}
 }
 
-// GOGC is added unless the daemon's environment already names one; an empty value is no choice.
+// Each tier setting is added unless the daemon's environment already names it (an empty value is no
+// choice); the socket directory is added always, over an inherited one.
 func TestAWGRuntimeEnv(t *testing.T) {
-	for _, c := range []struct {
-		environ []string
-		want    string
-	}{
-		{[]string{"PATH=/usr/bin"}, "GOGC=" + awgGOGC},
-		{[]string{"PATH=/usr/bin", "GOGC=80"}, ""},
-		{[]string{"GOGC=off"}, ""},
-		{[]string{"GOGC="}, "GOGC=" + awgGOGC},
-		{[]string{"XGOGC=80", "GOGCX=80"}, "GOGC=" + awgGOGC},
-		{nil, "GOGC=" + awgGOGC},
-	} {
-		if got := strings.Join(awgRuntimeEnv(c.environ), " "); got != c.want {
-			t.Errorf("awgRuntimeEnv(%q) = %q, want %q", c.environ, got, c.want)
+	for _, mem := range []int64{0, 100 << 10, 200 << 10, 1 << 20} {
+		tier := awgTierFor(mem).env
+		if !slices.Contains(tier, "GOGC="+awgGOGC) {
+			t.Errorf("%d KiB: tier %q does not set GOGC=%s", mem, tier, awgGOGC)
 		}
+		without := func(keys ...string) string {
+			var out []string
+			for _, kv := range tier {
+				if k, _, _ := strings.Cut(kv, "="); !slices.Contains(keys, k) {
+					out = append(out, kv)
+				}
+			}
+			return strings.Join(append(out, "AWG_SOCKET_DIR="+awgSocketDir), " ")
+		}
+		for _, c := range []struct {
+			environ []string
+			want    string
+		}{
+			{[]string{"PATH=/usr/bin"}, without()},
+			{[]string{"PATH=/usr/bin", "GOGC=80"}, without("GOGC")},
+			{[]string{"GOGC=off"}, without("GOGC")},
+			{[]string{"GOGC="}, without()},
+			{[]string{"XGOGC=80", "GOGCX=80"}, without()},
+			{nil, without()},
+			{[]string{"AWG_SOCKET_DIR=/var/run/elsewhere"}, without()},
+			{[]string{"GOMEMLIMIT=64MiB", "AWG_GO_BUFFERS_PER_POOL=4096", "AWG_GO_QUEUE_SIZE=", "GOMAXPROCS=2"},
+				without("GOMEMLIMIT", "AWG_GO_BUFFERS_PER_POOL", "GOMAXPROCS")},
+		} {
+			if got := strings.Join(awgRuntimeEnv(c.environ, mem), " "); got != c.want {
+				t.Errorf("awgRuntimeEnv(%q, %d) = %q, want %q", c.environ, mem, got, c.want)
+			}
+		}
+	}
+}
+
+// The tier boundaries and the settings each tier gives amneziawg-go (docs/AWG_LOWMEM.md, development repository).
+func TestAWGTierFor(t *testing.T) {
+	low := "AWG_GO_BUFFERS_PER_POOL=512 AWG_GO_QUEUE_SIZE=256 GOMEMLIMIT=24MiB GOGC=25 GOMAXPROCS=1"
+	small := "AWG_GO_BUFFERS_PER_POOL=512 AWG_GO_QUEUE_SIZE=256 GOGC=25"
+	normal := "AWG_GO_BUFFERS_PER_POOL=1024 AWG_GO_QUEUE_SIZE=256 GOGC=25"
+	for _, c := range []struct {
+		kib  int64
+		want string
+	}{
+		{0, small}, // unknown
+		{-1, small},
+		{59392, low}, // a 64 MB router
+		{124000, low},
+		{128<<10 - 1, low},
+		{128 << 10, small},
+		{244736, small}, // the AX3000T
+		{256<<10 - 1, small},
+		{256 << 10, normal},
+		{16 << 20, normal},
+	} {
+		if got := strings.Join(awgTierFor(c.kib).env, " "); got != c.want {
+			t.Errorf("awgTierFor(%d) = %q, want %q", c.kib, got, c.want)
+		}
+	}
+}
+
+func TestParseMemTotalKiB(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want int64
+	}{
+		{"MemTotal:         244736 kB\nMemFree:           53000 kB\n", 244736},
+		{"MemFree: 1 kB\nMemTotal: 59392 kB", 59392},
+		{"MemTotal:\n", 0},
+		{"MemTotal: lots kB\n", 0},
+		{"MemTotal: -5 kB\n", 0},
+		{"SwapTotal: 100 kB\n", 0},
+		{"", 0},
+	} {
+		if got := parseMemTotalKiB(c.in); got != c.want {
+			t.Errorf("parseMemTotalKiB(%q) = %d, want %d", c.in, got, c.want)
+		}
+	}
+	old := awgMeminfo
+	defer func() { awgMeminfo = old }()
+	awgMeminfo = func() ([]byte, error) { return nil, os.ErrNotExist }
+	if got := awgMemTotalKiB(); got != 0 {
+		t.Errorf("an unreadable meminfo gave %d KiB, want 0", got)
+	}
+}
+
+// AWG_SOCKET_DIR must name the directory internal/awg dials, or the daemon finds no socket at all.
+func TestAWGSocketDirIsTheClients(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "awg", "uapi.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^const uapiSocketDir = "([^"]+)"`).FindSubmatch(src)
+	if m == nil || string(m[1]) != awgSocketDir {
+		t.Fatalf("internal/awg dials %q, amneziawg-go is told %q", m, awgSocketDir)
 	}
 }
 

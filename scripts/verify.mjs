@@ -245,6 +245,30 @@ const checks = [
   // verification, including wrong-key and tamper refusals.
   { name: 'apk signing', cmd: 'sh', args: ['scripts/check-apk-signing.sh'],
     evidence: { re: /apk signing: (\d+) real-crypto checks passed/, min: 5, what: 'apk signing checks' } },
+  // AmneziaWG 3.1 from WayHop's own feed; the plan is docs/AWG_FULL_INSTALL.md (development repository).
+  // install-awg.sh runs as root on routers and decides what fits; its unit tests drive it
+  // with a stub package manager under busybox ash and dash, then the installers' --with-awg hooks run
+  // in real OpenWrt and Entware containers. The count is the busybox ash run, the shell routers have.
+  { name: 'awg installer', cmd: 'sh', args: ['packaging/awg/test/docker.sh'],
+    evidence: { re: /install-awg unit tests \([^)]*\): \d+ cases, (\d+) checks passed/, min: 330,
+      what: 'install-awg unit checks under busybox ash' } },
+  // The same installer against the real apk 3 (OpenWrt 25.12) and opkg (24.10) from a fixture feed
+  // signed with throwaway keys: install, re-run, uninstall, kernel-module rollback, interruption, a
+  // feed signed with another key. awg.yml runs it again on the packages a build produced.
+  { name: 'awg install lifecycle', cmd: 'sh', args: ['scripts/check-awg-install.sh'],
+    evidence: { re: /install-awg lifecycle: (\d+) checks passed/, min: 70,
+      what: 'install-awg lifecycle checks on a real apk and opkg' } },
+  // A router trusts the feed through keys embedded in install-awg.sh and the --with-awg hooks; a key
+  // rotated in packaging/feed/keys/ that does not reach those copies would break every new install.
+  { name: 'awg installer keys', cmd: 'sh', args: ['scripts/check-awg-installer-keys.sh'],
+    evidence: { re: /embedded feed keys match packaging\/feed\/keys: (\d+) checks/, min: 6,
+      what: 'embedded feed key copies compared' } },
+  // The netifd protocol handler amneziawg.sh in OpenWrt 25.12 and 24.10 rootfs images, with awg, ip
+  // and amneziawg-go stubbed. Given a directory with x86_64 awg and amneziawg-go it also brings up a
+  // real userspace interface in both; awg.yml does that with the binaries it built.
+  { name: 'awg netifd proto', cmd: 'sh', args: ['scripts/check-awg-openwrt-proto.sh'],
+    evidence: { re: /openwrt proto: (\d+) checks passed/, min: 42,
+      what: 'amneziawg protocol handler checks in two OpenWrt images' } },
   // The publish rules drop docs/ and design/ and keep scripts/ and internal/, so a comment citing
   // one of those design notes by path resolves here and dangles in the tree the public gets. The
   // pointer is worth keeping; what it has to do is say where the document lives. (This very entry

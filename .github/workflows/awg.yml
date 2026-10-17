@@ -1,0 +1,573 @@
+name: awg
+
+# WayHop's own AmneziaWG 3.1 builds: kmod-amneziawg + amneziawg-tools + luci-proto-amneziawg for every
+# OpenWrt release x target in packaging/awg/targets.txt, and amneziawg-go + a static awg per CPU arch
+# packed for Entware and OpenWrt (opkg + apk).
+# The plan: docs/AWG_FULL_INSTALL.md (development repository).
+#
+#   push touching the AWG sources  -> the smoke matrix (targets.txt lines marked `smoke`)
+#   awg-v* tag, weekly schedule    -> every line; the tag also publishes the GitHub release and asks
+#                                     feed.yml to republish the feed with it
+#   workflow_dispatch              -> the scope chosen
+#
+# Every job that builds or runs upstream code (SDK builds, Go builds, package lifecycle, QEMU) is on a
+# GitHub-hosted runner with a read-only token and no secret. Only `release` signs; it runs on the
+# trusted self-hosted runner behind the `release` environment, after every test, and builds nothing.
+# Artifacts pass the build outputs between jobs of ONE run and expire after three days.
+on:
+  push:
+    branches: ['**']
+    tags: ['awg-v*']
+    paths:
+      - 'packaging/awg/**'
+      - 'scripts/awg/**'
+      - 'scripts/build-amneziawg-go.sh'
+      - 'scripts/check-awg-*'
+      - '.github/workflows/awg.yml'
+  schedule:
+    - cron: '41 2 * * 6'   # weekly: upstream SDK/feeds drift and new upstream tags show up with no push
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: 'full = every line of packaging/awg/targets.txt, smoke = the reduced matrix'
+        type: choice
+        options: [full, smoke]
+        default: full
+
+permissions:
+  contents: read
+
+concurrency:
+  # A newer push supersedes a running smoke build of the same branch; a tag or the weekly full run is
+  # never cancelled by one.
+  group: awg-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' && github.ref_type != 'tag' }}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  # Newest 1.26.x on the Go download page (checked 2026-10-16), the toolchain every workflow uses:
+  # govulncheck failed 1.26.6 on net/http advisories that 1.26.9 fixes.
+  GO_VERSION: '1.26.9'
+  SHELLCHECK_IMAGE: koalaman/shellcheck@sha256:bb596a0d169b85ddd81d8b6d3a2ff6d5baf5fca10b97f575ebc647c3dff62b3d
+
+jobs:
+  # Pins, lint and the build matrix. A moved upstream tag, a misnamed release tag or a script that
+  # does not lint stops the run here, before thirty SDK builds start.
+  pins:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      scope: ${{ steps.scope.outputs.scope }}
+      kmod: ${{ steps.matrix.outputs.kmod }}
+      e2e: ${{ steps.matrix.outputs.e2e }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Pinned upstream tags still resolve to the pinned commits
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          . packaging/awg/VERSIONS
+          bad=0
+          check_tag() {  # <name> <repo> <tag> <commit>
+            local refs got newest
+            refs="$(git ls-remote "$2" "refs/tags/$3" "refs/tags/$3^{}")"
+            # An annotated tag lists the tag object and, peeled (^{}), the commit; prefer the commit.
+            got="$(printf '%s\n' "$refs" | awk '$2 ~ /\^\{\}$/ { p = $1 } $2 !~ /\^\{\}$/ { t = $1 } END { print (p != "" ? p : t) }')"
+            if [ "$got" != "$4" ]; then
+              echo "::error::$1: tag $3 resolves to '${got:-nothing}', WayHop pins $4"; bad=1; return
+            fi
+            echo "$1: $3 -> $got (as pinned)"
+            newest="$(git ls-remote --tags --refs "$2" | sed 's#.*refs/tags/##' | grep -E '^v[0-9]+(\.[0-9]+)+$' | sort -V | tail -n 1)"
+            [ "$newest" = "$3" ] || echo "::warning::$1: upstream has $newest, WayHop pins $3"
+          }
+          check_tag amneziawg-go "$AWG_GO_REPO" "$AWG_GO_TAG" "$AWG_GO_COMMIT"
+          check_tag amneziawg-tools "$AWG_TOOLS_REPO" "$AWG_TOOLS_TAG" "$AWG_TOOLS_COMMIT"
+          check_tag amneziawg-linux-kernel-module "$AWG_KMOD_REPO" "$AWG_KMOD_TAG" "$AWG_KMOD_COMMIT"
+          # The LuCI page is pinned to a commit, not a tag: fetch exactly that object.
+          tmp="$(mktemp -d)"
+          git -C "$tmp" init -q
+          if git -C "$tmp" fetch -q --depth 1 "$AWG_LUCI_REPO" "$AWG_LUCI_COMMIT"; then
+            echo "awg-openwrt: $AWG_LUCI_COMMIT is fetchable"
+            head="$(git ls-remote "$AWG_LUCI_REPO" HEAD | cut -f1)"
+            [ "$head" = "$AWG_LUCI_COMMIT" ] || echo "::warning::awg-openwrt: HEAD is $head, WayHop pins $AWG_LUCI_COMMIT"
+          else
+            echo "::error::awg-openwrt: pinned commit $AWG_LUCI_COMMIT cannot be fetched"; bad=1
+          fi
+          rm -rf "$tmp"
+          # The release build script carried its own copy of the amneziawg-go pin before VERSIONS
+          # existed; while it still does, the two must agree.
+          for k in AWG_GO_TAG AWG_GO_COMMIT; do
+            v="$(sed -n "s/^$k=\"\(.*\)\"$/\1/p" scripts/build-amneziawg-go.sh | head -n 1)"
+            if [ -n "$v" ] && [ "$v" != "$(eval "printf %s \"\$$k\"")" ]; then
+              echo "::error::scripts/build-amneziawg-go.sh has $k=$v, packaging/awg/VERSIONS differs"; bad=1
+            fi
+          done
+          [ "$bad" = 0 ]
+      - name: Release tag matches the pins
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          . packaging/awg/VERSIONS
+          want="awg-v${AWG_KMOD_TAG#v}-${AWG_PKG_RELEASE}"
+          [ "$TAG" = "$want" ] || { echo "::error::tag $TAG does not match packaging/awg/VERSIONS (expected $want)"; exit 1; }
+      - name: Lint the AWG scripts
+        run: |
+          set -euo pipefail
+          # The installer and the netifd protocol handler run as root on routers (busybox ash); the
+          # other scripts run in CI and on dev hosts. No -s: each file's shebang or `shellcheck shell=`
+          # directive decides (the handler declares dash, as netifd's handlers use `local`), the same
+          # list quality-gate.yml lints.
+          files="$(ls scripts/awg/*.sh scripts/check-awg-*.sh packaging/awg/*.sh packaging/awg/test/*.sh \
+            packaging/awg/openwrt/amneziawg-tools/files/amneziawg.sh 2>/dev/null)"
+          # shellcheck disable=SC2086  # a file list
+          docker run --rm --network none --read-only -v "$PWD:/repo:ro" -w /repo "$SHELLCHECK_IMAGE" \
+            -S warning $files
+          for f in scripts/awg/*.py; do [ -e "$f" ] && python3 -m py_compile "$f"; done
+          rm -rf scripts/awg/__pycache__
+      - name: Scope
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          INPUT_SCOPE: ${{ inputs.scope }}
+        run: |
+          set -euo pipefail
+          case "$EVENT" in
+            workflow_dispatch) scope="$INPUT_SCOPE" ;;
+            schedule) scope=full ;;
+            *) if [ "$REF_TYPE" = tag ]; then scope=full; else scope=smoke; fi ;;
+          esac
+          case "$scope" in smoke|full) ;; *) echo "::error::unknown scope '$scope'"; exit 1 ;; esac
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
+          echo "AmneziaWG build scope: $scope"
+      - name: Matrix
+        id: matrix
+        env:
+          SCOPE: ${{ steps.scope.outputs.scope }}
+        run: |
+          set -euo pipefail
+          kmod="$(sh scripts/awg/matrix.sh "$SCOPE" kmod)"
+          e2e="$(sh scripts/awg/matrix.sh "$SCOPE" e2e)"
+          echo "kmod=$kmod" >> "$GITHUB_OUTPUT"
+          echo "e2e=$e2e" >> "$GITHUB_OUTPUT"
+          echo "kmod: $kmod"; echo "e2e: $e2e"
+
+  # The installer and the netifd protocol handler on fixtures and stubs, beside the builds: they need
+  # no build output, so a broken installer is reported before the SDK matrix finishes. The same gates
+  # run in quality-gate.yml and scripts/verify.mjs.
+  installer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Installer keys are the feed keys
+        run: sh scripts/check-awg-installer-keys.sh
+      - name: Installer unit tests (busybox ash, dash, --with-awg hooks in containers)
+        run: sh packaging/awg/test/docker.sh
+      - name: netifd protocol handler in OpenWrt 25.12 and 24.10 (stubbed engines)
+        run: sh scripts/check-awg-openwrt-proto.sh
+
+  # amneziawg-go (lowmem patch) + static awg for amd64 arm64 arm mips mipsle, packed for Entware and
+  # OpenWrt, and every binary started once under qemu-user.
+  userspace:
+    needs: pins
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Build amneziawg-go and the static awg for every router arch
+        run: sh scripts/awg/build-userspace.sh dist/awg
+      - name: Pack the Entware and OpenWrt userspace packages
+        run: sh scripts/awg/pack-userspace.sh dist/awg dist/awg
+      - name: Every binary runs under qemu-user, every package installs and removes
+        run: |
+          set -euo pipefail
+          rc=0
+          sh scripts/awg/test-userspace.sh dist/awg || rc=$?
+          [ "$rc" != 3 ] || { echo "::error::docker is unavailable - the userspace artifacts were NOT exercised"; exit 1; }
+          exit "$rc"
+      - name: Every arch and package format is present
+        run: |
+          set -euo pipefail
+          bad=0
+          for tok in amd64 arm64 arm mips mipsle; do
+            for b in amneziawg-go awg; do
+              [ -s "dist/awg/userspace/$tok/$b" ] || { echo "::error::missing userspace/$tok/$b"; bad=1; }
+            done
+          done
+          for kind in entware ipk apk; do
+            n="$(find "dist/awg/$kind" -type f \( -name '*.ipk' -o -name '*.apk' \) 2>/dev/null | wc -l)"
+            [ "$n" -gt 0 ] || { echo "::error::no $kind packages were packed"; bad=1; }
+          done
+          [ "$bad" = 0 ]
+      # Handed to lifecycle and e2e through a cache scoped to this run, not an artifact: Actions
+      # artifact storage is the small account-wide quota build.yml explains, and a full quota fails
+      # the upload. The cache is per repository, and nothing outside this run reads these keys.
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            dist/awg/userspace
+            dist/awg/entware
+            dist/awg/ipk
+            dist/awg/apk
+          key: awg-run-${{ github.run_id }}-userspace
+
+  # One OpenWrt SDK build per release x target. The SDK tarball is cached under its URL; the build
+  # script verifies it against the release's sha256sums before use either way.
+  kmod:
+    needs: pins
+    name: kmod ${{ matrix.release }} ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.pins.outputs.kmod) }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Resolve the SDK
+        id: sdk
+        env:
+          REL: ${{ matrix.release }}
+          TGT: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          base="https://downloads.openwrt.org/releases/$REL/targets/$TGT"
+          name="$(curl -fsSL --retry 3 "$base/sha256sums" | awk '{ sub(/^\*/, "", $2) } $2 ~ /^openwrt-sdk-.*\.tar\.(zst|xz)$/ { print $2; exit }')"
+          [ -n "$name" ] || { echo "::error::no SDK listed in $base/sha256sums"; exit 1; }
+          echo "url=$base/$name" >> "$GITHUB_OUTPUT"
+          echo "SDK: $base/$name"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/wayhop-awg/sdk
+          key: openwrt-sdk-${{ steps.sdk.outputs.url }}
+      - name: Build kmod-amneziawg, amneziawg-tools, luci-proto-amneziawg
+        env:
+          REL: ${{ matrix.release }}
+          TGT: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          export AWG_SDK_CACHE="$HOME/.cache/wayhop-awg/sdk"
+          mkdir -p "$AWG_SDK_CACHE"
+          sh scripts/awg/build-openwrt.sh "$REL" "$TGT"
+      - name: The output is what the feed accepts
+        env:
+          REL: ${{ matrix.release }}
+          TGT: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          dir="dist/awg/openwrt/$REL/$TGT"
+          [ -s "$dir/BUILDINFO" ] || { echo "::error::$dir/BUILDINFO is missing"; exit 1; }
+          cat "$dir/BUILDINFO"
+          # feed-layout.sh refuses a directory whose BUILDINFO disagrees with its packages.
+          sh scripts/awg/feed-layout.sh dist/awg "$RUNNER_TEMP/feed-check"
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: dist/awg/openwrt/${{ matrix.release }}/${{ matrix.target }}
+          key: awg-run-${{ github.run_id }}-kmod-${{ matrix.id }}
+
+  # Install, upgrade and remove in OpenWrt rootfs containers, from a feed laid out exactly like the
+  # published one and signed with throwaway keys.
+  lifecycle:
+    needs: [pins, userspace, kmod]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      # The rootfs images here are releases no kmod line builds for, so the lifecycle exercises the
+      # userspace packages; the kernel path is proven on real OpenWrt in the e2e job.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            dist/awg/userspace
+            dist/awg/entware
+            dist/awg/ipk
+            dist/awg/apk
+          key: awg-run-${{ github.run_id }}-userspace
+          fail-on-cache-miss: true
+      - name: Test feed (feed layout, throwaway keys)
+        run: |
+          set -euo pipefail
+          sh scripts/awg/feed-layout.sh dist/awg "$RUNNER_TEMP/feed"
+          sh scripts/awg/qemu-feed-sign.sh "$RUNNER_TEMP/feed" "$RUNNER_TEMP/testkeys"
+          sh scripts/awg/feed-layout.sh --check "$RUNNER_TEMP/feed"
+      # check-awg-install.sh re-signs the packages it is given with throwaway keys of its own and
+      # drives install-awg.sh against the real apk and opkg (see that script).
+      - name: Package lifecycle (install, upgrade, remove)
+        run: |
+          set -euo pipefail
+          rc=0
+          sh scripts/check-awg-install.sh "$RUNNER_TEMP/feed" || rc=$?
+          [ "$rc" != 3 ] || { echo "::error::docker is unavailable - the lifecycle was NOT tested"; exit 1; }
+          exit "$rc"
+      # The handler again, now with the x86_64 awg and amneziawg-go this run built: a real userspace
+      # interface in each image, every AmneziaWG 3.1 key read back, renew and teardown.
+      - name: netifd protocol handler with the built awg and amneziawg-go
+        run: |
+          set -euo pipefail
+          rc=0
+          sh scripts/check-awg-openwrt-proto.sh dist/awg/userspace/amd64 || rc=$?
+          [ "$rc" != 3 ] || { echo "::error::docker is unavailable - the protocol handler was NOT tested"; exit 1; }
+          exit "$rc"
+
+  # Real OpenWrt in QEMU: install from the served feed, then an AmneziaWG 3.1 tunnel with every 3.1
+  # parameter to a peer on this runner. malta/le boots with 64 MiB, the small-RAM router case.
+  e2e:
+    needs: [pins, userspace, kmod]
+    name: e2e ${{ matrix.release }} ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.pins.outputs.e2e) }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            dist/awg/userspace
+            dist/awg/entware
+            dist/awg/ipk
+            dist/awg/apk
+          key: awg-run-${{ github.run_id }}-userspace
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: dist/awg/openwrt/${{ matrix.release }}/${{ matrix.target }}
+          key: awg-run-${{ github.run_id }}-kmod-${{ matrix.id }}
+          fail-on-cache-miss: true
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/wayhop-awg-e2e
+          key: awg-e2e-${{ matrix.id }}-v1
+      - name: Test feed (feed layout, throwaway keys)
+        run: |
+          set -euo pipefail
+          # The peer runs these two binaries; keep them executable whatever carried them here.
+          chmod 0755 dist/awg/userspace/amd64/amneziawg-go dist/awg/userspace/amd64/awg
+          sh scripts/awg/feed-layout.sh dist/awg "$RUNNER_TEMP/feed"
+          sh scripts/awg/qemu-feed-sign.sh "$RUNNER_TEMP/feed" "$RUNNER_TEMP/testkeys"
+      - name: QEMU end to end (${{ matrix.cases }}, ${{ matrix.mem }} MiB)
+        env:
+          REL: ${{ matrix.release }}
+          TGT: ${{ matrix.target }}
+          AWG_E2E_CASES: ${{ matrix.cases }}
+          AWG_E2E_MEM: ${{ matrix.mem }}
+        run: |
+          set -euo pipefail
+          [ -e /dev/kvm ] && echo "KVM available" || echo "no KVM: TCG"
+          AWG_E2E_KEYS="$RUNNER_TEMP/testkeys" AWG_E2E_PEER_DIR="$PWD/dist/awg/userspace/amd64" \
+          AWG_E2E_OUT="$RUNNER_TEMP/e2e-out" \
+            sh scripts/awg/qemu-docker.sh "$RUNNER_TEMP/feed" "$REL" "$TGT"
+      - name: Summary
+        if: always()
+        run: cat "$RUNNER_TEMP/e2e-out/summary.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+      # No artifact upload (the account-wide quota): a failed run prints its logs into the job log.
+      - name: Logs of a failed run
+        if: failure()
+        run: |
+          find "$RUNNER_TEMP/e2e-out" -type f -name '*.log' 2>/dev/null | sort | while read -r f; do
+            echo "::group::$f"; tail -n 300 "$f"; echo "::endgroup::"
+          done
+
+  # Tag only: tarball every output directory, sign the manifest, publish a release that never becomes
+  # "latest" (bootstrap.sh downloads releases/latest), then ask feed.yml to republish the feed.
+  release:
+    needs: [pins, installer, userspace, kmod, lifecycle, e2e]
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'awg-v')
+    runs-on: [self-hosted, Linux, X64]
+    environment: release
+    timeout-minutes: 300   # rebuilds every SDK line in sequence
+    permissions:
+      contents: write   # create the release + upload its assets
+      actions: write    # dispatch feed.yml
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Verify the release source
+        env:
+          TAG: ${{ github.ref_name }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          . packaging/awg/VERSIONS
+          want="awg-v${AWG_KMOD_TAG#v}-${AWG_PKG_RELEASE}"
+          [ "$TAG" = "$want" ] || { echo "::error::tag $TAG does not match packaging/awg/VERSIONS (expected $want)"; exit 1; }
+          tagged="$(git rev-parse "refs/tags/$TAG^{commit}")"
+          head="$(git rev-parse HEAD)"
+          [ "$tagged" = "$EXPECTED_SHA" ] && [ "$head" = "$EXPECTED_SHA" ] \
+            || { echo "::error::$TAG -> $tagged, HEAD $head, event $EXPECTED_SHA: not one commit"; exit 1; }
+      # Like build.yml's release: rebuild every package from the tagged commit right here and attach
+      # it to the release directly, with no Actions artifact in between (the account-wide quota fills
+      # up and would block the release). The kmod and tools builds are reproducible, so these are the
+      # bytes the matrix jobs above built and tested; build-openwrt.sh re-checks every pin either way.
+      - name: Rebuild every package from this commit
+        run: |
+          set -euo pipefail
+          sh scripts/awg/build-userspace.sh dist/awg
+          sh scripts/awg/pack-userspace.sh dist/awg dist/awg
+          sh scripts/awg/matrix.sh full kmod >/dev/null   # the list parses: no malformed or duplicate line
+          while read -r rel tgt _; do
+            case "$rel" in ''|\#*) continue ;; esac
+            AWG_DOCKER_PREFIX="awg-release-${GITHUB_RUN_ID}-" sh scripts/awg/build-openwrt-docker.sh "$rel" "$tgt" dist/awg
+          done < packaging/awg/targets.txt
+      - name: Drop this run's SDK cache volume from the self-hosted runner
+        if: always()
+        run: docker volume rm -f "awg-release-${GITHUB_RUN_ID}-sdk-cache" >/dev/null 2>&1 || true
+      - name: Check completeness, tarball every output directory, build the signer
+        run: |
+          set -euo pipefail
+          missing=0
+          sh scripts/awg/matrix.sh full kmod >/dev/null   # the list parses: no malformed or duplicate line
+          while read -r rel tgt _; do
+            case "$rel" in ''|\#*) continue ;; esac
+            [ -s "dist/awg/openwrt/$rel/$tgt/BUILDINFO" ] || { echo "::error::no build for $rel $tgt"; missing=1; }
+          done < packaging/awg/targets.txt
+          for tok in amd64 arm64 arm mips mipsle; do
+            for b in amneziawg-go awg; do
+              [ -s "dist/awg/userspace/$tok/$b" ] || { echo "::error::missing userspace/$tok/$b"; missing=1; }
+            done
+          done
+          for kind in entware ipk apk; do
+            [ -n "$(find "dist/awg/$kind" -mindepth 2 -maxdepth 2 -type f 2>/dev/null | head -n 1)" ] \
+              || { echo "::error::no $kind packages"; missing=1; }
+          done
+          [ "$missing" = 0 ] || { echo "release is INCOMPLETE - refusing to publish"; exit 1; }
+          # Artifacts do not keep file modes: packages are data, the userspace binaries are programs.
+          find dist/awg -type f -exec chmod 0644 {} +
+          chmod 0755 dist/awg/userspace/*/amneziawg-go dist/awg/userspace/*/awg
+          # The feed builder is the strictest reader of this tree: every BUILDINFO is checked again.
+          sh scripts/awg/feed-layout.sh dist/awg "$RUNNER_TEMP/awg-feed-check"
+          rm -rf "$RUNNER_TEMP/awg-feed-check"
+          rm -rf release && mkdir release
+          # One tarball per directory that holds files (openwrt/<rel>/<target>/<sub>, userspace and
+          # userspace/<arch>, entware/<token>, ipk/<arch>, apk/<arch>), each holding that directory's
+          # files under their dist/awg-relative path, so unpacking them all rebuilds dist/awg.
+          n=0
+          for rel in $(cd dist/awg && find . -type f | sed -e 's#^\./##' -e 's#/[^/]*$##' | sort -u); do
+            case "$rel" in */*|openwrt|userspace|entware|ipk|apk) ;; *) echo "::error::unexpected file outside a dist/awg directory: $rel"; exit 1 ;; esac
+            name="awg-$(printf '%s' "$rel" | tr '/' '-').tar.gz"
+            # The updater's companion path reads amneziawg-go-* assets of WayHop releases; an AWG
+            # release must never carry that prefix.
+            case "$name" in amneziawg-go-*) echo "::error::refusing asset name $name"; exit 1 ;; esac
+            [ ! -e "release/$name" ] || { echo "::error::two directories map to $name"; exit 1; }
+            ( cd dist/awg && find "$rel" -maxdepth 1 -type f -print0 | sort -z \
+                | tar -cf - --owner=0 --group=0 --numeric-owner --mtime=@0 --no-recursion --null -T - ) \
+              | gzip -n -9 > "release/$name"
+            n=$((n + 1))
+          done
+          [ "$n" -gt 0 ] || { echo "::error::nothing to release"; exit 1; }
+          ( cd release && sha256sum awg-*.tar.gz > SHA256SUMS )
+          echo "$n tarballs:"; cat release/SHA256SUMS
+          signer_dir="$(mktemp -d "$RUNNER_TEMP/awg-release-signer.XXXXXX")"
+          signer="$signer_dir/usigntool"
+          go build -trimpath -o "$signer" ./packaging/feed/usigntool
+          if [ ! -x "$signer" ] || [ -L "$signer" ]; then
+            echo "::error::release signer build is not a regular executable"; exit 1
+          fi
+          printf 'AWG_RELEASE_SIGNER=%s\nAWG_RELEASE_SIGNER_DIR=%s\n' "$signer" "$signer_dir" >> "$GITHUB_ENV"
+      - name: Sign and verify the manifest
+        env:
+          AWG_RELEASE_SIGN_KEY: ${{ secrets.VELINX_USIGN_SEC }}
+        run: |
+          set -euo pipefail
+          [ -n "${AWG_RELEASE_SIGN_KEY:-}" ] || { echo "::error::VELINX_USIGN_SEC is required for an AmneziaWG release"; exit 1; }
+          umask 077
+          key="$(mktemp "$RUNNER_TEMP/awg-relsign.XXXXXX")"
+          if [ ! -f "$key" ] || [ -L "$key" ] || [ "$(stat -c %a "$key")" != 600 ]; then
+            echo "::error::signing key file is not a private regular file"; exit 1
+          fi
+          printf 'AWG_RELEASE_KEY_FILE=%s\n' "$key" >> "$GITHUB_ENV"
+          cleanup() { rm -f "$key"; }
+          trap cleanup EXIT
+          trap 'exit 129' HUP
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          printf '%s' "$AWG_RELEASE_SIGN_KEY" > "$key"
+          unset AWG_RELEASE_SIGN_KEY
+          # feed.yml verifies this signature with the same committed public key before it uses any of it.
+          "$AWG_RELEASE_SIGNER" sign -sec "$key" -m release/SHA256SUMS -out release/SHA256SUMS.sig
+          "$AWG_RELEASE_SIGNER" verify -pub packaging/feed/keys/wayhop.pub -m release/SHA256SUMS -sig release/SHA256SUMS.sig
+      - name: Remove signing material
+        if: always()
+        run: |
+          [ -z "${AWG_RELEASE_KEY_FILE:-}" ] || rm -f -- "$AWG_RELEASE_KEY_FILE"
+      - name: Verify the release is complete
+        run: |
+          set -euo pipefail
+          "$AWG_RELEASE_SIGNER" verify -pub packaging/feed/keys/wayhop.pub -m release/SHA256SUMS -sig release/SHA256SUMS.sig
+          ( cd release && sha256sum -c --strict SHA256SUMS )
+          listed="$(wc -l < release/SHA256SUMS)"
+          present="$(find release -maxdepth 1 -name 'awg-*.tar.gz' | wc -l)"
+          [ "$listed" = "$present" ] || { echo "::error::SHA256SUMS lists $listed, $present tarballs present"; exit 1; }
+          if find release -maxdepth 1 -name 'amneziawg-go-*' | grep -q .; then
+            echo "::error::an amneziawg-go-* asset would shadow the updater's companion assets"; exit 1
+          fi
+          ls -la release
+      - name: Remove the signer
+        if: always()
+        run: |
+          [ -z "${AWG_RELEASE_SIGNER:-}" ] || rm -f -- "$AWG_RELEASE_SIGNER"
+          [ -z "${AWG_RELEASE_SIGNER_DIR:-}" ] || rmdir -- "$AWG_RELEASE_SIGNER_DIR"
+      - name: Publish the release (never "latest")
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          . packaging/awg/VERSIONS
+          notes="AmneziaWG 3.1 packages built by WayHop: amneziawg-go ${AWG_GO_TAG}, amneziawg-tools ${AWG_TOOLS_TAG}, kernel module ${AWG_KMOD_TAG}, packaging revision ${AWG_PKG_RELEASE}. Routers install them from the WayHop feed; SHA256SUMS is signed with the WayHop release key."
+          gh release create "$TAG" release/awg-*.tar.gz release/SHA256SUMS release/SHA256SUMS.sig \
+            --repo "$GITHUB_REPOSITORY" --title "AmneziaWG $TAG" --notes "$notes" --latest=false --verify-tag
+          latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          case "$latest" in
+            awg-*) echo "::error::$TAG became the latest release - bootstrap.sh would download from it; fix this by hand now"; exit 1 ;;
+          esac
+      - name: Republish the feed with these packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # feed.yml publishes for a WayHop release tag; republish the current one so the feed picks
+          # up the newest awg-v* release.
+          vtag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          case "$vtag" in
+            v[0-9]*) ;;
+            *) echo "::error::the latest release is '$vtag', not a WayHop v* release - the feed was not republished"; exit 1 ;;
+          esac
+          gh workflow run feed.yml --repo "$GITHUB_REPOSITORY" --ref "$vtag" -f release_tag="$vtag"
+          echo "dispatched feed.yml for $vtag"

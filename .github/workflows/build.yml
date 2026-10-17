@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: '1.26.6'  # >= 1.26.6: GO-2026-6218 / 6090 / 6089 / 5972 / 5942 (net/url, crypto/tls, net/http, encoding/asn1, net) fixed here
+          go-version: '1.26.9'  # >= 1.26.9: GO-2026-6603 / 6605 / 6609-6613 / 6617 (net/http), 6607 (crypto/tls), 6608 (net/textproto) fixed here
           cache: false
       - run: go vet ./...
       # -v so the run says which tests SKIPPED. `go test` prints ok for a package whose tests all
@@ -75,7 +75,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: '1.26.6'  # >= 1.26.6: GO-2026-6218 / 6090 / 6089 / 5972 / 5942 (net/url, crypto/tls, net/http, encoding/asn1, net) fixed here
+          go-version: '1.26.9'  # >= 1.26.9: GO-2026-6603 / 6605 / 6609-6613 / 6617 (net/http), 6607 (crypto/tls), 6608 (net/textproto) fixed here
           cache: false
       - name: Cross-compile + package ${{ matrix.name }}
         env:
@@ -134,7 +134,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: '1.26.6'  # >= 1.26.6: GO-2026-6218 / 6090 / 6089 / 5972 / 5942 (net/url, crypto/tls, net/http, encoding/asn1, net) fixed here
+          go-version: '1.26.9'  # >= 1.26.9: GO-2026-6603 / 6605 / 6609-6613 / 6617 (net/http), 6607 (crypto/tls), 6608 (net/textproto) fixed here
           cache: false
       - name: Verify immutable release source
         id: source
@@ -257,10 +257,16 @@ jobs:
           # Listed in SHA256SUMS.txt, so the signed manifest covers it like every other asset.
           TMPDIR="${RUNNER_TEMP:-/tmp}" sh scripts/build-amneziawg-go.sh
           cp dist/amneziawg-go/amneziawg-go-*-linux-*.gz dist/
-          ( cd dist && for f in *.tar.gz *.ipk *.apk amneziawg-go-*.gz; do [ -e "$f" ] && sha256sum "$f"; done > SHA256SUMS.txt )
+          # The standalone AmneziaWG installer, unversioned like bootstrap.sh so that
+          # `releases/latest/download/install-awg.sh` always resolves. Unlike bootstrap.sh it IS in
+          # SHA256SUMS.txt: bootstrap.sh is the trust root (it carries the key the manifest is checked
+          # with), while install-awg.sh is one of the files bootstrap.sh / install.sh download and
+          # check against that manifest (--with-awg), exactly like the tarballs.
+          cp packaging/awg/install-awg.sh dist/install-awg.sh
+          ( cd dist && for f in *.tar.gz *.ipk *.apk amneziawg-go-*.gz install-awg.sh; do [ -e "$f" ] && sha256sum "$f"; done > SHA256SUMS.txt )
           # Online one-command installer. Unversioned asset name so the copy-paste
           # `releases/latest/download/bootstrap.sh` one-liner always resolves; kept out
-          # of SHA256SUMS.txt (which lists only the tarballs the bootstrap verifies).
+          # of SHA256SUMS.txt (which lists only the files the bootstrap verifies).
           cp packaging/bootstrap.sh dist/bootstrap.sh
           # Build the audited signer before the secret-bearing step starts. The next step receives
           # the signing secret; this build/package step never does.
@@ -344,9 +350,12 @@ jobs:
               [ -s "$f" ] || { echo "::error::missing or empty OpenWrt apk package: $f"; missing=1; }
             done
           done < packaging/feed/arch-map.txt
-          for f in dist/SHA256SUMS.txt dist/SHA256SUMS.txt.sig dist/bootstrap.sh; do
+          for f in dist/SHA256SUMS.txt dist/SHA256SUMS.txt.sig dist/bootstrap.sh dist/install-awg.sh; do
             [ -s "$f" ] || { echo "::error::missing or empty release asset: $f"; missing=1; }
           done
+          # The installer is fetched and checked against the signed manifest, so it must be listed there.
+          grep -Eq '^[0-9a-f]{64}  install-awg\.sh$' dist/SHA256SUMS.txt \
+            || { echo "::error::install-awg.sh is not listed in SHA256SUMS.txt"; missing=1; }
           # One amneziawg-go asset per arch the updater can be asked for; two would make the pick ambiguous.
           for tok in amd64 arm64 armv7 mips mipsle; do
             n="$(find dist -maxdepth 1 -name "amneziawg-go-*-linux-${tok}.gz" -size +0 | wc -l)"
@@ -367,7 +376,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          assets=(dist/*.tar.gz dist/*.ipk dist/*.apk dist/amneziawg-go-*.gz dist/SHA256SUMS.txt dist/SHA256SUMS.txt.sig dist/bootstrap.sh)
+          assets=(dist/*.tar.gz dist/*.ipk dist/*.apk dist/amneziawg-go-*.gz dist/install-awg.sh dist/SHA256SUMS.txt dist/SHA256SUMS.txt.sig dist/bootstrap.sh)
           gh release create "${GITHUB_REF_NAME}" "${assets[@]}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "WayHop ${GITHUB_REF_NAME}" \

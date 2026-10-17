@@ -1,0 +1,33 @@
+# AmneziaWG pins for WayHop's own builds. Shell-sourceable (POSIX sh), read by scripts/awg/*,
+# scripts/build-amneziawg-go.sh and .github/workflows/awg.yml. Every fetch is refused unless the tag
+# resolves to the pinned commit, so a moved tag cannot change what we ship.
+# The three upstream versions below are mutually consistent: kmod 3.1.20260906 carries the
+# RandomTrailers fix that makes it match go 3.1.20260828, and tools older than 3.1.20260812 fail
+# `setconf` on 3.1 keys. See docs/AWG_FULL_INSTALL.md (development repository).
+
+AWG_GO_REPO="https://github.com/amnezia-vpn/amneziawg-go"
+AWG_GO_TAG="v3.1.20260828"
+AWG_GO_COMMIT="b5928efb6ca19f0153958460c3d141f04abc5c2e"
+
+AWG_TOOLS_REPO="https://github.com/amnezia-vpn/amneziawg-tools"
+AWG_TOOLS_TAG="v3.1.20260812"
+AWG_TOOLS_COMMIT="ee0f0a9aa34ff0a0da4b3433b9512781cfe02843"
+
+AWG_KMOD_REPO="https://github.com/amnezia-vpn/amneziawg-linux-kernel-module"
+AWG_KMOD_TAG="v3.1.20260906"
+AWG_KMOD_COMMIT="4569c4c67f3a57414969260cafbbd04694fbaae0"
+
+# LuCI protocol page only (Apache-2.0 per its files; attribution kept in the built package).
+AWG_LUCI_REPO="https://github.com/Slava-Shchipunov/awg-openwrt"
+AWG_LUCI_COMMIT="03b62269e2edc168504f057cffaafda11b25ed92"
+
+# Revision of WayHop's packaging of the versions above; bump when only the packaging changes.
+AWG_PKG_RELEASE="2"
+
+# Toolchain of the static `awg` for Entware (scripts/awg/build-awg-static.sh): zig cc and the musl
+# it bundles. The tarball is refused unless its sha256 matches. Pinned 2026-10-16 from
+# ziglang.org/download/index.json; its minisign signature verified against the Zig Software
+# Foundation key RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U.
+AWG_ZIG_VERSION="0.16.0"
+AWG_ZIG_URL="https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz"
+AWG_ZIG_SHA256="70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"

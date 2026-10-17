@@ -202,13 +202,14 @@ func TestCompanionRecord(t *testing.T) {
 // The demo names the real pinned build, and the whole chain - listing, pick, fit - runs on it for
 // every arch without the network.
 func TestCompanionOfflineMatchesThePinnedBuild(t *testing.T) {
-	script, err := os.ReadFile(filepath.Join("..", "..", "scripts", "build-amneziawg-go.sh"))
+	// The build script reads its pins from VERSIONS, the one place they are written.
+	pins, err := os.ReadFile(filepath.Join("..", "..", "packaging", "awg", "VERSIONS"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := regexp.MustCompile(`(?m)^AWG_GO_TAG="([^"]+)"`).FindSubmatch(script)
+	m := regexp.MustCompile(`(?m)^AWG_GO_TAG="([^"]+)"`).FindSubmatch(pins)
 	if m == nil || string(m[1]) != offlineCompanionVersion {
-		t.Fatalf("the build script pins %q, the demo catalogue names %q", m, offlineCompanionVersion)
+		t.Fatalf("VERSIONS pins %q, the demo catalogue names %q", m, offlineCompanionVersion)
 	}
 	e := *EngineByID("amneziawg-go")
 	for arch := range companionScriptNames {
