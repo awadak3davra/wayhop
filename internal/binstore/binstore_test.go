@@ -182,3 +182,110 @@ func TestRemove(t *testing.T) {
 		}
 	}
 }
+
+// exists reports whether p is there at all.
+func exists(p string) bool {
+	_, err := os.Lstat(p)
+	return err == nil
+}
+
+// Once a package owns the binary, only WayHop's compressed copy goes: the gzip, its record and the copy
+// unpacked from it. The package's binary - in dir itself here, as on a router whose bin directory is
+// the package's - is never touched.
+func TestRemoveStaleCompressed(t *testing.T) {
+	cases := []struct {
+		name string
+		// arrange lays out dir and run; it returns the paths that must survive and those that must go.
+		arrange func(t *testing.T, dir, run string) (keep, gone []string)
+	}{
+		{"compressed store beside the package's binary", func(t *testing.T, dir, run string) ([]string, []string) {
+			store(t, dir, "bin", []byte("wayhop build"), "v3.1.20260828")
+			if _, err := Unpack(dir, "bin", run); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(Stored(dir, "bin", false), []byte("package build"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			return []string{Stored(dir, "bin", false)},
+				[]string{Stored(dir, "bin", true), recordPath(dir, "bin"), filepath.Join(run, "bin"), filepath.Join(run, "bin.src")}
+		}},
+		{"a raw record the package wrote over", func(t *testing.T, dir, run string) ([]string, []string) {
+			if err := os.WriteFile(Stored(dir, "bin", false), []byte("wayhop build"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := Write(dir, "bin", "v1", false); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(Stored(dir, "bin", false), []byte("the package's longer build"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			return []string{Stored(dir, "bin", false)}, []string{recordPath(dir, "bin")}
+		}},
+		{"a raw record that still describes its binary", func(t *testing.T, dir, run string) ([]string, []string) {
+			if err := os.WriteFile(Stored(dir, "bin", false), []byte("wayhop build"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := Write(dir, "bin", "v1", false); err != nil {
+				t.Fatal(err)
+			}
+			return []string{Stored(dir, "bin", false), recordPath(dir, "bin")}, nil
+		}},
+		{"an unpacked copy Unpack did not make", func(t *testing.T, dir, run string) ([]string, []string) {
+			if err := os.WriteFile(filepath.Join(run, "bin"), []byte("someone else's"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			return []string{filepath.Join(run, "bin")}, nil
+		}},
+		{"a gzip path that is not a file", func(t *testing.T, dir, run string) ([]string, []string) {
+			if err := os.Mkdir(Stored(dir, "bin", true), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			return []string{Stored(dir, "bin", true)}, nil
+		}},
+		{"nothing stored", func(t *testing.T, dir, run string) ([]string, []string) { return nil, nil }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir, run := t.TempDir(), t.TempDir()
+			keep, gone := c.arrange(t, dir, run)
+			removed, err := RemoveStaleCompressed(dir, "bin", run)
+			if err != nil {
+				t.Fatalf("RemoveStaleCompressed: %v", err)
+			}
+			for _, p := range keep {
+				if !exists(p) {
+					t.Errorf("%s was removed", p)
+				}
+			}
+			for _, p := range gone {
+				if exists(p) {
+					t.Errorf("%s survived", p)
+				}
+			}
+			if len(removed) != len(gone) {
+				t.Errorf("reported %q, want the %d paths removed", removed, len(gone))
+			}
+			// Twice is the same as once.
+			if again, err := RemoveStaleCompressed(dir, "bin", run); err != nil || len(again) != 0 {
+				t.Errorf("second run: %q, %v", again, err)
+			}
+		})
+	}
+}
+
+// runDir and dir may be one directory on an odd install; the binary there is still never the copy's.
+func TestRemoveStaleCompressed_RunDirIsDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(Stored(dir, "bin", false), []byte("package build"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bin.src"), []byte("marker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RemoveStaleCompressed(dir, "bin", dir); err != nil {
+		t.Fatal(err)
+	}
+	if !exists(Stored(dir, "bin", false)) {
+		t.Error("the package's binary was removed")
+	}
+}

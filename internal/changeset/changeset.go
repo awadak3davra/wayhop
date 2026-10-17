@@ -480,8 +480,18 @@ func endpointScalarFields(e model.Endpoint) map[string]string {
 	if e.Owner != "" {
 		m["Owner"] = string(e.Owner)
 	}
+	// Only where there is a choice to report: a WayHop AmneziaWG connection, or a stray flag on
+	// anything else (which Validate refuses, and the review should not hide).
+	if e.AWGUserspace {
+		m[fieldAWGEngine] = "amneziawg-go"
+	} else if e.Engine == model.EngineAmneziaWG {
+		m[fieldAWGEngine] = "automatic"
+	}
 	return m
 }
+
+// fieldAWGEngine is the review row for Endpoint.AWGUserspace.
+const fieldAWGEngine = "AmneziaWG engine"
 
 func diffEndpointFields(b, d model.Endpoint) []Change {
 	var out []Change
@@ -496,6 +506,9 @@ func diffEndpointFields(b, d model.Endpoint) []Change {
 		case "Enabled":
 			c.MayInterrupt = true
 			c.Impact = "turns this egress on/off; traffic using it will move"
+		case fieldAWGEngine:
+			c.MayInterrupt = true
+			c.Impact = "moves this connection between the router's own AmneziaWG and amneziawg-go; its tunnel restarts"
 		case "Server", "Port":
 			c.MayInterrupt = true
 			c.Impact = "reconnects this egress to a different address"

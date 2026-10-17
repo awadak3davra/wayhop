@@ -11,6 +11,7 @@
 #       --arch A     force arch: mipsle | mips | arm | arm64 | amd64
 #       --no-start   install but do not start the service
 #       --dry-run    run every check and print what WOULD change; change nothing
+#       --with-awg[=auto|kmod|userspace]  then install AmneziaWG 3.1 (install-awg.sh)
 #   -h, --help       show this help and exit
 #
 # Idempotent: re-running upgrades in place. POSIX sh / busybox-safe.
@@ -40,15 +41,19 @@ Usage: sh ./install.sh [options] [arch]
       --arch A   force arch: mipsle | mips | arm | arm64 | amd64
       --no-start install but do not start the service
       --dry-run  run all checks, print what WOULD change, change nothing
+      --with-awg[=auto|kmod|userspace]
+                 then install AmneziaWG 3.1 with install-awg.sh (exit 2 if it is refused)
   -h, --help     show this help
 USAGE
   exit 0
 }
 
 ASSUME=""; DRY_RUN=0; NO_START=0; PORT=8088; FORCE_ARCH=""
+WITH_AWG=0; AWG_MODE=auto
 while [ $# -gt 0 ]; do
   case "$1" in
     -y|--yes) ASSUME=yes ;;
+    --with-awg) WITH_AWG=1 ;; --with-awg=*) WITH_AWG=1; AWG_MODE="${1#*=}" ;;
     --port) shift; PORT="$1"; PORT_EXPLICIT=1 ;; --port=*) PORT="${1#*=}"; PORT_EXPLICIT=1 ;;
     --arch) shift; FORCE_ARCH="$1" ;; --arch=*) FORCE_ARCH="${1#*=}" ;;
     --no-start) NO_START=1 ;;
@@ -60,6 +65,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 case "$PORT" in ''|*[!0-9]*) die "invalid --port: '$PORT'" ;; esac
+case "$AWG_MODE" in auto|kmod|userspace) ;; *) die "invalid --with-awg mode '$AWG_MODE' (want auto, kmod or userspace)" ;; esac
 { [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ]; } || die "--port out of range 1-65535: $PORT"
 
 ask() {
@@ -113,6 +119,75 @@ native_summary() {
   else info "native: none detected -- WayHop will tunnel these via sing-box instead"; fi
   info "(advisory only -- nothing was installed; WayHop carries non-native protocols via sing-box)"
 }
+
+# >>> with-awg hook (packaging/awg/install-awg.sh; tests: packaging/awg/test/hooks.sh)
+# --with-awg: AmneziaWG 3.1 through install-awg.sh, once WayHop itself is in place. Uses the
+# install-awg.sh beside this script (the tarball's own copy); without one it is downloaded from the
+# WayHop release (latest, or WAYHOP_VERSION) and checked against that release's SHA256SUMS.txt the way
+# bootstrap.sh checks a tarball: the manifest signature wherever usign/signify exists, then SHA-256.
+# Release manifest key: the same as bootstrap.sh's; scripts/check-awg-installer-keys.sh guards drift.
+RELEASE_PUBKEY="untrusted comment: WayHop package feed
+RWRPIiBbFocxjpgLjnQqmDCLsl6UIxNQbLKar75vb/65X5BEh5lnqbxL"
+awg_fetch() { # url dest
+  if command -v curl >/dev/null 2>&1; then curl -fsSL --connect-timeout 20 "$1" -o "$2"
+  elif command -v wget >/dev/null 2>&1; then wget -q -T 20 -O "$2" "$1"
+  else return 1; fi
+}
+awg_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+  elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 "$1" | sed 's/.*= *//'; fi
+}
+awg_installer() { # tmpdir -> sets AWG_SH to a verified install-awg.sh; 1 when there is none
+  AWG_SH=""
+  if [ -f "$SRC/install-awg.sh" ]; then AWG_SH="$SRC/install-awg.sh"; return 0; fi
+  _ab="https://github.com/awadak3davra/wayhop/releases/latest/download"
+  if [ -n "${WAYHOP_VERSION:-}" ]; then
+    case "$WAYHOP_VERSION" in v*) _at="$WAYHOP_VERSION" ;; *) _at="v$WAYHOP_VERSION" ;; esac
+    _ab="https://github.com/awadak3davra/wayhop/releases/download/$_at"
+  fi
+  info "install-awg.sh is not beside install.sh -- fetching it from $_ab"
+  awg_fetch "$_ab/SHA256SUMS.txt" "$1/SHA256SUMS.txt" || { warn "could not download the release's SHA256SUMS.txt"; return 1; }
+  _av=""
+  command -v signify >/dev/null 2>&1 && _av=signify
+  [ -z "$_av" ] && command -v usign >/dev/null 2>&1 && _av=usign
+  if [ -n "$_av" ]; then
+    awg_fetch "$_ab/SHA256SUMS.txt.sig" "$1/SHA256SUMS.txt.sig" ||
+      { warn "the release ships no SHA256SUMS.txt.sig -- refusing an unsigned manifest on a device that can verify one"; return 1; }
+    printf '%s\n' "$RELEASE_PUBKEY" > "$1/release.pub"
+    "$_av" -V -q -p "$1/release.pub" -x "$1/SHA256SUMS.txt.sig" -m "$1/SHA256SUMS.txt" 2>/dev/null ||
+      { warn "manifest SIGNATURE verification FAILED -- refusing install-awg.sh"; return 1; }
+    ok "release manifest signature verified ($_av)"
+  else
+    warn "no usign/signify here: the manifest signature is not checked; SHA-256 over HTTPS still is"
+  fi
+  _am="$(awk '{ n = $2; sub(/^\*/, "", n); if (n == "install-awg.sh") print $1 }' "$1/SHA256SUMS.txt")"
+  { [ -n "$_am" ] && [ "$(printf '%s\n' "$_am" | wc -l | tr -d ' ')" = 1 ] && [ "${#_am}" = 64 ]; } ||
+    { warn "install-awg.sh is not listed exactly once, with a SHA-256, in the release's SHA256SUMS.txt"; return 1; }
+  _am="$(printf '%s' "$_am" | tr 'A-F' 'a-f')"
+  awg_fetch "$_ab/install-awg.sh" "$1/install-awg.sh" || { warn "could not download install-awg.sh"; return 1; }
+  [ "$(awg_sha256 "$1/install-awg.sh")" = "$_am" ] || { warn "SHA-256 MISMATCH for install-awg.sh -- refusing to run it"; return 1; }
+  ok "install-awg.sh sha256 verified"
+  AWG_SH="$1/install-awg.sh"
+}
+with_awg() { # extra install-awg.sh args... -> 0 done, 1 failed, 2 refused
+  hdr "AmneziaWG 3.1 (--with-awg)"
+  _ad="$(mktemp -d 2>/dev/null)" || _ad=""
+  [ -n "$_ad" ] || { _ad="/tmp/wayhop-awg.$$"; (umask 077; mkdir -p "$_ad"); }
+  if ! awg_installer "$_ad"; then
+    rm -rf "$_ad"; warn "AmneziaWG NOT installed: no verified install-awg.sh (WayHop itself is fine)"; return 1
+  fi
+  _ay="--yes"; [ "$ASSUME" = no ] && _ay="--dry-run"   # -n: report only
+  sh "$AWG_SH" --mode "$AWG_MODE" "$_ay" "$@"
+  _arc=$?
+  rm -rf "$_ad"
+  case "$_arc" in
+    0) ok "AmneziaWG step done" ;;
+    2) warn "AmneziaWG NOT installed: refused, see above (WayHop itself is fine)" ;;
+    *) warn "AmneziaWG NOT installed: install-awg.sh exited $_arc (WayHop itself is fine)"; _arc=1 ;;
+  esac
+  return "$_arc"
+}
+# <<< with-awg hook
 
 # Banner version read from the bundled binary (the tarball ships one wayhop-<arch> for this router's
 # CPU), so it can never drift from what is actually installed. Falls back quietly if it won't run.
@@ -272,7 +347,11 @@ case "$listener" in
 esac
 for p in 9090 5353 7890; do port_busy "$p" && warn "port :$p in use ($(port_listener "$p")) -- adjust \"ports\" in config.json if needed"; done
 
-if [ "$DRY_RUN" = 1 ]; then hdr "Dry-run complete"; say "no changes made. Re-run without --dry-run to install."; exit 0; fi
+if [ "$DRY_RUN" = 1 ]; then
+  hdr "Dry-run complete"; say "no changes made. Re-run without --dry-run to install."
+  if [ "$WITH_AWG" = 1 ]; then with_awg --dry-run; exit $?; fi
+  exit 0
+fi
 
 # An upgrade over any earlier installation is safe without a ritual: on first start the daemon
 # imports whatever applied state it finds (a previous-generation apply ledger, or the pre-ledger
@@ -428,7 +507,11 @@ say "enabling service (boot start)"
 # ===========================================================================
 # Start + health check
 # ===========================================================================
-if [ "$NO_START" = 1 ]; then hdr "Done (not started)"; say "start later: $INITD/wayhop start"; native_summary; exit 0; fi
+if [ "$NO_START" = 1 ]; then
+  hdr "Done (not started)"; say "start later: $INITD/wayhop start"; native_summary
+  if [ "$WITH_AWG" = 1 ]; then with_awg; exit $?; fi
+  exit 0
+fi
 hdr "Start"
 say "starting service"
 "$INITD/wayhop" start 2>/dev/null || warn "start returned non-zero -- check: logread -e wayhop"
@@ -528,6 +611,14 @@ echo "  status: $INITD/wayhop status   |   logs: logread -e wayhop"
 if [ -f "$ETC/uninstall.sh" ]; then echo "  uninstall: sh $ETC/uninstall.sh   (add --purge to also delete config)"
 elif [ -f "$SRC/uninstall.sh" ]; then echo "  uninstall: sh ./uninstall.sh   (add --purge to also delete config)"
 else warn "uninstall.sh not found -- re-download the tarball to remove WayHop later"; fi
+
+if [ "$WITH_AWG" = 1 ]; then
+  if [ "${ROLLED_BACK:-0}" = 1 ] || { [ "$HEALTHY" != 1 ] && [ "${HEALTH_CHECKED:-0}" = 1 ]; }; then
+    warn "AmneziaWG (--with-awg) skipped: WayHop itself did not come up"
+  else
+    with_awg || exit $?
+  fi
+fi
 
 # Exit status reflects the real outcome so the bootstrap / automation can tell success from failure.
 if [ "${ROLLED_BACK:-0}" = 1 ]; then

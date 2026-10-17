@@ -102,6 +102,9 @@ func (u *Updater) SelfFit(ctx context.Context, repo, tag, exePath string) (Insta
 	if repo == "" {
 		repo = DefaultSelfRepo
 	}
+	if !IsWayHopReleaseTag(tag) {
+		return f, errNotWayHopTag(tag)
+	}
 	rel, err := u.releaseDirect(ctx, Engine{Repo: repo}, tag)
 	if err != nil {
 		return f, fmt.Errorf("lookup wayhop %s: %w", tag, err)

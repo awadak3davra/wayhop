@@ -33,7 +33,7 @@ permissions:
 
 env:
   # Same patched Go the release builds use; go.mod's `go 1.22` is only the language floor.
-  GO_VERSION: '1.26.6'  # >= 1.26.6: GO-2026-6218 / 6090 / 6089 / 5972 / 5942 (net/url, crypto/tls, net/http, encoding/asn1, net) fixed here
+  GO_VERSION: '1.26.9'  # >= 1.26.9: GO-2026-6603 / 6605 / 6609-6613 / 6617 (net/http), 6607 (crypto/tls), 6608 (net/textproto) fixed here
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
   SHELLCHECK_IMAGE: koalaman/shellcheck@sha256:bb596a0d169b85ddd81d8b6d3a2ff6d5baf5fca10b97f575ebc647c3dff62b3d
 
@@ -98,6 +98,13 @@ jobs:
             -S warning packaging/*.sh packaging/openwrt/*.sh \
             packaging/S99wayhop packaging/openwrt/wayhop.init \
             packaging/test/bootstrap_harness.sh packaging/test/s99wayhop_harness.sh
+          # AmneziaWG 3.1: the installer (root on routers), its tests, the netifd protocol handler the
+          # amneziawg-tools package installs, the build/test scripts and the gates that drive them.
+          # Globs, so a script added to these directories is linted without editing this list.
+          docker run --rm --network none --read-only -v "$PWD:/repo:ro" -w /repo "$SHELLCHECK_IMAGE" \
+            -S warning packaging/awg/*.sh packaging/awg/test/*.sh \
+            packaging/awg/openwrt/amneziawg-tools/files/amneziawg.sh \
+            scripts/awg/*.sh scripts/check-awg-*.sh
           # the feed pack scripts + maintainer scripts run as ROOT on user routers — lint them too
           docker run --rm --network none --read-only -v "$PWD:/repo:ro" -w /repo "$SHELLCHECK_IMAGE" \
             -S warning -s sh packaging/feed/*.sh \
@@ -141,6 +148,17 @@ jobs:
         run: sh scripts/check-feed-index.sh
       - name: apk index signing boundary (real crypto, pinned offline signer)
         run: sh scripts/check-apk-signing.sh
+      # AmneziaWG 3.1 from WayHop's own feed. awg.yml repeats the lifecycle and the protocol handler
+      # on the packages and binaries a build produced; here they run on fixtures and stubs, so a
+      # change to the installer or the handler is gated without an SDK build.
+      - name: AmneziaWG installer unit tests (busybox ash, dash, --with-awg hooks in containers)
+        run: sh packaging/awg/test/docker.sh
+      - name: AmneziaWG installer keys are the feed keys
+        run: sh scripts/check-awg-installer-keys.sh
+      - name: AmneziaWG install lifecycle on a real apk and opkg (fixture feed, throwaway keys)
+        run: sh scripts/check-awg-install.sh
+      - name: AmneziaWG netifd protocol handler in OpenWrt 25.12 and 24.10 (stubbed engines)
+        run: sh scripts/check-awg-openwrt-proto.sh
 
   # --- secret scanning over tree + full history (BLOCKING) ---
   # The feed SIGNING keys live only in GitHub secrets + off-repo backup; this backstop fails

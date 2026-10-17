@@ -1949,5 +1949,14 @@
   "Or point the phone's camera at this code.": "Або навядзіце на гэты код камеру тэлефона.",
   "Daily summary at": "Зводка за суткі ў",
   "Router clock: {0}; quiet hours and the summary follow it.": "Гадзіннік роўтара: {0}; па ім ідуць ціхія гадзіны і зводка.",
-  "Outages, switches, traffic by exit. Silent, even in quiet hours.": "Збоі, пераключэнні, трафік па выхадах. Без гуку, нават у ціхія гадзіны."
+  "Outages, switches, traffic by exit. Silent, even in quiet hours.": "Збоі, пераключэнні, трафік па выхадах. Без гуку, нават у ціхія гадзіны.",
+  "This will install:": "Будзе ўсталявана:",
+  "Install from WayHop's feed: {0}?": "Усталяваць з рэпазіторыя WayHop: {0}?",
+  "Install amneziawg-go from a WayHop release instead": "Замест гэтага ўсталяваць amneziawg-go з рэліза WayHop",
+  "Installer log": "Журнал усталёўшчыка",
+  "Remove the AmneziaWG packages": "Выдаліць пакеты AmneziaWG",
+  "Installed from a WayHop release ({0}).": "Усталявана з рэліза WayHop ({0}).",
+  "Restart the network service now": "Перазапусціць сеткавую службу зараз",
+  "Restart the network service after installing (every link drops for a few seconds)": "Перазапусціць сеткавую службу пасля ўсталёўкі (усе злучэнні знікнуць на некалькі секунд)",
+  "AmneziaWG 3.x settings reach netifd's new handler only after the network service restarts: now (every link drops for a few seconds) or at the next reboot.": "Налады AmneziaWG 3.x трапяць у новы апрацоўшчык netifd толькі пасля перазапуску сеткавай службы: зараз (усе злучэнні знікнуць на некалькі секунд) або пры наступнай перазагрузцы."
 }

@@ -1,0 +1,31 @@
+# OpenWrt builds of kmod-amneziawg + amneziawg-tools + luci-proto-amneziawg.
+# One line per SDK build: <release> <target>/<subtarget> [smoke]
+# A kmod is pinned to one kernel build, so every release x target needs its own line.
+# `smoke` lines are the reduced matrix built on branch pushes; a tag or the schedule builds all.
+24.10.8 ramips/mt7621
+24.10.8 ramips/mt76x8
+24.10.8 mediatek/filogic
+24.10.8 mediatek/mt7622
+24.10.8 ath79/generic
+24.10.8 ipq40xx/generic
+24.10.8 qualcommax/ipq807x
+24.10.8 mvebu/cortexa9
+24.10.8 bcm27xx/bcm2711
+24.10.8 x86/64 smoke
+24.10.8 rockchip/armv8
+24.10.8 malta/le
+24.10.8 armsr/armv8
+25.12.5 ramips/mt7621
+25.12.5 ramips/mt76x8
+25.12.5 mediatek/filogic
+25.12.5 mediatek/mt7622
+25.12.5 ath79/generic
+25.12.5 ipq40xx/generic
+25.12.5 qualcommax/ipq807x
+25.12.5 mvebu/cortexa9
+25.12.5 bcm27xx/bcm2711
+25.12.5 x86/64 smoke
+25.12.5 rockchip/armv8
+25.12.5 malta/le smoke
+25.12.5 armsr/armv8
+25.12.2 mediatek/filogic smoke

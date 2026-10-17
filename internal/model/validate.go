@@ -159,6 +159,11 @@ func (p *Profile) Validate() error {
 		if e.PersistentKeepalive != 0 && (e.PersistentKeepalive < 1 || e.PersistentKeepalive > 65535) {
 			return fmt.Errorf("endpoint %q: persistent_keepalive %d out of range (1-65535)", e.ID, e.PersistentKeepalive)
 		}
+		// Only WayHop's own AmneziaWG engine can move a connection onto amneziawg-go. Refused rather
+		// than ignored elsewhere: a flag the planner would never read is a setting that looks in force.
+		if e.AWGUserspace && (e.Engine != EngineAmneziaWG || !e.OwnsResource()) {
+			return fmt.Errorf("endpoint %q: awg_userspace applies only to an AmneziaWG connection WayHop runs itself", e.ID)
+		}
 		if e.Engine == EngineExternal {
 			// Routes via an existing OS interface, not a server — it needs only the
 			// interface name; server/port/protocol do not apply.

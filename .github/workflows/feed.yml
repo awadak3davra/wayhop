@@ -4,6 +4,10 @@ name: feed
 # awadak3davra/wayhop-feed GitHub Pages site. Runs on a v* release tag, or manually for validation.
 # Both opkg/Entware and apk are mandatory: the latter is the only native package format on the newest
 # supported OpenWrt release and is built with the digest-pinned apk-tools image below.
+# The feed also carries WayHop's AmneziaWG 3.1 packages from the newest awg-v* release (built and
+# tested by awg.yml, which dispatches this workflow after publishing one): its signed SHA256SUMS is
+# verified before anything in it is used, and its packages are indexed and signed here with the same
+# keys as wayhop's own. No awg-v* release yet means a feed without them, not a failed run.
 on:
   push:
     tags: ['v*']
@@ -69,7 +73,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: '1.26.6'
+          go-version: '1.26.9'
           cache: false
       - name: full race suite (no inert green tests)
         run: |
@@ -98,7 +102,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: '1.26.6'  # match the release toolchain (go.mod's 'go 1.22' is only the language floor); 1.26.6 closes five standard-library advisories
+          go-version: '1.26.9'  # match the release toolchain (go.mod's 'go 1.22' is only the language floor); 1.26.9 closes the net/http advisories govulncheck reported on 1.26.6
           cache: false
 
       - name: Build per-arch binaries
@@ -135,6 +139,50 @@ jobs:
             "$signer" "$signer_dir" >> "$GITHUB_ENV"
           ls -la bins
 
+      # Nothing from the AmneziaWG release is used until its SHA256SUMS verifies against the committed
+      # release key and every asset is a listed, matching awg-*.tar.gz holding only plain files under
+      # the five output directories. No secret is present in this step.
+      - name: Fetch and verify the newest AmneziaWG release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
+            | grep -E '^awg-v[0-9][0-9A-Za-z.]*-[0-9]+$' | sort -V | tail -n 1 || true)"
+          if [ -z "$tag" ]; then
+            echo "no awg-v* release exists yet - this feed carries no AmneziaWG packages"
+            exit 0
+          fi
+          work="$(mktemp -d "$RUNNER_TEMP/awg-release.XXXXXX")"
+          printf 'WAYHOP_AWG_WORK=%s\n' "$work" >> "$GITHUB_ENV"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir "$work/assets"
+          pub="$PWD/packaging/feed/keys/wayhop.pub"
+          cd "$work/assets"
+          { [ -s SHA256SUMS ] && [ -s SHA256SUMS.sig ]; } || { echo "::error::$tag has no signed SHA256SUMS"; exit 1; }
+          "$WAYHOP_FEED_SIGNER" verify -pub "$pub" -m SHA256SUMS -sig SHA256SUMS.sig
+          sha256sum -c --strict SHA256SUMS
+          for f in *; do
+            case "$f" in
+              SHA256SUMS|SHA256SUMS.sig) continue ;;
+              amneziawg-go-*) echo "::error::$tag carries $f, a name reserved for the updater's companion assets"; exit 1 ;;
+              awg-*.tar.gz) ;;
+              *) echo "::error::$tag carries an unexpected asset: $f"; exit 1 ;;
+            esac
+            n="$(awk -v f="$f" '{ n = $2; sub(/^\*/, "", n) } n == f' SHA256SUMS | wc -l)"
+            [ "$n" = 1 ] || { echo "::error::$f is listed $n times in SHA256SUMS"; exit 1; }
+          done
+          mkdir -p "$work/dist"
+          for t in awg-*.tar.gz; do
+            odd="$(tar -tvzf "$t" | awk 'substr($1, 1, 1) != "-" && substr($1, 1, 1) != "d"')"
+            [ -z "$odd" ] || { echo "::error::$t holds a link or special file: $odd"; exit 1; }
+            outside="$(tar -tzf "$t" | awk '!/^(openwrt|userspace|entware|ipk|apk)(\/|$)/ || /(^|\/)\.\.(\/|$)/')"
+            [ -z "$outside" ] || { echo "::error::$t has paths outside the AmneziaWG layout: $outside"; exit 1; }
+            tar -xzf "$t" -C "$work/dist" --no-same-owner --no-same-permissions
+          done
+          printf 'WAYHOP_AWG_DIST=%s\nWAYHOP_AWG_TAG=%s\n' "$work/dist" "$tag" >> "$GITHUB_ENV"
+          echo "verified $tag:"; cat SHA256SUMS
+
       - name: Pack opkg (.ipk) + Entware
         env:
           WAYHOP_BASE_VERSION: ${{ needs.source.outputs.base_version }}
@@ -158,6 +206,22 @@ jobs:
             sh packaging/feed/pack-entware.sh "bins/wayhop-$goname" "$v" "$rel" feed/entware "$ewtoken"
           done < packaging/feed/arch-map.txt
 
+      # Before any index is built or signed: the userspace packages join wayhop's ipk/entware/apk
+      # directories (whose indexes make-index.sh and the apk step rebuild below), the kernel-module
+      # packages get one directory per release/target with an unsigned index of their own, and the
+      # installer goes to awg/install-awg.sh. No secret is present in this step.
+      - name: Lay out the AmneziaWG packages
+        if: env.WAYHOP_AWG_DIST != ''
+        run: |
+          set -eu
+          echo "AmneziaWG packages from $WAYHOP_AWG_TAG"
+          sh scripts/awg/feed-layout.sh "$WAYHOP_AWG_DIST" feed
+
+      - name: Remove the downloaded AmneziaWG release
+        if: always()
+        run: |
+          [ -z "${WAYHOP_AWG_WORK:-}" ] || rm -rf -- "$WAYHOP_AWG_WORK"
+
       - name: Sign and verify opkg indexes (usign)
         env:
           WAYHOP_FEED_SIGN_KEY: ${{ secrets.VELINX_USIGN_SEC }}
@@ -178,6 +242,17 @@ jobs:
           printf '%s' "$WAYHOP_FEED_SIGN_KEY" > "$key"
           unset WAYHOP_FEED_SIGN_KEY
           sh packaging/feed/make-index.sh feed "$key" packaging/feed/keys/wayhop.pub "$WAYHOP_FEED_SIGNER"
+          # Each AmneziaWG per-target directory is a feed of its own (index from feed-layout.sh); it is
+          # signed with the same key and checked against the published public half the same way.
+          for p in feed/awg/openwrt/*/*/*/Packages; do
+            [ -f "$p" ] || continue
+            "$WAYHOP_FEED_SIGNER" sign -sec "$key" -m "$p" -out "$p.sig"
+            if ! "$WAYHOP_FEED_SIGNER" verify -pub packaging/feed/keys/wayhop.pub -m "$p" -sig "$p.sig" >/dev/null; then
+              rm -f "$p.sig"
+              echo "::error::signature for $p does not match packaging/feed/keys/wayhop.pub"; exit 1
+            fi
+            echo "  signed + verified $p"
+          done
 
       - name: Remove opkg signing material
         if: always()
@@ -245,7 +320,8 @@ jobs:
           printf '%s' "$WAYHOP_APK_SIGN_KEY" > "$key"
           unset WAYHOP_APK_SIGN_KEY
           signed=0
-          for adb in feed/apk/*/packages.adb; do
+          # wayhop's per-arch indexes, then the AmneziaWG per-target ones (from feed-layout.sh).
+          for adb in feed/apk/*/packages.adb feed/awg/openwrt/*/*/*/packages.adb; do
             [ -s "$adb" ] || continue
             dir="${adb%/*}"
             docker run --rm --network none --read-only --user "$(id -u):$(id -g)" \
@@ -265,6 +341,11 @@ jobs:
         if: always()
         run: |
           [ -z "${WAYHOP_APK_KEY_FILE:-}" ] || rm -f -- "$WAYHOP_APK_KEY_FILE"
+
+      # Every AmneziaWG target directory carries the complete index its package format needs.
+      - name: Verify the AmneziaWG part of the feed
+        if: env.WAYHOP_AWG_DIST != ''
+        run: sh scripts/awg/feed-layout.sh --check feed
 
       - name: Assemble feed root (keys + landing page)
         env:
@@ -286,19 +367,36 @@ jobs:
             echo " &mdash; <b>${WAYHOP_ARTIFACT_VERSION}</b>. Prefer a one-shot install instead? See the"
             echo " <a href=https://github.com/awadak3davra/wayhop#install>README install guide</a>.</p>"
             echo "<h2>OpenWrt 25.12+ &middot; apk</h2>"
+            # apk 3 treats a repository line that does not end in .adb as an apk 2 repository and asks
+            # it for APKINDEX.tar.gz, which this feed does not serve: the line names packages.adb.
             echo "<pre>wget -O /etc/apk/keys/wayhop.pem $BASE/wayhop-apk.pem.pub"
-            echo "echo \"$BASE/apk/\$(cat /etc/apk/arch)\" &gt;&gt; /etc/apk/repositories.d/wayhop.list"
+            echo "echo \"$BASE/apk/\$(cat /etc/apk/arch)/packages.adb\" &gt;&gt; /etc/apk/repositories.d/wayhop.list"
             echo "apk update &amp;&amp; apk add wayhop</pre>"
             echo "<h2>OpenWrt 21.02&ndash;24.10 &middot; opkg</h2>"
             echo "<pre>wget -O /tmp/wayhop.pub $BASE/wayhop.pub &amp;&amp; opkg-key add /tmp/wayhop.pub"
             echo "echo \"src/gz wayhop $BASE/ipk/\$(opkg print-architecture | awk '\$1==\"arch\" && \$2!=\"all\" && \$2!=\"noarch\"{print \$2; exit}')\" &gt;&gt; /etc/opkg/customfeeds.conf"
             echo "opkg update &amp;&amp; opkg install wayhop</pre>"
+            # Entware's opkg package ships no opkg-key and no `option check_signature` (both are
+            # commented out of its Makefile), so it verifies no feed signature, and opkg-key would write
+            # under /etc, which KeeneticOS owns. No key step: packages are still checked against the
+            # SHA-256 sums in the index.
             echo "<h2>Entware / Keenetic &middot; opkg (installs under /opt)</h2>"
-            echo "<pre>wget -O /tmp/wayhop.pub $BASE/wayhop.pub &amp;&amp; opkg-key add /tmp/wayhop.pub"
-            echo "echo \"src/gz wayhop $BASE/entware/\$(opkg print-architecture | awk '\$1==\"arch\" && \$2!=\"all\" && \$2!=\"noarch\"{print \$2; exit}')\" &gt;&gt; /opt/etc/opkg/customfeeds.conf"
+            echo "<pre>echo \"src/gz wayhop $BASE/entware/\$(opkg print-architecture | awk '\$1==\"arch\" && \$2!=\"all\" && \$2!=\"noarch\"{print \$2; exit}')\" &gt;&gt; /opt/etc/opkg/customfeeds.conf"
             echo "opkg update &amp;&amp; opkg install wayhop</pre>"
+            echo "<p class=v>Entware's opkg checks no feed signatures, so there is no key to add; it checks every package against the SHA-256 sum in the feed index.</p>"
             echo "<p class=v>Then open <code>http://&lt;router-ip&gt;:8088</code>. Upgrades: <code>opkg upgrade wayhop</code> (or <code>apk add -u wayhop</code> on 25.12+)."
             echo " Your config contents are never overwritten or deleted on upgrade/removal; upgrades only repair WayHop state to owner-only permissions.</p>"
+            if [ -f feed/awg/install-awg.sh ]; then
+              REL="https://github.com/awadak3davra/wayhop/releases/latest/download"
+              echo "<h2>AmneziaWG 3.1 &middot; kernel module where it fits, userspace otherwise</h2>"
+              echo "<pre>wget -O /tmp/install-awg.sh $BASE/awg/install-awg.sh &amp;&amp; sh /tmp/install-awg.sh</pre>"
+              echo "<p class=v>OpenWrt and Entware/Keenetic. It adds this feed and its key when they are missing (the keys are embedded"
+              echo " in the script), installs the kernel module when one is built for the router's exact kernel and amneziawg-go"
+              echo " otherwise, verifies the result and rolls back on failure. <code>--dry-run</code> prints the plan,"
+              echo " <code>--uninstall</code> removes what it installed, <code>--restart-network</code> restarts netifd when the"
+              echo " amneziawg protocol handler changed. WayHop releases carry the same script as"
+              echo " <a href=$REL/install-awg.sh>install-awg.sh</a>, listed in their signed SHA256SUMS.txt.</p>"
+            fi
           } > feed/index.html
           echo "feed tree:"; find feed -maxdepth 3 -type f | sort
 

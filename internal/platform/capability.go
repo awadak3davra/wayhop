@@ -77,6 +77,8 @@ const (
 	ReasonPortConflict          ReasonCode = "PORT_CONFLICT"
 	ReasonSavedValueIncompat    ReasonCode = "SAVED_VALUE_INCOMPATIBLE"
 	ReasonFeatureWouldBeDropped ReasonCode = "FEATURE_WOULD_BE_DROPPED"
+	// ReasonOperatorChoice: the router could do it natively, and the operator chose otherwise.
+	ReasonOperatorChoice ReasonCode = "OPERATOR_CHOICE"
 )
 
 // Blocks says how far a missing capability reaches. An optimisation that cannot load must not stop

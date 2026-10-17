@@ -467,7 +467,7 @@ func (s *Server) rollbackMaterialization(ctx context.Context, ops applyExecOps, 
 		}
 		target.Native = &executionNativeMaterializationV1{Delta: executionNativeDeltaV1{
 			SchemaVersion: executionNativeDeltaSchemaV1, Reconcile: *delta,
-		}}
+		}, AWGKernel: cloneAWGKernelCapture(base.Native.AWGKernel)}
 	}
 	return &target
 }

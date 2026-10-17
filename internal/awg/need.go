@@ -40,6 +40,19 @@ func Settings() []string {
 	return out
 }
 
+// Introduced is the generation that introduced a setting, by the name Settings lists it under; GenNone
+// for a name that is not an AmneziaWG setting. A writer's tests hold its own key lists to it.
+func Introduced(key string) Generation {
+	return settingGen[key]
+}
+
+// SettingText is a setting's value as Need reads it: numbers in decimal, strings as stored, "" for
+// anything else. A writer that renders a value by this reads exactly what Need judged, so a value Need
+// counted cannot be dropped by a writer that reads its type differently.
+func SettingText(value any) string {
+	return settingText(value)
+}
+
 // settingNeed is the generation a setting asks for with the value it carries: GenNone when it asks
 // for nothing. That is an unset value, and a 3.1 switch that is off - what every earlier generation
 // does anyway, so a config that spells the default out still runs anywhere. An H value written as a

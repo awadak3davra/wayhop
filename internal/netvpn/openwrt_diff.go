@@ -71,7 +71,16 @@ func DiffInterface(want, got AWGInterface) []Difference {
 		obfPrefix = "obfuscation_"
 	}
 	for _, k := range unionKeys(want.Obfuscation, got.Obfuscation) {
-		add(obfPrefix+k, want.Obfuscation[k], got.Obfuscation[k])
+		w, g := want.Obfuscation[k], got.Obfuscation[k]
+		// The 3.0 header protection key is a shared secret like the preshared key (LuCI masks it
+		// too): compared in full, reported by presence and length only.
+		if k == "header_protection_key" {
+			if w != g {
+				out = append(out, Difference{Field: obfPrefix + k, Want: redact(w), Got: redact(g)})
+			}
+			continue
+		}
+		add(obfPrefix+k, w, g)
 	}
 
 	if len(want.Peers) != len(got.Peers) {

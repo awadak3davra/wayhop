@@ -999,6 +999,51 @@ globalThis.row = healthRowEl;`, rowCtx);
     'a package-manager-owned engine says where it is updated', note);
   check(context.note([{ id: 'sing-box', role: 'core' }]) === null,
     'an ordinary router gets no such note at all');
+
+  // "The kernel carries AmneziaWG itself" stood over a generation-2 module that cannot carry a 3.x
+  // setting. The daemon now reports carried_by_kernel only for the newest generation, names it, and a
+  // router behind it gets the component offered as optional instead of the prose.
+  const gen = (builtin, extra = {}) => ({ id: 'amneziawg-go', name: 'AmneziaWG (userspace)', role: 'kernel-plugin',
+    provides: 'amneziawg', awg: { builtin, newest: '3.1', needed: false, ...extra }, ...extra.row });
+  check(context.run([gen('2', { optional: true })]).length === 1,
+    'an AmneziaWG older than amneziawg-go gets its row, as an offer');
+  check(context.run([gen('3.1', { row: { carried_by_kernel: true } })]).length === 0,
+    'the newest AmneziaWG in the kernel still gets no row');
+  const newest = text(context.note([gen('3.1', { row: { carried_by_kernel: true } })]));
+  check(/AmneziaWG 3\.1 itself/.test(newest), 'the note names the generation the kernel carries', newest);
+}
+
+// The AmneziaWG row sets the router's own generation against amneziawg-go's, and when nothing needs
+// the component says it is optional and what it is for, so its Install reads as an offer.
+{
+  const context = vm.createContext({
+    el: (tag, attrs = {}, ...children) => ({ tag, attrs, children }),
+    t: (s, ...a) => s.replace(/\{(\d)\}/g, (_, i) => a[i]),
+  });
+  vm.runInContext(`${functionSource(updater, 'awgBuiltinLine')}\nglobalThis.line = awgBuiltinLine;`, context);
+  const text = (n) => (n == null ? '' : typeof n !== 'object' ? String(n) : (n.children || []).map(text).join(''));
+  const offer = text(context.line({ builtin: '2', newest: '3.1', optional: true }));
+  check(/up to generation 2; amneziawg-go runs generation 3\.1/.test(offer) && /^.*Optional: no connection needs it yet/.test(offer),
+    'a generation-2 router is told what it has, what amneziawg-go adds, and that it is optional', offer);
+  const needed = text(context.line({ builtin: '2', newest: '3.1', optional: false }));
+  check(/generation 2/.test(needed) && !/Optional/.test(needed),
+    'a router that needs amneziawg-go is not told it is optional', needed);
+  check(context.line({ builtin: '3.1', newest: '3.1', optional: false }) === null,
+    'the newest generation needs no such line');
+  check(!/generation none/.test(text(context.line({ builtin: 'none', newest: '3.1', optional: true }))),
+    'a router with no AmneziaWG of its own is not given a generation');
+}
+
+// The connection editor's engine choice: collect() builds the endpoint from the form alone, so a
+// field without a control is lost on the first save. awg_userspace has one, is read back into it, and
+// is sent only for an AmneziaWG connection.
+{
+  const awgBranch = conns.slice(conns.indexOf('if (proto === "amneziawg") {\n      // Same typing rule'),
+    conns.indexOf('if (["socks", "http"].includes(proto) && g("f-user"))'));
+  check(/g\("f-awg-engine"\) === "userspace"\) out\.awg_userspace = true/.test(awgBranch),
+    'collect() carries the engine choice, inside the AmneziaWG branch', awgBranch.slice(-200));
+  check(/eng\.value = ep\.awg_userspace \? "userspace" : "auto"/.test(conns),
+    'the editor opens on the stored choice');
 }
 
 // No user-visible string may send the reader to a section that is not in the navigation.

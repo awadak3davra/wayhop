@@ -345,6 +345,12 @@
     "No release carries it yet.",
     "Install {0}",
     "Install",
-    "{0} process running|{0} processes running"
+    "{0} process running|{0} processes running",
+    "This router's own AmneziaWG carries settings up to generation {0}; amneziawg-go runs generation {1}.",
+    "Optional: no connection needs it yet. Install it to run connections with AmneziaWG 3.x settings, or to run any connection on it: choose amneziawg-go as the engine in the connection's editor. Under load it holds 60-120 MB of RAM.",
+    "Automatic: the router's own AmneziaWG when it can carry these settings",
+    "amneziawg-go: the newest AmneziaWG, in userspace",
+    "AmneziaWG engine",
+    "amneziawg-go must be installed on the Components page. It is slower than the router's own AmneziaWG and holds 60-120 MB of RAM under load; the Apply review says which one each connection runs on."
   ]
 }

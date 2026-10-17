@@ -18,7 +18,7 @@ var ErrRouterProtosUnprobed = errors.New("router netifd protocol handlers were n
 // operator's panel actually holds — was refused at the door.
 //
 // What makes this more than a second row in a table is the device. Measured read-only on the
-// test router (OpenWrt 25.12.2):
+// operator's test router (OpenWrt 25.12.2, a router in daily use):
 //
 //	installed: amneziawg-tools, kmod-amneziawg, luci-proto-amneziawg
 //	ABSENT:    kmod-wireguard, wireguard-tools, luci-proto-wireguard

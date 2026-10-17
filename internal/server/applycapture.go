@@ -188,7 +188,22 @@ func (s *Server) captureExecutionNative(
 	if s != nil {
 		readKeenetic = s.keeneticConfigReader
 	}
-	return captureExecutionNativeFrom(ctx, desired, host, read, readKeenetic)
+	capture, err := captureExecutionNativeFrom(ctx, desired, host, read, readKeenetic)
+	if err == nil && s != nil && platform.Platform(host.Host.Platform) == platform.OpenWrt {
+		// In the same host pass: the UCI writer's generation is part of what the plan is compiled
+		// against, like the UCI itself.
+		awgKernel := s.awgKernelCaptureFor(platform.OpenWrt, s.awgHostProbe())
+		switch {
+		case awgKernel.Kept:
+			log.Printf("apply: the AmneziaWG module probe failed (%s); keeping generation %s from the last Apply - the module and the netifd handler are unchanged",
+				awgKernel.ProbeError, awgKernel.Generation)
+		case awgKernel.ProbeError != "":
+			log.Printf("apply: the AmneziaWG module probe failed (%s) and nothing proves the last Apply's generation still holds; OpenWrt's own AmneziaWG is written at its baseline",
+				awgKernel.ProbeError)
+		}
+		capture.AWGKernel = &awgKernel
+	}
+	return capture, err
 }
 
 func captureExecutionNativeFrom(

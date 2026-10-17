@@ -1949,5 +1949,14 @@
   "Send /start {0} to your bot in Telegram.": "Отправьте своему боту в Telegram: /start {0}",
   "Daily summary at": "Сводка за сутки в",
   "Router clock: {0}; quiet hours and the summary follow it.": "Часы роутера: {0}; по ним идут тихие часы и сводка.",
-  "Outages, switches, traffic by exit. Silent, even in quiet hours.": "Сбои, переключения, трафик по выходам. Без звука, даже в тихие часы."
+  "Outages, switches, traffic by exit. Silent, even in quiet hours.": "Сбои, переключения, трафик по выходам. Без звука, даже в тихие часы.",
+  "This will install:": "Будет установлено:",
+  "Install from WayHop's feed: {0}?": "Установить из репозитория WayHop: {0}?",
+  "Install amneziawg-go from a WayHop release instead": "Вместо этого установить amneziawg-go из релиза WayHop",
+  "Installer log": "Журнал установщика",
+  "Remove the AmneziaWG packages": "Удалить пакеты AmneziaWG",
+  "Installed from a WayHop release ({0}).": "Установлено из релиза WayHop ({0}).",
+  "Restart the network service now": "Перезапустить сетевую службу сейчас",
+  "Restart the network service after installing (every link drops for a few seconds)": "Перезапустить сетевую службу после установки (все соединения пропадут на несколько секунд)",
+  "AmneziaWG 3.x settings reach netifd's new handler only after the network service restarts: now (every link drops for a few seconds) or at the next reboot.": "Настройки AmneziaWG 3.x попадут в новый обработчик netifd только после перезапуска сетевой службы: сейчас (все соединения пропадут на несколько секунд) или при следующей перезагрузке."
 }

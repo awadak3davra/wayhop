@@ -58,7 +58,14 @@ func (s *Server) handleUpdaterEngines(w http.ResponseWriter, r *http.Request) {
 	out := make([]item, 0, len(updater.Engines))
 	for _, e := range updater.Engines {
 		pkg := s.updater.EnginePackageStatus(ctx, e)
-		it := item{Engine: e, Installed: s.updater.Installed(e), LastError: s.updErr(e.ID),
+		if e.ID == awgGoEngine {
+			// Where the page first learns that a package owns amneziawg-go, the copy WayHop kept
+			// compressed goes, before the row reads what is installed.
+			s.awgDropStaleStore(pkg)
+		}
+		// InstalledFor, not Installed: a binary opkg/apk owns is reported at the package's version and
+		// with the package as its source - amneziawg-go's own --version is upstream's stale constant.
+		it := item{Engine: e, Installed: s.updater.InstalledFor(e, pkg), LastError: s.updErr(e.ID),
 			Package: pkg, NativeManaged: pkg.Managed, NativeOwner: pkg.Package, OwnershipUnknown: !pkg.OwnershipKnown,
 			CarriedByKernel: e.Provides != "" && caps.Native[e.Provides]}
 		if e.Role == "core" {
@@ -145,6 +152,12 @@ func (s *Server) handleUpdaterFit(w http.ResponseWriter, r *http.Request) {
 	// the click.
 	if r.PathValue("id") == "self" {
 		s.handleSelfFit(w, r)
+		return
+	}
+	// The AmneziaWG feed install answers the same question - what would an install do here, before it
+	// runs - with the installer's own dry run (awgcomponent_install.go).
+	if r.PathValue("id") == awgFeedID {
+		s.handleAWGPlan(w, r)
 		return
 	}
 	e := updater.EngineByID(r.PathValue("id"))
@@ -247,6 +260,10 @@ func (s *Server) downloadPathSuffix() string {
 
 // handleUpdaterInstall downloads + installs a chosen version (the side-effecting action).
 func (s *Server) handleUpdaterInstall(w http.ResponseWriter, r *http.Request) {
+	if r.PathValue("id") == awgFeedID {
+		s.handleAWGInstall(w, r)
+		return
+	}
 	e := updater.EngineByID(r.PathValue("id"))
 	if e == nil {
 		writeErr(w, http.StatusNotFound, "unknown engine")
@@ -349,6 +366,10 @@ func (s *Server) handleUpdaterInstall(w http.ResponseWriter, r *http.Request) {
 // refusal would leave the core down (watchdog disarmed) with nothing removed: routing dead on a
 // router whose sing-box belongs to opkg/apk.
 func (s *Server) handleUpdaterUninstall(w http.ResponseWriter, r *http.Request) {
+	if r.PathValue("id") == awgFeedID {
+		s.handleAWGUninstall(w, r)
+		return
+	}
 	e := updater.EngineByID(r.PathValue("id"))
 	if e == nil {
 		writeErr(w, http.StatusNotFound, "unknown engine")

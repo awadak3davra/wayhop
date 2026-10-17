@@ -743,6 +743,16 @@ function manualForm(ep) {
         // Opened when the endpoint already carries any of them, so editing never hides a value in force.
         if (Object.keys(P).some((k) => /^(jc|jmin|jmax|s[1-4]|h[1-4]|i[1-5])$/.test(k))) det.open = true;
         add(det);
+        // Which AmneziaWG runs it (Endpoint.awg_userspace). Automatic is the router's own - its kernel
+        // module, or KeeneticOS's and OpenWrt's native tunnels - whenever it can carry these settings,
+        // and amneziawg-go when they need a newer generation. The router's own may be generation 1 or
+        // 2, so the newest one is offered here rather than decided for the operator.
+        const eng = el("select", { id: "f-awg-engine" },
+          el("option", { value: "auto" }, t("Automatic: the router's own AmneziaWG when it can carry these settings")),
+          el("option", { value: "userspace" }, t("amneziawg-go: the newest AmneziaWG, in userspace")));
+        eng.value = ep.awg_userspace ? "userspace" : "auto";
+        add(el("div", { class: "field" }, el("label", {}, t("AmneziaWG engine")), eng,
+          el("div", { class: "hint" }, t("amneziawg-go must be installed on the Components page. It is slower than the router's own AmneziaWG and holds 60-120 MB of RAM under load; the Apply review says which one each connection runs on."))));
       }
     } else if (proto === "olcrtc") {
       add(fSelect("f-provider", "Meet provider", ["jitsi", "telemost", "wbstream"], P.provider || "jitsi"),
@@ -930,6 +940,9 @@ function manualForm(ep) {
         const v = g("f-awg-" + k);
         if (v === "") delete p[k]; else p[k] = v;
       }
+      // collect() builds the endpoint from the form alone, so a field with no control here is lost on
+      // save; the engine choice has one, and only an AmneziaWG connection may carry it.
+      if (g("f-awg-engine") === "userspace") out.awg_userspace = true;
     }
     if (["socks", "http"].includes(proto) && g("f-user")) p.username = g("f-user");
     if (proto === "anytls") {

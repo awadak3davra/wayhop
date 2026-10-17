@@ -365,7 +365,7 @@ input[type=checkbox]:focus-visible, input[type=radio]:focus-visible, a:focus-vis
    final line; this is the piece CSS grid's auto-fill cannot do without placeholder cells. */
 .exit-grid { display:flex; flex-wrap:wrap; justify-content:center; gap:var(--sp-3); margin-bottom:var(--sp-4); }
 .exit-tile { background:var(--card); border:1px solid var(--divider); border-radius:var(--radius);
-  padding:12px; box-shadow:var(--shadow); min-width:0; box-sizing:border-box;
+  padding:12px 10px; box-shadow:var(--shadow); min-width:0; box-sizing:border-box;
   /* The 2180px Keenetic screenshot is a scaled 1280-CSS-pixel viewport and leaves 947.33px for
      this grid. Five 176px cards plus four 12px gaps need 928px, so all five fit there at about
      179.87px each. The 300px cap keeps wide screens compact and a partial final row centred. */
@@ -377,25 +377,24 @@ input[type=checkbox]:focus-visible, input[type=radio]:focus-visible, a:focus-vis
 .exit-tile .exit-flag { width:24px; font-size:20px; line-height:1; flex:none; text-align:center; overflow:hidden; }
 /* The exit ADDRESS is what this card exists to show, so it must fit the card it is in - and the card
    is a fixed ~180px when five sit across a 947px dashboard, no matter how wide the screen is.
-   Sizing it off the VIEWPORT therefore grew the text while its box stayed still: measured at 947px
-   the string had exactly zero pixels of headroom on this machine's font, so a wider window or a
-   wider font (a Linux desktop's DejaVu against Windows' Segoe UI) truncated the last octet of an
-   address the operator is reading to tell two exits apart. cqw sizes it off the card instead: a
-   compact card gets ~14px, and a card with room keeps the full stat size. */
+   Sizing it off the VIEWPORT grew the text while its box stayed still, so a wider window or font
+   truncated the last octet the operator reads to tell two exits apart. cqw sizes it off the card: a
+   compact card gets ~13px, and a card with room keeps the full stat size. */
 .exit-tile { container-type:inline-size; }
 /* The 13.5px comes first on purpose: a browser without container-query units drops the clamp as
    unparseable, and without something valid before it the address would fall back to inherited
    size - larger than the card, which is the bug this rule exists to prevent. */
-.exit-tile .exit-ip { font-size:13.5px; font-size:clamp(13px,8.5cqw,var(--fs-stat)); font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.exit-tile .exit-ip { font-size:13.5px; font-size:clamp(13px,8.3cqw,var(--fs-stat)); font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .exit-tile .exit-prov { font-size:var(--fs-small); color:var(--ink-2); margin-top:6px; min-height:calc(var(--fs-small) + 3px); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 /* On a five-across card the flag and its gap take a quarter of the row from the address itself.
    Measured across the sans-serifs this stack falls back to, the same string is 11% wider in Arial,
    27% in DejaVu Sans (what a Linux desktop picks) and 42% in Verdana than in Segoe UI - so the
-   address needs both a smaller size and that space back to survive all of them. Wider cards keep
+   address needs both a smaller size and that space back to survive all of them. DejaVu still had
+   6% room at 947px, so a narrower flag, gap and side padding give it 7px more. Wider cards keep
    the full-size flag. */
 @container (max-width: 220px) {
-  .exit-tile .exit-flag { width:18px; font-size:16px; }
-  .exit-tile .exit-mid { gap:5px; }
+  .exit-tile .exit-flag { width:16px; font-size:15px; }
+  .exit-tile .exit-mid { gap:4px; }
 }
 
 /* Live throughput row (folded-in graph legend): colour-dot matching the tile's graph line + its rate. */

@@ -29,6 +29,10 @@ const (
 	maxAttrGen31 = 34
 )
 
+// UserspaceGeneration is the generation amneziawg-go runs: the build WayHop ships is pinned to
+// upstream v3.1.20260828 (scripts/build-amneziawg-go.sh), whose UAPI takes every 3.1 setting.
+const UserspaceGeneration = Gen31
+
 // Classify maps what the kernel reports for the "amneziawg" family to a generation. A version 0
 // means the family was not found. A future generation (version 4+) is treated as at least 3.1: new
 // attributes are appended, so everything 3.1 knows it still accepts.

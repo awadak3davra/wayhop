@@ -148,15 +148,22 @@ func TestParseVmRSS(t *testing.T) {
 	}
 }
 
-// "The kernel carries it" holds only while no connection runs on amneziawg-go.
+// "The kernel carries it" holds only while no connection runs on amneziawg-go and the router's own
+// AmneziaWG is already the newest generation: a generation-2 module cannot carry 3.x settings.
 func TestAWGCarriedByKernel(t *testing.T) {
-	if !awgCarriedByKernel(true, awgComponentStatus{}) {
-		t.Error("a kernel carrying every connection was not reported")
+	newest := awgComponentStatus{Builtin: "3.1", Newest: "3.1"}
+	if !awgCarriedByKernel(true, newest) {
+		t.Error("a 3.1 kernel carrying every connection was not reported")
 	}
-	if awgCarriedByKernel(true, awgComponentStatus{Needed: true}) {
-		t.Error("a kernel next to an AmneziaWG 3 connection was reported as carrying it")
+	if awgCarriedByKernel(true, awgComponentStatus{Builtin: "2", Newest: "3.1"}) {
+		t.Error("a generation-2 module was reported as carrying AmneziaWG with nothing to install")
 	}
-	if awgCarriedByKernel(false, awgComponentStatus{}) {
+	needed := newest
+	needed.Needed = true
+	if awgCarriedByKernel(true, needed) {
+		t.Error("a kernel next to a connection on amneziawg-go was reported as carrying it")
+	}
+	if awgCarriedByKernel(false, newest) {
 		t.Error("a router without the module was reported as carrying it")
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"wayhop/internal/awg"
 	"wayhop/internal/binstore"
 	"wayhop/internal/changeset"
 	"wayhop/internal/config"
@@ -27,6 +28,7 @@ import (
 	"wayhop/internal/nativeplan"
 	"wayhop/internal/pbr"
 	"wayhop/internal/platform"
+	"wayhop/internal/plugin"
 )
 
 // The plan is what the Review & Apply panel shows and the only thing POST /api/apply is pinned to
@@ -632,8 +634,12 @@ func (s *Server) endpointFindings(prof model.Profile, capset platform.Capability
 	keeneticHost := s.detectedPlatform() == platform.Keenetic
 	var userspace map[string]nativeplan.UserspaceEndpoint
 	moves := map[string]string{}
+	// The kernel module generation the Apply's capture would compile with (awgkernel.go): asked with
+	// anything else, the review and the planner disagree about where a connection runs.
+	kernel := awg.GenNone
 	if !s.config().Demo {
-		userspace = nativeplan.Userspace(&prof, s.detectedPlatform(), capset)
+		kernel = s.awgKernelGeneration()
+		userspace = nativeplan.UserspaceFor(&prof, s.detectedPlatform(), capset, kernel)
 		if s.detectedPlatform() == platform.OpenWrt {
 			moves = s.openWrtUserspaceMoves(prof, capset, userspace)
 		}
@@ -709,14 +715,18 @@ func (s *Server) endpointFindings(prof model.Profile, capset platform.Capability
 		case model.EngineAmneziaWG:
 			if move, ok := moves[e.ID]; ok {
 				// The Apply would be refused by the planner (nativeplan.MoveError); say it here, where it
-				// is one click from the fix.
+				// is one click from the fix - and, when the operator changed nothing, what did.
+				detail := "This connection would move to " + move + " in one Apply, and on OpenWrt both run it on the " +
+					"same device name, so the old tunnel's teardown would take the new one down with it."
+				if why := nativeplan.OpenWrtMoveReason(e, kernel); why != "" {
+					detail += " It moves because " + why + "."
+				}
 				out = append(out, PlanFinding{
 					ID: "endpoint.amneziawg.move", Setting: "AmneziaWG engine", Item: name(e),
 					Requested: move, Effective: "not moved",
 					Severity: platform.SeverityBlocked, Reason: platform.ReasonModeConflict,
 					Blocks: platform.BlocksApply,
-					Detail: "This connection would move to " + move + " in one Apply, and on OpenWrt both run it on the " +
-						"same device name, so the old tunnel's teardown would take the new one down with it.",
+					Detail: detail,
 					Remedy: "Switch the connection off and apply, then switch it on and apply again.",
 				})
 				continue
@@ -744,6 +754,21 @@ func (s *Server) endpointFindings(prof model.Profile, capset platform.Capability
 						". It works, with less throughput than a native tunnel.",
 					Remedy: u.Remedy,
 				})
+				continue
+			}
+			// Set to run on amneziawg-go where no native lane carries it - the generic path, the demo:
+			// the plugin needs the binary exactly as a lane endpoint does, and the kernel tools are moot.
+			if e.AWGUserspace {
+				if !s.awgUserspaceInstalled() {
+					out = append(out, PlanFinding{
+						ID: "endpoint.engine.amneziawg_go", Setting: "engine", Item: name(e),
+						Requested: "amneziawg-go", Effective: "not started",
+						Severity: platform.SeverityBlocked, Reason: platform.ReasonMissingBinary,
+						Blocks: platform.BlocksFeature,
+						Detail: "This connection is set to run on amneziawg-go, which is not installed, so it cannot come up.",
+						Remedy: "Install AmneziaWG 3 (amneziawg-go) through the Updater, or set the connection's engine back to Automatic.",
+					})
+				}
 				continue
 			}
 			if capset.Usable(platform.CapEngineAmneziaWG) || s.pluginBinaryPresent("awg") || s.pluginBinaryPresent("awg-quick") {
@@ -790,6 +815,68 @@ func (s *Server) endpointFindings(prof model.Profile, capset platform.Capability
 				Remedy: "Use sing-box, AmneziaWG or olcRTC for this connection, or disable it.",
 			})
 		}
+	}
+	if !s.config().Demo {
+		out = append(out, s.awgTransitionFindings(prof, capset, userspace, moves)...)
+	}
+	return out
+}
+
+// awgTransitionFindings are the review's account of an AmneziaWG change on the router that the
+// connections have not caught up with yet: connections still on amneziawg-go that the kernel module now
+// carries (they switch at their next start - an Apply that leaves them unchanged does not restart them,
+// and nothing restarts a working tunnel to move it), and a netifd that has not read the AmneziaWG handler
+// an install added or changed, while this Apply would write OpenWrt's own AmneziaWG interfaces.
+func (s *Server) awgTransitionFindings(prof model.Profile, capset platform.CapabilitySet,
+	userspace map[string]nativeplan.UserspaceEndpoint, moves map[string]string) []PlanFinding {
+	var out []PlanFinding
+	p := s.detectedPlatform()
+	nativePlan := p == platform.OpenWrt || p == platform.Keenetic
+	running := s.awgRunningOnUserspace()
+	var probe awg.Probe
+	if len(running) > 0 {
+		probe = s.awgHostProbe()
+	}
+	writesNative := false
+	for _, e := range prof.Endpoints {
+		if !e.Enabled || e.Engine != model.EngineAmneziaWG || !e.OwnsResource() {
+			continue
+		}
+		_, inLane := userspace[e.ID]
+		_, moving := moves[e.ID]
+		native := nativePlan && !inLane && nativeAWGCreatable(e, capset)
+		writesNative = writesNative || (native && p == platform.OpenWrt)
+		if !running[e.ID] || moving || native {
+			continue // not on the engine, or a move the blocker above already explains
+		}
+		next := plugin.AWGDecision(probe, p == platform.Keenetic, e)
+		if !awgSwitchesToKernel(probe, next, true) {
+			continue
+		}
+		name := e.Name
+		if name == "" {
+			name = e.ID
+		}
+		out = append(out, PlanFinding{
+			ID: "endpoint.amneziawg.kernel_switch", Setting: "AmneziaWG engine", Item: name,
+			Requested: "AmneziaWG kernel module", Effective: "amneziawg-go until its next start",
+			Severity: platform.SeverityDegraded, Reason: platform.ReasonNone, Blocks: platform.BlocksNothing,
+			Detail: "This connection runs on amneziawg-go, and the AmneziaWG kernel module installed since it started carries it (" +
+				next.Reason + "). It keeps running as it is and switches to the kernel module the next time it starts: " +
+				"after a WayHop restart or a reboot, or when an Apply changes it. An Apply that leaves it unchanged does not restart it.",
+			Remedy: "Nothing is required. Restart WayHop or the router when a short interruption suits you to switch it now.",
+		})
+	}
+	if writesNative && s.awgNetifdRestartPending() {
+		out = append(out, PlanFinding{
+			ID: "endpoint.amneziawg.netifd_restart", Setting: "AmneziaWG handler",
+			Severity: platform.SeverityDegraded, Reason: platform.ReasonMissingService, Blocks: platform.BlocksFeature,
+			Detail: "AmneziaWG's netifd handler was installed or changed after the network service started, and netifd reads " +
+				"handlers only when it starts. Until it restarts, OpenWrt's own AmneziaWG interfaces this Apply writes may not " +
+				"come up, or may come up without their AmneziaWG 3.x settings.",
+			Remedy: "Restart the network service from the AmneziaWG row on the Components page (every link drops for a few seconds), " +
+				"or reboot the router, then apply.",
+		})
 	}
 	return out
 }
@@ -1001,6 +1088,14 @@ func findingTemplate(f PlanFinding) (code, title, detail, remedy string) {
 		return "NATIVE_ADOPTION_INCOMPLETE", "Native Keenetic tunnel needs re-adoption",
 			"An enabled native exit predates the captured KeeneticOS ownership and NDM identity required for safe Apply.",
 			"Open Diagnostics and use Repair adoption for the affected native tunnel, then review again."
+	case f.ID == "endpoint.amneziawg.kernel_switch":
+		return "AWG_KERNEL_SWITCH_PENDING", "Connections switch to the AmneziaWG kernel module at their next start",
+			"These connections run on amneziawg-go, and the kernel module now carries them.",
+			"Nothing is required; they switch the next time they start."
+	case f.ID == "endpoint.amneziawg.netifd_restart":
+		return "AWG_NETIFD_RESTART_PENDING", "The network service must restart for AmneziaWG",
+			"netifd has not read the AmneziaWG handler that was installed or changed.",
+			"Restart the network service from the Components page, or reboot the router."
 	case f.ID == "endpoint.external.interface":
 		return "EXTERNAL_INTERFACE_MISSING", "External connection has no interface",
 			"The connection routes through an existing interface but does not name one.",

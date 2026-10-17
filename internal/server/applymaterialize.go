@@ -86,7 +86,8 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 					"the router-native plan does not cover every enabled connection", "")
 			}
 			backend = executionBackendNativeFirst
-			nativeMaterialization = &executionNativeMaterializationV1{Delta: delta}
+			nativeMaterialization = &executionNativeMaterializationV1{Delta: delta,
+				AWGKernel: cloneAWGKernelCapture(artifact.Capture.AWGKernel)}
 		case errors.As(nativeErr, &move):
 			// Not handed to the generic path below. That path takes the whole profile: every other
 			// tunnel would leave the router's own AmneziaWG with it, and the interfaces a previous
