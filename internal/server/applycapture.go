@@ -251,13 +251,14 @@ func captureExecutionNativeFrom(
 			return executionNativeCaptureV1{}, errExecutionCaptureUnavailable
 		}
 		occupied := keenetic.OccupiedWireguardInterfaces(runningConfig)
-		ndmNames, ok := validKeeneticAdoptEvidence(desired.Profile, adopt, occupied)
+		ndmNames, foreign, ok := validKeeneticAdoptEvidence(desired.Profile, adopt, occupied)
 		if !ok {
 			return executionNativeCaptureV1{}, errExecutionCaptureUnavailable
 		}
 		return executionNativeCaptureV1{
 			AdoptInterfaces:    adopt,
 			AdoptNDMNames:      ndmNames,
+			AdoptForeign:       foreign,
 			DomainsViaDNSMasq:  keeneticDomainsViaDNSMasq(),
 			ListsViaIpset:      keeneticKernelPBRPresent(),
 			OccupiedInterfaces: occupied,
@@ -278,36 +279,98 @@ func captureExecutionNativeFrom(
 // It used to return only a boolean, so the NDM names it had just authenticated were discarded and
 // the plan had nothing but kernel names to route with — which NDM rejects. Returning them keeps the
 // single place that establishes the correspondence as the single place it comes from.
+//
+// A tunnel run outside KeeneticOS (foreignKeeneticDevice) is the one adopted link with no NDM owner
+// to prove. Its live kernel link must be exactly the device the endpoint names, and that device lies
+// outside NDM's `nwgN` namespace, so no NDM WireGuard interface can own it. It is returned in the
+// second map, and an endpoint is in exactly one of the two.
 func validKeeneticAdoptEvidence(
 	profile model.Profile,
 	adopt map[string]string,
 	occupied map[string]bool,
-) (map[string]string, bool) {
+) (map[string]string, map[string]string, bool) {
 	endpoints := make(map[string]model.Endpoint, len(profile.Endpoints))
 	for _, endpoint := range profile.Endpoints {
 		if endpoint.Enabled && endpoint.Engine == model.EngineExternal {
 			if endpoint.ID == "" || !endpoint.IsExternal() || endpoints[endpoint.ID].ID != "" {
-				return nil, false
+				return nil, nil, false
 			}
 			endpoints[endpoint.ID] = endpoint
 		}
 	}
 	if len(endpoints) != len(adopt) {
-		return nil, false
+		return nil, nil, false
 	}
 	ndmNames := make(map[string]string, len(adopt))
+	var foreign map[string]string
 	for endpointID, kernelName := range adopt {
 		endpoint, ok := endpoints[endpointID]
 		if !ok {
-			return nil, false
+			return nil, nil, false
+		}
+		if device, isForeign := foreignKeeneticDevice(endpoint); isForeign {
+			if device != kernelName {
+				return nil, nil, false
+			}
+			if foreign == nil {
+				foreign = make(map[string]string)
+			}
+			foreign[endpointID] = kernelName
+			continue
 		}
 		ndmName, known := keenetic.ResolveNDMName(endpoint)
 		if !known || !occupied[ndmName] || keeneticKernelName(ndmName) != kernelName {
-			return nil, false
+			return nil, nil, false
 		}
 		ndmNames[endpointID] = ndmName
 	}
-	return ndmNames, true
+	return ndmNames, foreign, true
+}
+
+// foreignKeeneticDevice reports an adopted external endpoint whose tunnel the router runs outside
+// KeeneticOS, and its kernel device.
+//
+// Measured on a live Keenetic: AmneziaWG 3.1 runs there from Entware (amneziawg-go as `awg1`),
+// because NDM's own AmneziaWG stops at generation 2. Discovery sees that link in the WireGuard-family
+// runtime dump and nowhere in NDM's listing, so the endpoint has no NDM name, and Apply refused it
+// as an NDM tunnel awaiting re-adoption — a repair that cannot exist for it.
+//
+// Strict on purpose: only discovery's runtime source, with no NDM name, on a link outside NDM's own
+// `nwgN` namespace. A legacy NDM tunnel that merely lacks its captured name is NOT foreign: it keeps
+// the re-adoption finding, since routing it by device would bypass the identity NDM does have.
+func foreignKeeneticDevice(e model.Endpoint) (string, bool) {
+	if e.Engine != model.EngineExternal || !e.IsExternal() {
+		return "", false
+	}
+	if _, known := keenetic.ResolveNDMName(e); known {
+		return "", false
+	}
+	if source, _ := e.Params["source"].(string); source != netvpn.SourceRuntime {
+		return "", false
+	}
+	iface, _ := e.Params["interface"].(string)
+	if netvpn.ValidInterfaceName(iface) != nil || strings.HasPrefix(iface, "nwg") {
+		return "", false
+	}
+	return iface, true
+}
+
+// keeneticForeignDevices is foreignKeeneticDevice over a profile's enabled endpoints: the review's
+// view of keenetic.CompileOptions.Foreign, which the Apply capture then proves on the router.
+func keeneticForeignDevices(p model.Profile) map[string]string {
+	var out map[string]string
+	for _, e := range p.Endpoints {
+		if !e.Enabled {
+			continue
+		}
+		if device, ok := foreignKeeneticDevice(e); ok {
+			if out == nil {
+				out = make(map[string]string)
+			}
+			out[e.ID] = device
+		}
+	}
+	return out
 }
 
 func keeneticKernelName(ndmName string) string {

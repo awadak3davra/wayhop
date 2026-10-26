@@ -1958,5 +1958,11 @@
   "Installed from a WayHop release ({0}).": "Bir WayHop sürümünden kuruldu ({0}).",
   "Restart the network service now": "Ağ hizmetini şimdi yeniden başlat",
   "Restart the network service after installing (every link drops for a few seconds)": "Kurulumdan sonra ağ hizmetini yeniden başlat (tüm bağlantılar birkaç saniyeliğine kesilir)",
-  "AmneziaWG 3.x settings reach netifd's new handler only after the network service restarts: now (every link drops for a few seconds) or at the next reboot.": "AmneziaWG 3.x ayarları netifd'nin yeni işleyicisine ancak ağ hizmeti yeniden başladıktan sonra ulaşır: şimdi (tüm bağlantılar birkaç saniyeliğine kesilir) ya da bir sonraki yeniden başlatmada."
+  "AmneziaWG 3.x settings reach netifd's new handler only after the network service restarts: now (every link drops for a few seconds) or at the next reboot.": "AmneziaWG 3.x ayarları netifd'nin yeni işleyicisine ancak ağ hizmeti yeniden başladıktan sonra ulaşır: şimdi (tüm bağlantılar birkaç saniyeliğine kesilir) ya da bir sonraki yeniden başlatmada.",
+  "Removed {0}: deleted on the router": "{0} kaldırıldı: yönlendiricide silindi",
+  "Could not read every tunnel from the router: {0}": "Yönlendiricideki tünellerin tümü okunamadı: {0}",
+  "The router no longer has this tunnel. Repoint what uses it, then delete it here.": "Yönlendiricide bu tünel artık yok. Onu kullananları başka yere yönlendirin, sonra buradan silin.",
+  "This tunnel is not running on the router right now.": "Bu tünel şu anda yönlendiricide çalışmıyor.",
+  "deleted on the router": "yönlendiricide silindi",
+  "not running on the router": "yönlendiricide çalışmıyor"
 }

@@ -1962,5 +1962,11 @@
   "Installed from a WayHop release ({0}).": "از یک نسخهٔ منتشرشدهٔ WayHop نصب شده است ({0}).",
   "Restart the network service now": "سرویس شبکه را همین حالا راه‌اندازی مجدد کن",
   "Restart the network service after installing (every link drops for a few seconds)": "پس از نصب، سرویس شبکه را راه‌اندازی مجدد کن (همهٔ پیوندها چند ثانیه قطع می‌شوند)",
-  "AmneziaWG 3.x settings reach netifd's new handler only after the network service restarts: now (every link drops for a few seconds) or at the next reboot.": "تنظیمات AmneziaWG 3.x فقط پس از راه‌اندازی مجدد سرویس شبکه به هندلر جدید netifd می‌رسند: همین حالا (همهٔ پیوندها چند ثانیه قطع می‌شوند) یا در راه‌اندازی مجدد بعدی."
+  "AmneziaWG 3.x settings reach netifd's new handler only after the network service restarts: now (every link drops for a few seconds) or at the next reboot.": "تنظیمات AmneziaWG 3.x فقط پس از راه‌اندازی مجدد سرویس شبکه به هندلر جدید netifd می‌رسند: همین حالا (همهٔ پیوندها چند ثانیه قطع می‌شوند) یا در راه‌اندازی مجدد بعدی.",
+  "Removed {0}: deleted on the router": "{0} حذف شد: روی روتر پاک شده بود",
+  "Could not read every tunnel from the router: {0}": "خواندن همهٔ تونل‌های روتر ممکن نشد: {0}",
+  "The router no longer has this tunnel. Repoint what uses it, then delete it here.": "این تونل دیگر روی روتر نیست. هر چیزی را که از آن استفاده می‌کند به جای دیگری هدایت کنید، سپس آن را اینجا حذف کنید.",
+  "This tunnel is not running on the router right now.": "این تونل الان روی روتر در حال اجرا نیست.",
+  "deleted on the router": "روی روتر حذف شده",
+  "not running on the router": "روی روتر اجرا نمی‌شود"
 }

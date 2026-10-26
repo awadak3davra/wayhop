@@ -29,6 +29,10 @@ type executionNativeCaptureV1 struct {
 	// AdoptNDMNames is Keenetic-only: endpoint ID → the NDM interface name that owns the adopted
 	// kernel link. omitempty keeps an OpenWrt capture encoding byte-identically.
 	AdoptNDMNames map[string]string `json:"adopt_ndm_names,omitempty"`
+	// AdoptForeign is Keenetic-only: endpoint ID → the kernel device of an adopted tunnel run outside
+	// KeeneticOS, proven to be no NDM interface's link (validKeeneticAdoptEvidence). omitempty keeps
+	// every capture without one encoding byte-identically.
+	AdoptForeign map[string]string `json:"adopt_foreign,omitempty"`
 	// DomainsViaDNSMasq records that the resolver-backed domain path was available when this was
 	// captured, so a replay compiles the same plan that was reviewed rather than one that quietly
 	// needs a proxy core because the resolver went missing in between.
@@ -88,6 +92,7 @@ func buildExecutionNativeArtifactV1(
 		RouterProtos: cloneRouterProtos(capture.RouterProtos), FirewallZone: capture.FirewallZone,
 		AdoptInterfaces:    cloneNativeInterfaces(capture.AdoptInterfaces),
 		AdoptNDMNames:      cloneNativeInterfaces(capture.AdoptNDMNames),
+		AdoptForeign:       cloneNativeInterfaces(capture.AdoptForeign),
 		DomainsViaDNSMasq:  capture.DomainsViaDNSMasq,
 		OwnedInterfaces:    nativeOwnershipFrom(previous),
 		PluginDevices:      nativePluginDevicesFrom(previous),
@@ -113,6 +118,7 @@ func buildExecutionNativeArtifactV1(
 			RouterProtos:      cloneRouterProtos(capture.RouterProtos), FirewallZone: capture.FirewallZone,
 			AdoptInterfaces:    cloneNativeInterfaces(capture.AdoptInterfaces),
 			AdoptNDMNames:      cloneNativeInterfaces(capture.AdoptNDMNames),
+			AdoptForeign:       cloneNativeInterfaces(capture.AdoptForeign),
 			DomainsViaDNSMasq:  capture.DomainsViaDNSMasq,
 			OccupiedInterfaces: cloneNativeInterfaceSet(capture.OccupiedInterfaces),
 			GlobalPriorities:   cloneNativePriorities(capture.GlobalPriorities),

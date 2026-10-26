@@ -1958,5 +1958,11 @@
   "Installed from a WayHop release ({0}).": "Instalado desde una versión de WayHop ({0}).",
   "Restart the network service now": "Reiniciar ahora el servicio de red",
   "Restart the network service after installing (every link drops for a few seconds)": "Reiniciar el servicio de red tras la instalación (todos los enlaces se caen unos segundos)",
-  "AmneziaWG 3.x settings reach netifd's new handler only after the network service restarts: now (every link drops for a few seconds) or at the next reboot.": "Los ajustes de AmneziaWG 3.x solo llegan al nuevo manejador de netifd tras reiniciar el servicio de red: ahora (todos los enlaces se caen unos segundos) o en el próximo reinicio."
+  "AmneziaWG 3.x settings reach netifd's new handler only after the network service restarts: now (every link drops for a few seconds) or at the next reboot.": "Los ajustes de AmneziaWG 3.x solo llegan al nuevo manejador de netifd tras reiniciar el servicio de red: ahora (todos los enlaces se caen unos segundos) o en el próximo reinicio.",
+  "Removed {0}: deleted on the router": "Se quitó {0}: eliminado en el router",
+  "Could not read every tunnel from the router: {0}": "No se pudieron leer todos los túneles del router: {0}",
+  "The router no longer has this tunnel. Repoint what uses it, then delete it here.": "El router ya no tiene este túnel. Redirige lo que lo usa y luego elimínalo aquí.",
+  "This tunnel is not running on the router right now.": "Este túnel no está en marcha en el router ahora mismo.",
+  "deleted on the router": "eliminado en el router",
+  "not running on the router": "no está en marcha en el router"
 }

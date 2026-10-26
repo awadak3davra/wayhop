@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"testing"
 
 	"wayhop/internal/model"
@@ -20,7 +21,7 @@ func extEndpoint(id, iface, key string, enabled bool) model.Endpoint {
 func TestMissingAdoptedTunnels_RemovedTunnelIsReported(t *testing.T) {
 	eps := []model.Endpoint{extEndpoint("external-awg0", "awg0", "KEY-A", true)}
 
-	got := missingAdoptedTunnels(eps, nil, true, nil) // discovery succeeded and found nothing
+	got := missingAdoptedTunnels(eps, netvpn.Discovery{}, nil) // discovery succeeded and found nothing
 	if len(got) != 1 {
 		t.Fatalf("a removed tunnel must be reported, got %+v", got)
 	}
@@ -38,7 +39,7 @@ func TestMissingAdoptedTunnels_PresentTunnelIsSilent(t *testing.T) {
 	eps := []model.Endpoint{extEndpoint("external-awg0", "awg0", "KEY-A", true)}
 	live := []netvpn.DiscoveredVPN{{Iface: "awg0", PublicKey: "KEY-A"}}
 
-	if got := missingAdoptedTunnels(eps, live, true, nil); len(got) != 0 {
+	if got := missingAdoptedTunnels(eps, netvpn.Discovery{VPNs: live}, nil); len(got) != 0 {
 		t.Errorf("a present tunnel must not be reported: %+v", got)
 	}
 }
@@ -49,7 +50,7 @@ func TestMissingAdoptedTunnels_RenamedTunnelIsNotMissing(t *testing.T) {
 	eps := []model.Endpoint{extEndpoint("external-awg0", "awg0", "KEY-A", true)}
 	live := []netvpn.DiscoveredVPN{{Iface: "awg1", PublicKey: "KEY-A"}} // renamed, same key
 
-	if got := missingAdoptedTunnels(eps, live, true, nil); len(got) != 0 {
+	if got := missingAdoptedTunnels(eps, netvpn.Discovery{VPNs: live}, nil); len(got) != 0 {
 		t.Errorf("a renamed tunnel is still present and must not be reported missing: %+v", got)
 	}
 }
@@ -59,7 +60,7 @@ func TestMissingAdoptedTunnels_MatchesByIfaceWhenNoKey(t *testing.T) {
 	eps := []model.Endpoint{extEndpoint("external-tun0", "tun0", "", true)}
 	live := []netvpn.DiscoveredVPN{{Iface: "tun0"}}
 
-	if got := missingAdoptedTunnels(eps, live, true, nil); len(got) != 0 {
+	if got := missingAdoptedTunnels(eps, netvpn.Discovery{VPNs: live}, nil); len(got) != 0 {
 		t.Errorf("matched by interface name; must not be reported: %+v", got)
 	}
 }
@@ -69,7 +70,7 @@ func TestMissingAdoptedTunnels_MatchesByIfaceWhenNoKey(t *testing.T) {
 func TestMissingAdoptedTunnels_FailedDiscoveryReportsNothing(t *testing.T) {
 	eps := []model.Endpoint{extEndpoint("external-awg0", "awg0", "KEY-A", true)}
 
-	if got := missingAdoptedTunnels(eps, nil, false, nil); len(got) != 0 {
+	if got := missingAdoptedTunnels(eps, netvpn.Discovery{Err: errors.New("ndmc show interface: exit status 1")}, nil); len(got) != 0 {
 		t.Errorf("a failed discovery must not be reported as mass tunnel removal: %+v", got)
 	}
 }
@@ -80,7 +81,7 @@ func TestMissingAdoptedTunnels_IgnoresNonExternal(t *testing.T) {
 		ID: "wayhop-made", Engine: model.EngineSingBox, Enabled: true,
 		Params: map[string]any{"interface": "awg0"},
 	}}
-	if got := missingAdoptedTunnels(eps, nil, true, nil); len(got) != 0 {
+	if got := missingAdoptedTunnels(eps, netvpn.Discovery{}, nil); len(got) != 0 {
 		t.Errorf("non-external endpoints have no native interface: %+v", got)
 	}
 }
@@ -90,7 +91,7 @@ func TestMissingAdoptedTunnels_IgnoresNonExternal(t *testing.T) {
 func TestMissingAdoptedTunnels_DisabledIsReportedButMarked(t *testing.T) {
 	eps := []model.Endpoint{extEndpoint("external-awg0", "awg0", "KEY-A", false)}
 
-	got := missingAdoptedTunnels(eps, nil, true, nil)
+	got := missingAdoptedTunnels(eps, netvpn.Discovery{}, nil)
 	if len(got) != 1 {
 		t.Fatalf("want the finding, got %+v", got)
 	}
@@ -108,7 +109,7 @@ func TestMissingAdoptedTunnels_IgnoredEndpointIsSuppressed(t *testing.T) {
 		extEndpoint("external-awg1", "awg1", "KEY-B", true),
 	}
 
-	got := missingAdoptedTunnels(eps, nil, true, []string{"external-awg0"})
+	got := missingAdoptedTunnels(eps, netvpn.Discovery{}, []string{"external-awg0"})
 	if len(got) != 1 {
 		t.Fatalf("want only the un-dismissed tunnel, got %+v", got)
 	}
@@ -122,7 +123,7 @@ func TestMissingAdoptedTunnels_IgnoredEndpointIsSuppressed(t *testing.T) {
 func TestMissingAdoptedTunnels_IgnoreIsPerObjectNotGlobal(t *testing.T) {
 	eps := []model.Endpoint{extEndpoint("external-awg9", "awg9", "KEY-Z", true)}
 
-	got := missingAdoptedTunnels(eps, nil, true, []string{"external-awg0", "external-awg1"})
+	got := missingAdoptedTunnels(eps, netvpn.Discovery{}, []string{"external-awg0", "external-awg1"})
 	if len(got) != 1 {
 		t.Errorf("an unrelated dismissal must not suppress a new disappearance: %+v", got)
 	}

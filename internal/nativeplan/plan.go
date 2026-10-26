@@ -55,6 +55,10 @@ type HostFacts struct {
 	// (`Wireguard0`) for the adopted kernel link (`nwg0`). Routes target the NDM name; the kernel
 	// name is what the live-link probe uses. Captured, never derived.
 	AdoptNDMNames map[string]string
+	// AdoptForeign is the other Keenetic answer for an adopted kernel link: a tunnel run outside
+	// KeeneticOS (Entware AmneziaWG), which no NDM interface owns. Its device is its route target
+	// (see keenetic.CompileOptions.Foreign). An adopted endpoint is in exactly one of the two maps.
+	AdoptForeign map[string]string
 	// DomainsViaDNSMasq is captured, not assumed: it says this router has both the kernel plane and a
 	// resolver able to populate its sets, which is what lets a domain list skip the compatibility core.
 	DomainsViaDNSMasq bool
@@ -310,6 +314,7 @@ func compileKeenetic(profile *model.Profile, facts HostFacts) (*Plan, error) {
 	compiled, err := keenetic.Compile(profile, keenetic.CompileOptions{
 		AdoptInterfaces:    cloneMap(facts.AdoptInterfaces),
 		AdoptNDMNames:      cloneMap(facts.AdoptNDMNames),
+		Foreign:            cloneMap(facts.AdoptForeign),
 		DomainsViaDNSMasq:  facts.DomainsViaDNSMasq,
 		GlobalPriorityNow:  cloneIntMap(facts.GlobalPriorities),
 		ListsViaIpset:      facts.ListsViaIpset,
@@ -329,6 +334,10 @@ func compileKeenetic(profile *model.Profile, facts HostFacts) (*Plan, error) {
 		expected := decision.Interface
 		if decision.Path == PathNativeAdopt {
 			expected = facts.AdoptNDMNames[decision.EndpointID]
+			// A tunnel run outside KeeneticOS has no NDM name: its routes name the device itself.
+			if expected == "" {
+				expected = facts.AdoptForeign[decision.EndpointID]
+			}
 		}
 		if compiledInterface == "" || (expected != "" && expected != compiledInterface) {
 			return nil, fmt.Errorf("native plan: Keenetic endpoint %q has no consistent compiled interface identity", decision.EndpointID)

@@ -83,12 +83,16 @@ func TestParseNDMInterfaces(t *testing.T) {
 			// this table asserts identity parsing only, so normalize it out before comparing.
 			for i := range got {
 				got[i].ndmUp = nil
+				if got[i].Source != SourceNDM {
+					t.Errorf("tunnel[%d] Source = %q, want %q", i, got[i].Source, SourceNDM)
+				}
+				got[i].Source = ""
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("parseNDMInterfaces() = %#v, want %#v", got, tt.want)
 			}
-			// Discovered NDM tunnels must never carry peers or a public key,
-			// since `show interface` does not expose them.
+			// The listing prints no peers, and a flat block has no layout to tell the interface's
+			// key from a peer's, so neither is read.
 			for _, d := range got {
 				if d.PublicKey != "" || d.Peers != nil {
 					t.Errorf("expected empty PublicKey/Peers, got PublicKey=%q Peers=%#v", d.PublicKey, d.Peers)
@@ -242,12 +246,13 @@ func TestParseNDMInterfaces_RealKeeneticFormat(t *testing.T) {
 		t.Fatalf("want exactly 3 Wireguard tunnels (nested ports/bridges/wifi filtered), got %d: %#v", len(got), got)
 	}
 	want := []struct {
-		iface, ndm, name string
-		active           bool
+		iface, ndm, name, key string
+		port                  int
+		active                bool
 	}{
-		{"nwg1", "Wireguard1", "wg-exit-nl", true},
-		{"nwg2", "Wireguard2", "wg-vps-lan", true},
-		{"nwg7", "Wireguard7", "wg-disabled", false},
+		{"nwg1", "Wireguard1", "wg-exit-nl", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", 45234, true},
+		{"nwg2", "Wireguard2", "wg-vps-lan", "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=", 42475, true},
+		{"nwg7", "Wireguard7", "wg-disabled", "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=", 51111, false},
 	}
 	const future = 9999999999
 	for i, w := range want {
@@ -258,9 +263,11 @@ func TestParseNDMInterfaces_RealKeeneticFormat(t *testing.T) {
 		if got[i].Active(future) != w.active {
 			t.Errorf("tunnel[%d] %s Active = %v, want %v", i, w.ndm, got[i].Active(future), w.active)
 		}
-		// NDM discovery never carries peers/pubkey (they live in the wg dump, not `show interface`).
-		if got[i].PublicKey != "" || got[i].Peers != nil {
-			t.Errorf("tunnel[%d] must have no PublicKey/Peers, got %q / %#v", i, got[i].PublicKey, got[i].Peers)
+		// The interface's own key and port come from its wireguard: sub-block; the listing
+		// prints no peers.
+		if got[i].PublicKey != w.key || got[i].ListenPort != w.port || got[i].Peers != nil {
+			t.Errorf("tunnel[%d] key/port/peers = %q / %d / %#v, want %q / %d / none",
+				i, got[i].PublicKey, got[i].ListenPort, got[i].Peers, w.key, w.port)
 		}
 	}
 }

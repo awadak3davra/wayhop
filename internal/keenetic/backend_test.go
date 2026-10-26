@@ -696,3 +696,60 @@ func TestCompile_PartialAWGObfuscationWarns(t *testing.T) {
 		t.Fatalf("a complete AWG set or a genuine WireGuard endpoint must not warn; warnings = %q", plan.Warnings)
 	}
 }
+
+// A tunnel the router runs outside KeeneticOS (measured: Entware AmneziaWG 3.1 as `awg1`) has no NDM
+// name. Its device is the route target for the kernel policy plane, and nothing that would need NDM
+// to name it is emitted: no static route, no `ip global`.
+func TestCompile_ForeignTunnelRoutesByDevice(t *testing.T) {
+	ca := model.Endpoint{
+		ID: "ca", Name: "CA", Enabled: true, Engine: model.EngineExternal, Owner: model.OwnerExternal,
+		Protocol: model.ProtoAmneziaWG, Params: map[string]any{"interface": "awg1"},
+	}
+	profile := &model.Profile{
+		Endpoints: []model.Endpoint{ca},
+		RoutingLists: []model.RoutingList{{
+			ID: "ai", Name: "AI", Manual: []string{"gemini.example", "203.0.113.0/24"}, Outbound: ca.ID, Enabled: true,
+		}},
+	}
+	opt := CompileOptions{
+		AdoptInterfaces:   map[string]string{ca.ID: "awg1"},
+		Foreign:           map[string]string{ca.ID: "awg1"},
+		ListsViaIpset:     true,
+		DomainsViaDNSMasq: true,
+	}
+	plan, err := Compile(profile, opt)
+	if err != nil {
+		t.Fatalf("a tunnel run outside KeeneticOS did not compile: %v", err)
+	}
+	if plan.IfaceFor[ca.ID] != "awg1" || plan.CompatibilityRouting || plan.Singbox != nil {
+		t.Fatalf("foreign tunnel: iface %q, compatibility %v, singbox %#v",
+			plan.IfaceFor[ca.ID], plan.CompatibilityRouting, plan.Singbox)
+	}
+	if cmds := strings.Join(plan.Routes, "\n"); strings.Contains(cmds, "awg1") {
+		t.Fatalf("NDM was handed a static route to a device it does not own:\n%s", cmds)
+	}
+
+	// Only the device the capture proved for this endpoint is a route target.
+	mismatch := opt
+	mismatch.Foreign = map[string]string{ca.ID: "awg2"}
+	if _, err := Compile(profile, mismatch); err == nil {
+		t.Fatal("an adopted link that differs from the proven foreign device compiled")
+	}
+
+	// Without the kernel policy plane only the core can carry a list into the device.
+	if !needsCompatibilityRouting(profile, RoutePlanes{Foreign: opt.Foreign, DomainsViaDNSMasq: true}) {
+		t.Fatal("a list into a foreign device was classified native with no kernel policy plane")
+	}
+
+	// A default rule into it is not a ladder: NDM cannot raise a device it does not own.
+	withDefault := *profile
+	withDefault.Rules = []model.Rule{{ID: "default", Default: true, Outbound: ca.ID}}
+	if !needsCompatibilityRouting(&withDefault, opt.planes()) {
+		t.Fatal("a default rule into a foreign device was put on the NDM ladder")
+	}
+	grouped := *profile
+	grouped.Groups = []model.Group{{ID: "grp", Name: "G", Type: model.GroupFallback, Members: []string{ca.ID}}}
+	if groupIsNativelyRoutable(&grouped, &grouped.Groups[0], opt.planes()) {
+		t.Fatal("a group whose member NDM cannot name was classified natively routable")
+	}
+}

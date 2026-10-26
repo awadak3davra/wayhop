@@ -700,11 +700,9 @@ async function loadNativeCaps() {
     if (stale()) return;   // a newer run has already cleared and repainted the card
     const vpns = (dv && dv.vpns) || [];
     if (vpns.length) {
-      // Tunnels already represented by an external endpoint shouldn't offer Adopt
-      // again — mirror the matcher the Connections page uses (engine external +
-      // params.interface). state.profile is loaded on the Diagnostics route.
-      const adopted = iface => ((state.profile && state.profile.endpoints) || []).some(
-        e => e.engine === "external" && e.params && e.params.interface === iface);
+      // Tunnels already represented by an external endpoint shouldn't offer Adopt again. The server
+      // decides (v.adopted), matching by public key first: an interface-name match alone would hide
+      // a new Keenetic tunnel that reused a deleted one's WireguardN slot.
       const sec = el("div", { style: "margin-top:var(--sp-3);border-top:1px solid var(--divider);padding-top:var(--sp-3)" },
         el("div", { class: "hint", style: "font-weight:600;margin-bottom:var(--sp-2)" }, t("Detected native tunnels")),
         // One-time explainer: adopting is non-destructive and never auto-enables.
@@ -729,7 +727,7 @@ async function loadNativeCaps() {
         // two controls called "Adopted" on the page with nothing to tell them apart — the same
         // object-less naming the Failover actions had, and invisible on a demo with no native
         // tunnels at all.
-        const represented = !!v.adopted || adopted(v.iface);
+        const represented = !!v.adopted;
         const adoptBtn = v.needs_repair
           ? el("button", { class: "btn btn-sm", "aria-label": t("Repair adoption") + " " + v.iface, title: t("Capture this KeeneticOS tunnel's exact ownership and NDM identity without changing whether it is enabled"),
               onclick: async () => {

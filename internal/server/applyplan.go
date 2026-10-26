@@ -478,6 +478,7 @@ func (s *Server) keeneticRoutePlanes(prof model.Profile) keenetic.RoutePlanes {
 		ListsViaIpset:     keeneticKernelPBRPresent(),
 		Userspace: nativeplan.UserspaceDevices(
 			nativeplan.KeeneticUserspace(&prof, s.capabilitySet(context.Background(), false))),
+		Foreign: keeneticForeignDevices(prof),
 	}
 }
 
@@ -689,7 +690,10 @@ func (s *Server) endpointFindings(prof model.Profile, capset platform.Capability
 				continue
 			}
 			if keeneticHost {
-				if _, ndmKnown := keenetic.ResolveNDMName(e); !e.IsExternal() || !ndmKnown {
+				// A tunnel run outside KeeneticOS has no NDM identity to capture; the Apply capture
+				// proves instead that no NDM interface owns its link (validKeeneticAdoptEvidence).
+				_, foreign := foreignKeeneticDevice(e)
+				if _, ndmKnown := keenetic.ResolveNDMName(e); !foreign && (!e.IsExternal() || !ndmKnown) {
 					out = append(out, PlanFinding{
 						ID: "endpoint.external.keenetic_identity", Setting: "native tunnel", Item: name(e),
 						Severity: platform.SeverityBlocked, Reason: platform.ReasonSavedValueIncompat,

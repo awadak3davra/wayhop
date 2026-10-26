@@ -13,63 +13,90 @@ import (
 )
 
 // handleVPNDiscover lists native VPN tunnels (WireGuard / AmneziaWG) already configured on
-// the router, so the UI can offer to route through them without re-importing keys. Read-only;
-// the discovery captures no secrets (no private keys, preshared keys, or obfuscation headers).
-// full_tunnel / active are computed server-side so every client agrees on the verdict.
+// the router, so the UI can offer to route through them without re-importing keys. The discovery
+// captures no secrets (no private keys, preshared keys, or obfuscation headers). full_tunnel /
+// active are computed server-side so every client agrees on the verdict.
+//
+// It is also the moment WayHop learns the router's current truth, so it brings the adopted
+// endpoints up to date with it (syncAdoptedTunnels): a renamed tunnel's endpoint follows it, a
+// deleted one is reported under "missing", or under "removed" when nothing used it and it was
+// dropped. The operator's routing is never changed by it.
 func (s *Server) handleVPNDiscover(w http.ResponseWriter, r *http.Request) {
 	type vpnRow struct {
 		Iface       string        `json:"iface"`
+		NDMName     string        `json:"ndm_name,omitempty"`
 		Type        string        `json:"type"`
 		Name        string        `json:"name,omitempty"`
+		Source      string        `json:"source,omitempty"`
 		PublicKey   string        `json:"public_key"`
 		ListenPort  int           `json:"listen_port,omitempty"`
 		Peers       []netvpn.Peer `json:"peers,omitempty"`
 		FullTunnel  bool          `json:"full_tunnel"`
 		Active      bool          `json:"active"`
 		Adopted     bool          `json:"adopted,omitempty"`
+		EndpointID  string        `json:"endpoint_id,omitempty"`
 		NeedsRepair bool          `json:"needs_repair,omitempty"`
 	}
 	now := time.Now().Unix()
-	vpns, derr := netvpn.Discover(r.Context())
+	disc := netvpn.DiscoverAll(r.Context())
+	ignored := s.config().IgnoredDrift
+	resp := map[string]any{}
+
+	var missing, removed []MissingTunnel
+	if err := s.store.Reconcile(func(p *model.Profile) bool {
+		var changed bool
+		missing, removed, changed = syncAdoptedTunnels(p, disc, ignored)
+		return changed
+	}); err != nil {
+		// The listing is still worth returning; say why the endpoints were not brought up to date.
+		resp["sync_error"] = err.Error()
+		missing, removed = missingAdoptedTunnels(s.store.Profile().Endpoints, disc, ignored), nil
+	}
+
 	profile := s.store.Profile()
-	out := make([]vpnRow, 0, len(vpns))
-	for _, v := range vpns {
-		adopted, needsRepair := nativeAdoptionState(profile.Endpoints, v)
+	out := make([]vpnRow, 0, len(disc.VPNs))
+	for _, v := range disc.VPNs {
+		id, needsRepair := nativeAdoption(profile.Endpoints, v)
 		out = append(out, vpnRow{
-			Iface: v.Iface, Type: v.Type, Name: v.Name, PublicKey: v.PublicKey, ListenPort: v.ListenPort,
-			Peers: v.Peers, FullTunnel: v.FullTunnel(), Active: v.Active(now),
-			Adopted: adopted, NeedsRepair: needsRepair,
+			Iface: v.Iface, NDMName: v.NDMName, Type: v.Type, Name: v.Name, Source: v.Source,
+			PublicKey: v.PublicKey, ListenPort: v.ListenPort, Peers: v.Peers,
+			FullTunnel: v.FullTunnel(), Active: v.Active(now),
+			Adopted: id != "", EndpointID: id, NeedsRepair: needsRepair,
 		})
 	}
-	resp := map[string]any{"vpns": out}
-	// Adopted endpoints whose interface has vanished. Surfaced alongside discovery because this is
-	// the only moment WayHop learns the router's current truth — and an endpoint that routes through
-	// a tunnel that no longer exists looks entirely healthy until someone says otherwise. Reported,
-	// never auto-removed: deleting it would cascade through every rule referencing it.
-	if missing := missingAdoptedTunnels(s.store.Profile().Endpoints, vpns, derr == nil, s.config().IgnoredDrift); len(missing) > 0 {
+	resp["vpns"] = out
+	// Adopted endpoints whose interface has vanished. Reported, never auto-removed while anything
+	// uses them: deleting one would cascade through every rule referencing it.
+	if len(missing) > 0 {
 		resp["missing"] = missing
 	}
-	if derr != nil {
+	if len(removed) > 0 {
+		resp["removed"] = removed
+	}
+	if disc.Err != nil {
 		// Non-fatal: still return whatever was found, but surface WHY discovery may be incomplete so
 		// the UI can warn instead of showing an empty list that is indistinguishable from a real break.
-		resp["discover_error"] = derr.Error()
+		resp["discover_error"] = disc.Err.Error()
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func nativeAdoptionState(endpoints []model.Endpoint, discovered netvpn.DiscoveredVPN) (bool, bool) {
+// nativeAdoption names the endpoint that adopted a discovered tunnel ("" if none), and whether that
+// endpoint needs its ownership or NDM identity repaired. It matches as the sync does
+// (adoptedMatches), so a new tunnel that reused a deleted one's interface name is offered for
+// adoption instead of hiding behind the old record.
+func nativeAdoption(endpoints []model.Endpoint, discovered netvpn.DiscoveredVPN) (string, bool) {
 	for _, endpoint := range endpoints {
-		iface, _ := endpoint.Params["interface"].(string)
-		if endpoint.Engine != model.EngineExternal || iface != discovered.Iface {
+		if !adoptedMatches(endpoint, discovered) {
 			continue
 		}
 		if discovered.NDMName == "" { // OpenWrt has no NDM identity to repair.
-			return true, false
+			return endpoint.ID, false
 		}
 		ndmName, known := keenetic.ResolveNDMName(endpoint)
-		return true, !endpoint.IsExternal() || !known || ndmName != discovered.NDMName
+		return endpoint.ID, !endpoint.IsExternal() || !known || ndmName != discovered.NDMName
 	}
-	return false, false
+	return "", false
 }
 
 // peerEndpointHost extracts the bare host of the FIRST peer carrying an endpoint,
@@ -117,13 +144,16 @@ func endpointFromDiscovered(d netvpn.DiscoveredVPN) model.Endpoint {
 	if d.NDMName != "" {
 		params["ndm_name"] = d.NDMName
 	}
-	name := d.Iface + " (native)"
-	if strings.TrimSpace(d.Name) != "" {
-		name = d.Name + " (native)"
+	// Where the tunnel was seen decides whether its later absence means "deleted" (see
+	// missingAdoptedTunnels); the label the name was made from tells a name WayHop wrote from one
+	// the operator chose (see autoNamed).
+	if d.Source != "" {
+		params["source"] = d.Source
 	}
+	params["native_label"] = strings.TrimSpace(d.Name)
 	return model.Endpoint{
 		ID:       "external-" + d.Iface,
-		Name:     name,
+		Name:     nativeEndpointName(d.Name, d.Iface),
 		Engine:   model.EngineExternal,
 		Protocol: model.Protocol(d.Type), // descriptive only; validate skips protocol for external
 		// The underlying tunnel is owned by the router/OS — WayHop routes through it but must never
@@ -136,13 +166,14 @@ func endpointFromDiscovered(d netvpn.DiscoveredVPN) model.Endpoint {
 
 // refreshAdoptedEndpoint repairs discovery metadata without changing an operator's routing state.
 // Re-adoption is an ownership/identity refresh, not a hidden disable, rename, or health-policy reset.
+// The name follows the router's label only while it is still the one WayHop made (autoNamed).
 func refreshAdoptedEndpoint(existing, discovered model.Endpoint) model.Endpoint {
 	discovered.ID = existing.ID
 	discovered.Enabled = existing.Enabled
 	discovered.Health = existing.Health
 	discovered.MTU = existing.MTU
 	discovered.PersistentKeepalive = existing.PersistentKeepalive
-	if strings.TrimSpace(existing.Name) != "" {
+	if strings.TrimSpace(existing.Name) != "" && !autoNamed(existing) {
 		discovered.Name = existing.Name
 	}
 	params := make(map[string]any, len(existing.Params)+len(discovered.Params))
@@ -154,6 +185,24 @@ func refreshAdoptedEndpoint(existing, discovered model.Endpoint) model.Endpoint 
 	}
 	discovered.Params = params
 	return discovered
+}
+
+// nativeEndpointName is the name an adopted tunnel is given: the router's label, else the device.
+func nativeEndpointName(label, iface string) string {
+	if label = strings.TrimSpace(label); label != "" {
+		return label + " (native)"
+	}
+	return iface + " (native)"
+}
+
+// autoNamed reports whether an adopted endpoint still carries the name WayHop made for it, so a
+// label changed on the router may replace it. An endpoint adopted before the label was recorded
+// counts as auto-named while it keeps the " (native)" suffix every such name had.
+func autoNamed(e model.Endpoint) bool {
+	if label, ok := e.Params["native_label"].(string); ok {
+		return e.Name == nativeEndpointName(label, endpointIface(e))
+	}
+	return strings.HasSuffix(e.Name, " (native)")
 }
 
 // handleVPNAdopt turns an already-discovered native tunnel into a DISABLED

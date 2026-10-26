@@ -9,6 +9,9 @@ package health
 import (
 	"context"
 	"errors"
+	"net/netip"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -324,7 +327,7 @@ func eventKindFor(from, to State) string {
 // through proxy id (testURL = the per-tunnel health target, else the default).
 func (m *Monitor) probe(ctx context.Context, id, testURL, iface string) (State, int) {
 	if iface != "" {
-		alive, ms, ran := netdiag.ReachableViaIfaceProbe(ctx, iface, "1.1.1.1", 3)
+		alive, ms, ran := netdiag.ReachableViaIfaceProbe(ctx, iface, ifaceProbeHost(testURL), 3)
 		if !ran {
 			// The probe never executed (no ping on this PATH, the interface is gone, the context
 			// was cancelled). Reporting Down here would mark every native tunnel dead on such a
@@ -352,6 +355,35 @@ func (m *Monitor) probe(ctx context.Context, id, testURL, iface string) (State, 
 		return Down, 0
 	}
 	return Unknown, 0
+}
+
+// defaultIfaceProbeHost is what a kernel interface-backed exit is pinged at when its health-check
+// target names no address.
+const defaultIfaceProbeHost = "1.1.1.1"
+
+// ifaceProbeHost is the address a kernel interface-backed exit is pinged at: its own health-check
+// target when that names an address (a bare IP, or a URL whose host is one), else
+// defaultIfaceProbeHost.
+//
+// The panel has always offered "or 1.1.1.1 / gateway IP" in that field and said it is what the
+// tunnel pings, yet the kernel probe pinged 1.1.1.1 whatever it held. Measured on a live Keenetic: an
+// exit to a VPS that forwards only Google's networks (to reach Gemini) never answered 1.1.1.1 and read
+// Down at 0% while it carried the traffic routed into it; 8.8.8.8 answers through it.
+//
+// A hostname is not resolved here: ping would resolve it through the router's own DNS, outside the
+// tunnel, so a name (a URL for the Clash delay test, say) falls back to the default like an empty
+// target.
+func ifaceProbeHost(target string) string {
+	target = strings.TrimSpace(target)
+	if ip, err := netip.ParseAddr(target); err == nil {
+		return ip.Unmap().String()
+	}
+	if u, err := url.Parse(target); err == nil && u.Host != "" {
+		if ip, err := netip.ParseAddr(u.Hostname()); err == nil {
+			return ip.Unmap().String()
+		}
+	}
+	return defaultIfaceProbeHost
 }
 
 type target struct{ id, name, kind, testURL, iface string }
