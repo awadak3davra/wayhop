@@ -10,9 +10,44 @@
 // Attention order: broken first, then unprobed, then working (slowest first, since a slow exit is
 // the next thing to look at), then switched-off, then tunnels that are not exits yet. A list sorted
 // best-first buries the one row the user opened the page for.
+// nativeGone maps an adopted endpoint's id to the /api/vpn/discover "missing" record for it: its
+// tunnel is not on the router (deleted: true when the router's own configuration no longer has it).
+// Filled by discoverTunnels, read by the exits list's rank, row and panel.
+let nativeGone = {};
+
+// discoverTunnels reads /api/vpn/discover for the exits list. The server answers it by bringing the
+// adopted endpoints up to date with the router (a renamed tunnel's endpoint follows it, a deleted
+// unused one is dropped), so the caller reads the profile AFTER it. A tunnel is listed as "not an
+// exit yet" only when the server matched it to no endpoint: it matches by public key first, so a
+// new tunnel that took a deleted one's interface name is offered instead of hiding behind the old
+// record. Best-effort: absent CLI tools or an unreachable endpoint simply means there are none.
+async function discoverTunnels() {
+  nativeGone = {};
+  try {
+    const dv = (await api.get("/api/vpn/discover")) || {};
+    (dv.missing || []).forEach(m => { nativeGone[m.endpoint_id] = m; });
+    const removed = dv.removed || [];
+    if (removed.length) {
+      toast(t("Removed {0}: deleted on the router", removed.map(m => m.name || m.endpoint_id).join(", ")), "ok");
+    }
+    return { tunnels: (dv.vpns || []).filter(tn => !tn.adopted), error: dv.discover_error || "" };
+  } catch (_) {
+    return { tunnels: [], error: "" };
+  }
+}
+
+// discoverHint says a partial look out loud: without it a tunnel the router failed to report reads
+// exactly like one it does not have.
+function discoverHint(err) {
+  return el("div", { class: "hint", style: "padding:6px 10px" },
+    t("Could not read every tunnel from the router: {0}", err));
+}
+
 function exitRank(item) {
   if (item.kind === "native") return 5;
   const e = item.ep;
+  // An exit whose tunnel the router no longer has is broken whether or not it is switched on.
+  if (nativeGone[e.id]) return 0;
   if (!e.enabled) return 4;
   const h = healthMap[e.id];
   if (h && h.state === "down") return 0;
@@ -83,6 +118,14 @@ function exitPanelFor(item) {
     panel.appendChild(el("div", { class: "insp-note" },
       t("Adopted from the OS tunnel {0}.", e.params.interface)));
   }
+  // Kept rather than removed because something still uses it (or it is switched on): say so, and
+  // what to do, instead of rendering a healthy-looking exit that carries nothing.
+  const gone = nativeGone[e.id];
+  if (gone) {
+    panel.appendChild(el("div", { class: "insp-note", style: "color:var(--err)" }, gone.deleted
+      ? t("The router no longer has this tunnel. Repoint what uses it, then delete it here.")
+      : t("This tunnel is not running on the router right now.")));
+  }
   if (isExternal && !e.enabled) {
     panel.appendChild(el("div", { class: "hint", style: "margin-top:6px" },
       "OS-managed tunnel — switch it on to route through it"));
@@ -129,8 +172,9 @@ function paintExitRow(row, item) {
   let dotCls = "muted", note = "";
   if (item.kind === "native") { dotCls = item.tn.active ? "native" : "native idle"; note = t("not an exit yet"); }
   else {
-    const e = item.ep, h = healthMap[e.id];
-    if (!e.enabled) { dotCls = "muted"; note = t("off"); }
+    const e = item.ep, h = healthMap[e.id], gone = nativeGone[e.id];
+    if (gone) { dotCls = "err"; note = gone.deleted ? t("deleted on the router") : t("not running on the router"); }
+    else if (!e.enabled) { dotCls = "muted"; note = t("off"); }
     // The cause belongs in the panel, where there is room for it and for its suggested fix. In a
     // 260px column it only ever showed a truncated fragment — "No response (timed out or bl".
     else if (h && h.state === "down") { dotCls = "err"; note = t("down"); }

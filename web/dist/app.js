@@ -2353,15 +2353,11 @@ async function renderConnections(view) {
 // the same builder serves the first render and every in-place refresh.
 async function connectionsBody() {
   const view = el("div", { class: "conn-body" });
-  await loadProfile();
 
-  // Native tunnels are fetched before anything renders so both kinds can share one ordering.
-  // Best-effort: absent CLI tools or an unreachable endpoint simply means there are none.
-  let tunnels = [];
-  try {
-    const dv = await api.get("/api/vpn/discover");
-    tunnels = (dv && dv.vpns) || [];
-  } catch (_) { /* CLI tools absent or endpoint unreachable */ }
+  // Native tunnels are fetched before anything renders so both kinds can share one ordering, and
+  // before the profile, which discovery brings up to date (see discoverTunnels).
+  const found = await discoverTunnels(), tunnels = found.tunnels;
+  await loadProfile();
 
   if (!state.profile.endpoints.length && !tunnels.length) {
     const card = el("div", { class: "card" });
@@ -2370,12 +2366,9 @@ async function connectionsBody() {
     return view;
   }
 
-  const adoptedIfaces = new Set(state.profile.endpoints
-    .filter(e => e.engine === "external" && e.params && e.params.interface)
-    .map(e => e.params.interface));
   const items = [
     ...state.profile.endpoints.map(e => ({ kind: "exit", id: e.id, ep: e, label: e.name || e.id })),
-    ...tunnels.filter(tn => !adoptedIfaces.has(tn.iface))
+    ...tunnels
       .map(tn => ({ kind: "native", id: "native:" + tn.iface, tn: tn, label: tn.name || tn.iface })),
   ];
   const order = new Map(items.map((it, i) => [it.id, i]));
@@ -2418,6 +2411,7 @@ async function connectionsBody() {
     needing
       ? el("span", { class: "insp-list-warn" }, t("{0} needing attention", needing))
       : el("span", { class: "insp-list-ok" }, t("all healthy"))));
+  if (found.error) list.appendChild(discoverHint(found.error));
   items.forEach(it => {
     const row = exitRow(it, selectExit);
     rows.set(it.id, row);

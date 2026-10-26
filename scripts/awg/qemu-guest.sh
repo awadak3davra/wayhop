@@ -150,9 +150,11 @@ EOF
   /etc/init.d/firewall reload >/dev/null 2>&1
   # A reload, deliberately: whether it is enough depends on netifd already knowing the protocol.
   /etc/init.d/network reload
+  # awg0 is read from sysfs: on 24.10 under KVM `ip link show awg0` has failed while awg0 was up and
+  # carrying traffic (netifd logged it up; the handshake and pings passed in the same phase).
   i=0
-  while ! ip link show awg0 >/dev/null 2>&1 && [ "$i" -lt 10 ]; do i=$((i + 1)); sleep 1; done
-  if ip link show awg0 >/dev/null 2>&1; then say link_after_reload yes; else say link_after_reload no; fi
+  while ! [ -e /sys/class/net/awg0 ] && [ "$i" -lt 10 ]; do i=$((i + 1)); sleep 1; done
+  if [ -e /sys/class/net/awg0 ]; then say link_after_reload yes; else say link_after_reload no; fi
   ;;
 
 restart)
@@ -162,8 +164,8 @@ restart)
 tunnel)
   tag="$1"
   i=0
-  while ! ip link show awg0 >/dev/null 2>&1 && [ "$i" -lt 30 ]; do i=$((i + 1)); sleep 1; done
-  if ip link show awg0 >/dev/null 2>&1; then say "${tag}_link" yes; else say "${tag}_link" no; fi
+  while ! [ -e /sys/class/net/awg0 ] && [ "$i" -lt 30 ]; do i=$((i + 1)); sleep 1; done
+  if [ -e /sys/class/net/awg0 ]; then say "${tag}_link" yes; else say "${tag}_link" no; fi
   hs=0; i=0
   while [ "$i" -lt 45 ]; do
     hs=$(awg show awg0 latest-handshakes 2>/dev/null | awk '{print $2}' | head -n 1)
@@ -205,7 +207,7 @@ uninstall)
   gone="$(awk 'NR == FNR { a[$0] = 1; next } !($0 in a) { printf "-%s;", $0 }' /tmp/awg-e2e.after /tmp/awg-e2e.before)"
   say "${tag}_residue" "${extra}${gone}"
   say "${tag}_kmod_loaded" "$(kmod_loaded)"
-  if ip link show awg0 >/dev/null 2>&1; then say "${tag}_link" yes; else say "${tag}_link" no; fi
+  if [ -e /sys/class/net/awg0 ]; then say "${tag}_link" yes; else say "${tag}_link" no; fi
   if pidof amneziawg-go >/dev/null 2>&1; then say "${tag}_go_running" yes; else say "${tag}_go_running" no; fi
   mem "$tag"
   ;;

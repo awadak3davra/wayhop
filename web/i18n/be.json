@@ -1958,5 +1958,11 @@
   "Installed from a WayHop release ({0}).": "Усталявана з рэліза WayHop ({0}).",
   "Restart the network service now": "Перазапусціць сеткавую службу зараз",
   "Restart the network service after installing (every link drops for a few seconds)": "Перазапусціць сеткавую службу пасля ўсталёўкі (усе злучэнні знікнуць на некалькі секунд)",
-  "AmneziaWG 3.x settings reach netifd's new handler only after the network service restarts: now (every link drops for a few seconds) or at the next reboot.": "Налады AmneziaWG 3.x трапяць у новы апрацоўшчык netifd толькі пасля перазапуску сеткавай службы: зараз (усе злучэнні знікнуць на некалькі секунд) або пры наступнай перазагрузцы."
+  "AmneziaWG 3.x settings reach netifd's new handler only after the network service restarts: now (every link drops for a few seconds) or at the next reboot.": "Налады AmneziaWG 3.x трапяць у новы апрацоўшчык netifd толькі пасля перазапуску сеткавай службы: зараз (усе злучэнні знікнуць на некалькі секунд) або пры наступнай перазагрузцы.",
+  "Removed {0}: deleted on the router": "Выдалена {0}: выдалена на роўтары",
+  "Could not read every tunnel from the router: {0}": "Не ўдалося прачытаць усе тунэлі роўтара: {0}",
+  "The router no longer has this tunnel. Repoint what uses it, then delete it here.": "На роўтары гэтага тунэля больш няма. Перанакіруйце тое, што яго выкарыстоўвае, потым выдаліце яго тут.",
+  "This tunnel is not running on the router right now.": "Зараз гэты тунэль на роўтары не запушчаны.",
+  "deleted on the router": "выдалены на роўтары",
+  "not running on the router": "не запушчаны на роўтары"
 }

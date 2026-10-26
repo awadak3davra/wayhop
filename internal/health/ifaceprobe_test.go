@@ -68,3 +68,23 @@ func TestRecord_UnknownDoesNotLaunderACommittedDown(t *testing.T) {
 		t.Errorf("a blind probe rewrote a committed Down to %q — the recovery gate would be bypassed", got)
 	}
 }
+
+// A kernel exit is pinged at the address its own health-check target names. A VPS that forwards only
+// some networks (measured: Google only, for Gemini) never answers the default, so pinging 1.1.1.1
+// whatever the target said read a working exit as Down.
+func TestIfaceProbeHost_UsesTheExitsTargetAddress(t *testing.T) {
+	for target, want := range map[string]string{
+		"":                                      defaultIfaceProbeHost,
+		"8.8.8.8":                               "8.8.8.8",
+		" 203.0.113.7 ":                         "203.0.113.7",
+		"http://198.51.100.1/generate_204":      "198.51.100.1",
+		"http://[2001:db8::1]:80/x":             "2001:db8::1",
+		"::ffff:192.0.2.5":                      "192.0.2.5",
+		"http://cp.cloudflare.com/generate_204": defaultIfaceProbeHost, // a name is not resolved here
+		"gateway.example":                       defaultIfaceProbeHost,
+	} {
+		if got := ifaceProbeHost(target); got != want {
+			t.Errorf("ifaceProbeHost(%q) = %q, want %q", target, got, want)
+		}
+	}
+}

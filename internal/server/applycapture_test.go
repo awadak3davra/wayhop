@@ -271,6 +271,94 @@ func TestCaptureExecutionNativeKeeneticRequiresExactExternalNDMEvidence(t *testi
 	}
 }
 
+// keeneticForeignTuple is the live shape that Apply refused: an AmneziaWG 3.1 tunnel run from
+// Entware (`awg1`), seen by discovery's runtime dump only, adopted with no NDM name.
+func keeneticForeignTuple(t *testing.T, params map[string]any) (DesiredSnapshot, ExecutionHostFactsV1) {
+	t.Helper()
+	desired, _ := executionCaptureExternalTuple(t)
+	profile := desired.Profile
+	profile.Endpoints = append([]model.Endpoint(nil), profile.Endpoints...)
+	profile.Endpoints[0].Protocol = model.ProtoAmneziaWG
+	profile.Endpoints[0].Params = params
+	var err error
+	desired, err = newDesiredSnapshot(desired.Config, profile, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := hostTestProbe(desired)
+	probe.Platform = string(platform.Keenetic)
+	probe.RawCapabilities.Platform = string(platform.Keenetic)
+	host, err := newHostSnapshot(desired, probe, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	iface, _ := params["interface"].(string)
+	return desired, ExecutionHostFactsV1{Host: host, ExternalBindings: []ExecutionExternalBindingV1{{
+		EndpointID: "external", Interface: iface, IfIndex: 21, AdminUp: true, Ready: true,
+	}}}
+}
+
+func TestCaptureExecutionNativeKeeneticProvesForeignTunnel(t *testing.T) {
+	runningConfig := func(context.Context) (string, error) {
+		return "interface Wireguard0\n description provider-tunnel\n!\n", nil
+	}
+	desired, hostFacts := keeneticForeignTuple(t, map[string]any{"interface": "awg1", "source": "runtime"})
+	capture, err := captureExecutionNativeFrom(context.Background(), desired, hostFacts, nil, runningConfig)
+	if err != nil {
+		t.Fatalf("a tunnel run outside KeeneticOS was refused at capture: %v", err)
+	}
+	if capture.AdoptForeign["external"] != "awg1" || len(capture.AdoptNDMNames) != 0 ||
+		capture.AdoptInterfaces["external"] != "awg1" {
+		t.Fatalf("foreign capture = adopt %#v ndm %#v foreign %#v",
+			capture.AdoptInterfaces, capture.AdoptNDMNames, capture.AdoptForeign)
+	}
+
+	for name, params := range map[string]map[string]any{
+		// A legacy NDM tunnel that only lacks its captured name keeps the re-adoption path.
+		"NDM namespace":      {"interface": "nwg5", "source": "runtime"},
+		"not runtime-seen":   {"interface": "awg1", "source": "ndm"},
+		"no discovery proof": {"interface": "awg1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			desired, hostFacts := keeneticForeignTuple(t, params)
+			if _, err := captureExecutionNativeFrom(context.Background(), desired, hostFacts, nil,
+				runningConfig); !errors.Is(err, errExecutionCaptureUnavailable) {
+				t.Fatalf("error = %v, want the NDM evidence refusal", err)
+			}
+		})
+	}
+
+	// The live link must be the device the endpoint names: a binding to anything else is not proof.
+	desired, hostFacts = keeneticForeignTuple(t, map[string]any{"interface": "awg1", "source": "runtime"})
+	hostFacts.ExternalBindings[0].Interface = "awg2"
+	if _, err := captureExecutionNativeFrom(context.Background(), desired, hostFacts, nil,
+		runningConfig); !errors.Is(err, errExecutionCaptureUnavailable) {
+		t.Fatalf("mismatched foreign link error = %v", err)
+	}
+}
+
+func TestEndpointFindingsAcceptForeignKeeneticTunnel(t *testing.T) {
+	desired, hostFacts := keeneticForeignTuple(t, map[string]any{"interface": "awg1", "source": "runtime"})
+	s := &Server{cfg: &desired.Config, platformOf: func() platform.Platform { return platform.Keenetic }}
+	for _, f := range s.endpointFindings(desired.Profile, hostFacts.Host.CapabilitySet) {
+		if f.ID == "endpoint.external.keenetic_identity" {
+			t.Fatalf("a tunnel run outside KeeneticOS was sent to an NDM re-adoption that cannot exist: %#v", f)
+		}
+	}
+	if got := keeneticForeignDevices(desired.Profile); got["external"] != "awg1" || len(got) != 1 {
+		t.Fatalf("review foreign devices = %#v", got)
+	}
+
+	legacy, legacyHost := keeneticForeignTuple(t, map[string]any{"interface": "nwg5", "source": "runtime"})
+	found := false
+	for _, f := range s.endpointFindings(legacy.Profile, legacyHost.Host.CapabilitySet) {
+		found = found || f.ID == "endpoint.external.keenetic_identity"
+	}
+	if !found {
+		t.Fatal("an NDM tunnel without its captured name lost its re-adoption finding")
+	}
+}
+
 func TestCaptureExecutionNativeKeeneticRequiresRunningConfigEvidence(t *testing.T) {
 	desired, _ := executionCaptureExternalTuple(t)
 	probe := hostTestProbe(desired)

@@ -345,6 +345,35 @@ func TestCompileKeeneticAdoptsKnownExternalOwnersWithoutWritePlan(t *testing.T) 
 	}
 }
 
+// A tunnel run outside KeeneticOS is adopted by its device alone: no NDM name exists for it, and the
+// device the capture proved is both the decision's link and the routes' target.
+func TestCompileKeeneticAdoptsForeignTunnelByDevice(t *testing.T) {
+	endpoint := managedAWG()
+	endpoint.Owner = model.OwnerExternal
+	facts := HostFacts{
+		Platform: platform.Keenetic,
+		Capabilities: usableCapabilities(
+			platform.NativeOperationCapabilityID(string(endpoint.Protocol), platform.NativeAdopt),
+		),
+		AdoptInterfaces:    map[string]string{endpoint.ID: "awg1"},
+		AdoptForeign:       map[string]string{endpoint.ID: "awg1"},
+		OccupiedInterfaces: map[string]bool{},
+	}
+	plan, err := Compile(&model.Profile{Endpoints: []model.Endpoint{endpoint}}, facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Keenetic.Interfaces) != 0 || plan.Decisions[0].Path != PathNativeAdopt ||
+		plan.Decisions[0].Interface != "awg1" || plan.Keenetic.IfaceFor[endpoint.ID] != "awg1" {
+		t.Fatalf("foreign tunnel plan: decision %#v, iface %q", plan.Decisions[0], plan.Keenetic.IfaceFor[endpoint.ID])
+	}
+
+	facts.AdoptForeign = map[string]string{endpoint.ID: "awg2"}
+	if _, err := Compile(&model.Profile{Endpoints: []model.Endpoint{endpoint}}, facts); err == nil {
+		t.Fatal("a foreign device that is not the adopted link compiled")
+	}
+}
+
 func TestCompileKeeneticPreservesNativeConnectionsUnderCompatibilityRouting(t *testing.T) {
 	native := managedAWG()
 	native.ID, native.Name = "native-nl", "Native NL"

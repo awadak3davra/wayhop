@@ -1,8 +1,10 @@
 package server
 
 import (
+	"fmt"
 	"strings"
 
+	"wayhop/internal/keenetic"
 	"wayhop/internal/model"
 	"wayhop/internal/netvpn"
 )
@@ -34,28 +36,42 @@ func adoptedPublicKey(e model.Endpoint) string {
 // have "external-<iface>" records, and rewriting their IDs would orphan every rule and group that
 // references them. Keeping the ID and fixing the LOOKUP is the change that costs a user nothing.
 func resolveAdoptedID(existing []model.Endpoint, d netvpn.DiscoveredVPN) string {
-	fallback := "external-" + d.Iface
-
-	key := strings.TrimSpace(d.PublicKey)
-	if key == "" {
-		// NDM discovery does not expose public keys. The exact live kernel interface is still enough
-		// to refresh an existing record in place (not to infer a rename): this is how a pre-ownership
-		// Keenetic endpoint learns its authoritative NDM name without duplicating itself.
-		for _, e := range existing {
-			iface, _ := e.Params["interface"].(string)
-			if e.Engine == model.EngineExternal && iface == d.Iface {
-				return e.ID
-			}
-		}
-		return fallback
-	}
 	for _, e := range existing {
-		if e.Engine != model.EngineExternal {
-			continue
-		}
-		if adoptedPublicKey(e) == key {
+		if adoptedMatches(e, d) {
 			return e.ID // same tunnel, whatever it is called today
 		}
 	}
-	return fallback
+	// A new tunnel can land on a name a deleted one left behind: KeeneticOS reuses a freed
+	// WireguardN slot. When the old record still holds "external-<iface>" (rules route through it,
+	// so it was kept), the new tunnel gets an ID of its own rather than silently taking over the old
+	// tunnel's rules.
+	taken := map[string]bool{}
+	for _, e := range existing {
+		taken[e.ID] = true
+	}
+	id := "external-" + d.Iface
+	for n := 2; taken[id]; n++ {
+		id = fmt.Sprintf("external-%s-%d", d.Iface, n)
+	}
+	return id
+}
+
+// adoptedMatches reports whether an adopted endpoint is the discovered tunnel.
+//
+// The interface's public key decides whenever both sides carry one: it survives renames, and two
+// different keys under one name are two tunnels (a deleted Keenetic tunnel whose slot a new one
+// reused). Without a key on both sides the kernel name decides, then the NDM name. A missing key
+// never matches another missing key.
+func adoptedMatches(e model.Endpoint, d netvpn.DiscoveredVPN) bool {
+	if e.Engine != model.EngineExternal {
+		return false
+	}
+	if ek, dk := adoptedPublicKey(e), strings.TrimSpace(d.PublicKey); ek != "" && dk != "" {
+		return ek == dk
+	}
+	if iface := endpointIface(e); iface != "" && iface == d.Iface {
+		return true
+	}
+	name, known := keenetic.ResolveNDMName(e)
+	return known && name == d.NDMName
 }

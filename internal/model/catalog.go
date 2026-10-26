@@ -111,7 +111,10 @@ func RoutingPresets() []RoutingPreset {
 		srs("svc-meta", "Meta (IG/FB/WA)", "https://github.com/itdoginfo/allow-domains/releases/latest/download/meta.srs", "domain", service, "Instagram / Facebook / WhatsApp.", "proxy"),
 		srs("svc-twitter", "Twitter / X", "https://github.com/itdoginfo/allow-domains/releases/latest/download/twitter.srs", "domain", service, "Twitter / X domains.", "proxy"),
 		srs("svc-tiktok", "TikTok", "https://github.com/itdoginfo/allow-domains/releases/latest/download/tiktok.srs", "domain", service, "TikTok domains.", "proxy"),
-		srs("svc-ai", "Google AI", "https://github.com/itdoginfo/allow-domains/releases/latest/download/google_ai.srs", "domain", service, "Google AI (Gemini) domains.", "proxy"),
+		// The text file itdoginfo compiles into google_ai.srs. As a .srs the list needed the core, and a
+		// Keenetic in routing mode "fast" (no core TUN) dropped it with nothing routed.
+		domains("svc-ai", "Google AI", "https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Services/google_ai.lst",
+			service, "Google AI (Gemini) domains. Carried by the router's own resolver — no proxy core needed.", "proxy"),
 		srs("svc-hdrezka", "HDrezka", "https://github.com/itdoginfo/allow-domains/releases/latest/download/hdrezka.srs", "domain", service, "HDrezka streaming.", "proxy"),
 		srs("svc-crypto", "Crypto / exchanges", "https://github.com/SagerNet/sing-geosite/raw/rule-set/geosite-category-cryptocurrency.srs", "domain", service, "Crypto exchanges, wallets, DeFi/dapps, block explorers and node RPCs (v2fly cryptocurrency category via sing-geosite). Route via a tunnel to reach services that geo-block, or to keep crypto traffic off the local ISP.", "proxy"),
 		// Streaming geo-unblock: these refuse datacenter/VPN IPs, so pair them with a CLEAN residential-ish

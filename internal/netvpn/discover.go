@@ -12,6 +12,8 @@ package netvpn
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -40,6 +42,8 @@ type DiscoveredVPN struct {
 	PublicKey  string `json:"public_key"`     // this interface's own public key
 	ListenPort int    `json:"listen_port,omitempty"`
 	Peers      []Peer `json:"peers,omitempty"`
+	// Source says where the tunnel was seen: SourceNDM, SourceUCI or SourceRuntime.
+	Source string `json:"source,omitempty"`
 	// ndmUp carries the KeeneticOS admin/link verdict (InterfaceStatusUp) for tunnels discovered
 	// via `ndmc show interface`, which lists NO peers/handshakes for Active() to read. nil off the
 	// NDM path (wg/awg dumps carry real handshakes). Unexported and never serialized: a purely
@@ -101,7 +105,7 @@ func parseWgDump(out, typ string) []DiscoveredVPN {
 		d, seen := byIface[iface]
 		if !seen {
 			// interface line: f[0]=iface f[1]=privkey f[2]=pubkey f[3]=listen-port …
-			d = &DiscoveredVPN{Iface: iface, Type: typ, PublicKey: f[2]}
+			d = &DiscoveredVPN{Iface: iface, Type: typ, PublicKey: f[2], Source: SourceRuntime}
 			if p, err := strconv.Atoi(f[3]); err == nil {
 				d.ListenPort = p
 			}
@@ -132,30 +136,146 @@ func parseWgDump(out, typ string) []DiscoveredVPN {
 	return res
 }
 
-// Discover probes the host for native WireGuard + AmneziaWG tunnels via the wg/awg CLIs.
-// Missing wg/awg tools simply yield no results from that path (absence is normal, never an error).
-//
-// On KeeneticOS the wg/awg CLIs are absent (NDM owns the runtime), so when the dumps yield
-// nothing we fall back to the NDM discovery path (`ndmc -c "show interface"`). Where wg/awg
-// ARE present (OpenWrt/Entware), behavior is unchanged — the fallback is never consulted.
-//
-// The returned error is non-nil ONLY when the NDM fallback was consulted and ndmc EXISTED but
-// FAILED — so a caller can distinguish "no tunnels configured" (nil error, empty slice) from
-// "discovery itself broke" and surface the difference instead of a silent empty list.
+// Where a discovered tunnel was seen. A tunnel read from the router's CONFIGURATION (NDM on
+// KeeneticOS, uci on OpenWrt) is listed whether it is up or down, so its absence from that listing
+// means it was deleted. A tunnel seen only in the runtime (an awg-quick/wg-quick tunnel) vanishes
+// the moment it goes down, so its absence proves nothing.
+const (
+	SourceNDM     = "ndm"
+	SourceUCI     = "uci"
+	SourceRuntime = "runtime"
+)
+
+// ConfigListed reports whether the tunnel came from a configuration listing (see SourceNDM).
+func (d DiscoveredVPN) ConfigListed() bool { return d.Source == SourceNDM || d.Source == SourceUCI }
+
+// wayhopIfacePrefix names every device WayHop creates for its own endpoints (util.AWGIface): the
+// awg-quick plugin, the generator's bind_interface and the native OpenWrt writer all use it. Those
+// tunnels are WayHop's, not the router's, and offering one for adoption would route an exit
+// through itself.
+const wayhopIfacePrefix = "wr_"
+
+// Discovery is one full look at the router's native tunnels and how far that look reached.
+type Discovery struct {
+	VPNs []DiscoveredVPN
+	// NDM and UCI report that the router's configuration listing was read. Only then is a tunnel
+	// that is absent from it known to be deleted rather than unreadable.
+	NDM, UCI bool
+	// Err is non-nil when a tool that exists failed, so the result may be incomplete. Absent tools
+	// are normal (each platform has only some of them) and never an error.
+	Err error
+}
+
+// Discover is DiscoverAll for callers that need only the tunnels and whether the look was complete.
 func Discover(ctx context.Context) ([]DiscoveredVPN, error) {
-	var all []DiscoveredVPN
+	d := DiscoverAll(ctx)
+	return d.VPNs, d.Err
+}
+
+// DiscoverAll reads every source the router has and merges them:
+//
+//   - `awg show all dump` / `wg show all dump`: live interfaces with peers and handshakes;
+//   - `ndmc -c "show interface"` (KeeneticOS): every NDM WireGuard interface, up or down;
+//   - `uci -q show network` (OpenWrt): every configured wireguard/amneziawg interface, so a tunnel
+//     that is down is still listed and keeps its identity.
+//
+// All sources are always consulted. The NDM listing used to be a fallback for an empty dump, so a
+// Keenetic that also runs an Entware awg tunnel listed that one tunnel and none of the router's own,
+// and nothing added or deleted in the Keenetic web UI ever reached WayHop.
+func DiscoverAll(ctx context.Context) Discovery {
+	var d Discovery
+	var errs []error
+	var runtime []DiscoveredVPN
 	for _, t := range []struct{ bin, typ string }{
 		{"awg", "amneziawg"},
 		{"wg", "wireguard"},
 	} {
 		out, err := exec.CommandContext(ctx, t.bin, "show", "all", "dump").Output()
 		if err != nil {
+			if errors.Is(err, exec.ErrNotFound) {
+				continue
+			}
+			// A failing dump may still have printed the interfaces it could read; keep them, but
+			// the look is incomplete, so nothing may be concluded from what is absent.
+			errs = append(errs, fmt.Errorf("%s show all dump: %w", t.bin, err))
+		}
+		runtime = append(runtime, parseWgDump(string(out), t.typ)...)
+	}
+
+	ndm, ndmFound, err := discoverNDM(ctx)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	d.NDM = ndmFound && err == nil
+
+	uci, uciFound, err := discoverUCI(ctx)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	d.UCI = uciFound && err == nil
+
+	d.VPNs = mergeDiscovered(ndm, runtime, uci)
+	d.Err = errors.Join(errs...)
+	return d
+}
+
+// mergeDiscovered folds the three sources into one row per interface. NDM rows come first and
+// stay authoritative for identity and state; a dump row for the same interface only adds the
+// peers NDM does not print. A uci row marks a live interface as configuration-backed and lends it
+// a label, and stands in for an interface that is configured but not running. WayHop's own
+// devices are dropped. Pure, so the merge is tested without a router.
+func mergeDiscovered(ndm, runtime, uci []DiscoveredVPN) []DiscoveredVPN {
+	out := make([]DiscoveredVPN, 0, len(ndm)+len(runtime)+len(uci))
+	at := map[string]int{}
+	add := func(v DiscoveredVPN) {
+		if v.Iface == "" || strings.HasPrefix(v.Iface, wayhopIfacePrefix) {
+			return
+		}
+		at[v.Iface] = len(out)
+		out = append(out, v)
+	}
+	for _, v := range ndm {
+		if _, dup := at[v.Iface]; !dup {
+			add(v)
+		}
+	}
+	for _, v := range runtime {
+		i, seen := at[v.Iface]
+		if !seen {
+			add(v)
 			continue
 		}
-		all = append(all, parseWgDump(string(out), t.typ)...)
+		cur := &out[i]
+		if cur.Source != SourceNDM {
+			continue // the same interface from both dumps: the first one wins
+		}
+		if cur.PublicKey == "" {
+			cur.PublicKey = v.PublicKey
+		}
+		if cur.ListenPort == 0 {
+			cur.ListenPort = v.ListenPort
+		}
+		if len(cur.Peers) == 0 {
+			cur.Peers = v.Peers
+		}
 	}
-	if len(all) == 0 {
-		return DiscoverNDM(ctx)
+	for _, v := range uci {
+		i, seen := at[v.Iface]
+		if !seen {
+			add(v)
+			continue
+		}
+		cur := &out[i]
+		if cur.Source != SourceRuntime {
+			continue
+		}
+		cur.Source = SourceUCI
+		if cur.Name == "" {
+			cur.Name = v.Name
+		}
+		if cur.PublicKey == "" {
+			cur.PublicKey = v.PublicKey
+		}
 	}
-	return all, nil
+	return out
 }

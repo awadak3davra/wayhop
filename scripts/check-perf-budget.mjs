@@ -48,7 +48,13 @@ const DIST = 'web/dist';
 // still run on amneziawg-go and when they switch, the installer's notes - is the daemon's and is not
 // translated, like the plan sentences above, which kept the growth to three labels. Trimming was ruled
 // out for the reason given above. The payload stood 63 B under the previous figure.
-const BUDGET = 262 * 1000 + 400;
+//
+// Raised by 200 B in 0.5.8-r2 for keeping the router's own VPN connections in step with the router.
+// The code is in the route-scoped page-connections.js (app.js came out a little smaller); the cost is
+// six strings in every dictionary (+104 B gzip in total): a connection deleted on the router, one
+// not running, the removal notice, and the partial-discovery warning. An operator has to read those in
+// their own language to know which exit is dead. The payload stood 68 B under the previous figure.
+const BUDGET = 262 * 1000 + 600;
 
 const gz = (buf) => zlib.gzipSync(buf, { level: 9 }).length;
 const read = (f) => fs.readFileSync(path.join(DIST, f));

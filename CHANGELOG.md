@@ -3,6 +3,59 @@
 All notable changes to WayHop are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.8-r4] — 2026-10-26
+
+A rebuild of 0.5.8-r3 with one fix. The product version stays 0.5.8.
+
+### Fixed
+- **A kernel exit is pinged at the address its health-check target names.** The connection editor
+  offers "or 1.1.1.1 / gateway IP" as the target and calls it what the tunnel pings, but an exit the
+  router carries in its kernel (an adopted or native WireGuard/AmneziaWG tunnel) was always pinged at
+  1.1.1.1. An exit that does not reach 1.1.1.1 (a VPS that forwards only some networks) read Down at
+  0% while it carried its traffic. A target that is an address, or a URL whose host is one, is now
+  what the probe pings; a hostname or an empty target still means 1.1.1.1.
+
+## [0.5.8-r3] — 2026-10-25
+
+A rebuild of 0.5.8-r2 with two fixes. The product version stays 0.5.8; routers on 0.5.8-r2 see `-r3`
+as the newer build.
+
+### Fixed
+- **A Keenetic can route through a tunnel it runs outside KeeneticOS.** An Entware AmneziaWG tunnel
+  (such as `awg1` from 0.5.8's AmneziaWG 3.1 install) could be added as an exit, and then every
+  Apply was refused with "Native Keenetic tunnel needs re-adoption", a repair that did not exist for
+  it: such a tunnel has no NDM interface at all. Apply now proves instead that its live link is the
+  one the connection names and that it lies outside NDM's own tunnels, and routes lists into it on
+  the kernel policy plane by its device. What would need NDM to name the device (a default route on
+  the connection ladder, a failover group, static routes without the kernel plane) goes to the
+  compatibility core instead, as for WayHop's own userspace AmneziaWG. A Keenetic tunnel that only
+  lacks its captured NDM name still asks for re-adoption.
+- **The Google AI preset no longer needs the proxy core.** It shipped as a sing-box `.srs` rule-set,
+  which a router in routing mode "fast" dropped with nothing routed. It is now itdoginfo's plain-text
+  `google_ai.lst`, the file that rule-set is compiled from, carried by the router's own resolver.
+  A Google AI list added before this keeps its old source: remove it and add the preset again.
+
+## [0.5.8-r2] — 2026-10-19
+
+A rebuild of 0.5.8 with one fix. The product version stays 0.5.8; routers on 0.5.8 see `-r2` as
+the newer build.
+
+### Fixed
+- **The router's own VPN connections stay in step with the router.** On a Keenetic that also runs an
+  Entware `awg` tunnel (as 0.5.8's AmneziaWG install allows), WayHop listed that one tunnel and none
+  of the Keenetic's own: the NDM listing was read only when the `awg`/`wg` dumps found nothing, so
+  connections added or deleted in the Keenetic web UI never reached the panel. Every source is now
+  read every time (the dumps, `ndmc show interface`, and on OpenWrt `uci show network`, so a tunnel
+  that is down is still listed). An adopted connection follows its tunnel: a new name, interface or
+  peer address is picked up, and the router's label replaces a name WayHop made (never one you
+  chose). A connection whose tunnel was deleted on the router is removed when it is off and nothing
+  uses it; otherwise it is marked "deleted on the router" until you repoint what uses it. A new
+  Keenetic tunnel that reuses a deleted one's `WireguardN` slot is told apart by its public key and
+  offered as new. WayHop's own `wr_` devices are no longer offered for adoption, and a Keenetic
+  tunnel that is switched on but has no handshake reads as idle rather than up.
+- **The QEMU end-to-end test reads the `awg0` link from sysfs**, since `ip link show` failed on
+  OpenWrt 24.10 while the tunnel carried traffic (test-only).
+
 ## [0.5.8] — 2026-10-17
 
 ### Added

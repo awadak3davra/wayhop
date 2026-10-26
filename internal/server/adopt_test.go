@@ -144,26 +144,26 @@ func TestRefreshAdoptedEndpointPreservesOperatorState(t *testing.T) {
 	}
 }
 
-func TestNativeAdoptionStateRequiresExactKeeneticIdentity(t *testing.T) {
+func TestNativeAdoptionRequiresExactKeeneticIdentity(t *testing.T) {
 	discovered := netvpn.DiscoveredVPN{Iface: "nwg1", NDMName: "Wireguard1"}
 	legacy := []model.Endpoint{{
 		ID: "legacy-endpoint", Engine: model.EngineExternal, Params: map[string]any{"interface": "nwg1"},
 	}}
-	if adopted, repair := nativeAdoptionState(legacy, discovered); !adopted || !repair {
-		t.Fatalf("legacy state = adopted %v repair %v, want true/true", adopted, repair)
+	if id, repair := nativeAdoption(legacy, discovered); id == "" || !repair {
+		t.Fatalf("legacy state = adopter %q repair %v, want an adopter and repair true", id, repair)
 	}
 	repaired := append([]model.Endpoint(nil), legacy...)
 	repaired[0].Owner = model.OwnerExternal
 	repaired[0].Params = map[string]any{"interface": "nwg1", "ndm_name": "Wireguard1"}
-	if adopted, repair := nativeAdoptionState(repaired, discovered); !adopted || repair {
-		t.Fatalf("repaired state = adopted %v repair %v, want true/false", adopted, repair)
+	if id, repair := nativeAdoption(repaired, discovered); id == "" || repair {
+		t.Fatalf("repaired state = adopter %q repair %v, want an adopter and repair false", id, repair)
 	}
 	repaired[0].Params["ndm_name"] = "Wireguard9"
-	if adopted, repair := nativeAdoptionState(repaired, discovered); !adopted || !repair {
-		t.Fatalf("mismatched identity = adopted %v repair %v, want true/true", adopted, repair)
+	if id, repair := nativeAdoption(repaired, discovered); id == "" || !repair {
+		t.Fatalf("mismatched identity = adopter %q repair %v, want an adopter and repair true", id, repair)
 	}
-	if adopted, repair := nativeAdoptionState(legacy, netvpn.DiscoveredVPN{Iface: "nwg1"}); !adopted || repair {
-		t.Fatalf("OpenWrt state = adopted %v repair %v, want true/false", adopted, repair)
+	if id, repair := nativeAdoption(legacy, netvpn.DiscoveredVPN{Iface: "nwg1"}); id == "" || repair {
+		t.Fatalf("OpenWrt state = adopter %q repair %v, want an adopter and repair false", id, repair)
 	}
 }
 

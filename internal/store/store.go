@@ -176,6 +176,19 @@ func (s *Store) Replace(p model.Profile) error {
 	return s.publish(&cp)
 }
 
+// Reconcile runs fn on a mutable copy of the profile under the write lock and publishes the copy
+// only when fn reports a change. It is for a writer that derives its change from the profile itself
+// (the native-tunnel sync), so an edit made between its read and its write is never lost.
+func (s *Store) Reconcile(fn func(p *model.Profile) bool) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	p := s.snapshot()
+	if !fn(&p) {
+		return nil
+	}
+	return s.publish(&p)
+}
+
 // UpsertEndpoint inserts or replaces an endpoint by ID.
 func (s *Store) UpsertEndpoint(e model.Endpoint) error {
 	if e.ID == "" {
