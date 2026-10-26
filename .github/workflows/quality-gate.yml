@@ -33,7 +33,7 @@ permissions:
 
 env:
   # Same patched Go the release builds use; go.mod's `go 1.22` is only the language floor.
-  GO_VERSION: '1.26.9'  # >= 1.26.9: GO-2026-6603 / 6605 / 6609-6613 / 6617 (net/http), 6607 (crypto/tls), 6608 (net/textproto) fixed here
+  GO_VERSION: '1.26.10'  # >= 1.26.10: GO-2026-6809 (crypto/x509); >= 1.26.9: GO-2026-6603 / 6605 / 6609-6613 / 6617 (net/http), 6607 (crypto/tls), 6608 (net/textproto) fixed here
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
   SHELLCHECK_IMAGE: koalaman/shellcheck@sha256:bb596a0d169b85ddd81d8b6d3a2ff6d5baf5fca10b97f575ebc647c3dff62b3d
 

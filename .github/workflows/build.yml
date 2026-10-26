@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: '1.26.9'  # >= 1.26.9: GO-2026-6603 / 6605 / 6609-6613 / 6617 (net/http), 6607 (crypto/tls), 6608 (net/textproto) fixed here
+          go-version: '1.26.10'  # >= 1.26.10: GO-2026-6809 (crypto/x509); >= 1.26.9: GO-2026-6603 / 6605 / 6609-6613 / 6617 (net/http), 6607 (crypto/tls), 6608 (net/textproto) fixed here
           cache: false
       - run: go vet ./...
       # -v so the run says which tests SKIPPED. `go test` prints ok for a package whose tests all
@@ -75,7 +75,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: '1.26.9'  # >= 1.26.9: GO-2026-6603 / 6605 / 6609-6613 / 6617 (net/http), 6607 (crypto/tls), 6608 (net/textproto) fixed here
+          go-version: '1.26.10'  # >= 1.26.10: GO-2026-6809 (crypto/x509); >= 1.26.9: GO-2026-6603 / 6605 / 6609-6613 / 6617 (net/http), 6607 (crypto/tls), 6608 (net/textproto) fixed here
           cache: false
       - name: Cross-compile + package ${{ matrix.name }}
         env:
@@ -134,7 +134,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: '1.26.9'  # >= 1.26.9: GO-2026-6603 / 6605 / 6609-6613 / 6617 (net/http), 6607 (crypto/tls), 6608 (net/textproto) fixed here
+          go-version: '1.26.10'  # >= 1.26.10: GO-2026-6809 (crypto/x509); >= 1.26.9: GO-2026-6603 / 6605 / 6609-6613 / 6617 (net/http), 6607 (crypto/tls), 6608 (net/textproto) fixed here
           cache: false
       - name: Verify immutable release source
         id: source
