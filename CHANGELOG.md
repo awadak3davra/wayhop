@@ -3,6 +3,15 @@
 All notable changes to WayHop are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.8-r5] — 2026-10-26
+
+A rebuild of 0.5.8-r4 with a newer Go. The product version stays 0.5.8.
+
+### Security
+- **Go 1.26.10** for every build. It fixes GO-2026-6809 in `crypto/x509` (compromised intermediate
+  certificates were not distrusted), which govulncheck reports against 1.26.9 through every TLS dial
+  WayHop makes.
+
 ## [0.5.8-r4] — 2026-10-26
 
 A rebuild of 0.5.8-r3 with one fix. The product version stays 0.5.8.

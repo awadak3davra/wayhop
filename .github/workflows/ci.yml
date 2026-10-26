@@ -21,7 +21,7 @@ permissions:
 env:
   # Both the checks here and the release builds in build.yml run on the same Go 1.26
   # (patched stdlib); go.mod's `go 1.22` is only the language-version floor.
-  GO_VERSION: '1.26.9'  # >= 1.26.9: GO-2026-6603 / 6605 / 6609-6613 / 6617 (net/http), 6607 (crypto/tls), 6608 (net/textproto) fixed here
+  GO_VERSION: '1.26.10'  # >= 1.26.10: GO-2026-6809 (crypto/x509); >= 1.26.9: GO-2026-6603 / 6605 / 6609-6613 / 6617 (net/http), 6607 (crypto/tls), 6608 (net/textproto) fixed here
   # Run the JS-based actions on the runner's bundled Node 24 (Node 20 is deprecated).
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
@@ -82,7 +82,7 @@ jobs:
       # so there is nothing in this repo for setup-go to cache, and a stale module-cache
       # tarball on the self-hosted runner was failing the restore (tar exit 2).
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with: { go-version: '1.26.9', cache: false }   # olcRTC go.mod requires go 1.26.3; amneziawg-go builds on it too; 1.26.9 closes the net/http advisories govulncheck reported on 1.26.6
+        with: { go-version: '1.26.10', cache: false }   # olcRTC go.mod requires go 1.26.3; amneziawg-go builds on it too; 1.26.9 closes the net/http advisories govulncheck reported on 1.26.6, 1.26.10 GO-2026-6809 (crypto/x509)
       # Both steps clone into a FRESH directory under $RUNNER_TEMP and remove it on the way out.
       # They used to clone into fixed `awg`/`olc` paths in the workspace, which is fine exactly once:
       # this is a persistent self-hosted runner, so the second run met its own leftovers and the job
