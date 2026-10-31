@@ -45,9 +45,8 @@ func pluginrun_exeSuffix() string {
 	return ""
 }
 
-// pluginrun_goTool locates the Go binary (repo ~/go-toolchain first, then PATH).
-func pluginrun_goTool(t *testing.T) string {
-	t.Helper()
+// Resolve Go at package init, before a test empties PATH to prove that only its stub is found.
+var pluginrun_goBin = func() string {
 	if home, err := os.UserHomeDir(); err == nil {
 		cand := filepath.Join(home, "go-toolchain", "go", "bin", "go"+pluginrun_exeSuffix())
 		if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
@@ -57,8 +56,15 @@ func pluginrun_goTool(t *testing.T) string {
 	if p, err := exec.LookPath("go"); err == nil {
 		return p
 	}
-	t.Skip("no Go toolchain available to build the stub executable")
 	return ""
+}()
+
+func pluginrun_goTool(t *testing.T) string {
+	t.Helper()
+	if pluginrun_goBin == "" {
+		t.Skip("no Go toolchain available to build the stub executable")
+	}
+	return pluginrun_goBin
 }
 
 // pluginrun_crashStubSource prints a banner then exits immediately, simulating an

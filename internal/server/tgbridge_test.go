@@ -355,25 +355,28 @@ func main() {
 }
 `
 
-// tgbStub builds the stub as tg-ws-proxy into a directory on PATH (resolve's PATH fallback is what
-// finds tg-ws-proxy.exe on Windows) and returns the file its argv is recorded in.
-func tgbStub(t *testing.T, exitMsg string) string {
-	t.Helper()
-	goBin := ""
+// Resolve Go at package init: tgbServer deliberately empties PATH before tgbStub builds its binary.
+var tgbGoBin = func() string {
 	if home, err := os.UserHomeDir(); err == nil {
 		exe := ""
 		if runtime.GOOS == "windows" {
 			exe = ".exe"
 		}
 		if c := filepath.Join(home, "go-toolchain", "go", "bin", "go"+exe); tgbFileExists(c) {
-			goBin = c
+			return c
 		}
 	}
-	if goBin == "" {
-		if p, err := exec.LookPath("go"); err == nil {
-			goBin = p
-		}
+	if p, err := exec.LookPath("go"); err == nil {
+		return p
 	}
+	return ""
+}()
+
+// tgbStub builds the stub as tg-ws-proxy into a directory on PATH (resolve's PATH fallback is what
+// finds tg-ws-proxy.exe on Windows) and returns the file its argv is recorded in.
+func tgbStub(t *testing.T, exitMsg string) string {
+	t.Helper()
+	goBin := tgbGoBin
 	if goBin == "" {
 		t.Skip("no Go toolchain to build the bridge stub")
 	}
