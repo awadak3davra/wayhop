@@ -387,9 +387,10 @@ func tgbStub(t *testing.T, exitMsg string) string {
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
+	// cgo off: PATH holds only Go's directory here, and on Linux a cgo build then cannot find gcc.
 	cmd := exec.Command(goBin, "build", "-o", filepath.Join(bin, name), ".")
 	cmd.Dir = src
-	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local", "GO111MODULE=on", "PATH="+filepath.Dir(goBin))
+	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local", "GO111MODULE=on", "CGO_ENABLED=0", "PATH="+filepath.Dir(goBin))
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Skipf("could not build the bridge stub: %v\n%s", err, out)
 	}

@@ -54,9 +54,10 @@ func svcBuildStub(t *testing.T, binDir string) {
 	if err := os.WriteFile(filepath.Join(src, "go.mod"), []byte("module svcstub\n\ngo 1.22\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// cgo off: a caller may have emptied PATH, and on Linux a cgo build then cannot find gcc.
 	cmd := exec.Command(goBin, "build", "-o", filepath.Join(binDir, svcBin+pluginrun_exeSuffix()), ".")
 	cmd.Dir = src
-	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local", "GO111MODULE=on")
+	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local", "GO111MODULE=on", "CGO_ENABLED=0")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Skipf("could not build the service stub: %v\n%s", err, out)
 	}

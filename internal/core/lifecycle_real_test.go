@@ -69,7 +69,7 @@ func corelifecycle_buildStub(t *testing.T) string {
 	out := filepath.Join(dir, "stub"+corelifecycle_exeSuffix())
 	cmd := exec.Command(goBin, "build", "-o", out, ".")
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local", "GO111MODULE=on")
+	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local", "GO111MODULE=on", "CGO_ENABLED=0")
 	if combined, err := cmd.CombinedOutput(); err != nil {
 		t.Skipf("could not build stub executable (skipping real-process tests): %v\n%s", err, combined)
 	}

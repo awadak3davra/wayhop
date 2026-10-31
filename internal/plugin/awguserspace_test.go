@@ -112,7 +112,7 @@ func awgus_build(t *testing.T, dir, name, src string) {
 	}
 	cmd := exec.Command(pluginrun_goTool(t), "build", "-o", filepath.Join(dir, name+pluginrun_exeSuffix()), ".")
 	cmd.Dir = srcDir
-	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local", "GO111MODULE=on")
+	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local", "GO111MODULE=on", "CGO_ENABLED=0")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build the %s stub: %v\n%s", name, err, out)
 	}

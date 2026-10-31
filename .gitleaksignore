@@ -2,3 +2,8 @@
 # runtime-generated demoKey() in 0692662; keep the exception pinned to this one
 # detector finding rather than suppressing a rule, path, commit, or current file.
 9c2f828f02dfce9ae769fbd703d26489291d7bda:scripts/seed-demo.mjs:generic-api-key:48
+
+# Panel-gate fixture in the 0.5.9 public commit: an OpenSSH PEM frame around the 16-byte
+# "openssh-key-v1" magic, no key material. The tree now uses a labelled placeholder; this pins
+# the one historical finding.
+d0374c3cf3c555bd1311d295e4cc21c4f419a8cc:scripts/check-interaction-fixes.mjs:private-key:2974
