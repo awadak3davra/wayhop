@@ -48,7 +48,7 @@ func TestServersMigrationCompat(t *testing.T) {
 
 // An empty or whitespace-only servers.json must load as an empty list and rewrite
 // a valid file — NOT brick boot with "unexpected end of JSON input". A non-empty
-// garbage file still errors.
+// unparsable file is covered by TestOpenUnparsableSetsItAsideAndStartsEmpty.
 func TestOpenEmptyOrGarbage(t *testing.T) {
 	for _, content := range []string{"", "   ", "\n\t \n"} {
 		path := filepath.Join(t.TempDir(), "servers.json")
@@ -67,14 +67,122 @@ func TestOpenEmptyOrGarbage(t *testing.T) {
 			t.Fatalf("reopen after empty-file recreate errored: %v", err)
 		}
 	}
+}
 
-	// A genuinely-corrupt NON-empty file must still surface its parse error.
+// A NON-empty file that does not parse must not keep the daemon from starting: main treats an Open
+// error as fatal, and the init system respawned it into the same failure with the panel unreachable,
+// all over a convenience list with no secrets. The usual shape is a USB stick that acknowledged a
+// FLUSH and lost the block: the right length, all NULs, which TrimSpace does not strip. The file is
+// set aside with its bytes intact and the store starts empty.
+func TestOpenUnparsableSetsItAsideAndStartsEmpty(t *testing.T) {
+	for name, content := range map[string][]byte{
+		"garbage":    []byte("{not json"),
+		"nul-filled": make([]byte, 312),
+	} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "servers.json")
+		if err := os.WriteFile(path, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s, err := Open(path)
+		if err != nil {
+			t.Fatalf("%s: Open must not fail on an unparsable list: %v", name, err)
+		}
+		if len(s.List()) != 0 {
+			t.Fatalf("%s: want an empty list, got %v", name, s.List())
+		}
+		aside, _ := filepath.Glob(filepath.Join(dir, "servers.json.corrupt-*"))
+		if len(aside) != 1 {
+			t.Fatalf("%s: the unparsable file must be kept aside once, found %v", name, aside)
+		}
+		if got, _ := os.ReadFile(aside[0]); string(got) != string(content) {
+			t.Fatalf("%s: the set-aside copy lost bytes", name)
+		}
+		// The store is usable and the next start reads what it wrote.
+		if err := s.Upsert(Server{ID: "a", Name: "A"}); err != nil {
+			t.Fatalf("%s: Upsert after recovery: %v", name, err)
+		}
+		re, err := Open(path)
+		if err != nil || len(re.List()) != 1 {
+			t.Fatalf("%s: reopen = %v, %v", name, re, err)
+		}
+	}
+}
+
+// A read error other than "absent" is not corruption and still fails: starting empty would hide it,
+// and the next write would replace a list that may be intact.
+func TestOpenUnreadableStillFails(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "servers.json")
-	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+	if err := os.Mkdir(path, 0o755); err != nil { // reading a directory fails with something other than ENOENT
 		t.Fatal(err)
 	}
 	if _, err := Open(path); err == nil {
-		t.Fatal("Open(garbage) should error, not swallow real corruption")
+		t.Fatal("Open must report a read error that is not a missing file")
+	}
+}
+
+// A kill between atomicfile.Write's temp creation and its rename left servers.json.NNN.tmp behind for
+// good, one more with every crash. Open sweeps them before any writer starts.
+func TestOpenSweepsTempsACrashLeftBehind(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "servers.json")
+	orphan := path + ".123456.tmp"
+	if err := os.WriteFile(orphan, []byte(`[{"id":"a"`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(path); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("an orphaned servers temp survived Open: %v", err)
+	}
+}
+
+// PatchOrCreate finds or creates the record and applies fn under ONE hold of the lock. Two callers
+// creating the same new id used to miss in Patch, then each Upsert a whole record, the later one
+// replacing the earlier; here the second caller finds the first one's record and merges into it.
+func TestPatchOrCreate(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "servers.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	add := func(proto string) func(*Server) {
+		return func(sv *Server) { sv.Installed = append(sv.Installed, proto) }
+	}
+	created, err := s.PatchOrCreate("srv-a", Server{Name: "A", CreatedAt: "first"}, add("awg"))
+	if err != nil || !created {
+		t.Fatalf("first call: created=%v err=%v, want a new record", created, err)
+	}
+	created, err = s.PatchOrCreate("srv-a", Server{Name: "B", CreatedAt: "second"}, add("hy2"))
+	if err != nil || created {
+		t.Fatalf("second call: created=%v err=%v, want the existing record patched", created, err)
+	}
+	sv, ok := s.Get("srv-a")
+	if !ok || sv.ID != "srv-a" || sv.Name != "A" || sv.CreatedAt != "first" {
+		t.Fatalf("record = %+v, want the first caller's identity kept", sv)
+	}
+	if len(sv.Installed) != 2 || sv.Installed[0] != "awg" || sv.Installed[1] != "hy2" {
+		t.Fatalf("Installed = %v, want both callers' protocols", sv.Installed)
+	}
+	if _, err := s.PatchOrCreate("", Server{}, add("x")); err == nil {
+		t.Fatal("an empty id must be refused")
+	}
+
+	// Persist-then-commit: a failed write creates nothing in memory.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "servers.json")
+	bad, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o755); err != nil { // the final rename onto a directory fails
+		t.Fatal(err)
+	}
+	if _, err := bad.PatchOrCreate("srv-b", Server{}, add("awg")); err == nil {
+		t.Fatal("a failed write must be reported")
+	}
+	if len(bad.List()) != 0 {
+		t.Fatalf("a record whose write failed was committed: %v", bad.List())
 	}
 }
 

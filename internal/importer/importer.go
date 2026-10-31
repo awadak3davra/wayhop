@@ -5,13 +5,17 @@
 package importer
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"net"
 	"net/url"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -40,9 +44,15 @@ func schemeLabel(scheme string) string {
 	return scheme
 }
 
+// utf8BOM is the byte-order mark Windows Notepad (and some exporters) put at the start of a saved
+// .conf. TrimSpace keeps it (U+FEFF is not white space), so its first line read as BOM+"[Interface]",
+// parseConf never entered the section, and the interface keys - the private key among them - were
+// silently dropped.
+var utf8BOM = string(rune(0xFEFF))
+
 // Parse detects the link type and returns a populated endpoint.
 func Parse(raw string) (*model.Endpoint, error) {
-	raw = strings.TrimSpace(raw)
+	raw = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(raw), utf8BOM))
 	if raw == "" {
 		return nil, errors.New("empty link")
 	}
@@ -51,8 +61,8 @@ func Parse(raw string) (*model.Endpoint, error) {
 	// share link always does. We then gate the .conf / olcRTC content-sniffs on the ABSENCE of a
 	// scheme, so a crafted #fragment in a share link (the node name, which is provider/attacker-
 	// controlled) can't be misread as "[Interface]" (→ .conf parser, import FAILS: #15) or as olcRTC
-	// keys like "provider:…crypto" (→ silent data loss, a dead olcRTC stub replacing the real proxy:
-	// #14). The whitespace guard means a "://" sitting inside a multi-line config blob (preceded by a
+	// keys like "provider:…crypto" (→ the real proxy refused as a retired olcRTC config: #14).
+	// The whitespace guard means a "://" sitting inside a multi-line config blob (preceded by a
 	// newline, e.g. an olcRTC signaling URL) is NOT mistaken for a scheme.
 	scheme := ""
 	if i := strings.Index(raw, "://"); i > 0 && !strings.ContainsAny(raw[:i], " \t\r\n") {
@@ -66,19 +76,33 @@ func Parse(raw string) (*model.Endpoint, error) {
 	if scheme == "" {
 		// No URI scheme → a pasted config blob, not a share link: sniff its format.
 		if strings.Contains(raw, "[Interface]") {
-			return finalize(parseConf(raw))
+			return tagged(FormatConf)(finalize(parseConf(raw)))
+		}
+		if looksLikeOpenVPN(raw) {
+			return tagged(FormatOpenVPN)(finalize(parseOpenVPN(raw)))
+		}
+		// A Clash / mihomo config pasted (or opened with Import file, which accepts .yaml) under Paste
+		// link used to fall through to the URL parser and fail as "malformed share link: invalid
+		// control character", naming neither the format nor where it imports. One proxy imports
+		// here; several need the Subscription tab, which lets the operator choose.
+		if looksLikeClash(raw) {
+			return tagged(FormatClash)(parseClashSingle(raw))
+		}
+		// A Surge [Proxy] line ("Name = snell, host, port, psk=..."), the form Snell is handed out in.
+		if looksLikeSurge(raw) {
+			return tagged(FormatSurge)(parseSurgeSingle(raw))
 		}
 		if looksLikeOlcRTC(raw) {
-			return finalize(parseOlcRTC(raw))
+			return nil, errOlcRTCRetired
 		}
 	}
 
 	// vmess/ss carry base64 bodies that are not always valid URLs.
 	switch scheme {
 	case "vmess":
-		return finalize(parseVMess(raw))
+		return tagged(linkFormat("vmess"))(finalize(parseVMess(raw)))
 	case "ss":
-		return finalize(parseShadowsocks(raw))
+		return tagged(linkFormat("ss"))(finalize(parseShadowsocks(raw)))
 	}
 
 	// wireguard:// private keys are base64 and routinely carry a raw '/' (which url.Parse would
@@ -87,6 +111,13 @@ func Parse(raw string) (*model.Endpoint, error) {
 	// Normalize the wg authority first so url.Parse yields the correct userinfo + host.
 	if scheme == "wireguard" || scheme == "wg" {
 		raw = normalizeWGURL(raw)
+	}
+	// The Hysteria 2 URI scheme puts a port-hopping list in the authority itself
+	// ("hysteria2://auth@host:123,5000-6000/?..." is the official example), which url.Parse rejects
+	// as an invalid port. Lift the list out first; parseHysteria2 gets it back as the hop range.
+	hy2Ports := ""
+	if scheme == "hysteria2" || scheme == "hy2" {
+		raw, hy2Ports = splitAuthorityPortList(raw)
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -100,17 +131,21 @@ func Parse(raw string) (*model.Endpoint, error) {
 	}
 	switch scheme {
 	case "vless":
-		return finalize(parseVLESS(u))
+		return tagged(linkFormat("vless"))(finalize(parseVLESS(u)))
 	case "trojan":
-		return finalize(parseTrojan(u))
+		return tagged(linkFormat("trojan"))(finalize(parseTrojan(u)))
 	case "anytls":
-		return finalize(parseAnyTLS(u))
+		return tagged(linkFormat("anytls"))(finalize(parseAnyTLS(u)))
 	case "hysteria2", "hy2":
-		return finalize(parseHysteria2(u))
+		return tagged(linkFormat("hysteria2"))(finalize(parseHysteria2(u, hy2Ports)))
+	case "hysteria2+realm", "hy2+realm", "hysteria2+realm+http", "hy2+realm+http":
+		return tagged(linkFormat("hysteria2+realm"))(finalize(parseHysteria2Realm(u, strings.HasSuffix(scheme, "+http"))))
 	case "tuic":
-		return finalize(parseTUIC(u))
+		return tagged(linkFormat("tuic"))(finalize(parseTUIC(u)))
 	case "wireguard", "wg":
-		return finalize(parseWireGuardURL(u))
+		return tagged(linkFormat("wireguard"))(finalize(parseWireGuardURL(u)))
+	case "ssh":
+		return tagged(linkFormat("ssh"))(finalize(parseSSHURL(u)))
 	default:
 		return nil, fmt.Errorf("unsupported scheme %q", scheme)
 	}
@@ -125,7 +160,11 @@ func finalize(e *model.Endpoint, err error) (*model.Endpoint, error) {
 	// the store persist path does not re-validate, so an out-of-range port (70000/88888) would be
 	// durably persisted and then FATAL every Apply. EngineExternal endpoints (interface-based, no dial
 	// port) are exempt here exactly as model.Validate exempts them.
-	if e.Engine != model.EngineExternal && (e.Port < 1 || e.Port > 65535) {
+	//
+	// A Hysteria2 link in realm mode names a rendezvous instead of a server (parseHysteria2Realm), so
+	// it has no server or port to check here.
+	realm := e.UsesRealm()
+	if e.Engine != model.EngineExternal && !realm && (e.Port < 1 || e.Port > 65535) {
 		return nil, fmt.Errorf("port %d out of range (must be 1-65535)", e.Port)
 	}
 	// A link that yielded no server is not an endpoint. Parse used to return one anyway — with an
@@ -137,7 +176,7 @@ func finalize(e *model.Endpoint, err error) (*model.Endpoint, error) {
 	//
 	// EngineExternal is exempt for the same reason as the port check: an adopted OS tunnel is
 	// identified by its interface, not by a dial target.
-	if e.Engine != model.EngineExternal && strings.TrimSpace(e.Server) == "" {
+	if e.Engine != model.EngineExternal && !realm && strings.TrimSpace(e.Server) == "" {
 		return nil, fmt.Errorf("no server address in the link (got %q)", string(e.Protocol))
 	}
 	// An IPv6 literal must be bracketed in a URI, and the parsers that go through url.Parse take the
@@ -164,6 +203,38 @@ func finalize(e *model.Endpoint, err error) (*model.Endpoint, error) {
 
 // --- protocol parsers ---
 
+// What each share link can express (sourceFields, Reimport), read off its parser below: the params it
+// writes, the TLS fields tlsFromQuery, hysteria2Query, parseTUIC and parseVMess set, the pins linkPins
+// and vmessPins bring, and the transport transportFromQuery sets. No share link sets a top-level
+// knob, multiplex included.
+var (
+	linkTLSFields = []string{"enabled", "type", "sni", "alpn", "insecure", "fingerprint", "public_key", "short_id", "ech"}
+	// hysteria2Query and parseTUIC set no uTLS fingerprint and no Reality fields.
+	quicLinkTLSFields = []string{"enabled", "type", "sni", "alpn", "insecure", "ech"}
+
+	vlessLinkFields = sourceFields{params: []string{"uuid", "flow", "packet_encoding", model.ParamVerifyCertName, model.ParamFinalMask},
+		tls: linkTLSFields, pins: true, transport: true}
+	vmessLinkFields = sourceFields{params: []string{"uuid", "alter_id", "security", model.ParamVerifyCertName, model.ParamFinalMask},
+		tls: []string{"enabled", "type", "sni", "alpn", "insecure", "fingerprint"}, pins: true, transport: true}
+	trojanLinkFields = sourceFields{params: []string{"password", model.ParamVerifyCertName, model.ParamFinalMask},
+		tls: linkTLSFields, pins: true, transport: true}
+	anytlsLinkFields = sourceFields{params: []string{"password", model.ParamVerifyCertName, model.ParamFinalMask},
+		tls: linkTLSFields, pins: true}
+	ssLinkFields = sourceFields{params: []string{"method", "password", "udp_over_tcp", "plugin", "plugin_opts", model.ParamFinalMask}}
+	// A Hysteria2 link carries no QUIC tuning (initial_packet_size, disable_path_mtu_discovery,
+	// disable_chrome_parrot) and no bandwidth, so those stay as the form or a sing-box config set them.
+	// Its pinSHA256 lands in the TLS block now; the param an older WayHop kept it in goes with the link.
+	hysteria2LinkFields = sourceFields{params: []string{"password", "hop_ports", "obfs", "obfs_password",
+		model.ParamVerifyCertName, model.ParamFinalMask, model.ParamLegacyPin}, tls: quicLinkTLSFields, pins: true}
+	hysteria2RealmLinkFields = sourceFields{params: []string{"password", "realm", "realm_stun", "obfs", "obfs_password",
+		model.ParamVerifyCertName, model.ParamFinalMask, model.ParamLegacyPin}, tls: quicLinkTLSFields, pins: true}
+	tuicLinkFields = sourceFields{params: []string{"uuid", "password", "congestion_control", "udp_relay_mode", "heartbeat",
+		"zero_rtt_handshake", "udp_over_stream", model.ParamVerifyCertName, model.ParamFinalMask}, tls: quicLinkTLSFields, pins: true}
+	// The link's keepalive and MTU are params; the form's are the top-level knobs, which stay.
+	wireguardLinkFields = sourceFields{params: append([]string{"private_key", "peer_public_key", "pre_shared_key",
+		"persistent_keepalive", "local_address", "reserved", "mtu"}, awgParamKeys()...)}
+)
+
 func parseVLESS(u *url.URL) (*model.Endpoint, error) {
 	e := &model.Endpoint{
 		Engine:   model.EngineSingBox,
@@ -174,6 +245,13 @@ func parseVLESS(u *url.URL) (*model.Endpoint, error) {
 		Params:   map[string]any{"uuid": u.User.Username()},
 	}
 	q := u.Query()
+	// Xray's VLESS Encryption (encryption=mlkem768x25519plus..., Xray 25.8+) wraps the stream in a
+	// post-quantum layer sing-box does not implement. Ignoring the parameter imported a plain-VLESS
+	// endpoint that a server requiring the layer drops on every connection, while `sing-box check`
+	// passed. Refuse it instead. The value is key material, so it is not echoed.
+	if enc := strings.ToLower(strings.TrimSpace(q.Get("encryption"))); enc != "" && enc != "none" {
+		return nil, errors.New("vless: Xray VLESS encryption (encryption=...) is not supported by sing-box")
+	}
 	if flow := q.Get("flow"); flow != "" {
 		e.Params["flow"] = flow
 	}
@@ -184,8 +262,23 @@ func parseVLESS(u *url.URL) (*model.Endpoint, error) {
 	if pe := util.FirstNonEmpty(q.Get("packetEncoding"), q.Get("packet_encoding")); pe != "" {
 		e.Params["packet_encoding"] = pe
 	}
-	e.Transport = transportFromQuery(q)
+	t, err := transportFromQuery(q)
+	if err != nil {
+		return nil, fmt.Errorf("vless: %w", err)
+	}
+	e.Transport = t
 	e.TLS = tlsFromQuery(q, false, e.Server)
+	if err := linkPins(e, q); err != nil {
+		return nil, fmt.Errorf("vless: %w", err)
+	}
+	if err := linkFinalMask(e, linkQueryValue(u.RawQuery, "fm")); err != nil {
+		return nil, fmt.Errorf("vless: %w", err)
+	}
+	// No share link switches multiplex on (model.Multiplex), here or in trojan and vmess. The one
+	// convention there is, Hiddify's muxtype, is not a sign the server speaks sing-mux: Hiddify Panel
+	// adds it only when that server's core is Xray (hutils/proxy/xray.py is_muxable_agent, for any
+	// client that is not sing-box, WayHop's included), and Xray drops every sing-mux connection, so
+	// reading it broke a server that worked without it. Multiplex is the operator's choice in the form.
 	return e, nil
 }
 
@@ -199,9 +292,19 @@ func parseTrojan(u *url.URL) (*model.Endpoint, error) {
 		Params:   map[string]any{"password": u.User.Username()},
 	}
 	q := u.Query()
-	e.Transport = transportFromQuery(q)
+	t, err := transportFromQuery(q)
+	if err != nil {
+		return nil, fmt.Errorf("trojan: %w", err)
+	}
+	e.Transport = t
 	// Trojan is TLS by default unless explicitly disabled.
 	e.TLS = tlsFromQuery(q, true, e.Server)
+	if err := linkPins(e, q); err != nil {
+		return nil, fmt.Errorf("trojan: %w", err)
+	}
+	if err := linkFinalMask(e, linkQueryValue(u.RawQuery, "fm")); err != nil {
+		return nil, fmt.Errorf("trojan: %w", err)
+	}
 	return e, nil
 }
 
@@ -217,11 +320,20 @@ func parseAnyTLS(u *url.URL) (*model.Endpoint, error) {
 		Name:     fragmentName(u),
 		Params:   map[string]any{"password": u.User.Username()},
 	}
-	e.TLS = tlsFromQuery(u.Query(), true, e.Server)
+	q := u.Query()
+	e.TLS = tlsFromQuery(q, true, e.Server)
+	if err := linkPins(e, q); err != nil {
+		return nil, fmt.Errorf("anytls: %w", err)
+	}
+	if err := linkFinalMask(e, linkQueryValue(u.RawQuery, "fm")); err != nil {
+		return nil, fmt.Errorf("anytls: %w", err)
+	}
 	return e, nil
 }
 
-func parseHysteria2(u *url.URL) (*model.Endpoint, error) {
+// parseHysteria2 reads a hysteria2:// / hy2:// link. authorityPorts is the multi-port list Parse
+// lifted out of the authority ("" when the authority held a single port, or none).
+func parseHysteria2(u *url.URL, authorityPorts string) (*model.Endpoint, error) {
 	auth := u.User.Username()
 	if pw, ok := u.User.Password(); ok && pw != "" {
 		auth = auth + ":" + pw
@@ -235,26 +347,87 @@ func parseHysteria2(u *url.URL) (*model.Endpoint, error) {
 		Name:     fragmentName(u),
 		Params:   map[string]any{"password": auth},
 	}
+	if err := hysteria2Query(e, q, u.RawQuery, e.Server); err != nil {
+		return nil, err
+	}
+	// Port hopping: real Hysteria2 links carry the hop range as mport= or ports=
+	// (e.g. "20000-50000" or "443,5000-6000"). Dropping it silently means the
+	// tunnel only tries the base port — which breaks entirely if the server hops
+	// and isn't listening there. Carry it; the generator emits server_ports.
+	// The official URI form carries the list in the authority instead (host:443,5000-6000); the
+	// explicit query parameter wins when a link has both.
+	if mp := util.FirstNonEmpty(q.Get("mport"), q.Get("ports"), authorityPorts); mp != "" {
+		e.Params["hop_ports"] = mp
+	}
+	return e, nil
+}
+
+// hysteria2Query reads the query parameters hysteria2:// and hysteria2+realm:// share: obfuscation
+// and TLS, the certificate pin with it, and fm= from the raw query. sniFallback is the server name
+// used when the link gives no sni=.
+func hysteria2Query(e *model.Endpoint, q url.Values, rawQuery, sniFallback string) error {
 	if obfs := q.Get("obfs"); obfs != "" {
 		e.Params["obfs"] = obfs
 		if op := q.Get("obfs-password"); op != "" {
 			e.Params["obfs_password"] = op
 		}
 	}
-	// Port hopping: real Hysteria2 links carry the hop range as mport= or ports=
-	// (e.g. "20000-50000" or "443,5000-6000"). Dropping it silently means the
-	// tunnel only tries the base port — which breaks entirely if the server hops
-	// and isn't listening there. Carry it; the generator emits server_ports.
-	if mp := util.FirstNonEmpty(q.Get("mport"), q.Get("ports")); mp != "" {
-		e.Params["hop_ports"] = mp
-	}
-	// Hysteria2 always runs over QUIC+TLS.
+	// Hysteria2 always runs over QUIC+TLS. ech= is Hysteria's own (app/v2.10.0): a base64
+	// ECHConfigList.
 	e.TLS = &model.TLS{
 		Enabled:  true,
 		Type:     "tls",
-		SNI:      util.FirstNonEmpty(q.Get("sni"), e.Server),
+		SNI:      util.FirstNonEmpty(q.Get("sni"), sniFallback),
 		Insecure: insecureFromQuery(q),
 		ALPN:     splitCSV(q.Get("alpn")),
+		ECH:      settleECH(echFromLink(q.Get("ech")), "tls"),
+	}
+	// pinSHA256 hashes the whole certificate, which sing-box checks from 1.15 (generator/pin.go). With
+	// insecure=1 the pin is all that authenticates the server; without it Hysteria checks the chain as
+	// well, and sing-box checks the pin instead.
+	if err := linkPins(e, q); err != nil {
+		return fmt.Errorf("hysteria2: %w", err)
+	}
+	// fm= is Xray's finalmask (v2rayN reads it here too), not Hysteria's own obfs= above.
+	if err := linkFinalMask(e, linkQueryValue(rawQuery, "fm")); err != nil {
+		return fmt.Errorf("hysteria2: %w", err)
+	}
+	return nil
+}
+
+// parseHysteria2Realm reads Hysteria's realm-mode link (URI scheme, "Realm mode"):
+// hysteria2+realm://<token>@<rendezvous>[:port]/<realm name>?auth=<password>&..., or
+// hysteria2+realm+http:// for a plain-HTTP rendezvous. The authority and path are a realm address,
+// not a server: the userinfo is the rendezvous token, so the Hysteria password moves to auth=.
+// The hysteria2:// parameters apply as they do there, and stun= (repeatable) names the STUN servers.
+// lport= pins the client's local UDP port, which sing-box has no option for, so it is not carried;
+// nor is a port-hopping range, which realm mode does not have.
+func parseHysteria2Realm(u *url.URL, plainHTTP bool) (*model.Endpoint, error) {
+	q := u.Query()
+	addr := url.URL{Scheme: "realm", User: u.User, Host: u.Host, Path: u.Path, RawPath: u.RawPath,
+		RawQuery: url.Values{"stun": q["stun"]}.Encode()}
+	if plainHTTP {
+		addr.Scheme = "realm+http"
+	}
+	r, err := model.ParseHy2Realm(addr.String())
+	if err != nil {
+		return nil, fmt.Errorf("hysteria2+realm link: %w", err)
+	}
+	e := &model.Endpoint{
+		Engine:   model.EngineSingBox,
+		Protocol: model.ProtoHysteria2,
+		Name:     fragmentName(u),
+		Params:   map[string]any{"password": q.Get("auth"), "realm": r.URI()},
+	}
+	if len(r.STUN) > 0 {
+		e.Params["realm_stun"] = strings.Join(r.STUN, ",")
+	}
+	// No sni= leaves the name unset, and sing-box then presents the rendezvous host, as Hysteria does.
+	if err := hysteria2Query(e, q, u.RawQuery, ""); err != nil {
+		return nil, err
+	}
+	if e.Name == "" {
+		e.Name = "HYSTERIA2 realm " + r.Host // not the realm name: knowing it is what reveals the server's address
 	}
 	return e, nil
 }
@@ -298,6 +471,14 @@ func parseTUIC(u *url.URL) (*model.Endpoint, error) {
 		SNI:      util.FirstNonEmpty(q.Get("sni"), e.Server),
 		Insecure: insecureFromQuery(q),
 		ALPN:     splitCSV(q.Get("alpn")),
+		// No official TUIC URI; v2rayN reads ech= on tuic:// as on its other links.
+		ECH: settleECH(echFromLink(q.Get("ech")), "tls"),
+	}
+	if err := linkPins(e, q); err != nil {
+		return nil, fmt.Errorf("tuic: %w", err)
+	}
+	if err := linkFinalMask(e, linkQueryValue(u.RawQuery, "fm")); err != nil {
+		return nil, fmt.Errorf("tuic: %w", err)
 	}
 	return e, nil
 }
@@ -327,16 +508,21 @@ func parseVMess(raw string) (*model.Endpoint, error) {
 			"security": util.FirstNonEmpty(asString(m["scy"]), "auto"),
 		},
 	}
-	net := util.FirstNonEmpty(asString(m["net"]), "tcp")
+	net := strings.ToLower(strings.TrimSpace(util.FirstNonEmpty(asString(m["net"]), "tcp")))
 	if net == "h2" {
 		net = "http" // VMess "h2" is the HTTP/2 transport sing-box calls "http"
 	}
-	if net == "ws" || net == "grpc" || net == "http" || net == "httpupgrade" {
+	switch net {
+	case "ws", "grpc", "http", "httpupgrade":
 		t := &model.Transport{Type: net, Path: asString(m["path"]), Host: firstScalar(m["host"])}
 		if net == "grpc" {
 			t.ServiceName = asString(m["path"])
 		}
 		e.Transport = t
+	case "tcp", "raw", "none":
+	default:
+		// xhttp / kcp / quic: importing it as raw TCP made an endpoint the server cannot accept.
+		return nil, fmt.Errorf("vmess: %w", unsupportedTransport(net))
 	}
 	// VMess "tls" is normally the string "tls" (or ""), but some generators emit a
 	// JSON bool true or "1"/"true" — and a bare `== "tls"` check then silently leaves
@@ -351,7 +537,16 @@ func parseVMess(raw string) (*model.Endpoint, error) {
 		// carry allowInsecure: vmess was the ONLY protocol whose importer dropped the
 		// skip-cert-verify flag (vless/trojan/hy2/tuic all read it), so a vmess+TLS
 		// endpoint with a self-signed cert silently failed certificate verification.
-		e.TLS = &model.TLS{Enabled: true, Type: "tls", SNI: util.FirstNonEmpty(asString(m["sni"]), firstScalar(m["host"]), e.Server), Fingerprint: asString(m["fp"]), ALPN: asStringList(m["alpn"]), Insecure: truthy(asString(m["allowInsecure"]))}
+		// v2rayN's own VMess JSON spells it "insecure", "1" or "0" (VmessQRCode), and reads
+		// nothing else, so both are read.
+		e.TLS = &model.TLS{Enabled: true, Type: "tls", SNI: util.FirstNonEmpty(asString(m["sni"]), firstScalar(m["host"]), e.Server), Fingerprint: asString(m["fp"]), ALPN: asStringList(m["alpn"]), Insecure: truthy(asString(m["allowInsecure"])) || truthy(asString(m["insecure"]))}
+		if err := vmessPins(e, m); err != nil {
+			return nil, fmt.Errorf("vmess: %w", err)
+		}
+	}
+	// 3x-ui writes the finalmask into the JSON as "fm", a string of JSON.
+	if err := linkFinalMask(e, vmessFinalMask(m["fm"])); err != nil {
+		return nil, fmt.Errorf("vmess: %w", err)
 	}
 	return e, nil
 }
@@ -449,6 +644,10 @@ func parseShadowsocks(raw string) (*model.Endpoint, error) {
 				e.Params["plugin_opts"] = opts
 			}
 		}
+		// 3x-ui writes Xray's finalmask on Shadowsocks links too.
+		if err := linkFinalMask(e, linkQueryValue(query, "fm")); err != nil {
+			return nil, fmt.Errorf("ss: %w", err)
+		}
 	}
 	return e, nil
 }
@@ -505,8 +704,61 @@ func normalizeWGURL(raw string) string {
 	return head + rest + tail
 }
 
+// normalizedQuery indexes a query by its key lowercased with '_' and '-' removed, the spelling-
+// insensitive lookup Hiddify applies to wg:// links, so private_key, privateKey and private-key
+// all read as "privatekey". The first value of the first spelling seen wins. Values are as
+// url.Query decoded them; key params go through wgKey, which undoes the '+' that decoding ate.
+func normalizedQuery(q url.Values) map[string]string {
+	keys := make([]string, 0, len(q))
+	for k := range q {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys) // deterministic when two spellings of one key are both present
+	out := make(map[string]string, len(q))
+	for _, k := range keys {
+		n := strings.NewReplacer("_", "", "-", "").Replace(strings.ToLower(k))
+		if _, seen := out[n]; !seen && len(q[k]) > 0 {
+			out[n] = q[k][0]
+		}
+	}
+	return out
+}
+
+// firstOf returns the first non-empty value among keys of a normalizedQuery.
+func firstOf(m map[string]string, keys ...string) string {
+	for _, k := range keys {
+		if v := strings.TrimSpace(m[k]); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// wgKey reads a base64 key param (the first of keys that is set), restoring a '+' that url.Query()
+// decoded to a space. A WireGuard key is standard base64 (its alphabet includes '+'); a link that
+// carries the '+' un-percent-encoded (the common real-world form) has it turned into a space by
+// query decoding, which corrupts the key — the peer public_key / pre_shared_key no longer match the
+// server and the handshake fails. base64 never contains a literal space, so any space here is
+// unambiguously a lost '+', and it is restored BEFORE any trimming: a key may start with '+'.
+// A properly %2B-encoded link already yields '+' (no space), so this is a no-op for it.
+func wgKey(m map[string]string, keys ...string) string {
+	for _, k := range keys {
+		if v := m[k]; strings.TrimSpace(v) != "" {
+			return strings.ReplaceAll(v, " ", "+")
+		}
+	}
+	return ""
+}
+
 func parseWireGuardURL(u *url.URL) (*model.Endpoint, error) {
-	q := u.Query()
+	q := normalizedQuery(u.Query())
+	// v2rayN puts the private key in the userinfo and names the peer key publickey; Hiddify's wg://
+	// form also takes it as a parameter (pk / private_key) and names the peer key peer_public_key,
+	// pub or peer_pk. Read every spelling: a key that is not found is an endpoint that never handshakes.
+	priv := u.User.Username()
+	if priv == "" {
+		priv = wgKey(q, "privatekey", "pk")
+	}
 	e := &model.Endpoint{
 		Engine:   model.EngineSingBox,
 		Protocol: model.ProtoWireGuard,
@@ -514,26 +766,26 @@ func parseWireGuardURL(u *url.URL) (*model.Endpoint, error) {
 		Port:     atoiDefault(u.Port(), 51820),
 		Name:     fragmentName(u),
 		Params: map[string]any{
-			"private_key":     u.User.Username(),
-			"peer_public_key": b64Param(q, "publickey"),
+			"private_key":     priv,
+			"peer_public_key": wgKey(q, "publickey", "peerpublickey", "pub", "peerpub", "peerpk"),
 		},
 	}
-	if psk := b64Param(q, "presharedkey"); psk != "" {
+	if psk := wgKey(q, "presharedkey", "psk"); psk != "" {
 		e.Params["pre_shared_key"] = psk
 	}
 	// Carry PersistentKeepalive (spelled keepalive / persistentkeepalive in the
 	// wild) so an idle tunnel behind NAT keeps its UDP mapping alive.
-	if ka := atoiDefault(util.FirstNonEmpty(q.Get("keepalive"), q.Get("persistentkeepalive")), 0); ka > 0 {
+	if ka := atoiDefault(firstOf(q, "keepalive", "persistentkeepalive"), 0); ka > 0 {
 		e.Params["persistent_keepalive"] = ka
 	}
-	if addr := q.Get("address"); addr != "" {
+	if addr := firstOf(q, "address", "localaddress", "ip"); addr != "" {
 		e.Params["local_address"] = splitCSV(addr)
 	}
 	// Cloudflare WARP encodes 3 client-id bytes as the WG "reserved" field; sing-box
 	// puts them on the peer and the WARP server rejects the handshake without them.
 	// (Plain-WireGuard only — sing-box's userspace WG; native AmneziaWG has no such
 	// field.) Spelled reserved=a,b,c or reserved=[a,b,c] in the wild.
-	if r := parseReserved(q.Get("reserved")); r != nil {
+	if r := parseReserved(q["reserved"]); r != nil {
 		e.Params["reserved"] = r
 	}
 	// MTU keeps large packets from fragmenting/blackholing — emitted on the sing-box WG
@@ -541,8 +793,20 @@ func parseWireGuardURL(u *url.URL) (*model.Endpoint, error) {
 	// endpoint mtu is a uint32, so an out-of-range value (e.g. a hostile mtu=999999999999)
 	// overflows at config decode and FATALs the whole shared singbox.json. Bounding also makes
 	// 64-bit and 32-bit (mipsle) builds agree, since strconv.Atoi overflows differently per arch.
-	if mtu := atoiDefault(q.Get("mtu"), 0); mtu >= 576 && mtu <= 65535 {
+	if mtu := atoiDefault(q["mtu"], 0); mtu >= 576 && mtu <= 65535 {
 		e.Params["mtu"] = mtu
+	}
+	// A link carrying AmneziaWG obfuscation parameters (jc/jmin/jmax/s1-s4/h1-h4/i1-i5, the names
+	// the .conf uses; Hiddify reads them from wg:// links) is an AmneziaWG peer. Imported as plain
+	// WireGuard it would send unobfuscated handshakes the server ignores, so route it to the AWG
+	// engine exactly as the same values in a .conf are.
+	isAWG, err := applyAWGParams(e, q)
+	if err != nil {
+		return nil, err
+	}
+	if isAWG {
+		e.Protocol = model.ProtoAmneziaWG
+		e.Engine = model.EngineAmneziaWG
 	}
 	return e, nil
 }
@@ -574,10 +838,26 @@ func parseReserved(s string) []int {
 
 // --- query/transport/tls helpers ---
 
-func transportFromQuery(q url.Values) *model.Transport {
-	switch q.Get("type") {
+// unsupportedTransport is the error for a stream transport sing-box has no client for. A link
+// naming one used to import as raw TCP - a well-formed endpoint the server can never accept, with
+// nothing to say why - so the import now fails and says which transport it was.
+func unsupportedTransport(name string) error {
+	if len(name) > 24 {
+		name = name[:24] + "..."
+	}
+	switch name {
+	case "xhttp", "splithttp":
+		return fmt.Errorf("transport %q (Xray XHTTP) is not supported by sing-box", name)
+	case "kcp", "mkcp":
+		return fmt.Errorf("transport %q (mKCP) is not supported by sing-box", name)
+	}
+	return fmt.Errorf("transport %q is not supported by sing-box", name)
+}
+
+func transportFromQuery(q url.Values) (*model.Transport, error) {
+	switch typ := strings.ToLower(strings.TrimSpace(q.Get("type"))); typ {
 	case "ws":
-		return &model.Transport{Type: "ws", Path: q.Get("path"), Host: q.Get("host")}
+		return &model.Transport{Type: "ws", Path: q.Get("path"), Host: q.Get("host")}, nil
 	case "grpc":
 		// serviceName is the gRPC path segment; the wrong/empty one means the gRPC
 		// stream hits the wrong path and never connects (passes `sing-box check`,
@@ -585,14 +865,49 @@ func transportFromQuery(q url.Values) *model.Transport {
 		// URIs), service_name (sing-box JSON → link converters), servicename — so
 		// accept all, mirroring the packetEncoding handling above.
 		return &model.Transport{Type: "grpc", ServiceName: util.FirstNonEmpty(
-			q.Get("serviceName"), q.Get("service_name"), q.Get("servicename"))}
+			q.Get("serviceName"), q.Get("service_name"), q.Get("servicename"))}, nil
 	case "http", "h2":
-		return &model.Transport{Type: "http", Path: q.Get("path"), Host: q.Get("host")}
+		return &model.Transport{Type: "http", Path: q.Get("path"), Host: q.Get("host")}, nil
 	case "httpupgrade":
-		return &model.Transport{Type: "httpupgrade", Path: q.Get("path"), Host: q.Get("host")}
+		return &model.Transport{Type: "httpupgrade", Path: q.Get("path"), Host: q.Get("host")}, nil
+	case "", "tcp", "raw", "none":
+		return nil, nil // raw TCP ("raw" is Xray's current name for it)
 	default:
-		return nil // tcp / raw
+		return nil, unsupportedTransport(typ)
 	}
+}
+
+// hy2PortList is the Hysteria 2 "multi-port" syntax: ports and ranges joined by commas.
+var hy2PortList = regexp.MustCompile(`^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$`)
+
+// splitAuthorityPortList rewrites "scheme://auth@host:443,5000-6000/?q" to
+// "scheme://auth@host:443/?q" and returns the list ("443,5000-6000"). A single port, a missing port
+// and anything that is not a port list are returned unchanged with "" (url.Parse then judges them).
+// The list's first port stands in as the endpoint's single port; the generator dials the whole
+// list through server_ports.
+func splitAuthorityPortList(raw string) (string, string) {
+	i := strings.Index(raw, "://")
+	if i < 0 {
+		return raw, ""
+	}
+	start := i + 3
+	end := len(raw)
+	if j := strings.IndexAny(raw[start:], "/?#"); j >= 0 {
+		end = start + j
+	}
+	auth := raw[start:end]
+	host := strings.LastIndexByte(auth, '@') + 1
+	colon := strings.LastIndexByte(auth, ':')
+	if colon < host || strings.ContainsRune(auth[colon:], ']') {
+		return raw, ""
+	}
+	spec := auth[colon+1:]
+	if !strings.ContainsAny(spec, ",-") || !hy2PortList.MatchString(spec) {
+		return raw, ""
+	}
+	first, _, _ := strings.Cut(spec, ",")
+	first, _, _ = strings.Cut(first, "-")
+	return raw[:start] + auth[:colon+1] + first + raw[end:], spec
 }
 
 func tlsFromQuery(q url.Values, defaultOn bool, server string) *model.TLS {
@@ -610,6 +925,7 @@ func tlsFromQuery(q url.Values, defaultOn bool, server string) *model.TLS {
 			PublicKey:   q.Get("pbk"),
 			ShortID:     q.Get("sid"),
 			ALPN:        splitCSV(q.Get("alpn")),
+			ECH:         settleECH(echFromLink(q.Get("ech")), "reality"), // kept off: see settleECH
 		}
 	case "tls", "xtls":
 		return &model.TLS{
@@ -625,6 +941,8 @@ func tlsFromQuery(q url.Values, defaultOn bool, server string) *model.TLS {
 			Fingerprint: q.Get("fp"),
 			Insecure:    insecureFromQuery(q),
 			ALPN:        splitCSV(q.Get("alpn")),
+			// Encrypted Client Hello: Xray's ech= (vless, trojan; v2rayN writes it for anytls too).
+			ECH: settleECH(echFromLink(q.Get("ech")), "tls"),
 		}
 	default:
 		return nil
@@ -674,18 +992,6 @@ func splitHostPort(s string) (host string, port int) {
 	}
 	s = strings.TrimSuffix(strings.TrimPrefix(s, "["), "]")
 	return s, 0
-}
-
-// b64Param reads a base64 query parameter, restoring a '+' that url.Query()
-// decoded to a space. A WireGuard key is standard base64 (its alphabet includes
-// '+'); a "wireguard://" link that carries the '+' un-percent-encoded (the common
-// real-world form) has it turned into a space by query decoding, which corrupts
-// the key — the peer public_key / pre_shared_key no longer match the server and
-// the handshake fails. base64 never contains a literal space, so any space here is
-// unambiguously a lost '+'. A properly %2B-encoded link already yields '+' (no
-// space), so this is a no-op for it.
-func b64Param(q url.Values, key string) string {
-	return strings.ReplaceAll(q.Get(key), " ", "+")
 }
 
 func splitCSV(s string) []string {
@@ -829,7 +1135,15 @@ func asInt(v any, def int) int {
 }
 
 func genID(e *model.Endpoint) string {
-	base := string(e.Protocol) + "-" + e.Server
+	host := e.Server
+	if r, _ := model.Hy2RealmOf(e); r != nil {
+		// The realm name stays out of the id, as out of the name, but the rendezvous alone is not an
+		// identity: two home servers on one public rendezvous made one id, and the second import could
+		// only replace the first (QA-058). A short hash of the whole realm address tells them apart.
+		sum := sha256.Sum256([]byte(r.URI()))
+		host = "realm-" + r.Host + "-" + hex.EncodeToString(sum[:4])
+	}
+	base := string(e.Protocol) + "-" + host
 	if e.Port != 0 {
 		base += "-" + strconv.Itoa(e.Port)
 	}

@@ -208,7 +208,6 @@ func applytest_caps(unusable []string) platform.CapabilitySet {
 	}
 	add(platform.CapEngineSingbox, platform.BlocksFeature)
 	add(platform.CapEngineAmneziaWG, platform.BlocksFeature)
-	add(platform.CapEngineOlcRTC, platform.BlocksFeature)
 	add(platform.CapPBRKernel, platform.BlocksApply)
 	for _, protocol := range []string{"vless", "vmess", "trojan", "shadowsocks", "hysteria2", "tuic", "anytls", "wireguard", "amneziawg", "socks", "http"} {
 		add(platform.CapProtocolPrefix+protocol, platform.BlocksFeature)

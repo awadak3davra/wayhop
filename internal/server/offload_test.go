@@ -1,6 +1,11 @@
 package server
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"wayhop/internal/platform"
+)
 
 // TestParseDefaultRouteDev covers the `ip -o route show default` shapes the offload probe
 // must handle, including the real on-device line (double space before src), a PPPoE WAN,
@@ -64,7 +69,10 @@ func TestPbrCompileOptions_OffloadGate(t *testing.T) {
 	}
 
 	s2 := opshandlers_server(t)
-	s2.accelOnce.Do(func() { s2.accelKindCached = "ppe" }) // seed deterministically — no host probe
+	// A router, not the demo's capable box, whose accelerator is seeded deterministically — no host probe
+	// while the observation is fresh.
+	s2.cfg.Demo = false
+	s2.hostVerdicts.accel, s2.hostVerdicts.accelAt = platform.Accel{Kind: "ppe"}, time.Now()
 	s2.cfg.RoutingMode = "fast"
 	s2.cfg.Offload = "hw"
 	s2.cfg.OffloadDevices = []string{"br-lan"}

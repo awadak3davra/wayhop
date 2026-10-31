@@ -243,7 +243,7 @@ func exitName(e *model.Endpoint) string {
 // EngineExternal tunnel that binds an OS interface rather than dialing a server — the recorded
 // peer endpoint_ip. Only a routable literal or host is returned ("" when nothing usable).
 func endpointServerIP(e *model.Endpoint) string {
-	if s := strings.TrimSpace(e.Server); s != "" {
+	if s := strings.TrimSpace(e.ServerAddress()); s != "" {
 		return s
 	}
 	if e.Params != nil {

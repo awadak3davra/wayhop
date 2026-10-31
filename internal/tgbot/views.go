@@ -77,6 +77,8 @@ func (v view) stateWord(state string) string {
 
 func headline(h Health) (icon, key string) {
 	switch h {
+	case HealthRoutingOff:
+		return "⏸", "h.routingoff"
 	case HealthTesting:
 		return "⏳", "h.testing"
 	case HealthDegraded:
@@ -151,6 +153,9 @@ func (v view) Status(s Status) (string, *Keyboard) {
 	if s.LocalFault {
 		b.WriteString("<i>" + v.t("st.localfault") + "</i>\n")
 	}
+	if s.Routing.Off {
+		b.WriteString("<i>" + v.t("st.routingoff") + "</i>\n")
+	}
 	b.WriteString("\n")
 
 	if s.ExitIP.Known && s.ExitIP.IP != "" {
@@ -224,8 +229,13 @@ func (v view) Status(s Status) (string, *Keyboard) {
 		{btn(v.t("b.refresh"), cbStatus), btn(v.t("b.exits"), cbExits)},
 		{btn(v.t("b.events"), cbEvents+"0"), btn(v.t("b.more"), cbMore)},
 	}}
-	if s.FailSafe.Armed && v.role == roleOwner {
-		kb.Rows = append([][]InlineButton{{btn(v.t("b.keep"), cbKeep), btn(v.t("b.rollback"), cbRollback)}}, kb.Rows...)
+	switch {
+	case v.role != roleOwner:
+	case s.FailSafe.RollbackOutstanding:
+		// Keep is refused while a failed rollback is outstanding; Roll back retries it, window or not.
+		kb.Rows = append([][]InlineButton{{btn(v.t("b.rollback"), cbRollback+s.FailSafe.Window)}}, kb.Rows...)
+	case s.FailSafe.Armed:
+		kb.Rows = append([][]InlineButton{applyButtons(v.lang, s.FailSafe.Window)}, kb.Rows...)
 	}
 	if !v.muted.IsZero() {
 		kb.Rows = append(kb.Rows, []InlineButton{btn(v.t("b.unmute"), cbMute+"0")})

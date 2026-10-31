@@ -122,7 +122,8 @@ func TestDetectDNSLoops_DuplicatesAndEmpty(t *testing.T) {
 
 // IPv6 must work the same way, including bracketed host:port forms.
 func TestDetectDNSLoops_IPv6(t *testing.T) {
-	if got := DetectDNSLoops(dnsListeners, []string{"[::1]:53"}, nil); loopFor(got, "[::1]:53") == nil {
+	dual := append([]DNSListener{{Proto: "udp", Addr: ":::53", Process: "dnsmasq"}}, dnsListeners...)
+	if got := DetectDNSLoops(dual, []string{"[::1]:53"}, nil); loopFor(got, "[::1]:53") == nil {
 		t.Error("IPv6 loopback must be detected")
 	}
 	if got := DetectDNSLoops(dnsListeners, []string{"2606:4700:4700::1111"}, nil); len(got) != 0 {

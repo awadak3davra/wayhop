@@ -18,6 +18,8 @@
 #   WAYHOP_FLAVOUR=…        or  --openwrt|--entware force the build flavour (default: auto)
 #   --with-awg[=auto|kmod|userspace]                then install AmneziaWG 3.1 (install-awg.sh)
 #   -- <install.sh flags…>                          forward the rest verbatim, e.g.  -- --port 8089
+#                                                   (OpenWrt: -- --cleanup [--dry-run] only reclaims the
+#                                                   space earlier installs and updates left behind)
 set -eu
 
 REPO="awadak3davra/wayhop"
@@ -55,7 +57,7 @@ while [ $# -gt 0 ]; do
     --entware)    FLAVOUR=entware ;;
     --with-awg)   WITH_AWG=1 ;;
     --with-awg=*) WITH_AWG=1; AWG_MODE="${arg#*=}" ;;
-    -h|--help)    sed -n '2,29p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)    sed -n '2,/^set -eu$/p' "$0" 2>/dev/null | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     --)           break ;;
     *)            die "unknown option '$arg' (install.sh flags go after a literal --, e.g. -- --port 8089)" ;;
   esac
@@ -143,7 +145,9 @@ ASSET="wayhop-${VER}-${ARCH}${SUFFIX}.tar.gz"
 BASE="$GH/$REPO/releases/download/$TAG"
 
 # --- private temp dir; removed on ANY exit (success, error, interrupt) ---
-TMP="$(mktemp -d 2>/dev/null || true)"
+# Named so an interrupted run's directory is recognisable: the OpenWrt installer's leftover sweep
+# removes an old /tmp/wayhop-boot.* that no running process owns (this is RAM, on most routers).
+TMP="$(mktemp -d /tmp/wayhop-boot.XXXXXX 2>/dev/null || mktemp -d 2>/dev/null || true)"
 [ -n "$TMP" ] || { TMP="/tmp/wayhop-boot.$$"; (umask 077; mkdir -p "$TMP"); }
 [ -d "$TMP" ] || die "could not create a temp dir"
 trap 'rm -rf "$TMP" 2>/dev/null || true' EXIT INT TERM
@@ -198,6 +202,9 @@ info "sha256 verified"
 # --- unpack (only after verification) + hand off to the real, safe-on-a-live-router install.sh ---
 mkdir -p "$TMP/x"
 tar -xzf "$TMP/$ASSET" -C "$TMP/x" 2>/dev/null || die "extract failed (unexpected after a verified checksum)."
+# The archive has done its job. /tmp is RAM on a router, and the installer may need it to stage a
+# compressed rollback copy when the overlay is nearly full.
+rm -f "$TMP/$ASSET"
 [ -f "$TMP/x/install.sh" ] || die "install.sh not found inside $ASSET (bad archive layout)."
 
 # --with-awg: resolve install-awg.sh BEFORE anything is installed, so a release that cannot provide a

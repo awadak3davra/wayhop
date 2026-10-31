@@ -14,6 +14,94 @@
       "why": "WR_SINGBOX not set — ran clash-import+generate only",
       "when": "env:WR_SINGBOX"
     },
+    "TestCoreVersionRuleSetFetch": {
+      "why": "WR_SINGBOX not set — set it to a sing-box binary to run the core",
+      "when": "env:WR_SINGBOX"
+    },
+    "TestCoreVersionSingBoxCheck": {
+      "why": "WR_SINGBOX not set — set it to a sing-box binary for a real `check`",
+      "when": "env:WR_SINGBOX"
+    },
+    "TestByeDPILive": {
+      "why": "WR_BYEDPI not set — point it at a ciadpi binary to run it for real",
+      "when": "env:WR_BYEDPI"
+    },
+    "TestTGBridgeLive": {
+      "why": "WR_TGWSPROXY not set — point it at a tg-ws-proxy binary to run it for real",
+      "when": "env:WR_TGWSPROXY"
+    },
+    "TestLiveFlush": {
+      "why": "WR_CTFLUSH_LIVE not set — needs root, nft and nf_conntrack_netlink",
+      "when": "env:WR_CTFLUSH_LIVE"
+    },
+    "TestProbeInboundSingBoxCheck": {
+      "why": "WR_SINGBOX not set — set it to a sing-box binary for a real `check`",
+      "when": "env:WR_SINGBOX"
+    },
+    "TestRoutingListTLSFragmentSingBoxCheck": {
+      "why": "WR_SINGBOX not set — set it to a sing-box binary for a real `check`",
+      "when": "env:WR_SINGBOX"
+    },
+    "TestNDMPolicySingBoxCheck": {
+      "why": "WR_SINGBOX not set — set it to a sing-box binary for a real `check`",
+      "when": "env:WR_SINGBOX"
+    },
+    "TestCoreOverrideSingBoxCheck": {
+      "why": "WR_SINGBOX not set — set it to a sing-box binary for a real `check`",
+      "when": "env:WR_SINGBOX"
+    },
+    "TestSSHSingBoxCheck": {
+      "why": "WR_SINGBOX not set — set it to a sing-box binary for a real `check`",
+      "when": "env:WR_SINGBOX"
+    },
+    "TestECHSingBoxCheck": {
+      "why": "WR_SINGBOX not set — set it to a sing-box binary for a real `check`",
+      "when": "env:WR_SINGBOX"
+    },
+    "TestMultiplexSingBoxCheck": {
+      "why": "WR_SINGBOX not set — set it to a sing-box binary for a real `check`",
+      "when": "env:WR_SINGBOX"
+    },
+    "TestQUICTuningSingBoxCheck": {
+      "why": "WR_SINGBOX not set — set it to a sing-box binary for a real `check`",
+      "when": "env:WR_SINGBOX"
+    },
+    "TestVPNDNSServerSingBoxCheck": {
+      "why": "WR_SINGBOX not set — set it to a sing-box binary for a real `check`",
+      "when": "env:WR_SINGBOX"
+    },
+    "TestMultiplexSingBoxRuntime": {
+      "why": "WR_SINGBOX not set — set it to a sing-box binary to run the core",
+      "when": "env:WR_SINGBOX"
+    },
+    "TestCertificatePinSingBoxCheck": {
+      "why": "WR_SINGBOX not set — set it to a sing-box binary for a real `check`",
+      "when": "env:WR_SINGBOX"
+    },
+    "TestCertificatePinSingBoxRuntime": {
+      "why": "WR_SINGBOX not set — set it to a sing-box binary to run the core",
+      "when": "env:WR_SINGBOX"
+    },
+    "TestServerSetupPinSingBoxRuntime": {
+      "why": "WR_SINGBOX not set — set it to a sing-box binary to run the core",
+      "when": "env:WR_SINGBOX"
+    },
+    "TestTLSPinSnippetMatchesGo": {
+      "why": "openssl not on PATH — the installer's pin snippet cannot run here",
+      "when": "tool:openssl"
+    },
+    "TestTLSPinSnippetConcurrentRuns": {
+      "why": "openssl not on PATH — the installer's pin snippet cannot run here",
+      "when": "tool:openssl"
+    },
+    "TestTLSFragmentsPrintPinnedLinks": {
+      "why": "openssl not on PATH — the installer's pin snippet cannot run here",
+      "when": "tool:openssl"
+    },
+    "TestRealWorldLinksSingBoxCheck": {
+      "why": "WR_SINGBOX not set — ran import+generate+export only (set it for a real sing-box check)",
+      "when": "env:WR_SINGBOX"
+    },
     "TestGeneratorTransportMatrix": {
       "why": "WR_SINGBOX not set — ran import+generate only (set it for a real sing-box check)",
       "when": "env:WR_SINGBOX"

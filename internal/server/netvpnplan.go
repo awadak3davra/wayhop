@@ -33,7 +33,7 @@ func awgInterfaceFromEndpoint(e model.Endpoint, ifname string) (netvpn.AWGInterf
 // writableProto maps a model protocol onto the native protocol that would carry it, and reports
 // whether this writer can express the endpoint at all. Only the WireGuard family has a native
 // OpenWrt representation: vless/vmess/trojan/shadowsocks/hysteria2/tuic/anytls are proxy protocols
-// with no uci `proto=` of any kind, and olcRTC is a userspace SOCKS plugin. Saying so here, once,
+// with no uci `proto=` of any kind. Saying so here, once,
 // keeps the refusal message accurate instead of "the uci writer is for amneziawg".
 func writableProto(p model.Protocol) (netvpn.Proto, bool) {
 	return netvpn.ProtoForModel(p)

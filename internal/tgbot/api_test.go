@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -59,19 +60,64 @@ func TestUnauthorizedAndConflictAreRecognised(t *testing.T) {
 }
 
 // A block page or captive portal answers with HTML. The error must say what came back rather than
-// "invalid character '<'", which sends people looking for a JSON bug.
-func TestNonBotAPIResponseIsDescribed(t *testing.T) {
-	f := newFakeAPI(t)
-	f.on("getMe", func(map[string]any) (int, string) {
-		return 403, "<html><body>Access denied by your provider</body></html>"
-	})
-	_, err := f.client().GetMe(context.Background())
-	var ae *APIError
-	if !errors.As(err, &ae) || ae.Code != 403 || !strings.Contains(ae.Description, "Forbidden") {
-		t.Fatalf("got %v", err)
+// "invalid character '<'", which sends people looking for a JSON bug, and it is a transport failure:
+// read by its status, a proxy's 404 put the bot to sleep for ten minutes as "token rejected" and its
+// 403 dropped an alert as if the chat had blocked the bot.
+func TestNonBotAPIResponseIsATransportError(t *testing.T) {
+	secret := strings.SplitN(testToken, ":", 2)[1]
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{"block page 403", 403, "<html><body>Access denied by your provider</body></html>", "Forbidden: <html>"},
+		{"proxy 404 echoing the path", 404, "<h1>Not Found</h1> /bot" + testToken + "/getMe", "Not Found"},
+		{"escaped colon in the echo", 404, "no route for /bot123456%3A" + secret + "/getMe", "Not Found"},
+		{"captive portal 200", 200, "<html>Sign in to Wi-Fi</html>", "OK: <html>"},
+		{"proxy 401", 401, "Proxy authentication required", "Unauthorized"},
+		{"bad gateway", 502, "", "Bad Gateway"},
+		{"JSON that is not the Bot API's", 404, `{"error":"no such route","path":"/bot` + testToken + `/getMe"}`, "Not Found"},
+		{"long echo cut after the token", 404, strings.Repeat("x", 70) + testToken, "Not Found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeAPI(t)
+			f.on("getMe", func(map[string]any) (int, string) { return tc.status, tc.body })
+			_, err := f.client().GetMe(context.Background())
+			var he *HTTPError
+			if !errors.As(err, &he) || he.Status != tc.status || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v", err)
+			}
+			if IsUnauthorized(err) || IsBlocked(err) || IsConflict(err) || migratedTo(err) != 0 {
+				t.Fatalf("read as Telegram's verdict: %v", err)
+			}
+			if !retryable(err) {
+				t.Fatal("a page that is not Telegram's must be retried like a dropped connection")
+			}
+			if s := err.Error(); strings.Contains(s, secret) || strings.Contains(s, secret[:12]) {
+				t.Fatalf("token leaked: %v", err)
+			}
+		})
 	}
-	if !IsBlocked(err) {
-		t.Fatal("a 403 is a blocked chat for the send path")
+}
+
+// Telegram's own refusals keep their meaning.
+func TestBotAPIRefusalsKeepTheirMeaning(t *testing.T) {
+	for _, tc := range []struct {
+		status        int
+		body          string
+		unauth, block bool
+	}{
+		{401, `{"ok":false,"error_code":401,"description":"Unauthorized"}`, true, false},
+		{404, `{"ok":false,"error_code":404,"description":"Not Found"}`, true, false},
+		{403, `{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}`, false, true},
+	} {
+		f := newFakeAPI(t)
+		f.on("getMe", func(map[string]any) (int, string) { return tc.status, tc.body })
+		_, err := f.client().GetMe(context.Background())
+		if IsUnauthorized(err) != tc.unauth || IsBlocked(err) != tc.block {
+			t.Fatalf("%d: %v", tc.status, err)
+		}
 	}
 }
 
@@ -88,6 +134,27 @@ func TestTransportErrorNeverLeaksTheToken(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "<token>") {
 		t.Fatalf("expected the scrubbed marker, got %v", err)
+	}
+	// Nothing it unwraps to carries the token either, and a timeout still reads as one.
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if strings.Contains(e.Error(), "TEST-token") {
+			t.Fatalf("token in a wrapped cause: %v", e)
+		}
+	}
+	release := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer slow.Close()
+	defer close(release)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err = NewClient(slow.URL, testToken, slow.Client()).GetMe(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "TEST-token") {
+		t.Fatalf("timeout: %v", err)
 	}
 }
 

@@ -24,7 +24,41 @@ USE_PROCD=1
 PROG=/usr/sbin/wayhop
 CONF=/etc/wayhop/config.json
 
+# recover_binary: the binary is missing only when the power failed inside an upgrade's
+# compressed-copy swap (install.sh removes the old binary once a verified wayhop.bak.gz exists,
+# then writes the new one). Put the rollback copy back rather than start nothing.
+recover_binary() {
+	[ -x "$PROG" ] && return 0
+	rm -f "$PROG.new" "$PROG.rb"    # an unfinished copy is never a source
+	if [ -f "$PROG.bak" ]; then
+		ln "$PROG.bak" "$PROG.rb" 2>/dev/null || cp "$PROG.bak" "$PROG.rb" || { rm -f "$PROG.rb"; return 1; }
+	elif [ -f "$PROG.bak.gz" ] && gzip -t "$PROG.bak.gz" 2>/dev/null; then
+		gzip -dc "$PROG.bak.gz" > "$PROG.rb" || { rm -f "$PROG.rb"; return 1; }
+	else
+		return 1
+	fi
+	chmod 0755 "$PROG.rb" && sync && mv "$PROG.rb" "$PROG" &&
+		echo "wayhop: $PROG was missing; restored it from the rollback copy" >&2
+}
+
+# boot: an update whose new build had not yet proved itself when the router went down is judged
+# again by the update supervisor (/etc/wayhop/update-verify.sh, written by the daemon and the
+# installers): it rolls the update back if the new build does not answer, or at once on a second boot
+# inside the window. Detached, so the boot does not wait on it; only at boot, never on a restart the
+# supervisor itself performs.
+boot() {
+	if [ -f /etc/wayhop/update.pending ] && [ -f /etc/wayhop/update-verify.sh ]; then
+		if command -v setsid >/dev/null 2>&1; then
+			setsid sh /etc/wayhop/update-verify.sh boot </dev/null >>/tmp/wayhop-update.log 2>&1 &
+		else
+			sh /etc/wayhop/update-verify.sh boot </dev/null >>/tmp/wayhop-update.log 2>&1 &
+		fi
+	fi
+	start "$@"
+}
+
 start_service() {
+	recover_binary
 	# Don't try to start if the binary or config is missing; procd would just
 	# respawn-loop. Fail loudly into the log instead.
 	[ -x "$PROG" ] || { echo "wayhop: $PROG not found or not executable" >&2; return 1; }
@@ -40,6 +74,13 @@ start_service() {
 	# genuine tight crash-loop (10 deaths each <60s after start), which is when
 	# hammering the binary is pointless anyway. 5s between restarts.
 	procd_set_param respawn 60 5 10
+
+	# Open files: the usual default (1024 soft, 4096 hard) runs the core out of descriptors on a
+	# busy router, and every new connection then fails with "too many open files". procd sets this
+	# on the daemon, and the core it starts inherits it. This is procd's only form for a limit: a
+	# "limits { ... }" block is not procd syntax, and in this file it ends start_service early, so
+	# the script stops parsing and WayHop does not start.
+	procd_set_param limits nofile="16384 16384"
 
 	# Route the daemon's stdout/stderr into the system log (logd).
 	procd_set_param stdout 1

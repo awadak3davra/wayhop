@@ -143,6 +143,8 @@ type Monitor struct {
 	// startup, so it has its own lock rather than sharing the stats lock across ledger I/O.
 	interfaceMu      sync.RWMutex
 	nativeInterfaces func() (map[string]string, bool)
+	// plugins resolves a plugin-run exit (ByeDPI) to its process state (plugincause.go).
+	plugins pluginStates
 
 	// causeFor scans the entire engine log on every call; since the derived cause
 	// is global (not per-endpoint) and changes slowly, cache it for a short TTL so a
@@ -996,6 +998,11 @@ func (m *Monitor) Snapshot() []View {
 	coreAvail, coreKnown := m.coreState()
 	for i := range views {
 		if views[i].State == "down" {
+			st, known := m.pluginState(views[i].ID)
+			if cid, t, f, ok := localProxyCause(engines[views[i].ID], st, known, coreKnown, coreAvail); ok {
+				views[i].CauseID, views[i].Cause, views[i].CauseFix = cid, t, f
+				continue
+			}
 			if t, f := coreMissingCause(engines[views[i].ID], coreKnown, coreAvail); t != "" {
 				views[i].CauseID, views[i].Cause, views[i].CauseFix = causeEngineMissing, t, f
 				continue
@@ -1027,6 +1034,11 @@ func (m *Monitor) viewWithCause(id string) View {
 			engine = e.Engine
 			break
 		}
+	}
+	st, known := m.pluginState(id)
+	if cid, t, f, ok := localProxyCause(engine, st, known, coreKnown, coreAvail); ok {
+		v.CauseID, v.Cause, v.CauseFix = cid, t, f
+		return v
 	}
 	if t, f := coreMissingCause(engine, coreKnown, coreAvail); t != "" {
 		v.CauseID, v.Cause, v.CauseFix = causeEngineMissing, t, f

@@ -38,13 +38,21 @@ func secureDNS() *model.DNSSettings {
 }
 
 // singboxCheckDNS runs a real `sing-box check` on the config when WR_SINGBOX points at a binary (CI);
-// otherwise it skips, leaving the structural assertions as the local gate.
+// otherwise it skips, leaving the structural assertions as the local gate. The config is first fitted
+// to that binary the way Apply fits it to the detected core (Options.CoreVersion), so a 1.15 binary,
+// which refuses the legacy independent_cache, checks the form it would actually be given. It rewrites
+// cfg in place: call it after the assertions on the legacy form.
 func singboxCheckDNS(t *testing.T, cfg map[string]any) {
 	t.Helper()
 	bin := os.Getenv("WR_SINGBOX")
 	if bin == "" {
 		return
 	}
+	ver := singboxVersionOf(t, bin)
+	if modernCore(ver) {
+		applyModernCoreSchema(cfg)
+	}
+	FitTUNToCore(cfg, ver)
 	f := filepath.Join(t.TempDir(), "dns.json")
 	b, _ := json.MarshalIndent(cfg, "", " ")
 	if err := os.WriteFile(f, b, 0o644); err != nil {

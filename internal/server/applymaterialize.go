@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 
 	"wayhop/internal/generator"
+	"wayhop/internal/keenetic"
 	"wayhop/internal/model"
 	"wayhop/internal/nativeplan"
 	"wayhop/internal/pbr"
@@ -25,6 +27,9 @@ type materializeInput struct {
 	previous   *executionMaterializationV1
 	kernelPlan *pbr.Plan
 	generate   executionGenerator
+	// ndmPolicies is KeeneticOS's access policies by name → mark as this Apply captured them (the demo's
+	// in demo): the core routes a list sent to one by a `direct` outbound carrying that mark.
+	ndmPolicies map[string]uint32
 }
 
 // materializeError names a materialization failure for the operator: what could not be built and,
@@ -36,6 +41,32 @@ type materializeError struct {
 }
 
 func (e *materializeError) Error() string { return e.Stage + ": " + e.Detail }
+
+// withoutKernelCarriedFeeds drops the fetched IP feed of every list whose zone the KeeneticOS ipset
+// plane builds. Those destinations are marked and policy-routed before they reach wrtun0, so the
+// compatibility core's copy is never consulted - and on the live router it was 45.6k prefixes, about
+// 1.4 MB of config and parse memory (QA-066 review). A list without its own unscoped zone keeps its
+// feed: then the core is what routes it. Names stay too: sniffing backs up clients that bypass the
+// router's resolver.
+func withoutKernelCarriedFeeds(lists []model.RoutingList, plan *pbr.Plan) []model.RoutingList {
+	if plan == nil || len(plan.Zones) == 0 {
+		return lists
+	}
+	carried := make(map[string]bool, len(plan.Zones))
+	for _, z := range plan.Zones {
+		if !z.SrcScoped {
+			carried[z.Name] = true
+		}
+	}
+	out := make([]model.RoutingList, len(lists))
+	copy(out, lists)
+	for i := range out {
+		if len(out[i].CIDRCache) > 0 && carried[pbr.ListZoneName(out[i].ID)] {
+			out[i].CIDRCache = nil
+		}
+	}
+	return out
+}
 
 func newMaterializeError(stage, detail, remedy string) *materializeError {
 	return &materializeError{Stage: stage, Detail: detail, Remedy: remedy}
@@ -71,7 +102,8 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 		previousNative = nativeBaselineFromMaterialization(in.previous)
 	}
 	if in.native != nil && !desired.Config.Demo && (gotPlatform == platform.OpenWrt || gotPlatform == platform.Keenetic) {
-		artifact, nativeErr := buildExecutionNativeArtifactV1(desired, host.Host, *in.native, previousNative)
+		artifact, nativeErr := buildExecutionNativeArtifactFrom(desired, host.Host, *in.native, previousNative,
+			genericPluginDevices(in.previous))
 		var move *nativeplan.MoveError
 		switch {
 		case nativeErr == nil:
@@ -133,7 +165,7 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 			return executionMaterializationV1{}, nil, newMaterializeError("profile",
 				"connection "+endpointLabel(endpoint)+" uses engine "+string(endpoint.Engine)+" with protocol "+
 					string(endpoint.Protocol)+", which this build cannot run",
-				"Use sing-box, AmneziaWG or olcRTC for this connection, or disable it.")
+				"Use sing-box or AmneziaWG for this connection, or disable it.")
 		}
 	}
 
@@ -172,7 +204,14 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 			if target.Keenetic.Singbox == nil {
 				return executionMaterializationV1{}, nil, newMaterializeError("native", "the Keenetic compatibility plan carries no core config", "")
 			}
-			result, generateErr := in.generate(&profile, executionKeeneticCompatibilityOptions(desired))
+			compat := executionKeeneticCompatibilityOptions(desired)
+			compat.CoreVersion = executionCoreVersion(host.Host)
+			compat.NDMPolicies = in.ndmPolicies
+			genProfile := profile
+			if mode == "hybrid" || mode == "fast" {
+				genProfile.RoutingLists = withoutKernelCarriedFeeds(profile.RoutingLists, in.kernelPlan)
+			}
+			result, generateErr := in.generate(&genProfile, compat)
 			if generateErr != nil {
 				return executionMaterializationV1{}, nil, newMaterializeError("core", "the sing-box config could not be generated: "+generateErr.Error(), "")
 			}
@@ -189,6 +228,7 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 			if err := bindKeeneticCompatibilityTUN(result.Config); err != nil {
 				return executionMaterializationV1{}, nil, newMaterializeError("core", "the generated config has no TUN inbound to bind to wrtun0", "")
 			}
+			generator.FitTUNToCore(result.Config, compat.CoreVersion) // the bind above set gvisor again
 			coreConfig, err = json.MarshalIndent(result.Config, "", "  ")
 			if err != nil {
 				return executionMaterializationV1{}, nil, newMaterializeError("core", "the sing-box config could not be encoded: "+err.Error(), "")
@@ -198,8 +238,11 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 			coreConfig = []byte{}
 		default:
 			coreConfig, err = json.MarshalIndent(target.Keenetic.Singbox, "", "  ")
+			if err == nil {
+				coreConfig, err = fitFallbackCore(coreConfig, executionCoreVersion(host.Host), desired.Config.CoreOverride, target.Keenetic.IfaceFor)
+			}
 			if err != nil {
-				return executionMaterializationV1{}, nil, newMaterializeError("core", "the sing-box config could not be encoded: "+err.Error(), "")
+				return executionMaterializationV1{}, nil, newMaterializeError("core", "the sing-box config could not be prepared: "+err.Error(), "")
 			}
 		}
 		if !target.Keenetic.CompatibilityRouting {
@@ -217,6 +260,8 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 				"routing mode "+mode+" needs a kernel routing plan and none could be compiled",
 				"Add routing lists with IP/CIDR sources, or switch to tun or mixed mode.")
 		}
+		opts.CoreVersion = executionCoreVersion(host.Host)
+		opts.NDMPolicies = in.ndmPolicies
 		result, generateErr := in.generate(&profile, opts)
 		if generateErr != nil {
 			return executionMaterializationV1{}, nil, newMaterializeError("core", "the sing-box config could not be generated: "+generateErr.Error(), "")
@@ -418,4 +463,46 @@ func materializeFailure(err error) (stage, detail, remedy string) {
 		return me.Stage, me.Detail, me.Remedy
 	}
 	return "materialize", err.Error(), ""
+}
+
+// fitFallbackCore is what Generate does last, for the KeeneticOS fallback core, which the native plan
+// assembles and carries already encoded: generator.FitTUNToCore, then the operator's core override.
+// The override is applied here too because it is the operator's word on the core WayHop runs, and on
+// a KeeneticOS router whose connections NDM carries natively this is that core; leaving it out would
+// make the override silently mean nothing there. An override written against the full generated
+// config can name tags this per-connection core does not have (its groups, say): `sing-box check`
+// passes a rule to a missing outbound, so ApplyCoreOverride refuses one of the override's own rules
+// that does, and Apply stops here, before anything is written.
+//
+// What NDM routes into is not the override's to change: each connection's wrtunN TUN (the device
+// ifaceFor, the plan's, names), its SOCKS inbound and its route rule are captured before the override
+// and re-asserted after it (keenetic.FallbackDatapath), and an override that cannot keep them is
+// refused here the same way. The compatibility core gets the same from bindKeeneticCompatibilityTUN.
+// The override's prepended route rules go after this core's guards, its probe rules.
+//
+// Untouched, byte for byte, without an override and for every core that still accepts the TUN `stack`
+// option; otherwise the config is decoded and re-encoded.
+func fitFallbackCore(config []byte, coreVersion, override string, ifaceFor map[string]string) ([]byte, error) {
+	if generator.TUNStackAccepted(coreVersion) && strings.TrimSpace(override) == "" {
+		return config, nil
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(config, &decoded); err != nil {
+		return nil, err
+	}
+	generator.FitTUNToCore(decoded, coreVersion)
+	if strings.TrimSpace(override) == "" {
+		return json.MarshalIndent(decoded, "", "  ")
+	}
+	datapath, err := keenetic.CaptureFallbackDatapath(decoded, ifaceFor)
+	if err != nil {
+		return nil, err
+	}
+	if err := generator.ApplyCoreOverride(decoded, override, generator.LeadingProbeRules(decoded)); err != nil {
+		return nil, err
+	}
+	if err := datapath.Reassert(decoded); err != nil {
+		return nil, err
+	}
+	return json.MarshalIndent(decoded, "", "  ")
 }

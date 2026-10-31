@@ -83,8 +83,11 @@ func TestCapabilityProbeCommandBoundsOutputFlood(t *testing.T) {
 
 func TestCapabilityProbeCommandDoesNotReflectExecFailure(t *testing.T) {
 	const secretCommand = "wayhop-secret-capability-command-does-not-exist"
+	// The failure is immediate; the timeout only has to outlast the PATH lookup. One second did not
+	// under a full parallel `go test ./... -v` on Windows, where the lookup walks a long PATH, and the
+	// test then saw "timed out" instead of the failure it checks.
 	_, err := runCapabilityCommandBounded(
-		context.Background(), time.Second, 8<<10, 100*time.Millisecond, secretCommand,
+		context.Background(), 15*time.Second, 8<<10, 100*time.Millisecond, secretCommand,
 	)
 	if !errors.Is(err, errCapabilityProbeFailed) {
 		t.Fatalf("error = %v, want fixed execution-failure sentinel", err)

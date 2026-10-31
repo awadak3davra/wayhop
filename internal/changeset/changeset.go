@@ -12,6 +12,8 @@
 package changeset
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -19,6 +21,7 @@ import (
 	"strings"
 
 	"wayhop/internal/config"
+	"wayhop/internal/generator"
 	"wayhop/internal/model"
 )
 
@@ -63,7 +66,7 @@ const (
 // render, group, warn and undo without re-deriving anything.
 type Change struct {
 	ID         string    `json:"id"`          // stable object id (survives renames)
-	ObjectType string    `json:"object_type"` // endpoint | group | routing_list | device_group | dns | setting
+	ObjectType string    `json:"object_type"` // endpoint | group | routing_list | rule | device_group | dns | setting
 	ObjectName string    `json:"object_name"`
 	Action     Action    `json:"action"`
 	Field      string    `json:"field,omitempty"` // human field label; empty for whole-object add/remove
@@ -131,6 +134,18 @@ var secretParamKeys = map[string]bool{
 	"pre_shared_key": true, "password": true, "uuid": true, "token": true,
 	"obfs_password": true, "auth": true, "auth_str": true, "secret": true,
 	"short_id": true, "api_key": true, "subscription": true,
+	// An SSH exit's key passphrase (private_key and password are above).
+	"private_key_passphrase": true,
+	// QA-104: the Snell pre-shared key and the OpenConnect TOTP seed showed in the change review. An
+	// OpenVPN profile's client key, its tls-auth / tls-crypt key and its static key are the same kind
+	// of secret under other names (importer/openvpn.go ovpnInline), so they are masked with them.
+	"psk": true, "totp_secret": true, "key": true, "control_key": true, "static_key": true,
+	// A Snell user key authenticates one user against a multi-user server (sing-box snell.md: "the
+	// user key, used to authenticate"), so it is a credential like the psk.
+	"userkey": true,
+	// A Hysteria realm address carries the rendezvous token, and its realm name is what lets anyone
+	// on a shared rendezvous learn the server's address.
+	"realm": true,
 }
 
 // IsSecretField reports whether a params key carries a secret (used by the diff and by callers that
@@ -380,6 +395,34 @@ func describeTLS(t *model.TLS) string {
 	if t.Fragment || t.RecordFragment {
 		parts = append(parts, "fragmented")
 	}
+	// ECH's config is a public key the server publishes, but it is long and says nothing to a
+	// reader, so it is shown as a short digest, which is enough to see that a new config replaced the
+	// old one; the query name is a DNS name like the SNI.
+	if e := t.ECH; e != nil && e.Enabled {
+		switch {
+		case e.Config != "":
+			sum := sha256.Sum256([]byte(e.Config))
+			parts = append(parts, "ECH (config "+hex.EncodeToString(sum[:4])+")")
+		case e.QueryServerName != "":
+			parts = append(parts, "ECH (DNS, "+e.QueryServerName+")")
+		default:
+			parts = append(parts, "ECH (DNS)")
+		}
+	}
+	// Certificate pins are hashes of public certificates, nothing secret, but 64 digits say little to a
+	// reader: each is shown by its first 8, enough to see which pin replaced which.
+	pins := func(kind string, list []string) {
+		for _, p := range list {
+			b, err := model.ParsePinSHA256(p)
+			if err != nil {
+				parts = append(parts, kind+" pin "+strings.TrimSpace(p))
+				continue
+			}
+			parts = append(parts, kind+" pin "+hex.EncodeToString(b[:4]))
+		}
+	}
+	pins("certificate", t.PinCertSHA256)
+	pins("public-key", t.PinPubKeySHA256)
 	return strings.Join(parts, ", ")
 }
 
@@ -393,6 +436,42 @@ func describeTransport(tr *model.Transport) string {
 		return tr.Type + " (host " + tr.Host + ")"
 	}
 	return tr.Type
+}
+
+// describeMultiplex renders sing-mux as the row reads it: off, or the protocol and what shapes it.
+func describeMultiplex(m *model.Multiplex) string {
+	if m == nil || !m.Enabled {
+		return "off"
+	}
+	proto := m.Protocol
+	if proto == "" {
+		proto = "h2mux"
+	}
+	var pool []string
+	if m.MaxConnections > 0 {
+		pool = append(pool, fmt.Sprintf("%d connections", m.MaxConnections))
+	}
+	if m.MinStreams > 0 {
+		pool = append(pool, fmt.Sprintf("min %d streams", m.MinStreams))
+	}
+	if m.MaxStreams > 0 {
+		pool = append(pool, fmt.Sprintf("max %d streams", m.MaxStreams))
+	}
+	parts := []string{proto}
+	if b := m.Brutal; b != nil && b.Enabled {
+		parts = append(parts, fmt.Sprintf("TCP Brutal %d/%d Mbps", b.UpMbps, b.DownMbps))
+		// The save refuses a pool beside Brutal, but a restored profile can hold one. It is still
+		// named, or a change to it alone (or a save that drops it) would read the same before and after.
+		if len(pool) > 0 {
+			parts = append(parts, "pool unused ("+strings.Join(pool, ", ")+")")
+		}
+	} else {
+		parts = append(parts, pool...)
+	}
+	if m.Padding {
+		parts = append(parts, "padding")
+	}
+	return strings.Join(parts, ", ")
 }
 
 // sameJSON compares two values by their canonical JSON encoding — a dependable deep-equality for the
@@ -544,6 +623,11 @@ func diffEndpointFields(b, d model.Endpoint) []Change {
 	}
 	if !sameJSON(b.Transport, d.Transport) {
 		out = append(out, mk("Transport", describeTransport(b.Transport), describeTransport(d.Transport), false))
+	}
+	// Multiplex changes how the outbound dials (one connection or many), so it is a row like the two
+	// above, compared whole: a protocol, pool or Brutal rate change rewrites the outbound.
+	if !sameJSON(b.Multiplex, d.Multiplex) {
+		out = append(out, mk("Multiplex", describeMultiplex(b.Multiplex), describeMultiplex(d.Multiplex), false))
 	}
 	// Health decides failover. A group can start electing a different member purely because the probe
 	// URL, its interval or its latency tolerance moved, so this is a routing change in everything but
@@ -761,6 +845,11 @@ func diffRoutingLists(base, desired []model.RoutingList) []Change {
 			c.MayInterrupt = true
 			out = append(out, c)
 		}
+		if b.TLSFragment != d.TLSFragment {
+			c := mk("TLS fragmentation", nameOr(b.TLSFragment, "off"), nameOr(d.TLSFragment, "off"))
+			c.Impact = "changes how this list's direct TLS connections start"
+			out = append(out, c)
+		}
 		// Order matters for routing evaluation — report a move explicitly with both positions.
 		// Compared on RELATIVE order (position among the lists present in BOTH states), not absolute
 		// index: inserting or deleting any earlier list shifts every following absolute index, which
@@ -813,7 +902,29 @@ func diffSettings(b, d config.Config) []Change {
 		out = append(out, mk("Rule-set download route", nameOr(b.RuleSetDetour, "direct"), nameOr(d.RuleSetDetour, "direct"), SubRouting,
 			"changes which path routing-list downloads use (direct downloads fail on a censored network)", false))
 	}
+	if b.CoreOverride != d.CoreOverride {
+		before, after := overrideWord(b.CoreOverride), overrideWord(d.CoreOverride)
+		if before == after {
+			after += " (edited)"
+		}
+		// May interrupt: the override can rewrite any part of the core, routing and inbounds included.
+		out = append(out, mk("Core override", before, after, SubGeneral,
+			"changes the sing-box config WayHop generates, after it is generated", true))
+	}
 	return out
+}
+
+// overrideWord names a core override by the top-level keys it touches, never by its text: a
+// prepended outbound carries a server's credentials.
+func overrideWord(text string) string {
+	if strings.TrimSpace(text) == "" {
+		return "none"
+	}
+	o, err := generator.ParseCoreOverride(text)
+	if err != nil || len(o.Keys()) == 0 {
+		return "set"
+	}
+	return "touches " + strings.Join(o.Keys(), ", ")
 }
 
 // ---- small helpers ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
-/* page-telegram.css — styles of the Telegram bot manager (page-telegram.js), loaded with it on first
-   use so they stay out of the initial payload the perf budget measures. */
+/* page-telegram.css — styles of the Telegram bot manager and the bridge dialog (page-telegram.js),
+   loaded with it on first use so they stay out of the initial payload the perf budget measures. */
 .modal:has(.tg-mgr) { width:min(720px,94vw); }
 .tg-mgr { display:flex; flex-direction:column; gap:var(--sp-4); }
 .tg-status { display:flex; align-items:center; gap:var(--sp-2); flex-wrap:wrap; }
@@ -47,3 +47,6 @@
 .tg-qr { display:flex; align-items:center; gap:var(--sp-3); }
 .tg-qr img { width:164px; height:164px; border-radius:var(--radius-sm); background:#fff; flex:none; image-rendering:pixelated; }
 .tg-qr .hint { margin-top:0; }
+.tg-link { flex:1; min-width:0; font-family:var(--mono); font-size:var(--fs-small); overflow-wrap:anywhere; user-select:all;
+  padding:6px 10px; border-radius:var(--radius-sm); background:var(--card-2); }
+.tg-btns { display:flex; align-items:center; gap:var(--sp-2); flex-wrap:wrap; margin-left:auto; }

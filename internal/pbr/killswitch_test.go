@@ -1,6 +1,7 @@
 package pbr
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -61,5 +62,39 @@ func TestKillSwitchFailClosed(t *testing.T) {
 	}
 	if strings.Contains(planOff.RenderIPScript(Options{}), "blackhole default metric") {
 		t.Errorf("ipset plane without kill_switch must not render a blackhole fallback")
+	}
+}
+
+// IPv6 routes added without a metric get the kernel's 1024, so the v6 kill-switch blackhole must sit
+// above that, not at the v4 value: at 1000 it sorted ahead of the live `default dev` route and every
+// marked IPv6 packet was dropped while the tunnel was up (QA-096; measured on a Linux kernel).
+func TestKillSwitchV6BlackholeSitsBelowTheLiveRoute(t *testing.T) {
+	p := &model.Profile{
+		Endpoints: []model.Endpoint{
+			{ID: "awg", Engine: model.EngineAmneziaWG, Server: "192.0.2.4", Port: 51820,
+				Params: map[string]any{"private_key": "k", "peer_public_key": "k", "local_address": []string{"10.0.0.2/32", "fd00::2/128"}}},
+		},
+		Groups: []model.Group{{ID: "g", Name: "G", Type: model.GroupURLTest, Members: []string{"awg"}, KillSwitch: true}},
+		Rules: []model.Rule{
+			{ID: "r", IPCIDR: []string{"198.51.100.0/24", "2001:db8:5::/48"}, Outbound: "g"},
+			{ID: "def", Default: true, Outbound: model.OutboundDirect},
+		},
+	}
+	plan, _, err := Compile(p, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.HasV6() {
+		t.Fatal("test setup: the plan should carry IPv6")
+	}
+	if failClosedMetricV6 <= 1024 {
+		t.Fatalf("failClosedMetricV6 = %d, must exceed the kernel's default IPv6 metric 1024", failClosedMetricV6)
+	}
+	want := fmt.Sprintf("ip -6 route replace blackhole default metric %d", failClosedMetricV6)
+	if cmds := strings.Join(plan.RenderIP(Options{}), "\n"); !strings.Contains(cmds, want) {
+		t.Errorf("nft plane: v6 blackhole not at %d:\n%s", failClosedMetricV6, cmds)
+	}
+	if script := plan.RenderIPScript(Options{}); !strings.Contains(script, want) {
+		t.Errorf("ipset plane: v6 blackhole not at %d:\n%s", failClosedMetricV6, script)
 	}
 }

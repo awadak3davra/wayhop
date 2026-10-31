@@ -3,9 +3,11 @@ package server
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"wayhop/internal/model"
 	"wayhop/internal/pbr"
+	"wayhop/internal/platform"
 )
 
 // TestGenOptionsHybrid verifies the RoutingMode wiring: "hybrid" compiles the profile
@@ -161,7 +163,7 @@ func TestGenOptionsFast(t *testing.T) {
 // there's no LAN↔WAN flow to offload). Default (no Offload) leaves Flowtable nil.
 func TestGenOptionsFast_Offload(t *testing.T) {
 	s, _ := sharehandlers_server(t)
-	s.accelOnce.Do(func() { s.accelKindCached = "nft-flowtable" }) // flowtable-capable host, so offload compiles
+	s.hostVerdicts.accel, s.hostVerdicts.accelAt = platform.Accel{Kind: "nft-flowtable"}, time.Now() // flowtable-capable host, so offload compiles
 	if err := s.store.UpsertEndpoint(model.Endpoint{
 		ID: "tunnel-a", Name: "RU", Engine: model.EngineExternal, Server: "198.51.100.20",
 		Enabled: true, Params: map[string]any{"interface": "awg1"},

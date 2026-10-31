@@ -86,7 +86,10 @@ const RULES = path.join(ROOT, 'publish', 'scrub-rules.json');
 // for the divergence this gate exists to catch: those rules rewrite the FIXTURE and the asserted
 // rule text together (the zone name is derived from the list id), so the published copy of the
 // test asserts on the published names and passes there exactly as it does here.
-const EXPECTED_GO_COVERAGE_SHA256 = '481aab1f7c4f15e5f8b3061f7a54d08f51d99f0aaad174052b8b58812bb6e607';
+// Moved again with olcRTC's removal: internal/importer/olcrtc_test.go, the only Go file that used the
+// personal meet host as a fixture (four meet.example.com substitutions), was rewritten without it.
+// Nothing new is matched; one file simply stopped needing the rule.
+const EXPECTED_GO_COVERAGE_SHA256 = '07cb1105cdcb89b0e716a231d9d536933690756b421f5026a81f601b69f5de67';
 // K5 intentionally retired seven more personal-device-derived Keenetic migration/cutover Go files.
 // Their scrub matches disappeared with the code; pin the reduced subject so any further loss fails.
 const MIN_REWRITTEN_GO_FILES = 108;

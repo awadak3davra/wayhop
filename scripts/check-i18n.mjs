@@ -19,9 +19,10 @@ import fs from 'node:fs';
 // It was 13 while the panel shipped 15. The operator narrowed the set to CIS, Europe and the two
 // circumvention markets that matter here — Turkey and Iran — and the CJK/Indic/Arabic dictionaries
 // were deleted rather than left to rot: a language in the picker that nobody maintains is a promise
-// the panel cannot keep. Nine dictionaries ship now (be, de, es, fa, fr, pt, ru, tr, uk) plus
-// English as the source language. The floor still exists so a regeneration cannot quietly drop one.
-const MIN_LANGS = 9;
+// the panel cannot keep. Ten dictionaries ship now (be, de, es, fa, fr, pt, ru, tr, uk, zh-CN) plus
+// English as the source language: Simplified Chinese came back as a complete dictionary with every
+// key translated. The floor still exists so a regeneration cannot quietly drop one.
+const MIN_LANGS = 10;
 
 const problems = [];
 let deferredChecked = false;

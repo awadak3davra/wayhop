@@ -180,3 +180,68 @@ func TestStaleRollbackDoneDoesNotContaminateNewWindow(t *testing.T) {
 		t.Fatalf("the new window's rollback must actually run (stale done-mark leaked in): calls=%d", n)
 	}
 }
+
+// A retry after a failed rollback left rollbackFailed set while it ran, so a second press during it
+// (two owners, a double tap in Telegram) was not refused: the rollback ran again over what the first
+// retry had just restored. The second press must be refused, and a retry after a retry that failed must
+// still run.
+func TestRollbackNow_SecondPressDuringARetryIsRefused(t *testing.T) {
+	m := New(quietDurations())
+	defer m.Confirm()
+	var calls atomic.Int32
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	m.Arm(func() bool { return true }, func() error {
+		switch calls.Add(1) {
+		case 1:
+			return errors.New("restore failed") // the first attempt
+		case 2:
+			entered <- struct{}{}
+			<-release // the retry is in flight
+			return errors.New("restore failed again")
+		}
+		return nil
+	}, func() {}, false)
+
+	if err := m.RollbackNow(); err == nil {
+		t.Fatal("setup: the first rollback should fail")
+	}
+	retry := make(chan error, 1)
+	go func() { retry <- m.RollbackNow() }()
+	<-entered
+
+	second := make(chan error, 1)
+	go func() { second <- m.RollbackNow() }()
+	select {
+	case err := <-second:
+		if err == nil {
+			t.Fatal("a press during the retry reported success for a rollback whose outcome is unknown")
+		}
+	case <-time.After(2 * time.Second):
+		close(release)
+		<-retry
+		<-second
+		t.Fatalf("a press during the retry was not refused: it ran the rollback again (calls=%d)", calls.Load())
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("rollback ran %d times, want 2: a press during the retry must not run it", n)
+	}
+
+	close(release)
+	if err := <-retry; err == nil {
+		t.Fatal("setup: the retry should fail")
+	}
+	if st := m.Status(); !st.Pending || st.Phase != "rollback_failed" {
+		t.Fatalf("after the failed retry: %+v", st)
+	}
+	// The retry failed, so the next press is a legitimate retry and runs.
+	if err := m.RollbackNow(); err != nil {
+		t.Fatalf("a retry after the failed retry: %v", err)
+	}
+	if n := calls.Load(); n != 3 {
+		t.Fatalf("rollback ran %d times, want 3", n)
+	}
+	if st := m.Status(); st.Pending || st.Phase != "rolled_back" {
+		t.Fatalf("after a retry that worked: %+v", st)
+	}
+}

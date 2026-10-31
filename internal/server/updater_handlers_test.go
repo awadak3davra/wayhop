@@ -54,7 +54,7 @@ func updaterinstall_postWithID(h http.HandlerFunc, id, body string) *httptest.Re
 // engine binaries on PATH) every engine reports installed.present=false.
 func TestUpdaterinstall_EnginesListsRegistry(t *testing.T) {
 	// Hermetic: updater.Installed() falls back to PATH, so a host with real engine
-	// binaries on PATH (xray/hysteria/olcrtc on the self-hosted CI runner) would
+	// binaries on PATH (xray/hysteria on the self-hosted CI runner) would
 	// report them "installed" despite the empty BinDir. Empty PATH keeps it clean.
 	t.Setenv("PATH", t.TempDir())
 	s := updaterinstall_serverWithUpdater(t, "amd64")
@@ -294,40 +294,5 @@ func TestUpdaterinstall_VersionsSourceOnlyShapeWithoutNetwork(t *testing.T) {
 	}
 	if _, ok := resp["versions"]; ok {
 		t.Errorf("did not expect \"versions\" when the lookup failed; got %v", resp["versions"])
-	}
-}
-
-// A Nightly engine (olcRTC) publishes only prerelease nightlies: "latest" is the newest nightly TAG
-// (picker + install target), and the handler ALSO surfaces "latest_version" = the build DATE parsed
-// from the newest release NAME, so the UI can compare it to the installed binary's stamped date.
-func TestUpdaterinstall_VersionsNightlySurfacesLatestDate(t *testing.T) {
-	s, _ := sharehandlers_server(t)
-	// Mock mirror: any path returns a dated nightly prerelease list (newest first), as olcRTC publishes.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`[
-			{"tag_name":"nightly-2f2db04","name":"olcRTC nightly 2026.07.23 (2f2db04)","prerelease":true},
-			{"tag_name":"nightly-6fa08e7","name":"olcRTC nightly 2026.07.22 (6fa08e7)","prerelease":true}
-		]`))
-	}))
-	defer srv.Close()
-	s.updater = updater.New(t.TempDir(), "amd64", []string{srv.URL})
-
-	req := httptest.NewRequest(http.MethodGet, "/api/updater/olcrtc/versions", nil)
-	req.SetPathValue("id", "olcrtc")
-	w := httptest.NewRecorder()
-	s.handleUpdaterVersions(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("olcrtc versions: got %d, want 200 (%s)", w.Code, w.Body.String())
-	}
-	var resp map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("invalid JSON: %v (%s)", err, w.Body.String())
-	}
-	if got, _ := resp["latest"].(string); got != "nightly-2f2db04" {
-		t.Errorf("latest = %q, want the newest nightly tag nightly-2f2db04", got)
-	}
-	if got, _ := resp["latest_version"].(string); got != "2026.07.23" {
-		t.Errorf("latest_version = %q, want 2026.07.23 (date parsed from the newest release name)", got)
 	}
 }

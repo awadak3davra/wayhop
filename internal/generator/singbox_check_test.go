@@ -93,6 +93,8 @@ func allProtocolProfile() *model.Profile {
 		generator_singBoxEndpoint("p-ss128", model.ProtoShadowsocks, map[string]any{"method": "2022-blake3-aes-128-gcm", "password": ssKey128}),
 		withQUICTLS(generator_singBoxEndpoint("p-hy2", model.ProtoHysteria2, map[string]any{"password": "pw", "obfs": "salamander", "obfs_password": "op"})),
 		withQUICTLS(generator_singBoxEndpoint("p-tuic", model.ProtoTUIC, map[string]any{"uuid": uuid, "password": "pw", "congestion_control": "bbr", "udp_relay_mode": "native"})),
+		// An SSH exit by password; the cipher list is emitted only for a 1.14+ core (TestCoreVersionSingBoxCheck).
+		generator_singBoxEndpoint("p-ssh", model.ProtoSSH, map[string]any{"user": "wayhop", "password": "pw", "cipher": []any{"aes128-ctr"}}),
 		generator_singBoxEndpoint("p-socks", model.ProtoSOCKS, map[string]any{}),
 		generator_singBoxEndpoint("p-http", model.ProtoHTTP, map[string]any{}),
 		// Native WireGuard → top-level `endpoints` entry. Real 32-byte keys so
@@ -148,7 +150,7 @@ func TestAllProtocolsGenerate(t *testing.T) {
 			}
 		}
 	}
-	for _, want := range []string{"vless", "vmess", "trojan", "shadowsocks", "hysteria2", "tuic", "socks", "http", "urltest", "direct", "wireguard"} {
+	for _, want := range []string{"vless", "vmess", "trojan", "shadowsocks", "hysteria2", "tuic", "ssh", "socks", "http", "urltest", "direct", "wireguard"} {
 		if !got[want] {
 			t.Errorf("generated config is missing outbound/endpoint type %q", want)
 		}

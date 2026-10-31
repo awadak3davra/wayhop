@@ -8,10 +8,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
+	"wayhop/internal/model"
 
 	"wayhop/internal/platform"
 	"wayhop/internal/updater"
+	"wayhop/internal/updatetx"
 	"wayhop/internal/version"
 )
 
@@ -71,6 +74,12 @@ func (s *Server) handleUpdaterEngines(w http.ResponseWriter, r *http.Request) {
 		if e.Role == "core" {
 			it.UsedBy = coreUsers
 		}
+		if e.Role == "socks-plugin" {
+			it.UsedBy = engineUsers(prof, model.Engine(e.ID))
+		}
+		if e.ID == tgBridgeEngineID && s.config().TelegramBridge.Enabled {
+			it.UsedBy = []string{"Telegram bridge"}
+		}
 		if e.Provides == "amneziawg" {
 			st := s.awgComponent(ctx, prof)
 			it.AWG = &st
@@ -127,12 +136,6 @@ func (s *Server) handleUpdaterVersions(w http.ResponseWriter, r *http.Request) {
 		"latest":    latest,
 		"versions":  tags,
 		"installed": s.updater.Installed(*e).Version,
-	}
-	// A nightly-only engine (olcRTC): "latest" above is the newest nightly TAG (drives the version
-	// picker + install). Also surface the newest build's DATE, parsed from its release NAME, so the UI
-	// can compare it to the installed binary's stamped date and show up-to-date / newer-build.
-	if e.Nightly && len(rels) > 0 {
-		resp["latest_version"] = updater.ParseVersion(rels[0].Name)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -323,7 +326,7 @@ func (s *Server) handleUpdaterInstall(w http.ResponseWriter, r *http.Request) {
 		}
 		s.applyMu.Unlock()
 	}
-	// The core was ABSENT and the committed plan expects one: start it the same way a restart does.
+	// The core was ABSENT and the applied plan expects one: start it the same way a restart does.
 	//
 	// Without this the install was a dead end. Measured on a live Keenetic after removing and
 	// reinstalling sing-box: the binary was back, the core stayed down, encrypted DNS stayed dark, and
@@ -336,16 +339,33 @@ func (s *Server) handleUpdaterInstall(w http.ResponseWriter, r *http.Request) {
 	converged := false
 	if e.ID == "sing-box" && s.singbox != nil && !reloaded && !s.singbox.Running() {
 		if ok, cerr := s.convergeAfterInstall(ctx); cerr != nil {
-			log.Printf("updater: %s installed %s but converging to the committed configuration failed: %v", e.ID, tag, cerr)
+			log.Printf("updater: %s installed %s but converging to the applied configuration failed: %v", e.ID, tag, cerr)
 			resp := map[string]any{"installed": tag, "engine": e.ID, "reloaded": false, "converge_error": cerr.Error()}
 			writeJSON(w, http.StatusOK, resp)
 			return
 		} else if ok {
 			converged = true
-			log.Printf("updater: %s installed %s; converged to the committed configuration", e.ID, tag)
+			log.Printf("updater: %s installed %s; converged to the applied configuration", e.ID, tag)
 		}
 	}
 	resp := map[string]any{"installed": tag, "engine": e.ID, "reloaded": reloaded, "converged": converged}
+	// A plugin connection that was waiting for this binary (ByeDPI, nfqws2) starts now. Supervise only
+	// relaunches procs that died, and nothing is pending after an install (a binary is neither profile
+	// nor config), so without this it waited for a daemon restart while Health kept saying "install
+	// it". A running one is restarted onto the new file, as the package-manager path does.
+	if e.ID != "sing-box" && s.plugins != nil {
+		s.applyMu.Lock()
+		if n := s.plugins.StopByBin(e.BinName); n > 0 {
+			s.plugins.Sync(s.plugins.Specs())
+			resp["restarted"] = n
+		}
+		s.applyMu.Unlock()
+	}
+	// The Telegram bridge is a service, not a connection: StopByBin stopped it above and nothing in
+	// Sync starts it again, so its own sync does (and starts one that was waiting for the binary).
+	if e.ID == tgBridgeEngineID {
+		s.syncTelegramBridge()
+	}
 	if reloadErr != "" {
 		// The install succeeded but the core didn't come back on this reload — surface it instead of
 		// reporting a bare success, and log it. Reload re-asserts desired=true, so the watchdog retries.
@@ -417,7 +437,7 @@ func (s *Server) handleUpdaterUninstall(w http.ResponseWriter, r *http.Request) 
 		stopped = true
 	}
 	if e.ID != "sing-box" && s.plugins != nil {
-		// Plugin engines (olcRTC etc.): stop the running plugin proc before removal so the removed
+		// Plugin engines (amneziawg-go, nfqws2): stop the running plugin proc before removal so the removed
 		// binary can't leave an orphan (no stop:true gate — removing a plugin implies stopping it;
 		// the gate is only for the routing core). No-op if it isn't a running plugin.
 		if n := s.plugins.StopByBin(e.BinName); n > 0 {
@@ -427,6 +447,9 @@ func (s *Server) handleUpdaterUninstall(w http.ResponseWriter, r *http.Request) 
 	if err := s.updater.Uninstall(*e); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if e.ID == tgBridgeEngineID {
+		s.syncTelegramBridge() // stopped above; it now reads as waiting for its binary
 	}
 	s.setUpdErr(e.ID, "") // a removed engine carries no stale failure reason
 	writeJSON(w, http.StatusOK, map[string]any{"removed": e.ID, "stopped": stopped})
@@ -499,6 +522,7 @@ func (s *Server) selfStatus(parent context.Context) map[string]any {
 		"auto_update": c.Updater.AutoUpdate,
 	}
 	out["package_manager"] = string(s.updater.PMKind())
+	s.selfUpdateReport(out)
 	ctx, cancel := context.WithTimeout(parent, 20*time.Second)
 	defer cancel()
 	if exe, exeErr := os.Executable(); exeErr == nil {
@@ -588,28 +612,27 @@ func (s *Server) selfInstall(parent context.Context, tag string) (int, map[strin
 	if err != nil {
 		return fail(http.StatusInternalServerError, "cannot locate the running binary: "+err.Error())
 	}
+	// A package-owned WayHop is updated by its package manager (selfupdate_tx.go), which the panel
+	// now drives itself rather than sending the operator to SSH.
+	if st := s.updater.SelfPackageStatus(ctx, exe); st.Managed || !st.OwnershipKnown {
+		return s.selfInstallPM(ctx, exe, st)
+	}
 	// The binary swap and a router Apply must never overlap. The currently running process remains
 	// valid if restart fails, but no Apply may begin under one executable identity and finish after
-	// its on-disk replacement has changed the next-boot recovery program.
-	s.applyMu.Lock()
-	installed, err := s.updater.SelfUpdate(ctx, repo, tag, exe)
-	s.applyMu.Unlock()
+	// its on-disk replacement has changed the next-boot recovery program (selfSwapAndJudge holds it).
+	installed, restarting, note, err := s.selfSwapAndJudge(ctx, repo, tag, exe, "panel")
 	if err != nil {
 		var nm *updater.NativeManagedError
-		if errors.As(err, &nm) {
-			return fail(http.StatusConflict, err.Error()) // policy: wayhop is PM-owned — upgrade via opkg/apk
+		if errors.As(err, &nm) || errors.Is(err, errUpdateInFlight) {
+			return fail(http.StatusConflict, err.Error()) // policy: PM-owned (upgrade via opkg/apk), or one update at a time
 		}
 		return fail(http.StatusBadGateway, err.Error())
 	}
-	cmd := restartCommand()
-	if cmd == nil {
-		return http.StatusOK, map[string]any{"installed": installed, "restarting": false,
-			"note": "binary swapped; restart the service manually to apply (or this is the demo)"}
+	out := map[string]any{"installed": installed, "restarting": restarting}
+	if note != "" {
+		out["note"] = note
 	}
-	if err := cmd.Start(); err != nil {
-		return http.StatusOK, map[string]any{"installed": installed, "restarting": false, "note": "restart failed: " + err.Error()}
-	}
-	return http.StatusOK, map[string]any{"installed": installed, "restarting": true}
+	return http.StatusOK, out
 }
 
 // handleSelfAuto toggles background auto-update of WayHop itself.
@@ -679,25 +702,59 @@ func (s *Server) AutoUpdateLoop(ctx context.Context) {
 			cancel()
 			continue
 		}
-		exe, err := os.Executable()
-		if err != nil {
-			cancel()
-			continue
-		}
-		s.applyMu.Lock()
-		installed, err := s.updater.SelfUpdate(cctx, repo, rel.Tag, exe)
-		s.applyMu.Unlock()
+		restarting := s.autoInstall(cctx, repo, rel.Tag)
 		cancel()
-		if err != nil {
-			log.Printf("auto-update: %v", err)
-			continue
+		if restarting {
+			return // being restarted
 		}
-		log.Printf("auto-update: installed wayhop %s, restarting", installed)
-		if cmd := restartCommand(); cmd != nil {
-			_ = cmd.Start()
-		}
-		return // being restarted
 	}
+}
+
+// autoInstall is one unattended install of tag, the newer release the loop found; it reports whether
+// the daemon is being restarted onto it.
+//
+// A release the supervisor rolled back, or whose update failed, is not installed again unattended: the
+// restored daemon starts a fresh timer and still sees it as newer, so every ~17 minutes the routing
+// would stop for 90 s and a whole binary would be written to the flash, only to be rolled back again.
+// A newer release, or an install from the panel, may try again.
+func (s *Server) autoInstall(ctx context.Context, repo, tag string) (restarting bool) {
+	if etc := s.updateDir(); etc != "" {
+		if r, ok := updatetx.ReadResult(etc); ok && sameRelease(r.To, tag) && (r.Result == "rolled_back" || r.Result == "failed") {
+			log.Printf("auto-update: not installing %s again: %s", tag, r.Reason)
+			return false
+		}
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	installed, restarting, note, err := s.selfSwapAndJudge(ctx, repo, tag, exe, "auto-update")
+	if err != nil {
+		log.Printf("auto-update: %v", err)
+		return false
+	}
+	log.Printf("auto-update: installed wayhop %s, restarting=%v %s", installed, restarting, note)
+	return restarting
+}
+
+// sameRelease reports whether a result's "to" names the release tag. Not every writer records the
+// tag: the daemon does ("v0.5.9"), but the installers' marker carries the bare version ("0.5.9",
+// which verify.sh copies into its result after a boot inside the window) and their own result the new
+// build's --version line ("wayhop 0.5.9 (293a4894bb18, ...)"). Compared as written, a release the
+// installer's run rolled back was installed again by the next auto-update tick.
+func sameRelease(to, tag string) bool {
+	v := releaseVersion(to)
+	return v != "" && v == releaseVersion(tag)
+}
+
+// releaseVersion is the version a tag, a bare version or a --version line names, without the "v".
+// A package revision stays: v0.5.5-r2 is a rebuild that may be the fix for what 0.5.5 broke.
+func releaseVersion(s string) string {
+	s = strings.TrimSpace(s)
+	if ver, _ := updatetx.ParseVersionLine(s); ver != "" {
+		s = ver
+	}
+	return strings.TrimPrefix(s, "v")
 }
 
 // handleSelfFit answers GET /api/updater/self/fit — the same shape /fit gives an engine, computed
@@ -739,4 +796,20 @@ func (s *Server) handleSelfFit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, fit)
+}
+
+// engineUsers names the enabled connections a SOCKS-plugin engine runs (a ByeDPI connection needs
+// ciadpi), so the Components page can say what a missing binary stops.
+func engineUsers(prof model.Profile, engine model.Engine) []string {
+	var out []string
+	for _, e := range prof.Endpoints {
+		if e.Enabled && e.Engine == engine {
+			name := e.Name
+			if name == "" {
+				name = e.ID
+			}
+			out = append(out, name)
+		}
+	}
+	return out
 }

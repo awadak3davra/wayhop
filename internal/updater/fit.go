@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"time"
 )
 
 // fit.go answers "what would this install cost, and does it fit" BEFORE anything is downloaded.
@@ -61,7 +62,7 @@ func (u *Updater) Fit(ctx context.Context, e Engine, tag string) (InstallFit, er
 	if err != nil {
 		return f, fmt.Errorf("lookup %s %s: %w", e.ID, tag, err)
 	}
-	asset := pickAsset(rel.Assets, u.Arch)
+	asset := pickAssetFor(e, rel.Assets, u.Arch)
 	if asset == nil {
 		return f, fmt.Errorf("no %s asset for arch %q in %s %s", e.ID, u.Arch, e.ID, tag)
 	}
@@ -115,9 +116,15 @@ func (u *Updater) SelfFit(ctx context.Context, repo, tag, exePath string) (Insta
 	}
 	f.Version = rel.Tag
 	f.Asset, f.Download = asset.Name, asset.Size
-	f.Need = peakInstallDisk(asset.Size, asset.Name, true)
-	f.Avail, f.AvailKnown = AvailBytes(dir)
-	f.Fits = enoughFlashFor(f.Avail, f.AvailKnown, asset.Size, asset.Name, true)
+	// SelfUpdate's own plan (selfspace.go): the new binary alone, because the rollback copy is a hard
+	// link, against the free space plus what SelfUpdate removes first — the leftovers of interrupted
+	// updates and the rollback copy this one supersedes. Avail reports that room, so the page's
+	// "free there" and "needs" compare like with like; the estimate is the one the swap decides on
+	// when it cannot stage in RAM, so the page never promises what the swap would refuse.
+	_, leftovers := selfLeftovers(exePath, time.Now())
+	p := u.planSelfSpace(exePath, unpackedBytes(asset.Size, asset.Name), leftovers)
+	f.Need, f.Avail, f.AvailKnown = p.need, p.room, p.known
+	f.Fits = p.fits()
 	if f.AvailKnown && !f.Fits {
 		f.ShortfallMiB = shortfallMiB(f.Avail, f.Need)
 	}

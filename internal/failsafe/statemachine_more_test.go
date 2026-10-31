@@ -282,6 +282,7 @@ func TestFailsafe_StatusTracksLastCheck(t *testing.T) {
 func TestFailsafe_TickReturnsRebootAtThreshold(t *testing.T) {
 	m := failsafe_newMgr()
 	failsafe_armForTick(m, 100000, nil)
+	m.allowReboot, m.reboot = true, func() {} // the phase says "reboot" only when one will run
 	m.tick(0, false)
 	m.tick(1000, false) // rollback
 	if a := m.tick(3000, false); a != ActReboot {
@@ -316,16 +317,15 @@ func TestFailsafe_RebootSuppressedWhenDisabled(t *testing.T) {
 		false, // allowReboot OFF
 	)
 
-	// Wait until the loop terminates (pending=false) by polling Status. The
-	// reboot branch in run() returns after the decision, clearing nothing else,
-	// so we detect completion via phase=="reboot".
+	// Wait until the loop terminates (pending=false after the rollback) by polling Status. With
+	// reboot disabled the window closes on its rollback verdict, never as "reboot".
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		if m.Status().Phase == "reboot" {
+		if s := m.Status(); !s.Pending && s.Phase == "rolled_back" {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("run() did not reach reboot phase in time; phase=%q", m.Status().Phase)
+			t.Fatalf("run() did not close the window in time; phase=%q", m.Status().Phase)
 		}
 		time.Sleep(time.Millisecond)
 	}

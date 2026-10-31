@@ -13,7 +13,7 @@ const (
 	KindCore     = "core"     // sing-box crashed, restarted, or stays down
 	KindApply    = "apply"    // the test-Apply window: started, kept, rolled back
 	KindBoot     = "boot"     // the router or the daemon came back
-	KindSystem   = "system"   // RAM almost full
+	KindSystem   = "system"   // RAM or storage almost full
 	KindUpdates  = "updates"  // a new WayHop release
 
 	// KindDigest is the daily summary. It has its own switch (the time it arrives at), so it is not
@@ -70,13 +70,24 @@ type Alert struct {
 	// Closed, when set on a resolving alert, replaces the opening message's text and removes its
 	// buttons, so a stale Keep button cannot be pressed after the window ended.
 	Closed func(lang string) string
+
+	// prompt delivers the alert at once whatever the quiet hours or a mute say, as its severity's
+	// sound would not: an outage and its end told together, the outage loud enough to have come
+	// through at night.
+	prompt bool
+	// timed: the text already says when it happened, so a late delivery adds no time of its own.
+	timed bool
 }
 
 // Callback data for alert buttons.
 const (
 	cbMute     = "mu:" // + minutes; 0 unmutes
-	cbKeep     = "ak"  // keep the test Apply
-	cbRollback = "ar"  // roll the test Apply back
+	cbKeep     = "ak:" // + the test Apply's window: keep it
+	cbRollback = "ar:" // + the test Apply's window: roll it back
+	// cbKeepOld and cbRollbackOld are the buttons of builds that did not name the window. Pressed
+	// now, they are refused like any button of an ended window.
+	cbKeepOld     = "ak"
+	cbRollbackOld = "ar"
 )
 
 // alertKeyboard is the standard row under an alert: the status, and a mute for the kinds that can
@@ -89,15 +100,35 @@ func alertKeyboard(lang string, sev Severity) *Keyboard {
 	return &Keyboard{Rows: [][]InlineButton{row}}
 }
 
-// applyKeyboard offers Keep and Roll back to owners, and only the status to everyone else.
-func applyKeyboard(lang, role string) *Keyboard {
+// applyKeyboard offers Keep and Roll back to owners, and only the status to everyone else. The
+// buttons name the test Apply they decide, window (see FailSafePulse.Window).
+func applyKeyboard(lang, role, window string) *Keyboard {
 	if role != roleOwner {
 		return &Keyboard{Rows: [][]InlineButton{{btn(T(lang, "b.status"), cbStatus)}}}
 	}
 	return &Keyboard{Rows: [][]InlineButton{
-		{btn(T(lang, "b.keep"), cbKeep), btn(T(lang, "b.rollback"), cbRollback)},
+		applyButtons(lang, window),
 		{btn(T(lang, "b.status"), cbStatus)},
 	}}
+}
+
+// applyRetryKeyboard is applyKeyboard after a rollback failed: Roll back (again) only. The router
+// runs the Test part undone, so the daemon refuses Keep, and offering it invited a press that could
+// only fail.
+func applyRetryKeyboard(lang, role, window string) *Keyboard {
+	if role != roleOwner {
+		return &Keyboard{Rows: [][]InlineButton{{btn(T(lang, "b.status"), cbStatus)}}}
+	}
+	return &Keyboard{Rows: [][]InlineButton{
+		{btn(T(lang, "b.rollback"), cbRollback+window)},
+		{btn(T(lang, "b.status"), cbStatus)},
+	}}
+}
+
+// applyButtons is the Keep / Roll back row for one test Apply. Telegram caps callback data at 64
+// bytes; a window name is a short hash.
+func applyButtons(lang, window string) []InlineButton {
+	return []InlineButton{btn(T(lang, "b.keep"), cbKeep+window), btn(T(lang, "b.rollback"), cbRollback+window)}
 }
 
 // simpleAlert builds an alert whose text does not depend on the role.

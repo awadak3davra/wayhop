@@ -2,7 +2,9 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,6 +101,66 @@ func TestGateBulk_UnknownRefusesTheBatch(t *testing.T) {
 	}
 	if n := len(s.store.Profile().Endpoints); n != before {
 		t.Errorf("the store went from %d to %d endpoint(s) on a refused batch; a refusal that persists part of the input is not a refusal", before, n)
+	}
+}
+
+// QA-028: an entry the core cannot load (an OpenVPN client with no certificate, as a pasted sing-box
+// config can carry) arrives disabled and named, instead of enabled and failing every later Apply.
+func TestGateBulk_UnloadableArrivesDisabled(t *testing.T) {
+	s := gateBulkServer(t, platform.CapSupported)
+	s.caps.mu.Lock()
+	s.caps.set.Items[platform.CapProtocolPrefix+"openvpn"] = platform.Capability{
+		ID: platform.CapProtocolPrefix + "openvpn", State: platform.CapSupported}
+	s.caps.mu.Unlock()
+	body := `{"endpoints":[
+  {"id":"noca","name":"noca","engine":"singbox","protocol":"openvpn","server":"198.51.100.12","port":1194,"enabled":true,"params":{"ca":"","mode":"tls"}},
+  {"id":"b","name":"b","engine":"singbox","protocol":"trojan","server":"198.51.100.11","port":443,"enabled":true}
+]}`
+	w := profilehandlers_post(s.handleBulkEndpoints, body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+	var resp struct {
+		StoredDisabled []string `json:"stored_disabled"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response: %v", err)
+	}
+	if len(resp.StoredDisabled) != 1 || !strings.Contains(resp.StoredDisabled[0], "missing required ca") {
+		t.Errorf("stored_disabled = %v, want the CA-less OpenVPN named with its reason", resp.StoredDisabled)
+	}
+	for _, e := range s.store.Profile().Endpoints {
+		if e.ID == "noca" && e.Enabled {
+			t.Error("the OpenVPN client with no certificate was stored enabled")
+		}
+		if e.ID == "b" && !e.Enabled {
+			t.Error("the loadable endpoint was disabled")
+		}
+	}
+	if p := s.store.Profile(); p.Validate() != nil {
+		err := p.Validate()
+		t.Errorf("the profile no longer validates after the import: %v", err)
+	}
+}
+
+// QA-028 on the single save: enabled, the same entry is refused with the reason and the way to keep
+// it; disabled, it saves as a draft.
+func TestUpsertEndpoint_UnloadableEnabledIsRefused(t *testing.T) {
+	s := gateBulkServer(t, platform.CapSupported)
+	s.caps.mu.Lock()
+	s.caps.set.Items[platform.CapProtocolPrefix+"openvpn"] = platform.Capability{
+		ID: platform.CapProtocolPrefix + "openvpn", State: platform.CapSupported}
+	s.caps.mu.Unlock()
+	const ep = `{"id":"noca","name":"noca","engine":"singbox","protocol":"openvpn","server":"198.51.100.12","port":1194,"enabled":%v,"params":{"ca":"","mode":"tls"}}`
+
+	w := profilehandlers_post(s.handleUpsertEndpoint, fmt.Sprintf(ep, true))
+	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "missing required ca") ||
+		!strings.Contains(w.Body.String(), "Save it disabled") {
+		t.Errorf("enabled: got %d %s, want 422 naming the missing ca and the draft way out", w.Code, w.Body.String())
+	}
+	w = profilehandlers_post(s.handleUpsertEndpoint, fmt.Sprintf(ep, false))
+	if w.Code != http.StatusOK {
+		t.Errorf("disabled draft: got %d %s, want 200", w.Code, w.Body.String())
 	}
 }
 

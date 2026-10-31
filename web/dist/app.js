@@ -124,6 +124,10 @@ function handleAuthAPIError(error) {
     authCSRFToken = "";
     ensureAuthenticated().catch(() => {});
   }
+  // QA-152: the daemon refused a save made from a copy something else has saved over since. Nothing
+  // was saved; the page is replaced with the current version (route() also closes the form), and the
+  // caller's toast says why.
+  if (error.status === 412) loadProfile().then(route, () => {});
   return error;
 }
 
@@ -323,9 +327,9 @@ const api = {
     }
     return JSON.parse(await pending);
   },
-  async post(p, body) {
+  async post(p, body, h, m) {
     await waitForAuthentication();
-    const r = await fetch(p, { method: "POST", headers: authRequestHeaders({ "content-type": "application/json" }, true), body: JSON.stringify(body || {}) });
+    const r = await fetch(p, { method: m || "POST", headers: authRequestHeaders({ "content-type": "application/json", ...h }, true), body: JSON.stringify(body || {}) });
     if (!r.ok) throw handleAuthAPIError(await apiErr(r)); return r.json();
   },
   async put(p, body, headers) {
@@ -419,6 +423,7 @@ async function refreshApplyState() {
   } catch (e) { /* transient error — keep the last known state, don't flip to a wrong value */ }
   reflectDirty();
   updateStatusPill();
+  renderRoutingSwitch();
 }
 function setApplyPhase(p, autoClearMs) {
   if (_applyPhaseTimer) { clearTimeout(_applyPhaseTimer); _applyPhaseTimer = null; }
@@ -471,9 +476,60 @@ function renderApplyBanner() {
   }
   host.appendChild(row);
 }
+
+/* ---------- routing switch ---------- */
+// POST /api/routing/switch (server/routingswitch.go). State rides on the /api/state poll.
+let routingBusy = false;
+function renderRoutingSwitch() {
+  const box = document.getElementById("routingsw"), host = document.getElementById("routing-banner");
+  const r = state.applyState && state.applyState.routing;
+  if (!box || !host) return;
+  if (!r) { box.hidden = true; host.hidden = true; return; }
+  const on = !!r.enabled;
+  // Rebuilt only when something shown changed: the 10 s poll must not take focus off the switch.
+  const sig = [on, r.error, routingBusy, t("Routing")].join("|");
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  paintHero();
+  box.hidden = false;
+  box.textContent = "";
+  const sw = switchEl(on, () => toggleRouting(!on), t("Routing") + switchWord(on));
+  if (routingBusy) sw.setAttribute("aria-disabled", "true");
+  box.classList.toggle("off", !on);
+  box.append(el("span", { class: "rs-label", "aria-hidden": "true" }, t("Routing")), sw);
+  if (on) { host.hidden = true; host.textContent = ""; return; }
+  host.hidden = false;
+  host.textContent = "";
+  host.appendChild(el("div", { class: "ab-row" },
+    el("span", { class: "ab-msg" }, t("WayHop's routing is off: all traffic goes straight out through the WAN."),
+      r.error ? el("span", { class: "ab-stage" }, " — " + r.error) : null),
+    el("div", { class: "ab-actions" }, el("button", { class: "btn btn-primary btn-sm", type: "button",
+      disabled: routingBusy ? "" : null, onclick: () => toggleRouting(true) }, t("Switch on")))));
+}
+async function toggleRouting(enable) {
+  if (routingBusy) return;
+  const msg = enable ? t("Switch WayHop's routing back on? The last applied configuration is restored.")
+    : t("Switch WayHop's routing off? All traffic goes straight out through the WAN; the tunnels stay up but carry nothing. Your configuration is kept.");
+  if (!await modalConfirm(msg, { okLabel: enable ? t("Switch on") : t("Switch off") })) return;
+  routingBusy = true; renderRoutingSwitch();
+  try {
+    const r = await api.post("/api/routing/switch", { enabled: enable });
+    if (r && r.routing) state.applyState.routing = r.routing;
+  } catch (e) {
+    if (e.data && e.data.routing) state.applyState.routing = e.data.routing;
+    toast(e.message + (e.data && e.data.detail ? ": " + e.data.detail : ""), "err");
+  } finally { routingBusy = false; renderRoutingSwitch(); refreshApplyState(); }
+}
 const findEndpoint = id => state.profile.endpoints.find(e => e.id === id);
+// QA-152. ifMatch(o) is the If-Match of a save of o, a connection, group or routing list: o's own
+// revision as loadProfile loaded it (o._rev), so the save is refused when that object was saved since
+// and passes whatever else was. keepRev(o, r) takes the revision a save of o answered (r.rev) when
+// the save was made from o's revision (r.was): the page mirrors the save in o, so o stays current.
+const ifMatch = o => o && o._rev ? { "If-Match": o._rev } : {};
+const keepRev = (o, r) => { if (o && r && r.rev && r.was === o._rev) o._rev = r.rev; };
 const findGroup = id => state.profile.groups.find(g => g.id === id);
-const nameOf = id => (findEndpoint(id) || findGroup(id) || {}).name || id;
+const nameOf = id => (findEndpoint(id) || findGroup(id) || {}).name ||
+  ((state.ndmPolicies || []).find(p => "ndm-policy:" + p.name === id) || {}).description || id;
 
 /* ---------- formatting ---------- */
 function fmtRate(bps) {
@@ -571,15 +627,14 @@ const DICTS = window.WR_DICTS || {};
 const I18N_LANGS = window.WR_LANGS || [{ code: "en", name: "English" }];
 const RTL_LANGS = new Set(window.WR_RTL || ["fa"]);
 const hasDict = c => c === "en" || DICTS[c] != null;
-function detectLang() {
-  const nav = (navigator.language || "en").toLowerCase();
-  for (const l of I18N_LANGS) {
-    if (l.code === "auto" || l.code === "en") continue;
-    if (nav === l.code || nav.startsWith(l.code + "-")) return l.code;
-  }
-  return "en";
+// i18n-loader.js's WR_PICK, so t() reads the file it loaded (a legacy stored "zh" too). Memoised.
+const LANG_RESOLVED = new Map();
+function detectLang(stored) {
+  const memo = stored + " " + navigator.language, pick = window.WR_PICK || (() => "");
+  if (!LANG_RESOLVED.has(memo)) LANG_RESOLVED.set(memo, pick(stored) || pick(navigator.language || "en") || "en");
+  return LANG_RESOLVED.get(memo);
 }
-const lang = () => { const v = localStorage.getItem(LANG_KEY); return v && hasDict(v) ? v : detectLang(); };
+const lang = () => { const v = localStorage.getItem(LANG_KEY); return v && hasDict(v) ? v : detectLang(v); };
 function setLang(v) {
   // Reloading in the requested language would silently discard unsaved form edits — the same hazard
   // the SPA nav guard covers for hash navigation. Consult the shared registry first; on cancel,
@@ -635,7 +690,7 @@ function pluralIndex(code, n) {
       if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return 1;
       return 2;
     }
-    case "tr": return 0;              // Turkish does not pluralise a noun that already carries a number
+    case "tr": case "zh": return 0;   // Turkish and Chinese do not pluralise a noun that carries a number
     case "fr": return x < 2 ? 0 : 1;  // French treats 0 as singular
     case "fa": return x <= 1 ? 0 : 1;
     default: return x === 1 ? 0 : 1;  // en, de, es, pt
@@ -747,6 +802,7 @@ function translateChrome() {
   const burger = document.querySelector(".nav-burger");
   if (burger) burger.setAttribute("aria-label", t("Menu")); // mobile drawer toggle — localize its screen-reader name
   try { updateStatusPill(); } catch (e) {} // re-localize the live status pill
+  try { renderRoutingSwitch(); } catch (e) {} // and the routing switch + its banner
 }
 
 /* ---------- restart the WayHop service ---------- */
@@ -1090,7 +1146,7 @@ const PAGES = {
   dashboard: { title: "Dashboard", render: renderDashboard },
   server: { title: "Set up Server", chunk: "page-server", render: renderServer },
   connections: { title: "Connections", chunk: "page-connections", render: renderConnections },
-  failover: { title: "Failover", render: renderFailover },
+  failover: { title: "Failover", chunk: "page-failover", render: renderFailover },
   routing: { title: "Routing", chunk: "page-routing", render: renderRouting },
   dns: { title: "DNS", chunk: "page-dns", render: renderDNS },
   updater: { title: "Components", chunk: "page-updater", render: renderUpdater },
@@ -1350,7 +1406,7 @@ async function renderDashboard(view) {
       // look for a crash that never happened.
       if (hh.singbox && !hh.singbox.available) {
         inner.appendChild(el("div", { class: "hint", style: "margin-top:3px" },
-          t("No proxy engine is installed. sing-box is required for VLESS, VMess, Trojan and SOCKS exits; AmneziaWG and olcRTC run as plugins.")));
+          t("No proxy engine is installed. sing-box is required for VLESS, VMess, Trojan and SOCKS exits; AmneziaWG runs as a plugin.")));
       }
       const actions = el("div", { style: "margin-top:8px;display:flex;gap:8px;flex-wrap:wrap" });
       actions.appendChild(el("button", {
@@ -1475,6 +1531,9 @@ function bestAliveMember(members) {
   return best;
 }
 function computeVerdict() {
+  // Routing off (header switch) outranks every verdict below.
+  const rs = state.applyState && state.applyState.routing;
+  if (rs && rs.enabled === false) return { level: "degraded", ico: "○", word: "Off", verdict: t("WayHop's routing is off: all traffic goes straight out through the WAN."), sub: "" };
   const h = state.health || {};
   if (!h.demo && !(h.singbox && h.singbox.running)) {
     // Native-only: an absent core is by design (kernel plane carries everything), so the
@@ -2158,7 +2217,7 @@ async function tryDisableWithDependents(e, data) {
   if (!choice) return false;
   const q = choice.detach ? "?detach=1" : "?replace_with=" + encodeURIComponent(choice.replace);
   try {
-    await api.post("/api/endpoints" + q, { ...e, enabled: false });
+    await api.post("/api/endpoints/" + encodeURIComponent(e.id) + q, { enabled: false }, 0, "PATCH");
   } catch (err) { toast(err.message, "err"); return false; }
   // The server moved or parked OTHER objects in the same revision — lists, rules, resolvers, group
   // membership — so the profile in hand is stale and the list must be rebuilt, in place where the
@@ -2179,7 +2238,8 @@ async function toggleEndpoint(e, sw) {
   updateDirty();    // light the Apply/Save buttons (the removed loadProfile() used to do this)
   refreshEnabledTile(); // keep the dashboard "N enabled" tile in sync (no full re-render)
   try {
-    await api.post("/api/endpoints", { ...e, enabled: want });
+    // The switch alone, never the copy this page loaded: that put back what another tab had saved since (QA-152).
+    keepRev(e, await api.post("/api/endpoints/" + encodeURIComponent(e.id), { enabled: want }, 0, "PATCH"));
     repaintExits(); // the switch and the row it belongs to are two nodes; without this the row keeps saying "off"
   } catch (err) {
     // Switching an exit off while a list, rule, resolver or group still points at it is refused —
@@ -2906,6 +2966,7 @@ async function renderRouting(view) {
     el("div", { class: "side" },
       el("button", { class: "btn", title: "Re-fetch CIDRs for any list with an auto-refresh source, then Apply to activate", onclick: (e) => refreshCidrSources(e.currentTarget) }, "↻ Refresh sources"),
       el("button", { class: "btn", title: "Add a ready-made routing list from the catalog", onclick: openRoutingCatalog }, "Preset lists"),
+      el("button", { class: "btn", onclick: openRoutingImport }, t("Import")),
       el("button", { class: "btn", title: t("Manage device groups, then scope a list to certain devices"), onclick: openDeviceGroups }, t("Device groups")),
       el("button", { class: "btn btn-primary", title: "Create your own routing list (domains/IPs or a feed)", onclick: () => openRoutingList(null) }, "+ Custom list"))));
 
@@ -2954,7 +3015,7 @@ async function renderRouting(view) {
       el("span", {}, t("List")),
       el("span", {}, t("Route via")),
       el("span", {}, t("Download via")),
-      el("span", { title: t("Connections and bytes the proxy core attributed to this list") }, t("Matched")),
+      el("span", { title: t("Connections and bytes the proxy core attributed to this list, else the kernel's packets and bytes") }, t("Matched")),
       el("span", {}, "")));
     lists.forEach((rl, i) => table.appendChild(routingRow(rl, i, lists.length)));
     card.appendChild(table);
@@ -3099,15 +3160,16 @@ async function paintRoutingTraffic() {
       cell.appendChild(el("span", { class: "rl-tr-none", title: t("No proxy core is running to attribute traffic") }, t("not sampled")));
       return;
     }
-    const s = (d.lists || {})[id] || { live: 0, conns: 0, bytes: 0 };
-    if (!s.conns && !s.bytes) {
+    const s = (d.lists || {})[id] || {}, k = !s.conns && !s.bytes && s.kernel, n = k ? k.packets : s.conns;
+    if (!n && !(k || s).bytes) {
       cell.appendChild(el("span", { class: "rl-tr-zero",
         title: t("Nothing has matched this list since the daemon started ({0})", fmtWhen(d.since_ms)) }, t("nothing yet")));
       return;
     }
-    cell.appendChild(el("span", { class: "rl-tr-n" }, String(s.conns)));
-    cell.appendChild(el("span", { class: "rl-tr-u" }, s.conns === 1 ? t("conn") : t("conns")));
-    cell.appendChild(el("span", { class: "rl-tr-b" }, fmtBytes(s.bytes)));
+    cell.appendChild(el("span", { class: "rl-tr-n" }, String(n)));
+    cell.appendChild(el("span", { class: "rl-tr-u", title: k ? t("packets since the rules were installed") : null },
+      k ? t("pkts") : n === 1 ? t("conn") : t("conns")));
+    cell.appendChild(el("span", { class: "rl-tr-b" }, fmtBytes((k || s).bytes)));
     if (s.live) cell.appendChild(el("span", { class: "rl-tr-live", title: t("open right now") }, s.live + " " + t("open")));
   });
 }
@@ -3180,7 +3242,7 @@ async function toggleRoutingList(rl, sw) {
   rl.enabled = want;
   updateDirty(); // light the Apply/Save buttons (the removed loadProfile() used to do this)
   try {
-    await api.post("/api/routing", { ...rl, enabled: want });
+    keepRev(rl, await api.post("/api/routing/" + encodeURIComponent(rl.id), { enabled: want }, 0, "PATCH")); // as toggleEndpoint
   } catch (e) {
     flipSwitch(sw, !want);
     rl.enabled = !want;
@@ -3315,11 +3377,11 @@ async function refreshCidrSources(btn) {
     const r = await api.post("/api/routing/refresh", {});
     await loadProfile(); route();
     const srcN = (r.lists || []).length;
-    const errN = (r.errors || []).length;
+    const errN = (r.errors || []).length, ref = refusedLines(r);
     if (!srcN) { toast(t("No auto-refresh CIDR sources — set one on a list first."), "ok"); return; }
     const msg = (r.changed ? t("Refreshed") : t("No changes")) + " · " + tn("{0} source|{0} sources", srcN) +
-      (errN ? " · " + t("{0} failed", errN) : "") + (r.changed ? t(" — click Apply to activate.") : "");
-    toast(msg, errN ? "err" : "ok");
+      (errN ? " · " + t("{0} failed", errN) : "") + ref.map(m => " · " + m).join("") + (r.changed ? t(" — click Apply to activate.") : "");
+    toast(msg, errN ? "err" : ref.length ? "info" : "ok");
   } catch (e) { toast(e.message, "err"); }
   finally { if (btn) btn.disabled = false; } // harmless if route() already replaced the button
 }
@@ -3482,17 +3544,15 @@ async function checkEndpointConfig(e, btn) {
 }
 
 
-// olcRTC is deliberately absent: the strict executor cannot yet identify and roll back its binary.
-// Existing/imported olcRTC entries are still shown by manualForm, but cannot be selected for a new
-// connection. AnyTLS is supported end-to-end by the importer, model and sing-box generator.
-const PROTOCOLS = ["vless", "vmess", "trojan", "shadowsocks", "hysteria2", "tuic", "anytls", "wireguard", "amneziawg", "socks", "http"];
+// olcRTC was removed (its project ended); a connection saved by an older build still opens in
+// manualForm, which says so, and cannot be created or enabled. AnyTLS is supported end-to-end by the importer, model and sing-box generator.
+const PROTOCOLS = ["vless", "vmess", "trojan", "shadowsocks", "hysteria2", "tuic", "anytls", "snell", "openvpn", "openconnect", "ssh", "wireguard", "amneziawg", "socks", "http"];
 const SS_METHODS = ["aes-256-gcm", "aes-128-gcm", "chacha20-ietf-poly1305", "2022-blake3-aes-256-gcm", "2022-blake3-aes-128-gcm", "2022-blake3-chacha20-poly1305"];
 
 function connectionProtocolRequirementIDs(proto) {
   if (proto === "wireguard" || proto === "amneziawg") {
     return ["native.operation." + proto + ".create", "native.operation." + proto + ".remove"];
   }
-  if (proto === "olcrtc") return ["engine.olcrtc"];
   return ["engine.singbox", "protocol." + proto];
 }
 
@@ -3625,227 +3685,6 @@ function redactSecrets(raw) {
 
 
 
-
-// memberPicker builds the failover-group member list: a checkbox row per endpoint with ▲/▼ arrows
-// that reorder the rows. DOM order IS the saved preference order (both group modals collect checked
-// members via $$("input:checked").map(value) in DOM order), so moving a row changes its priority.
-// The arrows preventDefault+stopPropagation so a click never toggles that row's checkbox.
-// rows: [{ e, checked }] already in the desired initial order.
-function memberPicker(rows) {
-  const box = el("div", { class: "checks checks-members" });
-  rows.forEach(({ e, checked }) => {
-    const cb = el("input", { type: "checkbox", value: e.id });
-    if (checked) cb.setAttribute("checked", "true");
-    const up = el("button", { class: "btn btn-sm", type: "button", title: "Move up (higher priority)", "aria-label": "Move up", style: "padding:1px 8px;line-height:1.2" }, "▲");
-    const dn = el("button", { class: "btn btn-sm", type: "button", title: "Move down (lower priority)", "aria-label": "Move down", style: "padding:1px 8px;line-height:1.2" }, "▼");
-    // A member is picked on what it IS and how it is DOING, and the row said only the first. The
-    // live state comes from the same healthMap the exits list reads, so "which of these is actually
-    // up right now" is answered where the choice is made rather than one page away. The word beside
-    // the dot carries the state for anyone who cannot use its colour.
-    const h = healthMap[e.id];
-    let dotCls = "muted", note = "";
-    if (!e.enabled) { note = t("off"); }
-    else if (h && h.state === "down") { dotCls = "err"; note = t("down"); }
-    else if (h && h.state === "alive") { dotCls = h.latency_ms >= 600 ? "warn" : "ok"; note = (h.latency_ms || "?") + " ms"; }
-    else { note = t("checking…"); }
-    const row = el("label", { class: "check member-row" }, cb,
-      el("span", { class: "insp-dot " + dotCls, "aria-hidden": "true" }),
-      el("span", { class: "member-n" }, e.name || e.id),
-      el("span", { class: "member-m" }, note),
-      e.protocol ? el("span", { class: "badge proto member-p" }, e.protocol) : el("span", { class: "member-p" }),
-      el("span", { class: "member-ord" }, up, dn));
-    row._up = up; row._dn = dn;
-    const move = (dir) => (ev) => {
-      ev.preventDefault(); ev.stopPropagation();
-      if (dir < 0 && row.previousElementSibling) box.insertBefore(row, row.previousElementSibling);
-      else if (dir > 0 && row.nextElementSibling) box.insertBefore(row.nextElementSibling, row);
-      syncEnds();
-    };
-    up.onclick = move(-1);
-    dn.onclick = move(1);
-    box.appendChild(row);
-  });
-  // The top row cannot move up and the bottom row cannot move down. move() already guards on the
-  // sibling, so both clicks were harmless - and silent, which is the defect: a control that looks
-  // live and answers nothing teaches the operator that these arrows are unreliable, on the one screen
-  // where order IS the configuration. Measured on the demo: clicking the top ▲ and the bottom ▼ left
-  // the row order byte-identical with nothing said. Re-run after every move, because which row sits
-  // at an end changes with each one.
-  const syncEnds = () => {
-    const rows = [...box.children];
-    rows.forEach((r, i) => {
-      if (r._up) r._up.disabled = i === 0;
-      if (r._dn) r._dn.disabled = i === rows.length - 1;
-    });
-  };
-  syncEnds();
-  return box;
-}
-
-// memberOrderHint explains what the ▲/▼ order actually does.
-//
-// It used to say "urltest/fallback auto-pick the fastest working member and use your order as a
-// tiebreak" — flatly, in a dialog whose own type dropdown offers "fallback — strict order", and whose
-// group card afterwards says fallback follows the order top to bottom. Three statements, two of them
-// wrong depending on the carrier, all on screen within one workflow. What decides it is who carries
-// the group, which is not known while the form is still being filled in, so the hint now says which
-// answers exist and leaves the group's own card to state the one in force.
-const MEMBER_ORDER_HINT = "Use ▲/▼ to set priority. A selector group uses the top member. Order is followed strictly on router tunnels; on the proxy core the fastest working member wins and your order is the tiebreak — the group's card says which applies to it.";
-
-// dialogNotes moves a form's explanatory prose out from between its controls and into the footer,
-// where it becomes one line that follows what the operator is touching: any section carrying
-// data-note shows its note on focus or hover, and the default note holds the rest of the time.
-//
-// In the failover dialog those three paragraphs took more vertical room than the member list they
-// were explaining, which is the part of it you actually work in. Notes passed in are already
-// translated — they are read from the attribute, not re-localized later.
-function dialogNotes(defaultNote) {
-  const line = el("div", { class: "hint foot-note", role: "status" }, defaultNote);
-  const show = ev => {
-    const sec = ev.target && ev.target.closest ? ev.target.closest("[data-note]") : null;
-    const next = sec ? sec.getAttribute("data-note") : defaultNote;
-    if (line.textContent !== next) line.textContent = next;
-  };
-  return {
-    wire(body) {
-      body.addEventListener("focusin", show);
-      body.addEventListener("mouseover", show);
-      body.addEventListener("mouseleave", () => { line.textContent = defaultNote; });
-      return body;
-    },
-    footer(...actions) {
-      return el("div", { class: "foot-notes" }, line, el("div", { class: "foot-actions" }, ...actions));
-    },
-  };
-}
-
-// testTuningFields builds the shared "health & flap tuning" block for a group's Test config —
-// probe URL, interval (s), and TOLERANCE (ms). tolerance is the anti-flap deadband sing-box gives
-// for free: a higher value keeps the active exit stickier on a jittery/DPI link (stops exit
-// ping-pong), a lower interval detects a dead exit faster (the daemon floors it to 5s). Returns the
-// DOM node + read() yielding a complete model.Health (defaults filled, so no field is dropped).
-function testTuningFields(test) {
-  test = test || {};
-  const url = el("input", { type: "text", value: test.url || "", placeholder: "http://cp.cloudflare.com/generate_204" });
-  const interval = el("input", { type: "number", min: "5", step: "5", value: String(test.interval || 60) });
-  const tolerance = el("input", { type: "number", min: "0", step: "10", value: String(test.tolerance != null ? test.tolerance : 50) });
-  // The tuning note rides along as data-note instead of a paragraph under the fields: the dialog's
-  // footer shows it while these three inputs are in use (see dialogNotes).
-  const node = el("div", { "data-note": t("Higher tolerance = stickier exit on a jittery/DPI link (try 100–150 ms); lower interval = faster failover (floored to 5 s). Tunes urltest/fallback auto-failover; a selector group only uses the URL for its health badge.") },
-    el("div", { class: "field" }, el("label", {}, t("Health check URL")), url),
-    el("div", { style: "display:flex;gap:12px" },
-      el("div", { class: "field", style: "flex:1" }, el("label", {}, t("Probe interval (s)")), interval),
-      el("div", { class: "field", style: "flex:1" }, el("label", {}, t("Flap tolerance (ms)")), tolerance)));
-  const read = () => {
-    const iv = parseInt(interval.value, 10);
-    const tol = parseInt(tolerance.value, 10);
-    return {
-      url: url.value.trim() || "http://cp.cloudflare.com/generate_204",
-      interval: Number.isFinite(iv) && iv > 0 ? iv : 60,
-      tolerance: Number.isFinite(tol) && tol >= 0 ? tol : 50,
-    };
-  };
-  return { node, read };
-}
-
-function openNewGroup() {
-  if (!state.profile.endpoints.length) { toast("Add some connections first", "err"); return; }
-  const name = el("input", { type: "text", placeholder: "Main failover" });
-  const type = el("select", {}, el("option", { value: "urltest" }, "urltest — auto, fastest working"),
-    el("option", { value: "fallback" }, "fallback — strict order"),
-    el("option", { value: "selector" }, "selector — manual"));
-  const checks = memberPicker(state.profile.endpoints.map(e => ({ e, checked: false })));
-  const tuning = testTuningFields();
-  const asDefault = el("input", { type: "checkbox" });
-  const killSwitch = el("input", { type: "checkbox" });
-
-  async function create(btn) {
-    const members = $$("input[type=checkbox]:checked", checks).map(c => c.value);
-    if (!name.value.trim()) return toast("Name required", "err");
-    if (!members.length) return toast("Pick at least one member", "err");
-    if (btn) { if (btn.disabled) return; btn.disabled = true; } // in-flight guard — no duplicate group from a double-click
-    // rlUniqueId walks endpoint/group/rule/list ids so a new group whose name slugs to an existing
-    // group's id gets a fresh id instead of silently OVERWRITING that group (UpsertGroup is by-id).
-    const id = rlUniqueId("grp-" + name.value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""));
-    // kill_switch is omitted from the payload when unchecked (omitempty / false =
-    // current behavior: WAN fallback when all members are down).
-    const g = { id, name: name.value.trim(), type: type.value, members, test: tuning.read() };
-    if (killSwitch.checked) g.kill_switch = true;
-    try { await api.post("/api/groups", g); }
-    catch (e) { if (btn) btn.disabled = false; return toast(e.message, "err"); } // group not created — re-enable, modal stays open for retry
-    // The group now exists. Setting it as the default route is a best-effort follow-up:
-    // if it fails, keep the created group (don't discard the success) and surface the error
-    // separately, so a retry can't collide on the already-created group id.
-    let ruleErr = null;
-    if (asDefault.checked) {
-      try { await api.post("/api/rules", { id: "default", default: true, outbound: id }); }
-      catch (e) { ruleErr = e; }
-    }
-    back.remove(); await loadProfile(); route();
-    toast(t("Created {0}", name.value.trim()), "ok");
-    if (ruleErr) toast(ruleErr.message, "err");
-  }
-
-  const notes = dialogNotes(t(MEMBER_ORDER_HINT));
-  const body = notes.wire(el("div", {},
-    el("div", { class: "field" }, el("label", {}, "Group name"), name),
-    el("div", { class: "field" }, el("label", {}, "Type"), type),
-    el("div", { class: "field", "data-note": t(MEMBER_ORDER_HINT) }, el("label", {}, t("Members (priority order)")), checks),
-    tuning.node,
-    el("label", { class: "check" }, asDefault, el("span", {}, "Set as default route (all traffic)")),
-    el("label", { class: "check", "data-note": t("When on, traffic is dropped instead of falling back to the open WAN if every member is down — no leak to the unprotected internet.") },
-      killSwitch, el("span", {}, t("Kill switch (drop when all members down)")))));
-  const back = modal({ title: "New failover group", body, fixed: true,
-    footer: notes.footer(el("button", { class: "btn btn-ghost", onclick: () => back.remove() }, "Cancel"),
-      el("button", { class: "btn btn-primary", onclick: (e) => create(e.currentTarget) }, "Create")) });
-}
-
-// openEditGroup edits an existing failover group's settings. The create modal builds new
-// groups; this re-posts the SAME group (POST /api/groups upserts by id) with the editable
-// fields — name, type, members, and the kill_switch toggle — preserving every other field
-// (test config, etc.) verbatim so an edit never silently drops it.
-function openEditGroup(g) {
-  const name = el("input", { type: "text", value: g.name || "" });
-  const type = el("select", {},
-    el("option", { value: "urltest" }, "urltest — auto, fastest working"),
-    el("option", { value: "fallback" }, "fallback — strict order"),
-    el("option", { value: "selector" }, "selector — manual"));
-  type.value = g.type || "urltest";
-  const have = new Set(g.members || []);
-  // List current members first (in saved preference order), then the remaining endpoints.
-  const ordered = (g.members || []).map(findEndpoint).filter(Boolean)
-    .concat(state.profile.endpoints.filter(e => !have.has(e.id)));
-  const checks = memberPicker(ordered.map(e => ({ e, checked: have.has(e.id) })));
-  const tuning = testTuningFields(g.test);
-  const killSwitch = el("input", { type: "checkbox" });
-  if (g.kill_switch) killSwitch.setAttribute("checked", "true");
-
-  async function save(btn) {
-    const members = $$("input[type=checkbox]:checked", checks).map(c => c.value);
-    if (!name.value.trim()) return toast("Name required", "err");
-    if (!members.length) return toast("Pick at least one member", "err");
-    if (btn) { if (btn.disabled) return; btn.disabled = true; } // in-flight guard — no duplicate POST from a double-click
-    try {
-      // Spread g first so unedited fields round-trip unchanged; test is rebuilt from the tuning
-      // block (seeded from g.test, so untouched values round-trip and no Health field is dropped).
-      const out = { ...g, name: name.value.trim(), type: type.value, members, kill_switch: killSwitch.checked, test: tuning.read() };
-      await api.post("/api/groups", out);
-      back.remove(); await loadProfile(); route(); toast(t("Saved {0}", name.value.trim()), "ok");
-    } catch (e) { if (btn) btn.disabled = false; toast(e.message, "err"); }
-  }
-
-  const notes = dialogNotes(t(MEMBER_ORDER_HINT));
-  const body = notes.wire(el("div", {},
-    el("div", { class: "field" }, el("label", {}, "Group name"), name),
-    el("div", { class: "field" }, el("label", {}, "Type"), type),
-    el("div", { class: "field", "data-note": t(MEMBER_ORDER_HINT) }, el("label", {}, t("Members (priority order)")), checks),
-    tuning.node,
-    el("label", { class: "check", "data-note": t("When on, traffic is dropped instead of falling back to the open WAN if every member is down — no leak to the unprotected internet.") },
-      killSwitch, el("span", {}, t("Kill switch (drop when all members down)")))));
-  const back = modal({ title: t("Edit failover group"), body, fixed: true,
-    footer: notes.footer(el("button", { class: "btn btn-ghost", onclick: () => back.remove() }, "Cancel"),
-      el("button", { class: "btn btn-primary", onclick: (e) => save(e.currentTarget) }, "Save")) });
-}
 
 /* ---------- apply ----------
  * POST /api/apply {save, rev, ack}. The ONLY thing pinned is `rev`, the desired-configuration
@@ -4210,7 +4049,7 @@ async function renderDNS(view) {
 
   // The path leads the page. Everything below it is the controls that shape it, which is only worth
   // reading once you can see what you are shaping.
-  if (configured || dnsState.servers.length) view.appendChild(dnsQueryPath(nat));
+  if (configured || dnsState.servers.length) view.appendChild(dnsQueryPath(nat, !!(resp && resp.tun)));
 
   // The router's OWN native DNS stack (dnsmasq + DoH), if WayHop is running on a router that has one —
   // a read-only "adopted" view so there's no hidden second config. Editing lands with native write-back.
@@ -4380,9 +4219,11 @@ function renderFailsafeBanner(st) {
       : t("Apply live — not saved, reverts on reboot or if connectivity drops");
   }
   if (st.last_error) detail += " · " + t("last error: {0}", st.last_error);
-  const keep = el("button", { class: "btn btn-primary btn-sm", type: "button", onclick: failsafeKeep }, t("Keep & Save"));
+  // The daemon refuses Keep after a failed rollback: offer only Roll back.
+  if (st.rollback_failed) { title = t("Rollback failed: {0}", st.rollback_error || ""); detail = ""; }
+  const keep = st.rollback_failed ? null : el("button", { class: "btn btn-primary btn-sm", type: "button", onclick: failsafeKeep }, t("Keep & Save"));
   const roll = el("button", { class: "btn btn-danger btn-sm", type: "button", onclick: failsafeRollback }, t("Roll back"));
-  if (_failsafeBusy) { keep.disabled = true; roll.disabled = true; }
+  if (_failsafeBusy) { if (keep) keep.disabled = true; roll.disabled = true; }
   b.style.display = "block"; b.innerHTML = "";
   b.appendChild(el("div", { class: "card fs-card" + (degraded ? " fs-degraded" : unverified ? " fs-unverified" : " fs-armed") },
     el("div", { class: "row-between" },
@@ -4439,7 +4280,7 @@ let pluginMap = {};
 let watchdog = null; // last /api/watchdog snapshot, shared with the dashboard Engine tile
 let speedResults = {}; // last speed-test per key (endpoint id, or "__global"); session-only
 let healthInFlight = false;
-// Run-state badge for engine-plugin endpoints (amneziawg / olcrtc). The protocol
+// Run-state badge for engine-plugin endpoints (amneziawg / nfqws). The protocol
 // type itself is shown by the .proto chip; this conveys running / needs-binary only.
 function pluginBadge(e) {
   if (!e.engine || e.engine === "singbox") return null;
@@ -4503,10 +4344,20 @@ function subMeta(e) {
     sub.appendChild(el("span", { class: "addr" }, "⇄ " + iface + (epip ? " → " + epip : "")));
     return sub;
   }
+  if (e.engine === "byedpi") { // a local proxy on the router: its strategy, not a server
+    sub.appendChild(el("span", { class: "badge proto" }, "ByeDPI"));
+    const bb = pluginBadge(e); if (bb) sub.appendChild(bb);
+    sub.appendChild(el("span", { class: "addr" }, "ciadpi " + ((e.params && e.params.strategy) || "")));
+    return sub;
+  }
   sub.appendChild(el("span", { class: "badge proto" }, e.protocol));
   const pb = pluginBadge(e);
   if (pb) sub.appendChild(pb);
-  sub.appendChild(el("span", { class: "addr" }, e.server + ":" + e.port));
+  // A Realm connection has no server: its rendezvous host, not the token or name (QA-054)
+  const realm = e.params && e.params.realm && (e.params.realm.split("/")[2] || "").replace(/^.*@/, "");
+  // An SSH exit is a login: user@host, root when none is set, as sing-box does.
+  const login = e.protocol === "ssh" ? ((e.params && e.params.user) || "root") + "@" : "";
+  sub.appendChild(el("span", { class: "addr" }, realm ? "realm " + realm : login + e.server + ":" + e.port));
   return sub;
 }
 function pillFor(e) {
@@ -5332,7 +5183,8 @@ function routeDestAction(d) {
       rl.manual = rl.manual || [];
       if (!rl.manual.includes(entry)) rl.manual.push(entry);
       try {
-        await api.post("/api/routing", rl);
+        // The whole list goes back, so it must still be the list as saved (QA-152).
+        keepRev(rl, await api.post("/api/routing", rl, ifMatch(rl)));
         updateDirty();
         toast(t("Added {0} → {1}", entry, rl.name || rl.id), "ok");
         picker.style.display = "none";
@@ -5704,6 +5556,7 @@ function validateSettingsClient(next) {
   if (pv.some(p => !(p >= 1 && p <= 65535))) errs.push(t("Every port must be between 1 and 65535."));
   else if (new Set(pv).size !== pv.length) errs.push(t("The four ports must all be different."));
   if (next.clash.controller && !isHostPort(next.clash.controller)) errs.push(t("Clash controller must be host:port."));
+  if (next.core_restart && !/^(([01]?\d|2[0-3]):[0-5]\d|([1-9]|1\d|2[0-4])h)$/.test(next.core_restart)) errs.push(t("Scheduled core restart") + ": HH:MM / 1h-24h");
   if (next.watchdog.notify_url && !isHTTPUrl(next.watchdog.notify_url)) errs.push(t("Webhook URL must start with http:// or https://."));
   (next.updater.mirrors || []).filter(Boolean).forEach(m => { if (!isHTTPUrl(m)) errs.push(t("Component download mirror is not a URL: ") + m); });
   return errs;
@@ -5771,7 +5624,10 @@ const SETTING_META = {
   "sing-box config": { cfg: "singbox.config", restart: true },
   "Clash controller": { cfg: "clash.controller" },
   "Clash secret": { cfg: "clash.secret", secret: true },
+  // A prepended outbound carries a server's credentials.
+  "Core override (JSON)": { cfg: "core_override", secret: true },
   "Notify webhook URL": { cfg: "watchdog.notify_url", secret: true },
+  "Scheduled core restart": { cfg: "core_restart" },
   "Connectivity-check target": { cfg: "failsafe.target" },
 };
 
@@ -6010,14 +5866,16 @@ function settingsIndex(view, defaults) {
 // loaded as the page renders, fills in the state and opens the manager, so the bot adds almost nothing
 // to the initial payload. No inputs in the card: the bot's settings have their own routes, and a field
 // here would count towards this page's "unsaved changes" that its Save does not store.
-function telegramCard() {
+// With bridge set it is the Telegram bridge's card instead (gap 13), on the same terms.
+function telegramCard(bridge) {
   const card = el("div", { class: "card", "data-section": "Telegram" });
-  card.appendChild(el("div", { class: "card-title", style: "margin-bottom:8px" }, t("Telegram bot")));
-  card.appendChild(el("div", { class: "hint", style: "margin-bottom:10px" },
-    t("Status, alerts and Keep / Roll back from your phone. The router talks to Telegram itself, so no port has to be opened.")));
+  card.appendChild(el("div", { class: "card-title", style: "margin-bottom:8px" }, bridge ? t("Telegram bridge") : t("Telegram bot")));
+  card.appendChild(el("div", { class: "hint", style: "margin-bottom:10px" }, bridge
+    ? t("Telegram without a tunnel for phones and computers on this network: a proxy on the router's LAN address.")
+    : t("Status, alerts and Keep / Roll back from your phone. The router talks to Telegram itself, so no port has to be opened.")));
   const slot = el("div", { class: "tg-card" }, el("span", { class: "hint" }, t("loading…")));
   card.appendChild(slot);
-  loadChunk("page-telegram").then(() => telegramCardFill(slot)).catch(e => {
+  loadChunk("page-telegram").then(() => (bridge ? tgBridgeCardFill : telegramCardFill)(slot)).catch(e => {
     slot.innerHTML = "";
     slot.appendChild(el("span", { class: "hint" }, e.message));
   });
@@ -6173,6 +6031,7 @@ async function renderSettings(view) {
   // settingsIndex walks the page.
   view.appendChild(accountCard(authState));
   view.appendChild(telegramCard());
+  view.appendChild(telegramCard(true));
 
   // Appearance — client-side prefs (theme + language persist in localStorage, not server config).
   const themeSel = el("select", {},
@@ -6273,6 +6132,10 @@ async function renderSettings(view) {
   // Proxy core
   const sbBin = txt(cfg.singbox && cfg.singbox.bin, "/opt/sbin/sing-box");
   const sbCfg = txt(cfg.singbox && cfg.singbox.config, "/opt/etc/wayhop/singbox.json");
+  // Core override (config.CoreOverride): merged into the generated config last; the daemon refuses
+  // an invalid one on save, and Apply still runs sing-box check on the result.
+  const coreOverride = el("textarea", { placeholder: '{"log": {"level": "info"}}', "aria-label": t("Core override (JSON)") });
+  coreOverride.value = cfg.core_override || "";
   const clashCtl = txt(cfg.clash && cfg.clash.controller, "127.0.0.1:9090");
   const clashSecF = secretInput(cfg.clash && cfg.clash.secret, t("optional"), "Clash API secret");
   const clashSec = clashSecF.input;
@@ -6305,6 +6168,8 @@ async function renderSettings(view) {
   // Watchdog (webhook may embed a token → masked)
   const wdURLF = secretInput(cfg.watchdog && cfg.watchdog.notify_url, "https://… (optional, blank = off)", "notification URL");
   const wdURL = wdURLF.input;
+  // Scheduled core restart (config.CoreRestart): HH:MM daily in router time, or Nh; empty = never.
+  const coreRestart = txt(cfg.core_restart, "04:30 / 6h");
   // Fail-safe (Apply rollback)
   const fsTarget = txt(cfg.failsafe && cfg.failsafe.target, "1.1.1.1");
   const fsReboot = el("input", { type: "checkbox" }); fsReboot.checked = !!(cfg.failsafe && cfg.failsafe.auto_reboot);
@@ -6457,8 +6322,10 @@ async function renderSettings(view) {
       ports: { ui: +pUI.value || 0, clash: +pClash.value || 0, dns: +pDNS.value || 0, mixed: +pMixed.value || 0 },
       clash: { controller: clashCtl.value.trim(), secret: clashSec.value },
       singbox: { bin: sbBin.value.trim(), config: sbCfg.value.trim() },
+      core_override: coreOverride.value.trim(),
       updater: { ...(cfg.updater || {}), mirrors },
       watchdog: { ...(cfg.watchdog || {}), notify_url: wdURL.value.trim() },
+      core_restart: coreRestart.value.trim(),
       failsafe: { ...(cfg.failsafe || {}), target: fsTarget.value.trim(), auto_reboot: fsReboot.checked },
       allowed_hosts: allowedHosts.value.split("\n").map(s => s.trim()).filter(Boolean),
     };
@@ -6503,12 +6370,12 @@ async function renderSettings(view) {
 
     save.disabled = true; status.textContent = t("saving…");
     try {
-      const r = await api.put("/api/config", next);
+      const r = await api.put("/api/config", next, { "If-Match": cfg.rev });
       status.textContent = "";
       const routeModeChanged = (next.routing_mode || "") !== lastSavedRouteMode;
       const offloadNow = (next.offload || "") + "|" + ((next.offload_devices || []).join(" "));
       const offloadChanged = offloadNow !== lastSavedOffload;
-      cfg = next;
+      cfg = { ...next, rev: r.rev };
       lastSavedRouteMode = next.routing_mode || "";
       lastSavedOffload = offloadNow;
       baseline = JSON.stringify(collectSettings()); _settingsDirty = false; dirtyBadge.style.display = "none";
@@ -6539,6 +6406,7 @@ async function renderSettings(view) {
       "Which interface the panel answers on. Blank means all of them. The port is set under "
       + "Ports → Web UI.")));
 
+  // The override's hint sits inside its field: the settings index renders each .field as one row.
   view.appendChild(el("div", { class: "card", "data-section": "Routing & core" },
     el("div", { class: "card-title", style: "margin-bottom:12px" }, t("Proxy core")),
     el("div", { style: "display:flex;gap:12px;flex-wrap:wrap" },
@@ -6546,7 +6414,9 @@ async function renderSettings(view) {
       el("div", { style: "flex:1;min-width:220px" }, field(t("sing-box config"), sbCfg, true))),
     el("div", { style: "display:flex;gap:12px;flex-wrap:wrap" },
       el("div", { style: "flex:1;min-width:220px" }, field(t("Clash controller"), clashCtl)),
-      el("div", { style: "flex:1;min-width:220px" }, field(t("Clash secret"), clashSecF.row)))));
+      el("div", { style: "flex:1;min-width:220px" }, field(t("Clash secret"), clashSecF.row))),
+    field(t("Core override (JSON)"), el("div", {}, coreOverride, el("div", { class: "hint", style: "margin-top:6px" },
+      t("Applied to the generated sing-box config last: keys merge, null deletes, arrays replace; \"prepend\" puts outbounds and rules first. The review lists what it changes."))))));
 
   view.appendChild(el("div", { class: "card", "data-section": "Panel" },
     el("div", { class: "card-title", style: "margin-bottom:12px" }, t("Ports"), restartTag()),
@@ -6569,7 +6439,9 @@ async function renderSettings(view) {
   view.appendChild(el("div", { class: "card", "data-section": "Reliability" },
     el("div", { class: "card-title", style: "margin-bottom:8px" }, t("Watchdog alerts")),
     el("div", { class: "hint", style: "margin-bottom:10px" }, t("Optional webhook POSTed {\"text\":\"…\"} on each sing-box crash-restart (e.g. a Telegram bot endpoint). Leave blank to disable.")),
-    field(t("Notify webhook URL"), wdURLF.row)));
+    field(t("Notify webhook URL"), wdURLF.row),
+    field(t("Scheduled core restart"), coreRestart),
+    el("div", { class: "hint", style: "margin-top:6px" }, t("HH:MM daily (router time) or Nh, e.g. 6h; empty = never. Drops all live connections."))));
 
   view.appendChild(el("div", { class: "card", "data-section": "Reliability" },
     el("div", { class: "card-title", style: "margin-bottom:8px" }, t("Fail-safe")),
@@ -6651,6 +6523,7 @@ async function renderSettings(view) {
     try {
       const r = await api.post("/api/backup/restore", parsed);
       toast(t("Restored {0} connections, {1} groups, {2} servers — review and press Apply to activate.", r.endpoints, r.groups, r.servers), "ok");
+      if (r.routing_mode_note) toast(r.routing_mode_note, "err"); // QA-153
       await loadProfile();
       route();
     } catch (e) { toast(e.message, "err"); }
@@ -6699,6 +6572,11 @@ async function loadProfile() {
   p.routing_lists = p.routing_lists || [];
   // Nested: a group's members can be null too (dashboard/Failover call .map on it).
   p.groups.forEach(g => { g.members = g.members || []; });
+  // Every object remembers its own revision (see ifMatch). Not enumerable, so a copy ({...e}) or a
+  // save body never carries it.
+  const revs = p.revs || {};
+  ["endpoints", "groups", "routing_lists"].forEach(k => p[k].forEach(o =>
+    Object.defineProperty(o, "_rev", { value: (revs[k] || {})[o.id], writable: true })));
   state.profile = p;
   updateDirty();
   refreshApplyState(); // authoritative pending from the backend — runs on load + after every mutation
@@ -6815,7 +6693,7 @@ function csRow(ch, onUndo) {
       flags.childNodes.length ? flags : null),
     el("button", {
       class: "btn btn-ghost btn-sm", type: "button", title: t("Undo this change"),
-      onclick: () => onUndo(ch.field ? { scope: "field", id: ch.id, field: ch.field } : { scope: "object", id: ch.id }),
+      onclick: () => onUndo({ scope: ch.field ? "field" : "object", id: ch.id, field: ch.field, object_type: ch.object_type }),
     }, t("Undo")));
 }
 

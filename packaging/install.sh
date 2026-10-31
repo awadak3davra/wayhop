@@ -44,6 +44,9 @@ Options:
       --dry-run    run every check and print what WOULD change; make NO changes
       --with-awg[=auto|kmod|userspace]
                    then install AmneziaWG 3.1 with install-awg.sh (exit 2 if it is refused)
+      --cleanup    only reclaim space: remove what earlier installs and updates left behind,
+                   keep one rollback copy (compressed); with --dry-run, list it and change nothing
+      --drop-rollback  with --cleanup: remove the rollback copy too
   -h, --help       show this help and exit
 
 arch is auto-detected when omitted. Idempotent: re-running upgrades in place.
@@ -56,6 +59,7 @@ USAGE
 # ---------------------------------------------------------------------------
 ASSUME=""           # "", "yes", "no"
 DRY_RUN=0
+CLEANUP=0; DROP_ROLLBACK=0
 NO_START=0
 PORT=8088
 FORCE_ARCH=""
@@ -73,12 +77,15 @@ while [ $# -gt 0 ]; do
     --arch=*)    FORCE_ARCH="${1#*=}" ;;
     --no-start)  NO_START=1 ;;
     --dry-run)   DRY_RUN=1 ;;
+    --cleanup)   CLEANUP=1 ;;
+    --drop-rollback) DROP_ROLLBACK=1 ;;
     -h|--help)   usage ;;
     mipsle|mips|arm|arm64|amd64) FORCE_ARCH="$1" ;;
     *) die "unknown option: $1 (try --help)" ;;
   esac
   shift
 done
+[ "$DROP_ROLLBACK" = 1 ] && [ "$CLEANUP" != 1 ] && die "--drop-rollback only goes with --cleanup"
 case "$PORT" in ''|*[!0-9]*) die "invalid --port: '$PORT'" ;; esac
 { [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ]; } || die "--port out of range 1-65535: $PORT"
 case "$AWG_MODE" in auto|kmod|userspace) ;; *) die "invalid --with-awg mode '$AWG_MODE' (want auto, kmod or userspace)" ;; esac
@@ -234,7 +241,371 @@ with_awg() { # extra install-awg.sh args... -> 0 done, 1 failed, 2 refused
 }
 # <<< with-awg hook
 
+# >>> space + leftovers (tests: packaging/test/openwrt_upgrade_harness.sh)
+# The overlay is the one resource an upgrade can run out of: 60 MiB on the test router with a fifth of it
+# free, against a ~14 MiB binary. The upgrade used to need room for TWO more binaries (the new one,
+# and a fresh copy of the old one as the rollback) while the previous rollback copy still sat beside
+# them: ~30 MiB on a box with 13-20 free. It then failed half-way, with the service already stopped
+# and a partial wayhop.new holding what little room there had been.
+#
+# Now: (1) what WayHop itself left behind is removed first (staging files of an interrupted install
+# or panel update, builds under the project's old names, duplicate copies, orphaned temp dirs);
+# (2) the rollback copy is a HARD LINK to the current binary, so writing it costs nothing: when the
+# new binary is renamed over the old name, the old inode stays behind under the .bak name; (3) where
+# even the new binary alone does not fit, the rollback copy is kept gzip-compressed (~40%), verified
+# against the binary's digest, and the old binary is removed only after that and with the service
+# stopped (the init script restores from it if power is lost before the new binary lands); (4) only
+# when none of that fits does it refuse, before anything is stopped, with the exact MiB to free.
+# Older copies of WayHop builds go only when the upgrade needs their room, or on --cleanup. Never
+# touched: the running binary, the config, and anything not provably WayHop's.
+MARGIN_KB=2048          # head-room left free after every step (flash file systems need some)
+STAGE_AGE_MIN=10        # a staging file younger than this may be a panel update still writing it
+TMP_AGE_MIN=30          # an installer temp dir younger than this may belong to a run in progress
+ENGINES="sing-box mihomo xray hysteria dnscrypt-proxy amneziawg-go olcrtc"   # the updater's BinNames, plus olcrtc, which earlier builds installed
+UPG="/tmp/wayhop-upgrade.$$"
+LEFT="$UPG/leftovers"
+GZ_STAGED=""
+trap 'rm -rf "$UPG" 2>/dev/null' EXIT
+upg_dir() { [ -d "$UPG" ] || (umask 077; mkdir -p "$UPG") || die "could not create $UPG"; }
+kib_of() { [ -f "$1" ] || { echo 0; return; }; _b="$(wc -c < "$1" 2>/dev/null | tr -d ' ')"; echo $(( (${_b:-0} + 1023) / 1024 )); }
+mib_of() { echo $(( ($1 + 1023) / 1024 )); }
+avail_kib() { df -Pk "$1" 2>/dev/null | awk 'NR == 2 && $4 ~ /^[0-9]+$/ { print $4 }'; }
+mount_of() { df -Pk "$1" 2>/dev/null | awk 'NR == 2 { print $6 }'; }
+# What deleting this name gives back: a directory's usage; nothing for a file another name still holds.
+freed_kib() {
+  if [ -d "$1" ]; then du -sk "$1" 2>/dev/null | awk '{ print $1; exit }'; return; fi
+  [ -f "$1" ] || { echo 0; return; }
+  # shellcheck disable=SC2012  # the link count: OpenWrt's busybox has no stat
+  _l="$(ls -ld "$1" 2>/dev/null | awk '{ print $2 }')"
+  if [ "${_l:-1}" -gt 1 ] 2>/dev/null; then echo 0; return; fi
+  du -k "$1" 2>/dev/null | awk '{ print $1; exit }'
+}
+sha_of() { [ -f "$1" ] && sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
+# "Provably WayHop's": an ELF executable carrying a WayHop build's own package paths (the project was
+# called velinx and wakeroute before). A file that merely has a matching name is left alone.
+is_wayhop_build() {
+  { [ -f "$1" ] && [ ! -h "$1" ]; } || return 1
+  [ "$(dd if="$1" bs=1 skip=1 count=3 2>/dev/null)" = ELF ] || return 1
+  grep -q -e 'wayhop/internal/' -e 'velinx/internal/' -e 'wakeroute/internal/' "$1" 2>/dev/null
+}
+recent() { [ -n "$(find "$1" -maxdepth 0 -mmin "-$2" 2>/dev/null)" ]; }
+left_add() { printf '%s\t%s\t%s\t%s\n' "$1" "${2:-0}" "$3" "$4" >> "$LEFT"; }   # tier KiB path why
+
+# scan_leftovers upgrade|cleanup -> $LEFT, one line per item: tier, KiB it frees, path, reason.
+#   dead      always safe: nothing can use it (an upgrade removes these before it measures)
+#   ram       the same, but in /tmp, which is RAM: it is not overlay space, it is memory
+#   obsolete  an older WayHop build kept beside the binary: removed on --cleanup, or when the upgrade
+#             needs its room (the upgrade writes a fresh rollback copy of the current binary anyway)
+#   rollback  the one rollback copy --cleanup keeps (removed only with --drop-rollback)
+scan_leftovers() {
+  upg_dir; : > "$LEFT"; : > "$UPG/older"
+  _busy=0; pidof wayhop >/dev/null 2>&1 && _busy=1
+  # Staging files of an interrupted install (this script's names) or panel self-update (the daemon's).
+  for _f in "$SBIN/wayhop.new" "$SBIN/wayhop.bak.new" "$SBIN/wayhop.bak.gz.new" "$SBIN/wayhop.rb" \
+            "$SBIN/wayhop.bak.tmp" "$SBIN/.wayhop.new" "$SVC.new" /lib/upgrade/keep.d/wayhop.new; do
+    [ -f "$_f" ] || continue
+    if [ "$_busy" = 1 ] && recent "$_f" "$STAGE_AGE_MIN"; then
+      info "keeping $_f: written in the last $STAGE_AGE_MIN min while WayHop runs (an update in progress?)"; continue
+    fi
+    left_add dead "$(freed_kib "$_f")" "$_f" "unfinished install or update"
+  done
+  # Builds under the project's earlier names. While their service exists the migration below moves it;
+  # once it is gone nothing runs them, and the config paths they were built for no longer exist.
+  for _o in velinx wakeroute; do
+    [ -x "$INITD/${INIT_PREFIX}$_o" ] && continue
+    for _f in "$SBIN/$_o" "$SBIN/$_o.bak" "$SBIN/$_o".bak-*; do
+      is_wayhop_build "$_f" && left_add dead "$(freed_kib "$_f")" "$_f" "a build under the old '$_o' name; nothing runs it"
+    done
+    for _f in "$SBIN/$_o.new" "$SBIN/.$_o.new" "$SBIN/$_o.bak.new" "$SBIN/$_o.bak.tmp"; do
+      [ -f "$_f" ] && left_add dead "$(freed_kib "$_f")" "$_f" "unfinished install under the old '$_o' name"
+    done
+  done
+  # Copies of WayHop builds beside the binary, as hand deploys kept them (wayhop.bak-<commit>). One
+  # identical to the binary or to the rollback copy is a duplicate; any other is an older build.
+  _cur="$(sha_of "$SBIN/wayhop")"; _bak="$(sha_of "$SBIN/wayhop.bak")"
+  for _f in "$SBIN"/wayhop.bak-*; do
+    is_wayhop_build "$_f" || continue
+    _s="$(sha_of "$_f")"
+    if [ -n "$_s" ] && [ "$_s" = "$_cur" ]; then left_add dead "$(freed_kib "$_f")" "$_f" "a duplicate of the installed binary"
+    elif [ -n "$_s" ] && [ "$_s" = "$_bak" ]; then left_add dead "$(freed_kib "$_f")" "$_f" "a duplicate of the rollback copy"
+    else printf '%s\n' "$_f" >> "$UPG/older"; fi
+  done
+  # An apk install up to 0.5.8 published the package's binary as a second, identical copy; on
+  # --cleanup the live name becomes a hard link of the package file (freed when the daemon restarts).
+  _pk=/usr/libexec/wayhop/wayhop
+  if [ "$1" = cleanup ] && [ -f "$_pk" ] && [ -f "$SBIN/wayhop" ] && [ ! "$_pk" -ef "$SBIN/wayhop" ] &&
+     [ -n "$_cur" ] && [ "$(sha_of "$_pk")" = "$_cur" ]; then
+    left_add relink "$(freed_kib "$SBIN/wayhop")" "$SBIN/wayhop" "a second copy of the package's $_pk; now a hard link of it (the room frees when WayHop next restarts)"
+  fi
+  # The rolling rollback copy is wayhop.bak or wayhop.bak.gz; with both, the older one is obsolete.
+  _rb=""
+  if [ -f "$SBIN/wayhop.bak" ] && [ -f "$SBIN/wayhop.bak.gz" ]; then
+    if [ "$SBIN/wayhop.bak.gz" -nt "$SBIN/wayhop.bak" ]; then
+      _rb="$SBIN/wayhop.bak.gz"; left_add obsolete "$(freed_kib "$SBIN/wayhop.bak")" "$SBIN/wayhop.bak" "older than the compressed rollback copy"
+    else
+      _rb="$SBIN/wayhop.bak"; left_add obsolete "$(freed_kib "$SBIN/wayhop.bak.gz")" "$SBIN/wayhop.bak.gz" "older than the plain rollback copy"
+    fi
+  elif [ -f "$SBIN/wayhop.bak" ]; then _rb="$SBIN/wayhop.bak"
+  elif [ -f "$SBIN/wayhop.bak.gz" ]; then _rb="$SBIN/wayhop.bak.gz"; fi
+  # With no rolling copy, --cleanup keeps the newest older build as the rollback copy instead.
+  if [ -z "$_rb" ] && [ "$1" = cleanup ]; then
+    while IFS= read -r _f; do { [ -z "$_rb" ] || [ "$_f" -nt "$_rb" ]; } && _rb="$_f"; done < "$UPG/older"
+  fi
+  while IFS= read -r _f; do
+    [ "$_f" = "$_rb" ] || left_add obsolete "$(freed_kib "$_f")" "$_f" "an older WayHop build"
+  done < "$UPG/older"
+  [ "$1" = cleanup ] && [ -n "$_rb" ] && left_add rollback "$(freed_kib "$_rb")" "$_rb" "the rollback copy"
+  # Engines the panel installs beside the configured sing-box: their staging files, and an
+  # amneziawg-go gzip superseded by the plain binary its version record now describes.
+  _sb="$(sed -n 's/.*"bin"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ETC/config.json" 2>/dev/null | head -n1)"
+  _sd=/usr/bin; case "$_sb" in /*/*) _sd="${_sb%/*}" ;; esac
+  for _e in $ENGINES; do
+    for _f in "$_sd/$_e.new" "$_sd/$_e.new.zip" "$_sd/$_e.gz.new" "$_sd/.$_e.version.new"; do
+      [ -f "$_f" ] || continue
+      if [ "$_busy" = 1 ] && recent "$_f" "$STAGE_AGE_MIN"; then continue; fi
+      left_add dead "$(freed_kib "$_f")" "$_f" "unfinished panel install of $_e"
+    done
+  done
+  _r="$(awk 'NR == 1 { print $2, $3 }' "$_sd/.amneziawg-go.version" 2>/dev/null)"
+  if [ -f "$_sd/amneziawg-go.gz" ] && [ -f "$_sd/amneziawg-go" ] && [ "$_r" = "0 $(wc -c < "$_sd/amneziawg-go" | tr -d ' ')" ]; then
+    left_add dead "$(freed_kib "$_sd/amneziawg-go.gz")" "$_sd/amneziawg-go.gz" "a compressed amneziawg-go the installed binary superseded"
+  fi
+  # Temp dirs of installer runs and panel self-updates that never finished (bootstrap, this script,
+  # install-awg.sh, the daemon's RAM staging). Never this run's own, never one whose process is
+  # alive, never a recent one.
+  for _d in /tmp/wayhop-boot.* /tmp/wayhop-awg.* /tmp/install-awg.* /tmp/wayhop-upgrade.* /tmp/wayhop-selfupdate.* /tmp/tmp.*; do
+    [ -d "$_d" ] && [ "$_d" != "$UPG" ] || continue
+    case "$SRC/" in "$_d"/*) continue ;; esac
+    case "$_d" in /tmp/tmp.*) { [ -f "$_d/SHA256SUMS.txt" ] && [ -f "$_d/x/install.sh" ]; } || continue ;; esac
+    _p="${_d##*.}"; case "$_p" in ''|*[!0-9]*) ;; *) [ -d "/proc/$_p" ] && continue ;; esac
+    recent "$_d" "$TMP_AGE_MIN" && continue
+    left_add ram "$(freed_kib "$_d")" "$_d" "temp dir of an installer run that did not finish (RAM, not flash)"
+  done
+}
+sum_leftovers() { # tiers... -> KiB they free
+  [ -s "$LEFT" ] || { echo 0; return; }
+  awk -F '\t' -v t=" $* " 'index(t, " " $1 " ") { s += $2 } END { print s + 0 }' "$LEFT"
+}
+list_leftovers() { # verb tiers...
+  _v="$1"; shift
+  [ -s "$LEFT" ] || return 0
+  while IFS="$(printf '\t')" read -r _t _k _f _w; do
+    case " $* " in *" $_t "*) ;; *) continue ;; esac
+    if [ "$_t" = relink ]; then info "${_v%% *} link $_f ($(mib_of "$_k") MiB) -- $_w"
+    else info "$_v $_f ($(mib_of "$_k") MiB) -- $_w"; fi
+  done < "$LEFT"
+}
+remove_leftovers() { # tiers... -> removes them; RECLAIMED_KB is what that freed
+  RECLAIMED_KB=0
+  [ -s "$LEFT" ] || return 0
+  while IFS="$(printf '\t')" read -r _t _k _f _w; do
+    case " $* " in *" $_t "*) ;; *) continue ;; esac
+    if [ "$_t" = relink ]; then   # replaced by a link of the identical package file, never removed
+      rm -f "$_f.rb"
+      if ln /usr/libexec/wayhop/wayhop "$_f.rb" 2>/dev/null && mv "$_f.rb" "$_f"; then
+        RECLAIMED_KB=$((RECLAIMED_KB + _k)); info "linked $_f ($(mib_of "$_k") MiB) -- $_w"
+      else rm -f "$_f.rb"; warn "could not link $_f to the package file -- left as it was"; fi
+      continue
+    fi
+    if [ -d "$_f" ]; then rm -rf "$_f"; else rm -f "$_f"; fi
+    if [ -e "$_f" ]; then warn "could not remove $_f"; continue; fi
+    RECLAIMED_KB=$((RECLAIMED_KB + _k)); info "removed $_f ($(mib_of "$_k") MiB) -- $_w"
+  done < "$LEFT"
+}
+biggest_files() { # the largest files on the overlay, so the refusal names where the room went
+  [ -d /overlay/upper ] || return 0
+  find /overlay/upper -xdev -type f -size +1024k 2>/dev/null | while IFS= read -r _f; do
+    printf '%s\t%s\n' "$(du -k "$_f" 2>/dev/null | cut -f1)" "${_f#/overlay/upper}"
+  done | sort -rn | head -n 5 | while IFS="$(printf '\t')" read -r _k _f; do info "  $(mib_of "$_k") MiB  $_f"; done
+}
+
+# gz_rollback SRC: SRC gzip-compressed to $SBIN/wayhop.bak.gz and checked against SRC's own digest
+# before it replaces anything. Prepared in /tmp (RAM) when there is room, so the overlay never holds
+# a half-written copy. 0 on success; on failure nothing is left behind and the existing copies stand.
+gz_rollback() {
+  _want="$(sha_of "$1")"; [ -n "$_want" ] || return 1
+  rm -f "$SBIN/wayhop.bak.gz.new"
+  _st="$GZ_STAGED"
+  if [ -z "$_st" ] && [ "$(avail_kib /tmp)" -ge $(( $(kib_of "$1") + 1024 )) ] 2>/dev/null; then
+    upg_dir; gzip -c "$1" > "$UPG/rollback.gz" 2>/dev/null && _st="$UPG/rollback.gz"
+  fi
+  if [ -n "$_st" ]; then cp "$_st" "$SBIN/wayhop.bak.gz.new" 2>/dev/null
+  else gzip -c "$1" > "$SBIN/wayhop.bak.gz.new" 2>/dev/null; fi || { rm -f "$SBIN/wayhop.bak.gz.new"; return 1; }
+  [ "$(gzip -dc "$SBIN/wayhop.bak.gz.new" 2>/dev/null | sha256sum | cut -d' ' -f1)" = "$_want" ] ||
+    { rm -f "$SBIN/wayhop.bak.gz.new"; return 1; }
+  sync
+  mv "$SBIN/wayhop.bak.gz.new" "$SBIN/wayhop.bak.gz" || { rm -f "$SBIN/wayhop.bak.gz.new"; return 1; }
+}
+
+# plan_space [extra KiB] -> PLAN: fresh | raw | gz | none | unknown, with the numbers the messages use.
+# extra is what a --dry-run would have reclaimed first. raw: the new binary alone must fit, after the
+# superseded rollback copy goes (the new rollback copy is a hard link). gz: the compressed copy of the
+# current binary must fit, and then the new binary in the room the removed old one leaves.
+plan_space() {
+  NEW_KB="$(kib_of "$BIN")"; AV_KB="$(avail_kib "$SBIN")"; PLAN=unknown
+  [ -n "$AV_KB" ] || return 0
+  AV_KB=$((AV_KB + ${1:-0}))
+  if [ ! -f "$SBIN/wayhop" ]; then
+    NEED_KB=$((NEW_KB + MARGIN_KB)); ROOM_KB=$AV_KB; PLAN=fresh
+    [ "$ROOM_KB" -ge "$NEED_KB" ] || PLAN=none
+    return 0
+  fi
+  OLD_KB="$(freed_kib "$SBIN/wayhop")"     # 0 while another name (a package's copy) holds the inode
+  BAK_KB=0
+  if [ -f "$SBIN/wayhop.bak" ] && [ ! "$SBIN/wayhop.bak" -ef "$SBIN/wayhop" ]; then BAK_KB=$(freed_kib "$SBIN/wayhop.bak"); fi
+  [ -f "$SBIN/wayhop.bak.gz" ] && BAK_KB=$((BAK_KB + $(freed_kib "$SBIN/wayhop.bak.gz")))
+  ROOM_KB=$((AV_KB + BAK_KB))
+  RAW_NEED_KB=$((NEW_KB + MARGIN_KB))
+  if [ "$ROOM_KB" -ge "$RAW_NEED_KB" ]; then PLAN=raw; NEED_KB=$RAW_NEED_KB; return 0; fi
+  NEED_KB=$RAW_NEED_KB; PLAN=none
+  [ "${OLD_KB:-0}" -gt 0 ] 2>/dev/null || return 0     # removing the old binary would free nothing
+  if [ -z "$GZ_STAGED" ] && [ "$DRY_RUN" != 1 ] && [ "$(avail_kib /tmp)" -ge $(( $(kib_of "$SBIN/wayhop") + 1024 )) ] 2>/dev/null; then
+    upg_dir
+    if gzip -c "$SBIN/wayhop" > "$UPG/rollback.gz" 2>/dev/null; then GZ_STAGED="$UPG/rollback.gz"; else rm -f "$UPG/rollback.gz"; fi
+  fi
+  if [ -n "$GZ_STAGED" ]; then GZ_KB="$(kib_of "$GZ_STAGED")"; else GZ_KB=$(( $(kib_of "$SBIN/wayhop") * 55 / 100 )); fi
+  GZ_NEED_KB=$((GZ_KB + MARGIN_KB))
+  [ "$NEW_KB" -gt "$OLD_KB" ] && GZ_NEED_KB=$((GZ_NEED_KB + NEW_KB - OLD_KB))
+  [ "$GZ_NEED_KB" -lt "$NEED_KB" ] && NEED_KB=$GZ_NEED_KB
+  [ "$ROOM_KB" -ge "$GZ_NEED_KB" ] && PLAN=gz
+  return 0
+}
+
+# --cleanup: reclaim space without installing anything. The running binary, the config and the one
+# rollback copy stay (that copy is compressed where it is plain; --drop-rollback removes it).
+# shellcheck disable=SC2086  # $_tiers is a list of tier words, split on purpose
+cleanup_main() {
+  hdr "Cleanup"
+  _fs="$(mount_of "$SBIN")"; _a0="$(avail_kib "$SBIN")"
+  [ -n "$_a0" ] && info "free on ${_fs:-$SBIN}: $(mib_of "$_a0") MiB"
+  scan_leftovers cleanup
+  _tiers="dead ram obsolete relink"; [ "$DROP_ROLLBACK" = 1 ] && _tiers="$_tiers rollback"
+  _rbf="$(awk -F '\t' '$1 == "rollback" { print $3 }' "$LEFT")"
+  _squash=0
+  if [ "$DROP_ROLLBACK" != 1 ] && [ "$_rbf" != "${_rbf%.gz}" ]; then :
+  elif [ "$DROP_ROLLBACK" != 1 ] && [ -n "$_rbf" ] && [ ! "$_rbf" -ef "$SBIN/wayhop" ]; then _squash=1; fi
+  _sum="$(sum_leftovers $_tiers)"
+  if [ "$_sum" -eq 0 ] && [ "$_squash" = 0 ]; then
+    ok "nothing to reclaim: no leftovers of earlier WayHop installs or updates"
+    [ -n "$_rbf" ] && info "kept: $_rbf (the rollback copy; --drop-rollback removes it)"
+    return 0
+  fi
+  if [ "$DRY_RUN" = 1 ]; then
+    list_leftovers "would remove" $_tiers
+    [ "$_squash" = 1 ] && info "would compress $_rbf to $SBIN/wayhop.bak.gz (about 40% of its $(mib_of "$(kib_of "$_rbf")") MiB)"
+    [ "$DROP_ROLLBACK" != 1 ] && [ -n "$_rbf" ] && info "would keep: $_rbf (the rollback copy)"
+    say "dry-run: about $(mib_of "$_sum") MiB would be freed$([ "$_squash" = 1 ] && echo ', more with the compressed rollback copy'); nothing was changed"
+    return 0
+  fi
+  remove_leftovers $_tiers
+  if [ "$_squash" = 1 ]; then
+    if gz_rollback "$_rbf"; then
+      rm -f "$_rbf"; ok "rollback copy compressed: $SBIN/wayhop.bak.gz ($(mib_of "$(kib_of "$SBIN/wayhop.bak.gz")") MiB)"
+    else
+      warn "could not compress the rollback copy -- kept $_rbf as it was"
+    fi
+  fi
+  _a1="$(avail_kib "$SBIN")"
+  if [ -n "$_a0" ] && [ -n "$_a1" ]; then
+    ok "reclaimed $(mib_of $((_a1 > _a0 ? _a1 - _a0 : 0))) MiB on ${_fs:-$SBIN} (free now: $(mib_of "$_a1") MiB)"
+  else
+    ok "reclaimed about $(mib_of "$RECLAIMED_KB") MiB"
+  fi
+  [ "$DROP_ROLLBACK" != 1 ] && [ -f "$SBIN/wayhop.bak.gz" ] && info "kept: $SBIN/wayhop.bak.gz (the rollback copy; --drop-rollback removes it)"
+  [ "$DROP_ROLLBACK" != 1 ] && [ -f "$SBIN/wayhop.bak" ] && info "kept: $SBIN/wayhop.bak (the rollback copy; --drop-rollback removes it)"
+  return 0
+}
+# restore_rollback: the rollback copy back under the binary's name -- a link of the plain copy, or
+# the compressed one unpacked and checked against the digest it was taken with. The service is
+# stopped. Unpacked in /tmp first where there is room, so the failed binary goes only once a good
+# copy is in hand.
+restore_rollback() {
+  rm -f "$SBIN/wayhop.rb"
+  if [ -f "$SBIN/wayhop.bak" ]; then
+    ln "$SBIN/wayhop.bak" "$SBIN/wayhop.rb" 2>/dev/null || cp "$SBIN/wayhop.bak" "$SBIN/wayhop.rb" || { rm -f "$SBIN/wayhop.rb"; return 1; }
+    RESTORED_FROM="$SBIN/wayhop.bak"
+  elif [ -f "$SBIN/wayhop.bak.gz" ]; then
+    _u=""
+    if [ "$(avail_kib /tmp)" -ge $(( $(kib_of "$SBIN/wayhop.bak.gz") * 4 + 1024 )) ] 2>/dev/null; then
+      upg_dir; gzip -dc "$SBIN/wayhop.bak.gz" > "$UPG/restore" 2>/dev/null && _u="$UPG/restore"
+      [ -z "$_u" ] || [ -z "${OLD_SHA:-}" ] || [ "$(sha_of "$_u")" = "$OLD_SHA" ] || return 1
+    fi
+    rm -f "$SBIN/wayhop"   # the failed binary: its room is what the unpacked copy needs
+    if [ -n "$_u" ]; then cp "$_u" "$SBIN/wayhop.rb" 2>/dev/null
+    else gzip -dc "$SBIN/wayhop.bak.gz" > "$SBIN/wayhop.rb" 2>/dev/null; fi || { rm -f "$SBIN/wayhop.rb"; return 1; }
+    [ -z "${OLD_SHA:-}" ] || [ "$(sha_of "$SBIN/wayhop.rb")" = "$OLD_SHA" ] || { rm -f "$SBIN/wayhop.rb"; return 1; }
+    RESTORED_FROM="$SBIN/wayhop.bak.gz"
+  else
+    return 1
+  fi
+  chmod 0755 "$SBIN/wayhop.rb" && sync && mv "$SBIN/wayhop.rb" "$SBIN/wayhop"
+}
+# swap_fail MSG: the new binary did not land. Put the old one back if it had been removed, start the
+# service again if this run stopped it, and only then stop with the message.
+swap_fail() {
+  rm -f "$SBIN/wayhop.new" "$SBIN/wayhop.bak.new" "$SBIN/wayhop.bak.gz.new"
+  if [ ! -f "$SBIN/wayhop" ]; then
+    restore_rollback || warn "could not restore the previous binary -- by hand: gzip -dc $SBIN/wayhop.bak.gz > $SBIN/wayhop && chmod 0755 $SBIN/wayhop"
+  fi
+  [ "${STOPPED:-0}" = 1 ] && { "$SVC" start 2>/dev/null || true; }
+  die "$1"
+}
+wait_stopped() { _i=0; while pidof wayhop >/dev/null 2>&1; do [ "$_i" -ge 10 ] && return 1; sleep 1; _i=$((_i + 1)); done; }
+
+# The update as the supervisor sees it (internal/updatetx/verify.sh, written beside the config as
+# update-verify.sh): the marker is written just before the new binary takes the name and removed once
+# this run has judged the result itself; a power cut in between leaves it for the init to finish at
+# boot. The result is what the panel and the bot report afterwards.
+tx_mark() { # <rollback copy>
+  _nl="$("$BIN" --version 2>/dev/null | head -n 1)"
+  _nv="$(printf '%s' "$_nl" | sed -n 's/^wayhop \([^ ]*\) .*/\1/p')"
+  _nc="$(printf '%s' "$_nl" | sed -n 's/^wayhop [^ ]* (\([0-9a-f]*\),.*/\1/p')"
+  TX_TO="$_nl"   # for tx_done, which runs after a rollback too, when "$SBIN/wayhop" is the old build again
+  printf 'bin=%s\ninit=%s\nconfig=%s\nrollback=%s\nnorollback=\nwant_commit=%s\nwant_version=%s\nfrom=%s\nto=%s\nby=installer\nwindow=90\nboots=0\n' \
+    "$SBIN/wayhop" "$SVC" "$ETC/config.json" "$1" "$_nc" "$_nv" "${PREV_VER:-}" "$_nv" > "$ETC/update.pending.new" &&
+    mv "$ETC/update.pending.new" "$ETC/update.pending" &&
+    sync   # the sync before tx_mark covers the binary, not this file: a power cut could keep the rename
+           # and lose the data, and verify.sh drops an empty marker at boot, so a broken build stays
+}
+tx_done() { # <ok|rolled_back|failed> <reason>
+  [ -f "$ETC/update.pending" ] || return 0
+  rm -f "$ETC/update.pending"
+  _je() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\n\r'; }
+  printf '{"result":"%s","reason":"%s","from":"%s","to":"%s","by":"installer","at":%s}\n' "$1" "$(_je "$2")" \
+    "$(_je "${PREV_VER:-}")" "$(_je "${TX_TO:-$("$SBIN/wayhop" --version 2>/dev/null | head -n 1)}")" "$(date +%s)" > "$ETC/update-result.json.new" &&
+    mv "$ETC/update-result.json.new" "$ETC/update-result.json"
+}
+# The supervisor itself, from the binary being installed (a build that predates it prints no script).
+install_verifier() {
+  "$BIN" update-verifier > "$ETC/update-verify.sh.new" 2>/dev/null
+  if [ "$(head -n 1 "$ETC/update-verify.sh.new" 2>/dev/null)" = '#!/bin/sh' ]; then
+    chmod 0755 "$ETC/update-verify.sh.new" && mv "$ETC/update-verify.sh.new" "$ETC/update-verify.sh"
+  else
+    rm -f "$ETC/update-verify.sh.new"
+  fi
+}
+# Once the new build has proved itself: a plain rollback copy on a nearly full flash is compressed.
+# Below one more binary's worth (+ head-room) free, the next binary-sized write -- an update's staging,
+# an engine -- cannot land, so the ~60% the copy gives back matters more than restoring it by link.
+squash_if_tight() {
+  { [ -f "$SBIN/wayhop.bak" ] && [ ! "$SBIN/wayhop.bak" -ef "$SBIN/wayhop" ]; } || return 0
+  _sf="$(avail_kib "$SBIN")"; _sn=$(( $(kib_of "$SBIN/wayhop") + MARGIN_KB ))
+  { [ -n "$_sf" ] && [ "$_sf" -lt "$_sn" ]; } || return 0
+  if gz_rollback "$SBIN/wayhop.bak"; then
+    rm -f "$SBIN/wayhop.bak"
+    ok "the overlay is nearly full ($(mib_of "$_sf") MiB free): the rollback copy is kept compressed -> $SBIN/wayhop.bak.gz"
+  fi
+}
+# <<< space + leftovers
+
 SRC="$(cd "$(dirname "$0")" && pwd)"
+# Entware paths, here because the shared space block below reads them.
+SBIN=/opt/sbin
+INITD=/opt/etc/init.d
+ETC=/opt/etc/wayhop
+VAR=/opt/var/wayhop
+INIT_PREFIX=S99          # the init is $INITD/${INIT_PREFIX}wayhop (OpenWrt: none)
+SVC="$INITD/${INIT_PREFIX}wayhop"
 # Banner version read from the bundled binary (the tarball ships one wayhop-<arch> for this router's
 # CPU), so it can never drift from what is actually installed. Falls back quietly if it won't run.
 VERSION=""
@@ -263,6 +634,7 @@ if [ -f /bin/ndmc ] || grep -qiE 'keenetic|-ndm-' /proc/version 2>/dev/null; the
 else
   PLATFORM=entware
 fi
+if [ "$CLEANUP" = 1 ]; then cleanup_main; exit 0; fi
 
 detect_arch() {
   case "$(uname -m)" in
@@ -400,8 +772,6 @@ fi
 # ===========================================================================
 hdr "Conflicts"
 
-INITD="/opt/etc/init.d"
-ETC="/opt/etc/wayhop"
 
 # best-effort: who listens on tcp :$1  -> echoes a short "prog/pid" string for display
 port_listener() {
@@ -555,6 +925,50 @@ fi
 if [ "$UNRESOLVED" -gt 0 ]; then warn "$UNRESOLVED conflict(s) left as-is -- continuing anyway"
 else ok "no blocking conflicts"; fi
 
+# ===========================================================================
+# Space
+# ===========================================================================
+# Decided here, before anything is stopped: a refusal leaves the running WayHop exactly as it was.
+hdr "Space"
+scan_leftovers upgrade
+DEAD_KB="$(sum_leftovers dead)"; OBS_KB="$(sum_leftovers obsolete)"
+FS="$(mount_of "$SBIN")"; FS="${FS:-$SBIN}"
+if [ "$DRY_RUN" = 1 ]; then
+  list_leftovers "would remove" dead ram
+  plan_space "$DEAD_KB"
+  if [ "$PLAN" = none ] && [ "$OBS_KB" -gt 0 ]; then
+    list_leftovers "would remove (the upgrade needs its room)" obsolete
+    plan_space $((DEAD_KB + OBS_KB))
+  fi
+else
+  remove_leftovers dead ram
+  [ "$RECLAIMED_KB" -gt 0 ] && ok "reclaimed $(mib_of "$RECLAIMED_KB") MiB that earlier installs and updates left behind"
+  plan_space
+  if [ "$PLAN" = none ] && [ "$OBS_KB" -gt 0 ]; then
+    info "older WayHop builds beside the binary are in the way -- removing them (the upgrade keeps a fresh rollback copy of the current binary)"
+    remove_leftovers obsolete
+    plan_space
+  fi
+fi
+case "$PLAN" in
+  fresh) ok "free on $FS: $(mib_of "$AV_KB") MiB; the binary needs $(mib_of "$NEED_KB") MiB" ;;
+  raw)   ok "free on $FS: $(mib_of "$ROOM_KB") MiB; the upgrade needs $(mib_of "$NEED_KB") MiB (the rollback copy is a hard link: it costs no space)" ;;
+  gz)    warn "free on $FS: $(mib_of "$ROOM_KB") MiB -- not enough for the new binary beside the old one ($(mib_of "$RAW_NEED_KB") MiB)"
+         info "the old binary is kept as a compressed rollback copy (~$(mib_of "$GZ_KB") MiB) and removed, with the service stopped, before the new one is written ($(mib_of "$NEED_KB") MiB needed)" ;;
+  none)
+    warn "not enough free space on $FS to install this safely"
+    warn "  free: $(mib_of "$ROOM_KB") MiB, after removing what earlier WayHop installs and updates left behind"
+    if [ -f "$SBIN/wayhop" ] && [ "${OLD_KB:-0}" -gt 0 ] 2>/dev/null; then
+      warn "  needed: $(mib_of "$NEED_KB") MiB -- the new binary ($(mib_of "$NEW_KB") MiB) in the room the old one leaves, the old one kept compressed (~$(mib_of "$GZ_KB") MiB) as the rollback copy, and $(mib_of "$MARGIN_KB") MiB head-room"
+    else
+      warn "  needed: $(mib_of "$NEED_KB") MiB -- the binary ($(mib_of "$NEW_KB") MiB) and $(mib_of "$MARGIN_KB") MiB head-room"
+    fi
+    if [ -d /overlay/upper ]; then warn "  the largest files on the overlay:"; biggest_files; fi
+    die "free at least $(mib_of $((NEED_KB - ROOM_KB))) MiB more on $FS (remove packages or files you no longer need), then re-run. Nothing was changed$([ "$UPGRADE" = 1 ] && echo '; the running WayHop was not stopped')."
+    ;;
+  *)     warn "could not measure the free space on $SBIN -- continuing; every write below still fails closed" ;;
+esac
+
 # ---------------------------------------------------------------------------
 # Under --dry-run we stop here, before any change.
 # ---------------------------------------------------------------------------
@@ -574,8 +988,6 @@ fi
 # ===========================================================================
 hdr "Install"
 
-SBIN="/opt/sbin"
-VAR="/opt/var/wayhop"
 if [ -x "$SBIN/wayhop" ]; then
   PREV_VER="$("$SBIN/wayhop" --version 2>/dev/null | head -1)"
   [ -n "$PREV_VER" ] && info "upgrading from: $PREV_VER"
@@ -620,43 +1032,59 @@ done
 for _p in $(pgrep_f "$ETC/singbox.json" 2>/dev/null); do kill "$_p" 2>/dev/null || true; done
 mkdir -p "$SBIN" "$INITD" "$ETC" "$VAR" || die "could not create install directories"
 
-if [ -x "$INITD/S99wayhop" ]; then
-  say "stopping existing service"
-  "$INITD/S99wayhop" stop 2>/dev/null || true
-  sleep 1
-fi
-
-# binary: stage -> back up previous -> atomic rename
-say "installing binary -> $SBIN/wayhop"
-cp "$BIN" "$SBIN/wayhop.new" || die "failed to copy binary"
-chmod 0755 "$SBIN/wayhop.new" || die "failed to chmod binary"
-if [ -f "$SBIN/wayhop" ]; then
-  rm -f "$SBIN/wayhop.bak.new"
-  cp "$SBIN/wayhop" "$SBIN/wayhop.bak.new" || {
-    rm -f "$SBIN/wayhop.bak.new" "$SBIN/wayhop.new"
-    die "could not create the rollback backup; the existing binary was not replaced"
-  }
-  cmp -s "$SBIN/wayhop" "$SBIN/wayhop.bak.new" || {
-    rm -f "$SBIN/wayhop.bak.new" "$SBIN/wayhop.new"
-    die "rollback backup verification failed; the existing binary was not replaced"
-  }
-  mv "$SBIN/wayhop.bak.new" "$SBIN/wayhop.bak" || {
-    rm -f "$SBIN/wayhop.bak.new" "$SBIN/wayhop.new"
-    die "could not publish the rollback backup; the existing binary was not replaced"
-  }
-fi
-mv "$SBIN/wayhop.new" "$SBIN/wayhop" || die "failed to install binary"
-ok "binary installed ($(wc -c < "$SBIN/wayhop" 2>/dev/null) bytes)"
-
-# init script (bundled in the tarball)
+# The init script goes in before the binary is touched: it is what puts the binary back from the
+# rollback copy should the power fail inside the window the compressed-copy swap below opens.
 HAVE_INIT=0
 if [ -f "$SRC/S99wayhop" ]; then
-  say "installing init script -> $INITD/S99wayhop"
-  if cp "$SRC/S99wayhop" "$INITD/S99wayhop" && chmod 0755 "$INITD/S99wayhop"; then HAVE_INIT=1; ok "init script installed"
-  else warn "could not install init script -- service won't auto-start on boot"; fi
+  say "installing init script -> $SVC"
+  if cp "$SRC/S99wayhop" "$SVC.new" && chmod 0755 "$SVC.new" && mv "$SVC.new" "$SVC"; then HAVE_INIT=1; ok "init script installed"
+  else rm -f "$SVC.new"; warn "could not install init script -- service won't auto-start on boot"; fi
 else
   warn "S99wayhop not found next to the installer (incomplete tarball?) -- no boot auto-start; will start the daemon directly"
 fi
+install_verifier
+
+STOPPED=0
+if [ "$UPGRADE" = 1 ] && [ -x "$SVC" ]; then
+  say "stopping existing service"; "$SVC" stop 2>/dev/null || true; sleep 1; STOPPED=1
+fi
+
+say "installing binary -> $SBIN/wayhop"
+OLD_SHA=""
+if [ -f "$SBIN/wayhop" ]; then
+  OLD_SHA="$(sha_of "$SBIN/wayhop")"
+  if [ "$PLAN" = gz ]; then
+    say "keeping the old binary as a compressed rollback copy -> $SBIN/wayhop.bak.gz"
+    # The superseded plain copy goes first only when the compressed one does not fit beside it.
+    gz_rollback "$SBIN/wayhop" || { [ -f "$SBIN/wayhop.bak" ] && rm -f "$SBIN/wayhop.bak" && gz_rollback "$SBIN/wayhop"; } ||
+      swap_fail "could not write a verified compressed rollback copy; the existing binary was not replaced"
+    rm -f "$SBIN/wayhop.bak"
+    wait_stopped || swap_fail "the running WayHop did not stop; the existing binary was not replaced"
+    rm -f "$SBIN/wayhop"   # its bytes live on in wayhop.bak.gz, checked against its digest above
+    ok "rollback copy: $SBIN/wayhop.bak.gz ($(mib_of "$(kib_of "$SBIN/wayhop.bak.gz")") MiB, verified)"
+  else
+    rm -f "$SBIN/wayhop.bak.new"
+    # A hard link: when the new binary is renamed over the old name the old inode stays behind under
+    # the .bak name, so the rollback copy takes no space. A file system without links gets a copy.
+    ln "$SBIN/wayhop" "$SBIN/wayhop.bak.new" 2>/dev/null || cp "$SBIN/wayhop" "$SBIN/wayhop.bak.new" ||
+      swap_fail "could not create the rollback backup; the existing binary was not replaced"
+    [ "$SBIN/wayhop.bak.new" -ef "$SBIN/wayhop" ] || cmp -s "$SBIN/wayhop" "$SBIN/wayhop.bak.new" ||
+      swap_fail "rollback backup verification failed; the existing binary was not replaced"
+    mv "$SBIN/wayhop.bak.new" "$SBIN/wayhop.bak" ||
+      swap_fail "could not publish the rollback backup; the existing binary was not replaced"
+    rm -f "$SBIN/wayhop.bak.gz"   # superseded by the plain copy of the current binary
+  fi
+fi
+cp "$BIN" "$SBIN/wayhop.new" || swap_fail "could not write the new binary (out of space?); the existing binary was not replaced"
+cmp -s "$BIN" "$SBIN/wayhop.new" || swap_fail "the written binary does not match the package; the existing binary was not replaced"
+chmod 0755 "$SBIN/wayhop.new" || swap_fail "failed to chmod binary"
+sync
+# Recorded just before the name changes hands (see tx_mark); a fresh install has nothing to roll back to.
+if [ -n "$OLD_SHA" ]; then
+  if [ "$PLAN" = gz ]; then tx_mark "$SBIN/wayhop.bak.gz"; else tx_mark "$SBIN/wayhop.bak"; fi
+fi
+mv "$SBIN/wayhop.new" "$SBIN/wayhop" || { tx_done failed "the new binary could not take the name"; swap_fail "failed to install binary"; }
+ok "binary installed"
 
 # Persist the uninstaller next to the config so removal works long after the tmpfs-extracted
 # tarball is gone (the "how do I remove this months later" trap -- /tmp/wr vanishes on reboot).
@@ -710,6 +1138,7 @@ fi
 # 6. START + HEALTH CHECK
 # ===========================================================================
 if [ "$NO_START" = 1 ]; then
+  tx_done ok "installed by the installer; not started (--no-start), so not judged"
   hdr "Done (not started)"
   say "installed but not started (--no-start). Start later: $INITD/S99wayhop start"
   native_summary
@@ -786,13 +1215,15 @@ fi
 #     restore the previous binary and restart it, so a bad update never strands the router. The
 #     preserved config is untouched (upgrades never rewrite it), so only the binary is reverted. ---
 ROLLED_BACK=0
-if [ "$HEALTHY" != 1 ] && [ "${HEALTH_CHECKED:-0}" = 1 ] && [ "$UPGRADE" = 1 ] && [ -f "$SBIN/wayhop.bak" ]; then
+if [ "$HEALTHY" != 1 ] && [ "${HEALTH_CHECKED:-0}" = 1 ] && [ "$UPGRADE" = 1 ] && { [ -f "$SBIN/wayhop.bak" ] || [ -f "$SBIN/wayhop.bak.gz" ]; }; then
   warn "new version did not answer on :$PORT within the timeout -- rolling back to the previous binary"
-  [ "$HAVE_INIT" = 1 ] && "$INITD/S99wayhop" stop 2>/dev/null
+  [ "$HAVE_INIT" = 1 ] && "$SVC" stop 2>/dev/null
   for _p in $(pgrep_f "$ETC/singbox.json" 2>/dev/null); do kill "$_p" 2>/dev/null || true; done
   sleep 1
-  if cp "$SBIN/wayhop.bak" "$SBIN/wayhop"; then
-    ok "restored the previous binary from $SBIN/wayhop.bak"
+  wait_stopped || { _wp="$(pidof wayhop 2>/dev/null)"; [ -z "$_wp" ] || kill -9 $_wp 2>/dev/null; }
+  if restore_rollback; then
+    ok "restored the previous binary from $RESTORED_FROM"
+    tx_done rolled_back "the new build did not answer on :$PORT after the installer started it"
     if [ "$HAVE_INIT" = 1 ]; then "$INITD/S99wayhop" start 2>/dev/null || true
     else ( "$SBIN/wayhop" --config "$ETC/config.json" >/dev/null 2>&1 & ); fi
     sleep 2
@@ -809,13 +1240,21 @@ if [ "$HEALTHY" != 1 ] && [ "${HEALTH_CHECKED:-0}" = 1 ] && [ "$UPGRADE" = 1 ] &
     if [ "$HEALTHY" = 1 ]; then warn "rolled back -- the PREVIOUS version is running on :$PORT; the update did NOT apply. Check the logs, then retry."
     else warn "rolled back, but the previous version is not answering on :$PORT either -- check: logread 2>/dev/null | grep wayhop"; fi
   else
-    die "ROLLBACK FAILED: could not restore $SBIN/wayhop.bak. Restore by hand: cp $SBIN/wayhop.bak $SBIN/wayhop && $INITD/S99wayhop restart"
+    if [ -f "$SBIN/wayhop.bak" ]; then
+      die "ROLLBACK FAILED: could not restore $SBIN/wayhop.bak. Restore by hand: cp $SBIN/wayhop.bak $SBIN/wayhop && $SVC restart"
+    fi
+    die "ROLLBACK FAILED: could not restore $SBIN/wayhop.bak.gz. Restore by hand: gzip -dc $SBIN/wayhop.bak.gz > $SBIN/wayhop && chmod 0755 $SBIN/wayhop && $SVC restart"
   fi
 fi
 
 IP="$(guess_lan_ip)"
 [ -z "$IP" ] && IP="$(uname -n 2>/dev/null)"
 
+if [ "${ROLLED_BACK:-0}" != 1 ]; then
+  if [ "$HEALTHY" = 1 ]; then tx_done ok "installed by the installer and answering on :$PORT"; squash_if_tight
+  elif [ "${HEALTH_CHECKED:-0}" != 1 ]; then tx_done ok "installed by the installer; not judged (no curl or wget here)"
+  else tx_done failed "the new build did not answer on :$PORT and there was no rollback copy to restore"; fi
+fi
 INSTALLED_VER="$("$SBIN/wayhop" --version 2>/dev/null | head -1)"
 hdr "Done"
 [ -n "$INSTALLED_VER" ] && ok "version:  $INSTALLED_VER"

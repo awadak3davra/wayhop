@@ -38,6 +38,9 @@ type NativeResolver struct {
 	ViaTunnel bool   `json:"via_tunnel"`       // routed through the VPN (enriched later); false = unknown/direct
 	Tier      int    `json:"tier,omitempty"`   // 1 hidden(VPN) · 2 WAN-encrypted · 3 geo-fallback
 	Source    string `json:"source,omitempty"` // provenance tag for write-back (e.g. "https-dns-proxy[0]")
+	// ListenAddr is where an adopted https-dns-proxy instance listens (its listen_addr, else the
+	// package's global one; "" = the package default 127.0.0.1). The write-back points dnsmasq there.
+	ListenAddr string `json:"listen_addr,omitempty"`
 }
 
 // NativeDNS is the whole adopted native resolver stack, ordered by preference (the tier order the

@@ -36,6 +36,8 @@ type IpsetOptions struct {
 	DNSIntercept bool
 	// DNSInterceptLAN is the interface clients arrive on (default br0 on KeeneticOS). Redirecting on
 	// the WAN side would capture the router's own upstream queries and loop them back into itself.
+	// The teardown deletes the redirect and the refusals on this interface whether or not the two
+	// switches are on: the plane it replaces may have had them on, so a caller sets it on every plane.
 	DNSInterceptLAN string
 	// DNSRejectEncrypted additionally refuses DoT (tcp/853) and the well-known public DoH endpoints,
 	// so a client that hardcodes an ENCRYPTED resolver falls back to plain 53 — which the redirect
@@ -80,6 +82,68 @@ var WellKnownDoHEndpoints = []string{
 	"94.140.14.14", "94.140.15.15", // AdGuard
 	"77.88.8.8", "77.88.8.1", // Yandex
 }
+
+// dnsRule is one rule of the DNS interception, in a chain NDM owns. The script and the teardown both
+// render from dnsRedirectRules and dnsRejectRules, so every rule the script can add is one the
+// teardown deletes.
+type dnsRule struct {
+	table string // "nat" or "filter"
+	chain string
+	add   string // -A or -I
+	spec  string
+}
+
+// dnsRedirectRules send clients' plain DNS arriving on lan to the router's own resolver.
+func dnsRedirectRules(lan string) []dnsRule {
+	var out []dnsRule
+	for _, proto := range []string{"udp", "tcp"} {
+		out = append(out, dnsRule{table: "nat", chain: "PREROUTING", add: "-A",
+			spec: "-i " + lan + " -p " + proto + " --dport 53 -j REDIRECT --to-ports 53"})
+	}
+	return out
+}
+
+// dnsRejectRules refuse DoT and DoH to WellKnownDoHEndpoints for clients arriving on lan.
+func dnsRejectRules(lan string) []dnsRule {
+	// DoT has a port of its own, so it can be refused precisely.
+	out := []dnsRule{{table: "filter", chain: "FORWARD", add: "-I",
+		spec: "-i " + lan + " -p tcp --dport 853 -j REJECT --reject-with tcp-reset"}}
+	// DoH cannot be, except at the few addresses everyone hardcodes.
+	for _, ip := range WellKnownDoHEndpoints {
+		out = append(out, dnsRule{table: "filter", chain: "FORWARD", add: "-I",
+			spec: "-i " + lan + " -p tcp -d " + ip + " --dport 443 -j REJECT --reject-with tcp-reset"})
+	}
+	return out
+}
+
+// iptablesTableArg is the `-t` option for table, empty for filter: the script has never named the
+// filter table, and its bytes stay what routers already run.
+func iptablesTableArg(table string) string {
+	if table == "" || table == "filter" {
+		return ""
+	}
+	return "-t " + table + " "
+}
+
+// writeAdd renders the idempotent check-then-add the netfilter.d hook can re-run after every rebuild.
+func (r dnsRule) writeAdd(b *strings.Builder) {
+	t := iptablesTableArg(r.table)
+	fmt.Fprintf(b, "iptables %s-C %s %s 2>/dev/null || iptables %s%s %s %s\n", t, r.chain, r.spec, t, r.add, r.chain, r.spec)
+}
+
+// IptablesDeleteEveryCopy renders the teardown line that deletes one rule of a chain NDM owns, every
+// copy of it: a lock race or an older build can have added the rule twice, and one -D would leave the
+// other. The executor matches a teardown against it, so the two cannot spell the delete differently.
+func IptablesDeleteEveryCopy(table, chain, spec string) string {
+	return "while iptables " + iptablesTableArg(table) + "-D " + chain + " " + spec + " 2>/dev/null; do :; done\n"
+}
+
+// FilterSectionEnd closes the filter-table section RenderIptablesScript puts first when it refuses
+// encrypted DNS. NDM rebuilds the filter table on its own and drops the FORWARD refusals with it, so
+// the netfilter.d hook answers filter:iptables for a script carrying this line, and the script stops
+// here on that event: the mangle flush and rebuild below would be work for a table that has none of
+// it. Apply runs the script without $table, so it never stops here.
+const FilterSectionEnd = "case \"$table:$type\" in filter:iptables) exit 0 ;; esac\n"
 
 func (o *IpsetOptions) withDefaults() {
 	if o.Chain == "" {
@@ -320,6 +384,15 @@ func (pl *Plan) RenderIptablesScript(io IpsetOptions) string {
 	io.withDefaults()
 	mask := hexMark(pl.Mask)
 	var b strings.Builder
+	// The encrypted-DNS refusals are the plane's only filter-table rules, so they come first, as a
+	// section of their own that ends at FilterSectionEnd (see there).
+	if io.DNSIntercept && io.DNSInterceptLAN != "" && io.DNSRejectEncrypted {
+		b.WriteString("# filter: refuse DoT and the well-known DoH addresses. A filter rebuild re-runs only this part.\n")
+		for _, r := range dnsRejectRules(io.DNSInterceptLAN) {
+			r.writeAdd(&b)
+		}
+		b.WriteString(FilterSectionEnd)
+	}
 	emit := func(ipt, fam string) {
 		ch := io.Chain
 		fmt.Fprintf(&b, "%s -t mangle -N %s 2>/dev/null || true\n", ipt, ch)
@@ -429,6 +502,14 @@ func (pl *Plan) RenderIptablesScript(io IpsetOptions) string {
 		}
 		// Mirror the chosen egress mark into the connmark (conntrack attribution; routing-inert).
 		fmt.Fprintf(&b, "%s -t mangle -A %s -j CONNMARK --save-mark --nfmask %s --ctmask %s\n", ipt, ch, mask, mask)
+		// A KeeneticOS access policy's slot becomes the policy's whole mark only now, after the save: the
+		// connection keeps the slot, so a packet whose destination left the set is restored onto the slot
+		// above and rewritten here like the first one. NDM's own rule then routes it, by the table and
+		// ladder NDM keeps for that policy.
+		for _, ps := range pl.NDMPolicySlots() {
+			fmt.Fprintf(&b, "%s -t mangle -A %s -m mark --mark %s/%s -j MARK --set-xmark %s/0xffffffff\n",
+				ipt, ch, hexMark(ps.Slot), mask, hexMark(ps.Mark))
+		}
 		// Ensure the jump from PREROUTING exists (appended → runs AFTER S86's pos-1 mark).
 		fmt.Fprintf(&b, "%s -t mangle -C PREROUTING -j %s 2>/dev/null || %s -t mangle -A PREROUTING -j %s\n", ipt, ch, ipt, ch)
 	}
@@ -453,21 +534,11 @@ func (pl *Plan) RenderIptablesScript(io IpsetOptions) string {
 	// for. REDIRECT (not DNAT) because the destination is the router itself — it rewrites to the
 	// interface's own address without us having to know it, which matters on a box whose LAN address
 	// the operator can change. Idempotent check→append, like every rule here, because the netfilter.d
-	// hook re-runs this script after each NDM firewall rebuild.
+	// hook re-runs this script after each NDM firewall rebuild. The encrypted-DNS refusals that go
+	// with it are at the top of the script, in the filter section.
 	if io.DNSIntercept && io.DNSInterceptLAN != "" {
-		for _, proto := range []string{"udp", "tcp"} {
-			fmt.Fprintf(&b, "iptables -t nat -C PREROUTING -i %s -p %s --dport 53 -j REDIRECT --to-ports 53 2>/dev/null || iptables -t nat -A PREROUTING -i %s -p %s --dport 53 -j REDIRECT --to-ports 53\n",
-				io.DNSInterceptLAN, proto, io.DNSInterceptLAN, proto)
-		}
-		if io.DNSRejectEncrypted {
-			// DoT has a port of its own, so it can be refused precisely.
-			fmt.Fprintf(&b, "iptables -C FORWARD -i %s -p tcp --dport 853 -j REJECT --reject-with tcp-reset 2>/dev/null || iptables -I FORWARD -i %s -p tcp --dport 853 -j REJECT --reject-with tcp-reset\n",
-				io.DNSInterceptLAN, io.DNSInterceptLAN)
-			// DoH cannot be, except at the few addresses everyone hardcodes.
-			for _, ip := range WellKnownDoHEndpoints {
-				fmt.Fprintf(&b, "iptables -C FORWARD -i %s -p tcp -d %s --dport 443 -j REJECT --reject-with tcp-reset 2>/dev/null || iptables -I FORWARD -i %s -p tcp -d %s --dport 443 -j REJECT --reject-with tcp-reset\n",
-					io.DNSInterceptLAN, ip, io.DNSInterceptLAN, ip)
-			}
+		for _, r := range dnsRedirectRules(io.DNSInterceptLAN) {
+			r.writeAdd(&b)
 		}
 	}
 	// TCP MSS clamping (QW1): iptables FORWARD mangle TCPMSS per kernel tunnel egress.
@@ -553,6 +624,15 @@ func (pl *Plan) RenderIPScript(opt Options) string {
 			fmt.Fprintf(&b, "ip route replace blackhole default table %d\n", e.Table)
 		}
 	}
+	// An access policy's own rule is NDM's (priority 100-109 on a live router), and so is the blackhole
+	// that follows it. This is the backstop for the hours between Applies: a policy deleted or renumbered
+	// in NDM takes its rule with it, and a packet still carrying its mark would fall through every
+	// WayHop rule to the main table - the WAN. While NDM's rule exists it matches first and this never
+	// fires. BusyBox ip parses the "blackhole" rule type (rtm_map.c).
+	for _, ps := range pl.NDMPolicySlots() {
+		fmt.Fprintf(&b, "ip rule del fwmark %s blackhole priority %d 2>/dev/null || true\n", hexMark(ps.Mark), ndmPolicyBackstopPref(opt))
+		fmt.Fprintf(&b, "ip rule add fwmark %s blackhole priority %d\n", hexMark(ps.Mark), ndmPolicyBackstopPref(opt))
+	}
 	// IPv6 datapath, symmetric with v4 — a MARKED v6 packet to a censored dst must route
 	// THROUGH the tunnel table, not fall through to the main v6 table (which on a device
 	// whose v6 default is the WAN egresses the WAN = a censorship leak). Emitted only when
@@ -573,25 +653,37 @@ func (pl *Plan) RenderIPScript(opt Options) string {
 				fmt.Fprintf(&b, "ip -6 route add default dev %s table %d 2>/dev/null || true\n", e.Iface, e.Table)
 				if e.FailClosed {
 					// Kill switch (v6) — mirror the v4 fail-closed blackhole above + render.go (fail-safe).
-					fmt.Fprintf(&b, "ip -6 route replace blackhole default metric %d table %d 2>/dev/null || true\n", failClosedMetric, e.Table)
+					fmt.Fprintf(&b, "ip -6 route replace blackhole default metric %d table %d 2>/dev/null || true\n", failClosedMetricV6, e.Table)
 				}
 			case EgressBlackhole:
 				fmt.Fprintf(&b, "ip -6 route replace blackhole default table %d\n", e.Table)
 			}
 		}
+		// The v6 backstop matters more: on a live router some NDM policy marks have v4 rules only.
+		for _, ps := range pl.NDMPolicySlots() {
+			fmt.Fprintf(&b, "ip -6 rule del fwmark %s blackhole priority %d 2>/dev/null || true\n", hexMark(ps.Mark), ndmPolicyBackstopPref(opt))
+			fmt.Fprintf(&b, "ip -6 rule add fwmark %s blackhole priority %d\n", hexMark(ps.Mark), ndmPolicyBackstopPref(opt))
+		}
 	}
 	return b.String()
 }
 
+// ndmPolicyBackstopPref sits just above the private-destination excludes (RulePref-3..-1), so a
+// policy-marked packet NDM no longer routes is dropped before anything WayHop owns can route it.
+func ndmPolicyBackstopPref(opt Options) int { return opt.RulePref - 4 }
+
 // RenderTeardownScript removes everything the Keenetic plane installed: the PREROUTING jump,
-// our mangle chain, the ip rules + table routes, and the kernel sets.
+// our mangle chain, the DNS redirect and the encrypted-DNS refusals, the ip rules + table routes,
+// and the kernel sets.
 func (pl *Plan) RenderTeardownScript(opt Options, io IpsetOptions) string {
 	opt.withDefaults()
 	io.withDefaults()
 	mask := hexMark(pl.Mask)
 	var b strings.Builder
 	for _, ipt := range []string{"iptables", "ip6tables"} {
-		fmt.Fprintf(&b, "%s -t mangle -D PREROUTING -j %s 2>/dev/null || true\n", ipt, io.Chain)
+		// Delete every jump, not one: duplicates left by lock races before QA-067 kept the chain
+		// referenced, so -X failed quietly and the extras outlived routing-off until a reboot.
+		fmt.Fprintf(&b, "while %s -t mangle -D PREROUTING -j %s 2>/dev/null; do :; done\n", ipt, io.Chain)
 		fmt.Fprintf(&b, "%s -t mangle -F %s 2>/dev/null || true\n", ipt, io.Chain)
 		fmt.Fprintf(&b, "%s -t mangle -X %s 2>/dev/null || true\n", ipt, io.Chain)
 	}
@@ -603,6 +695,15 @@ func (pl *Plan) RenderTeardownScript(opt Options, io IpsetOptions) string {
 	}
 	for _, dev := range io.masqDevices() {
 		fmt.Fprintf(&b, "iptables -t nat -D POSTROUTING -o %s -j MASQUERADE 2>/dev/null || true\n", dev)
+	}
+	// The DNS redirect and the refusals go whatever this plane's own switches say. This script runs
+	// when the plane is replaced (a switch turned off), when the mode leaves the kernel plane and when
+	// routing is turned off, and the plane it removes may have been rendered with them on. They sit in
+	// chains NDM owns, so nothing else would take them out before NDM's next rebuild of those tables.
+	if lan := io.DNSInterceptLAN; lan != "" {
+		for _, r := range append(dnsRedirectRules(lan), dnsRejectRules(lan)...) {
+			b.WriteString(IptablesDeleteEveryCopy(r.table, r.chain, r.spec))
+		}
 	}
 	// TCP MSS clamping teardown (QW1): remove TCPMSS rules from the FORWARD chain.
 	seenMSS := map[string]bool{}
@@ -624,11 +725,17 @@ func (pl *Plan) RenderTeardownScript(opt Options, io IpsetOptions) string {
 	for _, x := range privateExcludes(opt) {
 		fmt.Fprintf(&b, "ip rule del to %s lookup main priority %d 2>/dev/null || true\n", x.CIDR, x.Priority)
 	}
+	for _, ps := range pl.NDMPolicySlots() {
+		fmt.Fprintf(&b, "ip rule del fwmark %s blackhole priority %d 2>/dev/null || true\n", hexMark(ps.Mark), ndmPolicyBackstopPref(opt))
+	}
 	if pl.hasV6Zone() || len(pl.BypassV6) > 0 {
 		for i, e := range pl.nonWanEgresses() {
 			pref := opt.RulePref + i
 			fmt.Fprintf(&b, "ip -6 rule del fwmark %s/%s table %d priority %d 2>/dev/null || true\n", hexMark(e.Mark), mask, e.Table, pref)
 			fmt.Fprintf(&b, "ip -6 route flush table %d 2>/dev/null || true\n", e.Table)
+		}
+		for _, ps := range pl.NDMPolicySlots() {
+			fmt.Fprintf(&b, "ip -6 rule del fwmark %s blackhole priority %d 2>/dev/null || true\n", hexMark(ps.Mark), ndmPolicyBackstopPref(opt))
 		}
 		for _, x := range privateExcludesV6(opt) {
 			fmt.Fprintf(&b, "ip -6 rule del to %s lookup main priority %d 2>/dev/null || true\n", x.CIDR, x.Priority)

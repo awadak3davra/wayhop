@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,6 +52,9 @@ type Store struct {
 // Open loads the profile at path, creating an empty one if it does not exist.
 func Open(path string) (*Store, error) {
 	s := &Store{path: path}
+	// A temp a crash left between atomicfile.Write's create and rename is a full copy of the profile,
+	// endpoint keys included, that nothing else removes. No writer exists before Open returns.
+	atomicfile.RemoveStale(path)
 	data, err := os.ReadFile(path)
 	// Treat a missing OR empty/whitespace-only file identically: start from an empty
 	// profile and rewrite a valid file. An existing zero-length / whitespace-only file
@@ -62,7 +67,7 @@ func Open(path string) (*Store, error) {
 			log.Printf("wayhop: profile %s is empty; recreating empty profile", path)
 		}
 		empty := model.Profile{}
-		s.cur.Store(&published{p: &empty})
+		s.cur.Store(&published{p: &empty, gen: startGen()})
 		return s, s.persist(&empty)
 	}
 	if err != nil {
@@ -72,8 +77,28 @@ func Open(path string) (*Store, error) {
 	if err := json.Unmarshal(data, &p); err != nil {
 		return nil, fmt.Errorf("parse profile %s: %w", path, err)
 	}
-	s.cur.Store(&published{p: &p})
+	s.cur.Store(&published{p: &p, gen: startGen()})
 	return s, nil
+}
+
+// startGen is the generation a freshly opened store starts counting from.
+//
+// The generation leaves the process: the DNS page hands it out as a rev and the browser sends it back
+// as If-Match, from a tab that outlives a daemon restart. Starting at 0 on every Open made the new
+// process hand out the same numbers again, so a tab holding rev 1 from before the restart passed the
+// compare-and-set after one write by another tab and silently undid that write. A random start per
+// process makes a pre-restart rev stale in practice.
+//
+// math/rand/v2 rather than crypto/rand: this is a uniqueness token, not a secret, and the runtime
+// seeds it from the kernel's per-exec random bytes without a syscall that can block. crypto/rand's
+// getrandom waits for the kernel pool, which on a router early in boot can hold Open, and with it
+// the panel, for as long as the pool takes.
+//
+// >> 12 keeps the start below 2^52. The rev reaches the panel as a JSON number and JavaScript holds
+// numbers as doubles, exact only up to 2^53; a larger rev would come back rounded and every DNS save
+// would be refused as stale. 2^52 of headroom is more writes than a router will ever make.
+func startGen() uint64 {
+	return rand.Uint64() >> 12
 }
 
 // Profile returns the current profile as a value whose top-level slices share the
@@ -147,6 +172,15 @@ func cloneProfile(src *model.Profile) model.Profile {
 	// writer's private copy. Members + each list's ScopeGroups are shared by reference and only ever
 	// REPLACED wholesale (Upsert swaps the group; DeleteDeviceGroup assigns a fresh ScopeGroups).
 	p.DeviceGroups = append([]model.DeviceGroup{}, src.DeviceGroups...)
+	// DNS is a pointer, so `p := *src` shared the published plane itself, and repointDependents and
+	// parkDependents write each server's Detour in place: a delete or disable rewrote what lock-free
+	// readers were using before validation ran, and kept the change when the write was refused.
+	if src.DNS != nil {
+		dns := *src.DNS
+		dns.Servers = append([]model.DNSServer{}, src.DNS.Servers...)
+		dns.Rules = append([]model.DNSRule{}, src.DNS.Rules...)
+		p.DNS = &dns
+	}
 	return p
 }
 
@@ -173,6 +207,9 @@ func (s *Store) Replace(p model.Profile) error {
 	// Clone before publishing: the caller may retain aliases to p's slices, and a published
 	// profile must be immutable, so no external writer may hold our backing arrays.
 	cp := cloneProfile(&p)
+	for i := range cp.Endpoints {
+		cp.Endpoints[i].Import = "" // never stored (model.Endpoint.Import)
+	}
 	return s.publish(&cp)
 }
 
@@ -191,20 +228,43 @@ func (s *Store) Reconcile(fn func(p *model.Profile) bool) error {
 
 // UpsertEndpoint inserts or replaces an endpoint by ID.
 func (s *Store) UpsertEndpoint(e model.Endpoint) error {
+	_, err := s.UpsertEndpointAt(e, AnyRev)
+	return err
+}
+
+// UpsertEndpointAt is UpsertEndpoint committed only while the stored endpoint is still at rev (see Rev).
+func (s *Store) UpsertEndpointAt(e model.Endpoint, rev Rev) (Saved, error) {
 	if e.ID == "" {
-		return errors.New("endpoint id is required")
+		return Saved{}, errors.New("endpoint id is required")
 	}
+	e.Import = "" // a parse's format, never stored (model.Endpoint.Import)
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
 	p := s.snapshot()
+	at := -1
 	for i := range p.Endpoints {
 		if p.Endpoints[i].ID == e.ID {
-			p.Endpoints[i] = e
-			return s.publish(&p)
+			at = i
+			break
 		}
 	}
-	p.Endpoints = append(p.Endpoints, e)
-	return s.publish(&p)
+	var saved Saved
+	if at >= 0 {
+		saved.Was = model.EndpointRev(p.Endpoints[at])
+	}
+	if err := checkRev(rev, at >= 0, saved.Was); err != nil {
+		return saved, err
+	}
+	if at >= 0 {
+		p.Endpoints[at] = e
+	} else {
+		p.Endpoints = append(p.Endpoints, e)
+	}
+	if err := s.publish(&p); err != nil {
+		return saved, err
+	}
+	saved.Rev = model.EndpointRev(e)
+	return saved, nil
 }
 
 // UpsertEndpoints inserts-or-replaces many endpoints by ID in a SINGLE snapshot+publish under one
@@ -215,11 +275,25 @@ func (s *Store) UpsertEndpoint(e model.Endpoint) error {
 // so it can't regress on a profile a prior unvalidated upsert left imperfect. An endpoint with an
 // empty ID is skipped and its input index returned in skipped.
 func (s *Store) UpsertEndpoints(eps []model.Endpoint) (skipped []int, err error) {
+	return s.upsertEndpoints(eps, false, 0)
+}
+
+// UpsertEndpointsIfGen is UpsertEndpoints committed only while the profile is still at generation
+// wantGen, else refused with ErrStaleGen: for a writer that merged eps from a snapshot (the bulk import
+// merges a re-imported link into the stored connection) and must not write that merge over a newer one.
+func (s *Store) UpsertEndpointsIfGen(eps []model.Endpoint, wantGen uint64) (skipped []int, err error) {
+	return s.upsertEndpoints(eps, true, wantGen)
+}
+
+func (s *Store) upsertEndpoints(eps []model.Endpoint, ifGen bool, wantGen uint64) (skipped []int, err error) {
 	if len(eps) == 0 {
 		return nil, nil
 	}
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
+	if got := s.Gen(); ifGen && got != wantGen {
+		return nil, fmt.Errorf("%w: expected generation %d, current is %d", ErrStaleGen, wantGen, got)
+	}
 	p := s.snapshot()
 	idx := make(map[string]int, len(p.Endpoints))
 	for i := range p.Endpoints {
@@ -227,6 +301,7 @@ func (s *Store) UpsertEndpoints(eps []model.Endpoint) (skipped []int, err error)
 	}
 	for k := range eps {
 		e := eps[k]
+		e.Import = "" // never stored (model.Endpoint.Import)
 		if e.ID == "" {
 			skipped = append(skipped, k)
 			continue
@@ -274,6 +349,15 @@ func (s *Store) DeleteEndpoint(id string) error {
 			if ds.Detour == id {
 				return fmt.Errorf("endpoint %q is used by DNS server %q (detour); repoint it first", id, ds.Tag)
 			}
+			// A DNS server that asks this connection's pushed resolvers would name a connection that
+			// no longer exists, which `sing-box check` lets through and the core dies on at startup.
+			// Switching the resolver off alone is refused while a DNS rule targets it, so the way out
+			// named is the one that takes both: detach parks the resolver with its rules.
+			if usesVPNResolvers(ds, id) {
+				return fmt.Errorf("endpoint %q is used by DNS server %q (its pushed resolvers); delete with ?detach=1 "+
+					"to switch that server and the DNS rules that use it off, or with ?replace_with= naming another %s "+
+					"connection to move it there", id, ds.Tag, ds.Type)
+			}
 		}
 	}
 	kept := p.Endpoints[:0]
@@ -297,20 +381,42 @@ func (s *Store) DeleteEndpoint(id string) error {
 
 // UpsertGroup inserts or replaces a group by ID.
 func (s *Store) UpsertGroup(g model.Group) error {
+	_, err := s.UpsertGroupAt(g, AnyRev)
+	return err
+}
+
+// UpsertGroupAt is UpsertGroup committed only while the stored group is still at rev (see Rev).
+func (s *Store) UpsertGroupAt(g model.Group, rev Rev) (Saved, error) {
 	if g.ID == "" {
-		return errors.New("group id is required")
+		return Saved{}, errors.New("group id is required")
 	}
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
 	p := s.snapshot()
+	at := -1
 	for i := range p.Groups {
 		if p.Groups[i].ID == g.ID {
-			p.Groups[i] = g
-			return s.publish(&p)
+			at = i
+			break
 		}
 	}
-	p.Groups = append(p.Groups, g)
-	return s.publish(&p)
+	var saved Saved
+	if at >= 0 {
+		saved.Was = model.GroupRev(p.Groups[at])
+	}
+	if err := checkRev(rev, at >= 0, saved.Was); err != nil {
+		return saved, err
+	}
+	if at >= 0 {
+		p.Groups[at] = g
+	} else {
+		p.Groups = append(p.Groups, g)
+	}
+	if err := s.publish(&p); err != nil {
+		return saved, err
+	}
+	saved.Rev = model.GroupRev(g)
+	return saved, nil
 }
 
 // DeleteGroup removes a group; refuses if a rule targets it.
@@ -421,14 +527,49 @@ func (s *Store) DeleteRule(id string) error {
 
 // UpsertRoutingList inserts or replaces a routing list by ID.
 func (s *Store) UpsertRoutingList(rl model.RoutingList) error {
+	_, err := s.UpsertRoutingListAt(rl, AnyRev)
+	return err
+}
+
+// UpsertRoutingListAt is UpsertRoutingList committed only while the stored list is still at rev (see
+// Rev).
+func (s *Store) UpsertRoutingListAt(rl model.RoutingList, rev Rev) (Saved, error) {
 	if rl.ID == "" {
-		return errors.New("routing list id is required")
+		return Saved{}, errors.New("routing list id is required")
 	}
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
 	p := s.snapshot()
+	at := -1
 	for i := range p.RoutingLists {
 		if p.RoutingLists[i].ID == rl.ID {
+			at = i
+			break
+		}
+	}
+	var saved Saved
+	if at >= 0 {
+		saved.Was = model.RoutingListRev(p.RoutingLists[at])
+	}
+	if err := checkRev(rev, at >= 0, saved.Was); err != nil {
+		return saved, err
+	}
+	commit := func() (Saved, error) {
+		if err := s.publish(&p); err != nil {
+			return saved, err
+		}
+		saved.Rev = model.RoutingListRev(rl)
+		return saved, nil
+	}
+	for i := range p.RoutingLists {
+		if p.RoutingLists[i].ID == rl.ID {
+			// A rule-set format carried over from the old URL may not describe a new one (QA-150):
+			// model.CarriedRuleSetFormat decides, and the format then comes from the URL again. A
+			// format that differs from the stored one is the caller's choice and is kept.
+			if old := p.RoutingLists[i]; rl.Source != old.Source && rl.Format != "" && rl.Format == old.Format &&
+				!model.CarriedRuleSetFormat(rl.Format, rl.Source) {
+				rl.Format = ""
+			}
 			// Keep the system-managed CIDRCache consistent with CIDRSource across a user
 			// edit:
 			//   • source CHANGED → the old cache is stale → drop it unconditionally (even
@@ -458,11 +599,11 @@ func (s *Store) UpsertRoutingList(rl model.RoutingList) error {
 				}
 			}
 			p.RoutingLists[i] = rl
-			return s.publish(&p)
+			return commit()
 		}
 	}
 	p.RoutingLists = append(p.RoutingLists, rl)
-	return s.publish(&p)
+	return commit()
 }
 
 // SetRoutingListCache replaces a routing list's system-managed CIDRCache (the last-good
@@ -716,6 +857,14 @@ func (s *Store) publish(p *model.Profile) error {
 			}
 		}
 	}
+	// A DNS server that asks a VPN connection's pushed resolvers is stranded by edits the check above
+	// does not see: a connection switched to another protocol or engine fails validation with a plain
+	// error, and on a profile already invalid for an unrelated reason nothing above runs at all. So the
+	// newly stranded ones are found directly; one stranded before this write does not block the write
+	// that repairs something else.
+	if err := newlyStrandedResolvers(s.cur.Load(), p); err != nil {
+		return err
+	}
 	if err := s.persist(p); err != nil {
 		return err
 	}
@@ -733,6 +882,9 @@ func (s *Store) publish(p *model.Profile) error {
 // Gen returns the current profile generation: it increments on every durably-committed
 // mutation and never resets while the process lives. A reader that caches a value derived
 // purely from the profile can compare Gen() to skip recomputing when nothing has changed.
+// Each Open starts it at a random point (startGen), so callers compare generations for
+// equality only; the number itself means nothing and a lower one is not necessarily older
+// across a restart.
 func (s *Store) Gen() uint64 {
 	if cur := s.cur.Load(); cur != nil {
 		return cur.gen
@@ -791,7 +943,7 @@ func (s *Store) ReorderRoutingLists(ids []string) error {
 
 // EndpointDependent names one thing that routes through an endpoint, in terms the panel can show.
 type EndpointDependent struct {
-	Kind string `json:"kind"` // "rule" | "routing_list" | "download_via" | "dns_detour" | "group_member"
+	Kind string `json:"kind"` // "rule" | "routing_list" | "download_via" | "dns_detour" | "dns_server" | "group_member"
 	ID   string `json:"id"`
 	Name string `json:"name"`
 }
@@ -865,6 +1017,9 @@ func (s *Store) EndpointDependents(id string) []EndpointDependent {
 			if ds.Detour == id {
 				out = append(out, EndpointDependent{Kind: "dns_detour", ID: ds.Tag, Name: ds.Tag})
 			}
+			if usesVPNResolvers(ds, id) {
+				out = append(out, EndpointDependent{Kind: "dns_server", ID: ds.Tag, Name: ds.Tag})
+			}
 		}
 	}
 	for _, g := range p.Groups {
@@ -873,6 +1028,74 @@ func (s *Store) EndpointDependents(id string) []EndpointDependent {
 		}
 	}
 	return out
+}
+
+// StrandedResolverError refuses a write that would leave an enabled DNS server asking the pushed
+// resolvers of a connection that can no longer serve it. The HTTP layer answers it with 409, like a
+// connection that cannot be switched off while something routes through it.
+type StrandedResolverError struct {
+	Resolvers []model.StrandedVPNResolver
+}
+
+func (e *StrandedResolverError) Error() string {
+	r := e.Resolvers[0]
+	msg := fmt.Sprintf("connection %q is used by DNS server %q, which asks the resolvers that connection pushes, "+
+		"and after this change the connection %s. On the DNS page, point that server at another connection of "+
+		"its type, or delete it together with the DNS rules that send names to it; then make this change",
+		r.Endpoint, r.Tag, r.Why)
+	if n := len(e.Resolvers) - 1; n > 0 {
+		msg += fmt.Sprintf(" (%d more DNS server(s) are affected the same way)", n)
+	}
+	return msg
+}
+
+// newlyStrandedResolvers returns a *StrandedResolverError for the DNS servers next leaves stranded
+// that prev did not, or nil.
+func newlyStrandedResolvers(prev *published, next *model.Profile) error {
+	now := model.StrandedVPNResolvers(next)
+	if len(now) == 0 {
+		return nil
+	}
+	before := map[string]bool{}
+	if prev != nil && prev.p != nil {
+		for _, r := range model.StrandedVPNResolvers(prev.p) {
+			before[r.Tag+"\x00"+r.Endpoint] = true
+		}
+	}
+	var fresh []model.StrandedVPNResolver
+	for _, r := range now {
+		if !before[r.Tag+"\x00"+r.Endpoint] {
+			fresh = append(fresh, r)
+		}
+	}
+	if len(fresh) == 0 {
+		return nil
+	}
+	return &StrandedResolverError{Resolvers: fresh}
+}
+
+// usesVPNResolvers reports an ENABLED DNS server that asks the resolvers connection id pushes. Only an
+// enabled one depends on the connection: validation leaves a disabled one alone, which is what lets
+// the paths below park it instead of deleting it.
+func usesVPNResolvers(ds model.DNSServer, id string) bool {
+	return ds.Enabled && model.IsVPNDNSType(ds.Type) && strings.TrimSpace(ds.Endpoint) == id
+}
+
+// parkVPNResolver switches off the DNS server tagged tag and every enabled DNS rule that sends names
+// to it, keeping both. The rules have to go with it: an enabled rule aimed at a disabled server fails
+// validation (LOOP-029), and dropping them silently would send the VPN's private names to the default
+// resolver.
+func parkVPNResolver(dns *model.DNSSettings, tag string) {
+	for i := range dns.Servers {
+		if dns.Servers[i].Tag == tag {
+			dns.Servers[i].Enabled = false
+		}
+	}
+	for i := range dns.Rules {
+		if dns.Rules[i].Server == tag {
+			dns.Rules[i].Disabled = true
+		}
+	}
 }
 
 // EndpointReplacements are the outbounds a dependent may be moved to when an endpoint is deleted.
@@ -974,6 +1197,34 @@ func repointDependents(p *model.Profile, id, replacement string) {
 			p.DNS.Servers[i].Detour = replacement
 		}
 	}
+	// A server asking id's pushed resolvers can only move to another connection of the same protocol
+	// that sing-box runs, is on, and has no such server yet (one per connection, model.validateDNS).
+	// `direct`, a group or any other connection has no pushed resolvers, so there it is parked instead.
+	for i := range p.DNS.Servers {
+		ds := &p.DNS.Servers[i]
+		if !usesVPNResolvers(*ds, id) {
+			continue
+		}
+		if vpnResolverTarget(p, ds.Type, replacement) {
+			ds.Endpoint = replacement
+		} else {
+			parkVPNResolver(p.DNS, ds.Tag)
+		}
+	}
+}
+
+// vpnResolverTarget reports whether connection id can take over a DNS server of type typ.
+func vpnResolverTarget(p *model.Profile, typ, id string) bool {
+	e := p.EndpointByID(id)
+	if e == nil || !e.Enabled || e.Engine != model.EngineSingBox || string(e.Protocol) != typ {
+		return false
+	}
+	for _, ds := range p.DNS.Servers {
+		if usesVPNResolvers(ds, id) {
+			return false
+		}
+	}
+	return true
 }
 
 // parkDependents is the other half of that shared answer: everything pointing at id is moved onto
@@ -1004,6 +1255,9 @@ func parkDependents(p *model.Profile, id string) {
 	for i := range p.DNS.Servers {
 		if p.DNS.Servers[i].Detour == id {
 			p.DNS.Servers[i].Detour = ""
+		}
+		if usesVPNResolvers(p.DNS.Servers[i], id) {
+			parkVPNResolver(p.DNS, p.DNS.Servers[i].Tag)
 		}
 	}
 }
@@ -1091,7 +1345,18 @@ func replaceString(ss []string, old, repl string) []string {
 
 // putEndpoint writes e over the endpoint carrying the same id. The disable paths below EDIT an exit
 // the profile already holds; refusing an unknown id keeps them from quietly creating one.
+// endpointRevCheck reads endpoint id's revision in p and refuses a write made At another (see Rev).
+func endpointRevCheck(p *model.Profile, id string, rev Rev) (Saved, error) {
+	var saved Saved
+	cur := p.EndpointByID(id)
+	if cur != nil {
+		saved.Was = model.EndpointRev(*cur)
+	}
+	return saved, checkRev(rev, cur != nil, saved.Was)
+}
+
 func putEndpoint(p *model.Profile, e model.Endpoint) error {
+	e.Import = "" // never stored (model.Endpoint.Import)
 	for i := range p.Endpoints {
 		if p.Endpoints[i].ID == e.ID {
 			p.Endpoints[i] = e
@@ -1138,9 +1403,39 @@ func (s *Store) EndpointDisableReplacements(id string) []string {
 		if o == model.OutboundDirect || o == model.OutboundBlock {
 			continue
 		}
+		// A group that holds id, directly or through nested groups, would end up containing itself:
+		// SetEndpointDisabledReplacing refuses it, so offering it would be offering a refusal.
+		if groupReaches(&p, o, id) {
+			continue
+		}
 		kept = append(kept, o)
 	}
 	return kept
+}
+
+// groupReaches reports whether group from holds target, directly or through nested groups. An id
+// that is not a group reaches nothing. seen stops the walk on a profile that already has a cycle,
+// which publish still accepts writes to so that it can be repaired.
+func groupReaches(p *model.Profile, from, target string) bool {
+	seen := map[string]bool{}
+	var walk func(id string) bool
+	walk = func(id string) bool {
+		if seen[id] {
+			return false
+		}
+		seen[id] = true
+		g := p.GroupByID(id)
+		if g == nil {
+			return false
+		}
+		for _, m := range g.Members {
+			if m == target || walk(m) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(from)
 }
 
 // SetEndpointDisabledReplacing switches an endpoint off and moves everything that routed through it
@@ -1152,23 +1447,41 @@ func (s *Store) EndpointDisableReplacements(id string) []string {
 // answers to that question for a while (move the dependents, or park them); disabling one asks the
 // same question of the same dependents, so it now gets the same two answers.
 func (s *Store) SetEndpointDisabledReplacing(e model.Endpoint, replacement string) error {
+	_, err := s.SetEndpointDisabledReplacingAt(e, replacement, AnyRev)
+	return err
+}
+
+// SetEndpointDisabledReplacingAt is SetEndpointDisabledReplacing committed only while the stored
+// endpoint is still at rev (see Rev).
+func (s *Store) SetEndpointDisabledReplacingAt(e model.Endpoint, replacement string, rev Rev) (Saved, error) {
 	if e.ID == "" {
-		return errors.New("endpoint id is required")
+		return Saved{}, errors.New("endpoint id is required")
 	}
 	if replacement == "" {
-		return errors.New("a replacement outbound is required")
+		return Saved{}, errors.New("a replacement outbound is required")
 	}
 	if replacement == e.ID {
-		return fmt.Errorf("endpoint %q cannot replace itself", e.ID)
+		return Saved{}, fmt.Errorf("endpoint %q cannot replace itself", e.ID)
 	}
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
 	p := s.snapshot()
+	saved, err := endpointRevCheck(&p, e.ID, rev)
+	if err != nil {
+		return saved, err
+	}
 	if !outboundExists(&p, replacement) {
-		return fmt.Errorf("replacement outbound %q does not exist", replacement)
+		return saved, fmt.Errorf("replacement outbound %q does not exist", replacement)
 	}
 	if err := putEndpoint(&p, e); err != nil {
-		return err
+		return saved, err
+	}
+	// Every group holding e gets replacement in its place, so a replacement group that holds e
+	// (itself, or through a nested group) ends up containing itself. Measured: g=[a,b], replacement
+	// g saved g=[g b] with a 200. That is a self-member/cycle error, not the disabled-reference class
+	// publish refuses, so it was stored and every later Apply failed until the group was fixed by hand.
+	if groupReaches(&p, replacement, e.ID) {
+		return Saved{}, fmt.Errorf("group %q holds this connection, so it cannot take its place; choose a connection or a group that does not contain it", replacement)
 	}
 	memberable := p.EndpointByID(replacement) != nil || p.GroupByID(replacement) != nil
 	for gi := range p.Groups {
@@ -1176,12 +1489,16 @@ func (s *Store) SetEndpointDisabledReplacing(e model.Endpoint, replacement strin
 			continue
 		}
 		if !memberable {
-			return fmt.Errorf("group %q holds this connection; %q cannot be a member — choose a connection or a group", p.Groups[gi].ID, replacement)
+			return Saved{}, fmt.Errorf("group %q holds this connection; %q cannot be a member — choose a connection or a group", p.Groups[gi].ID, replacement)
 		}
 		p.Groups[gi].Members = replaceString(p.Groups[gi].Members, e.ID, replacement)
 	}
 	repointDependents(&p, e.ID, replacement)
-	return s.publish(&p)
+	if err := s.publish(&p); err != nil {
+		return saved, err
+	}
+	saved.Rev = model.EndpointRev(e)
+	return saved, nil
 }
 
 // SetEndpointDisabledDetaching switches an endpoint off and parks everything that routed through it
@@ -1192,23 +1509,38 @@ func (s *Store) SetEndpointDisabledReplacing(e model.Endpoint, replacement strin
 // A group loses the endpoint from its members rather than keeping a disabled one, which Validate()
 // rejects. The dialog that offers this lists the group, so it is a choice and not a surprise.
 func (s *Store) SetEndpointDisabledDetaching(e model.Endpoint) error {
+	_, err := s.SetEndpointDisabledDetachingAt(e, AnyRev)
+	return err
+}
+
+// SetEndpointDisabledDetachingAt is SetEndpointDisabledDetaching committed only while the stored
+// endpoint is still at rev (see Rev).
+func (s *Store) SetEndpointDisabledDetachingAt(e model.Endpoint, rev Rev) (Saved, error) {
 	if e.ID == "" {
-		return errors.New("endpoint id is required")
+		return Saved{}, errors.New("endpoint id is required")
 	}
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
 	p := s.snapshot()
+	saved, err := endpointRevCheck(&p, e.ID, rev)
+	if err != nil {
+		return saved, err
+	}
 	for _, g := range p.Groups {
 		if onlyMember(g.Members, e.ID) {
-			return fmt.Errorf("group %q has no other members; delete that group or pick a replacement connection", g.ID)
+			return Saved{}, fmt.Errorf("group %q has no other members; delete that group or pick a replacement connection", g.ID)
 		}
 	}
 	if err := putEndpoint(&p, e); err != nil {
-		return err
+		return saved, err
 	}
 	parkDependents(&p, e.ID)
 	for gi := range p.Groups {
 		p.Groups[gi].Members = removeString(p.Groups[gi].Members, e.ID)
 	}
-	return s.publish(&p)
+	if err := s.publish(&p); err != nil {
+		return saved, err
+	}
+	saved.Rev = model.EndpointRev(e)
+	return saved, nil
 }

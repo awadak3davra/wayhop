@@ -342,7 +342,10 @@ func applyNativeConnectionBindings(profile *model.Profile, plan *nativeplan.Plan
 				return errExecutionInvalidCapture
 			}
 		case nativeplan.PathCompatibility:
-			if endpoint.Engine != model.EngineSingBox {
+			// ByeDPI is core-carried too (a SOCKS outbound to the ciadpi the plugin manager runs), on
+			// OpenWrt only: the KeeneticOS planner refuses it (nativeplan.ByeDPIOnKeenetic).
+			byedpi := endpoint.Engine == model.EngineByeDPI && plan.Platform == platform.OpenWrt
+			if endpoint.Engine != model.EngineSingBox && !byedpi {
 				return errExecutionInvalidCapture
 			}
 			// OpenWrt carries compatibility endpoints directly as sing-box outbounds and therefore
@@ -410,12 +413,13 @@ func executionGeneratorOptions(
 ) (generator.Options, error) {
 	mode := desiredRoutingMode(desired.Config)
 	opts := generator.Options{
-		MixedPort: desired.Config.Ports.Mixed,
+		MixedPort: desired.Config.Ports.Mixed, ProbePort: desired.Config.Ports.Probe(),
 		ClashAddr: desired.Inputs.ClashAddr, ClashSecret: desired.Config.Clash.Secret,
 		TunEnabled: mode == "tun" || mode == "hybrid",
 		TunMTU:     desired.Config.GatewayMTU, TunAddr: desired.Config.GatewayAddr,
 		CacheFile:     path.Join(path.Dir(desired.Config.SingBox.Config), "cache.db"),
 		RuleSetDetour: desired.Config.RuleSetDetour,
+		CoreOverride:  desired.Config.CoreOverride,
 	}
 	switch mode {
 	case "tun", "mixed":
@@ -455,12 +459,13 @@ func executionGeneratorOptions(
 
 func executionKeeneticCompatibilityOptions(desired DesiredSnapshot) generator.Options {
 	return generator.Options{
-		MixedPort: desired.Config.Ports.Mixed,
+		MixedPort: desired.Config.Ports.Mixed, ProbePort: desired.Config.Ports.Probe(),
 		ClashAddr: desired.Inputs.ClashAddr, ClashSecret: desired.Config.Clash.Secret,
 		TunEnabled: true,
 		TunMTU:     desired.Config.GatewayMTU, TunAddr: desired.Config.GatewayAddr,
 		CacheFile:     path.Join(path.Dir(desired.Config.SingBox.Config), "cache.db"),
 		RuleSetDetour: desired.Config.RuleSetDetour,
+		CoreOverride:  desired.Config.CoreOverride,
 	}
 }
 
@@ -506,9 +511,24 @@ func dropTUNIPv6WithoutAutoRoute(inbound map[string]any) {
 	}
 }
 
+// bindKeeneticCompatibilityTUN points the one capture TUN at wrtun0, the device NDM routes into. It
+// runs after the operator's core override (generator.ApplyCoreOverride), on purpose: an override may
+// restate `inbounds`, and these five fields are what NDM's routes depend on, so they are re-asserted
+// rather than left to it.
 func bindKeeneticCompatibilityTUN(config map[string]any) error {
-	inbounds, ok := config["inbounds"].([]map[string]any)
-	if !ok {
+	var inbounds []map[string]any
+	switch list := config["inbounds"].(type) {
+	case []map[string]any:
+		inbounds = list
+	case []any: // replaced by a core override, decoded from JSON
+		for _, v := range list {
+			inbound, ok := v.(map[string]any)
+			if !ok {
+				return errExecutionGeneration
+			}
+			inbounds = append(inbounds, inbound)
+		}
+	default:
 		return errExecutionGeneration
 	}
 	count := 0
@@ -542,7 +562,8 @@ const (
 
 // classifyExecutionEndpoint is intentionally exhaustive over the model's current engines and
 // protocols. It does not inherit generator.Generate's broad "any other engine is a SOCKS plugin"
-// fallback: OpenVPN/Xray/Mihomo have no plugin implementation and nfqws is a packet modifier
+// fallback: OpenVPN/Xray/Mihomo have no plugin implementation, olcRTC was removed (a stored one
+// must still load), and nfqws is a packet modifier
 // rather than an egress, so an enabled endpoint on one of them cannot be materialized.
 func classifyExecutionEndpoint(engine model.Engine, protocol model.Protocol) executionEndpointKind {
 	switch engine {
@@ -553,16 +574,18 @@ func classifyExecutionEndpoint(engine model.Engine, protocol model.Protocol) exe
 		if protocol == model.ProtoAmneziaWG || protocol == model.ProtoWireGuard {
 			return executionEndpointPlugin
 		}
-	case model.EngineOlcRTC:
+	case model.EngineByeDPI:
+		// A local SOCKS proxy the plugin manager runs; protocol is not semantic for it.
 		return executionEndpointPlugin
 	case model.EngineSingBox:
 		switch protocol {
 		case model.ProtoVLESS, model.ProtoVMess, model.ProtoTrojan,
 			model.ProtoShadowsocks, model.ProtoHysteria2, model.ProtoTUIC,
-			model.ProtoAnyTLS, model.ProtoWireGuard, model.ProtoSOCKS, model.ProtoHTTP:
+			model.ProtoAnyTLS, model.ProtoWireGuard, model.ProtoSOCKS, model.ProtoHTTP, model.ProtoOpenVPN,
+			model.ProtoSnell, model.ProtoOpenConnect, model.ProtoSSH:
 			return executionEndpointCore
 		}
-	case model.EngineOpenVPN, model.EngineXray, model.EngineMihomo, model.EngineNfqws:
+	case model.EngineOpenVPN, model.EngineXray, model.EngineMihomo, model.EngineNfqws, model.EngineOlcRTC:
 		return executionEndpointUnsupported
 	default:
 		return executionEndpointUnsupported

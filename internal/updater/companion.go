@@ -133,8 +133,8 @@ func compressedNeed(assetSize int64) uint64 { return uint64(assetSize) + 4<<20 }
 
 // installCompressed keeps a companion as the gzip it was published as, for a flash too small for the
 // unpacked binary. It is downloaded verbatim with its digest checked, unpacked once into RAM so the
-// --version check can prove it runs here, then renamed into place and recorded - the record carries
-// the gzip's digest, which binstore.Unpack checks before every start.
+// --version check can prove it runs here, then stored and recorded by binstore.StoreCompressed - the
+// record carries the gzip's digest, which binstore.Unpack checks before every start.
 func (u *Updater) installCompressed(ctx context.Context, e Engine, rel Release, asset Asset) (string, error) {
 	gz := binstore.Stored(u.BinDir, e.BinName, true)
 	tmp := gz + ".new"
@@ -161,14 +161,8 @@ func (u *Updater) installCompressed(ctx context.Context, e Engine, rel Release, 
 	if err := u.engineManagedErr(e, "update"); err != nil {
 		return fail(err)
 	}
-	if err := os.Rename(tmp, gz); err != nil {
-		return fail(err)
-	}
-	// An unpacked binary left from an earlier install is no longer the copy that runs, and its space is
-	// what the compressed form exists to save.
-	_ = os.Remove(binstore.Stored(u.BinDir, e.BinName, false))
-	if err := binstore.Write(u.BinDir, e.BinName, rel.Tag, true); err != nil {
-		return "", fmt.Errorf("%s is stored, but its record could not be written, so it cannot be unpacked to run: %w", e.ID, err)
+	if err := binstore.StoreCompressed(u.BinDir, e.BinName, rel.Tag, tmp); err != nil {
+		return fail(fmt.Errorf("%s: %w", e.ID, err))
 	}
 	return rel.Tag, nil
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,6 +76,11 @@ func TestGateRestoreMode_AModeThisHostCannotRunIsDeclinedWithoutLosingTheRestore
 	}
 	if resp.Declined != "hybrid" || resp.Note == "" {
 		t.Errorf("the answer does not say which mode was declined or why: %+v", resp)
+	}
+	// QA-153: the panel shows the note as it is, beside a message that says the restore worked, so the
+	// note itself has to say that the mode was not restored, which one, and what stays.
+	if !strings.Contains(resp.Note, "routing mode (hybrid) was not restored") || !strings.Contains(resp.Note, "stays in") {
+		t.Errorf("the note does not say on its own that the mode was not restored: %q", resp.Note)
 	}
 	var restored bool
 	for _, e := range srv.store.Profile().Endpoints {

@@ -12,8 +12,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"wayhop/internal/atomicfile"
+	"wayhop/internal/generator"
 )
 
 // Ports is the reserved port block wayhop owns. Each is user-editable so the
@@ -24,6 +26,27 @@ type Ports struct {
 	Clash int `json:"clash"` // sing-box Clash API (external_controller)
 	DNS   int `json:"dns"`   // local DNS
 	Mixed int `json:"mixed"` // local mixed (socks+http) inbound
+}
+
+// Probe is the loopback port of the probe inbound (generator/probe.go), derived rather than stored:
+// a Settings save sends only the four ports above, so a stored fifth would be lost on every save. It
+// is the mixed port plus 10000 (away from the 789x ports mihomo and its kin take by default), moved
+// up past any of the other four and past the engine plugins' SOCKS block (17900-17999, generator
+// basePluginPort) - two listeners on one port would stop the core; 0 when nothing in range is free.
+func (p Ports) Probe() int {
+	base := p.Mixed + 10000
+	if base > 65535 {
+		base = p.Mixed - 10000
+	}
+	for port := base; port < base+10 && port >= 1 && port <= 65535; port++ {
+		if port >= pluginPortFirst && port < pluginPortEnd {
+			continue
+		}
+		if port != p.UI && port != p.Clash && port != p.DNS && port != p.Mixed {
+			return port
+		}
+	}
+	return 0
 }
 
 // Clash describes how to reach sing-box's Clash API.
@@ -100,6 +123,21 @@ type Subscription struct {
 	// RefreshHours controls auto-refresh of URL: 0 = OFF (opt-in default); >0 =
 	// re-fetch every N hours and add new endpoints (never deletes).
 	RefreshHours int `json:"refresh_hours,omitempty"`
+	// UserAgent is sent when fetching URL. Provider panels choose the format by it (one answers
+	// "sing-box" with sing-box JSON and "clash.meta" with Clash YAML) and some refuse a client they do
+	// not know; empty sends "wayhop". Kept with URL so the scheduled refresh asks the same way.
+	UserAgent string `json:"user_agent,omitempty"`
+	// HWID is sent as x-hwid (with x-device-os) on every fetch of URL; empty = off. Provider panels
+	// with a device limit (Remnawave) tie the subscription to it and answer 404 to a fetch without
+	// one. Either GeneratedHWID or the operator's; never derived from a serial or a MAC. Set only
+	// with URL, by an import that fetched it. It identifies this router to the provider, so an
+	// export without secrets masks it; a restore brings it back.
+	HWID string `json:"hwid,omitempty"`
+	// GeneratedHWID is WayHop's own ID (16 random hex), made by the first import with "generate" and
+	// kept from then on: switching the HWID off or to the operator's own never clears it, so going
+	// back to "generate" presents the same device, where a new ID would take another device slot.
+	// Masked and restored like HWID.
+	GeneratedHWID string `json:"generated_hwid,omitempty"`
 }
 
 // Backup configures the scheduled LOCAL auto-backup — a safety net so the whole setup
@@ -146,6 +184,10 @@ type Telegram struct {
 type TelegramChat struct {
 	ID   int64  `json:"id"`
 	Name string `json:"name,omitempty"`
+	// Type is Telegram's chat type as recorded at pairing (private, group, supergroup, channel); empty
+	// for chats paired before it was recorded. A channel and a group both have negative ids, and only a
+	// channel's subscribers can press its buttons without being in it, so a channel stays alerts-only.
+	Type string `json:"type,omitempty"`
 	// Role: "owner" (everything, confirms changes), "viewer" (read-only + alerts), "alerts" (a
 	// group or channel that only receives alerts).
 	Role string `json:"role"`
@@ -261,6 +303,18 @@ type Config struct {
 	// rule-set aborts the whole core at startup, that silently prevents sing-box from EVER running.
 	// Not circular: the chosen outbound works independently of any rule-set.
 	RuleSetDetour string `json:"rule_set_detour,omitempty"`
+	// CoreRestart restarts the proxy core on a schedule (competitor gap 12: Passwall2 and nikki offer
+	// it): "HH:MM" daily in the router's local time, or "<N>h" every N hours (1-24); empty = never.
+	// Opt-in, because a restart drops every connection the core carries; the watchdog already
+	// restarts a core that crashes.
+	CoreRestart string `json:"core_restart,omitempty"`
+	// CoreOverride is the operator's change to the sing-box config WayHop generates (competitor gap
+	// 11: nikki merges a mixin into its generated profile), as JSON text: an RFC 7396 merge patch plus
+	// an optional "prepend" object whose arrays go in front of the generated outbounds, route.rules,
+	// dns.rules and dns.servers. Applied last, at every generation; empty = the generated config as it
+	// is. The format and its limits live in generator/override.go, which Validate parses it with, so
+	// a malformed override is refused at save and never reaches Apply.
+	CoreOverride string `json:"core_override,omitempty"`
 	// NativeFirewallZone is the exact OpenWrt firewall zone used for WayHop-created native
 	// interfaces. Empty means native create/manage is unavailable; WayHop never guesses a zone.
 	NativeFirewallZone string `json:"native_firewall_zone,omitempty"`
@@ -281,6 +335,9 @@ type Config struct {
 	// Telegram is the built-in bot. HOT and written only by /api/telegram/* and by pairing, so —
 	// like Subscription — it is NOT copied by applyConfigFields.
 	Telegram Telegram `json:"telegram,omitempty"`
+	// TelegramBridge is the Telegram-over-WebSocket bridge (tgbridge.go). HOT and written only by
+	// PUT /api/telegram-bridge, so - like Telegram - it is NOT copied by applyConfigFields.
+	TelegramBridge TelegramBridge `json:"telegram_bridge,omitempty"`
 	// AllowedHosts lists EXTRA Host header values the panel will serve, on top of the ones this
 	// router answers to by itself (its interface IPs, loopback, its OS hostname) — a DNS-rebinding
 	// defense; see docs/SECURITY.md (development repository). Additive, so a wrong entry cannot lock the UI out: the LAN IP
@@ -297,6 +354,15 @@ type Config struct {
 	Features map[string]FeatureConfig `json:"features,omitempty"`
 
 	path string // source file, used by Save()
+}
+
+// Path is the file this config was loaded from ("" for one built in memory). The update supervisor
+// keeps its records beside it, on the same flash that survives a reboot.
+func (c *Config) Path() string {
+	if c == nil {
+		return ""
+	}
+	return c.path
 }
 
 // Default returns a Config with router-friendly defaults.
@@ -317,6 +383,9 @@ func Default() *Config {
 func Load(path string) (*Config, error) {
 	c := Default()
 	c.path = path
+	// A temp a crash left between Save's create and rename (panel credentials, the bot token) would
+	// otherwise stay for good; nothing saves the config before Load returns.
+	atomicfile.RemoveStale(path)
 
 	data, err := os.ReadFile(path)
 	// Treat a missing OR empty/whitespace-only file identically: create defaults and
@@ -393,6 +462,12 @@ func (c *Config) Validate() error {
 	if c.Clash.Controller != "" && !validHostPort(c.Clash.Controller) {
 		return fmt.Errorf("clash controller %q must be host:port", c.Clash.Controller)
 	}
+	if _, _, _, err := ParseCoreRestart(c.CoreRestart); err != nil {
+		return err
+	}
+	if _, err := generator.ParseCoreOverride(c.CoreOverride); err != nil {
+		return err
+	}
 	if !validRoutingModes[c.RoutingMode] {
 		return fmt.Errorf("routing_mode %q must be one of tun, hybrid, fast, mixed (or empty for auto)", c.RoutingMode)
 	}
@@ -419,6 +494,12 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("watchdog notify_url %q must start with http:// or https://", c.Watchdog.NotifyURL)
 	}
 	if err := c.Telegram.Validate(); err != nil {
+		return err
+	}
+	if err := c.TelegramBridge.Validate(); err != nil {
+		return err
+	}
+	if err := c.TelegramBridgePortConflict(); err != nil {
 		return err
 	}
 	for _, h := range c.AllowedHosts {
@@ -465,7 +546,8 @@ const RedactedMark = "***"
 // subscription URL and the watchdog webhook URL (both of which commonly embed a
 // per-account token) — for a backup that is safe to share.
 // Empty secrets stay empty. Round-trips safely: the import path never copies the
-// Subscription block, so a re-imported "***" URL is ignored, not persisted.
+// Subscription block, so a re-imported "***" URL is ignored, not persisted; of that block it
+// restores only the two HWIDs, and keeps the current one for "***".
 func (c Config) Redacted() Config {
 	if c.Clash.Secret != "" {
 		c.Clash.Secret = RedactedMark
@@ -473,13 +555,28 @@ func (c Config) Redacted() Config {
 	if c.Subscription.URL != "" {
 		c.Subscription.URL = RedactedMark
 	}
+	// The HWID is no credential on its own, but with the URL it is the device slot the provider
+	// counts, and a shared file should not let someone else present this router.
+	if c.Subscription.HWID != "" {
+		c.Subscription.HWID = RedactedMark
+	}
+	if c.Subscription.GeneratedHWID != "" {
+		c.Subscription.GeneratedHWID = RedactedMark
+	}
 	if c.Watchdog.NotifyURL != "" {
 		c.Watchdog.NotifyURL = RedactedMark
 	}
 	if c.Auth.PasswordHash != "" {
 		c.Auth.PasswordHash = RedactedMark
 	}
+	// Whole, not field by field: an override's prepended outbound carries a server's password or
+	// UUID under whatever key its protocol uses. The import path keeps the current override for the
+	// mark, like the other secrets.
+	if c.CoreOverride != "" {
+		c.CoreOverride = RedactedMark
+	}
 	c.Telegram = c.Telegram.Redacted()
+	c.TelegramBridge = c.TelegramBridge.Redacted()
 	return c
 }
 
@@ -517,4 +614,42 @@ func validHostPort(s string) bool {
 
 func isHTTPURL(s string) bool {
 	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+}
+
+// twoDigits reports whether s is one or two ASCII digits.
+func twoDigits(s string) bool {
+	if len(s) < 1 || len(s) > 2 {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// ParseCoreRestart reads CoreRestart: a daily time (hour, minute) or an interval (every). All zero
+// with no error means no schedule.
+func ParseCoreRestart(v string) (hour, minute int, every time.Duration, err error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, 0, 0, nil
+	}
+	// Digits only, at most two, as the panel's check accepts: strconv.Atoi alone also took "+6", "-0"
+	// and "007", so the API stored schedules the Settings page would refuse to show as valid.
+	if n, ok := strings.CutSuffix(v, "h"); ok {
+		h, perr := strconv.Atoi(n)
+		if perr != nil || !twoDigits(n) || h < 1 || h > 24 {
+			return 0, 0, 0, fmt.Errorf("core_restart %q: an interval is 1h to 24h", v)
+		}
+		return 0, 0, time.Duration(h) * time.Hour, nil
+	}
+	hh, mm, ok := strings.Cut(v, ":")
+	h, herr := strconv.Atoi(hh)
+	m, merr := strconv.Atoi(mm)
+	if !ok || herr != nil || merr != nil || !twoDigits(hh) || len(mm) != 2 || !twoDigits(mm) || h < 0 || h > 23 || m < 0 || m > 59 {
+		return 0, 0, 0, fmt.Errorf("core_restart %q must be HH:MM (daily, router time) or <N>h (every N hours)", v)
+	}
+	return h, m, 0, nil
 }

@@ -25,6 +25,14 @@ func subLineScheme(line string) string {
 // per-failure error list. It accepts either a base64-encoded body (the common
 // "v2ray subscription" format) or plain text, with one share link per line.
 func ParseSubscription(text string) ([]model.Endpoint, []string) {
+	eps, errs, _ := ParseSubscriptionNotes(text)
+	return eps, errs
+}
+
+// ParseSubscriptionNotes is ParseSubscription with its notes: what an entry carried that its endpoint
+// keeps differently or not at all, said once when the import is previewed. A note is not an error;
+// the entry is imported.
+func ParseSubscriptionNotes(text string) (eps []model.Endpoint, errs, notes []string) {
 	// A leading UTF-8 BOM (U+FEFF) is not whitespace, so TrimSpace leaves it on the
 	// first line — which would make the first line "<BOM>proxies:" miss the clash key
 	// scan and the share-link/base64 detection, silently dropping the whole config.
@@ -39,7 +47,8 @@ func ParseSubscription(text string) ([]model.Endpoint, []string) {
 	// (rejects share links and base64 blobs), so this never shadows the existing
 	// paths for a non-clash input.
 	if looksLikeClash(text) {
-		return ParseClash(text)
+		eps, errs, notes = parseClash(text)
+		return tagAll(FormatClash, eps), errs, notes
 	}
 
 	// A pasted sing-box config.json is the INVERSE of the generator — a JSON object
@@ -48,7 +57,15 @@ func ParseSubscription(text string) ([]model.Endpoint, []string) {
 	// object with outbounds OR endpoints), so it never shadows a share link, a base64
 	// blob (json.Valid rejects those), or a clash YAML doc.
 	if looksLikeSingbox(text) {
-		return ParseSingbox(text)
+		eps, errs, notes = parseSingbox(text)
+		return tagAll(FormatSingbox, eps), errs, notes
+	}
+
+	// A Surge profile or bare [Proxy] lines. looksLikeSurge needs a [Proxy] header or a first line
+	// whose type is a Surge proxy keyword, which a share link or a base64 blob never is.
+	if looksLikeSurge(text) {
+		eps, errs = ParseSurge(text)
+		return tagAll(FormatSurge, eps), errs, nil
 	}
 
 	// A base64 subscription has no scheme markers until decoded.
@@ -58,8 +75,8 @@ func ParseSubscription(text string) ([]model.Endpoint, []string) {
 		}
 	}
 
-	eps := []model.Endpoint{}
-	errs := []string{}
+	eps = []model.Endpoint{}
+	errs = []string{}
 	// genID is protocol+server+port, so two transport/TLS variants of the same
 	// host (a common subscription shape) produce the same ID and would silently
 	// overwrite each other on bulk import. Keep batch IDs distinct by suffixing
@@ -83,7 +100,7 @@ func ParseSubscription(text string) ([]model.Endpoint, []string) {
 		e.ID = uniqueID(e.ID, seen)
 		eps = append(eps, *e)
 	}
-	return eps, errs
+	return eps, errs, nil
 }
 
 // maxTitleLen caps a decoded subscription title so a hostile/garbage server can't

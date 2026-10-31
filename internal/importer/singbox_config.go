@@ -88,9 +88,35 @@ var builtinOutboundTypes = map[string]bool{
 // by "type" to a model.Endpoint. Builtin/non-proxy types are skipped silently; an
 // unknown proxy type is collected as an error and skipped (partial success).
 func ParseSingbox(text string) (eps []model.Endpoint, errs []string) {
+	eps, errs, _ = parseSingbox(text)
+	return eps, errs
+}
+
+// What a sing-box config can express (sourceFields), across the outbound and endpoint types it reads:
+// the params singboxOutboundFields and the 1.14 types (Snell, OpenVPN, OpenConnect, SSH) write, the
+// whole TLS block with fragmenting and both kinds of pin, the transport, multiplex, and a WireGuard
+// endpoint's MTU and keepalive as the top-level knobs.
+var singboxFields = sourceFields{params: []string{"uuid", "alter_id", "security", "flow", "packet_encoding",
+	"password", "method", "plugin", "plugin_opts", "udp_over_tcp", "up_mbps", "down_mbps", "hop_ports", "obfs",
+	"obfs_password", "obfs_min_packet_size", "obfs_max_packet_size", "hop_interval", "hop_interval_max", "bbr_profile",
+	model.ParamQUICInitialPacketSize, model.ParamQUICDisablePMTUD, "disable_chrome_parrot", "congestion_control",
+	"udp_relay_mode", "heartbeat", "zero_rtt_handshake", "udp_over_stream", "username",
+	"private_key", "peer_public_key", "pre_shared_key", "local_address", "reserved", "peers",
+	"psk", "version", "reuse", "userkey", "network", "obfs_mode", "obfs_host", "mode",
+	"address", "auth_user_pass", "ca", "cert", "key", "control_wrap", "control_direction", "control_key", "data_ciphers",
+	"data_ciphers_fallback", "mtu", "peer_address", "remote_random", "route_no_pull", "servers", "static_key",
+	"key_direction", "cipher", "server_name", "server_name_type", "remote_cert_tls", "tls_version_min", "auth",
+	"compression", "compression_lzo", "allow_compression",
+	"no_udp", "server_cert", "totp_secret", "flavor", "auth_group",
+	"user", "private_key_passphrase", "client_version", "host_key", "mac", "kex_algorithm"},
+	tls: append(append([]string{}, linkTLSFields...), "fragment", "record_fragment"), pins: true, transport: true,
+	mtu: true, keepalive: true, multiplex: true}
+
+// parseSingbox is ParseSingbox with its notes: a multiplex block it kept differently or not at all.
+func parseSingbox(text string) (eps []model.Endpoint, errs, notes []string) {
 	var cfg singboxConfig
 	if err := json.Unmarshal([]byte(text), &cfg); err != nil {
-		return nil, []string{fmt.Sprintf("singbox: parse config: %v", err)}
+		return nil, []string{fmt.Sprintf("singbox: parse config: %v", err)}, nil
 	}
 	seen := map[string]bool{}
 	// Bound the typed numeric fields at the import boundary (mirrors model/validate.go). The store
@@ -138,19 +164,33 @@ func ParseSingbox(text string) (eps []model.Endpoint, errs []string) {
 			errs = append(errs, fmt.Sprintf("singbox: outbound %q: %v", outboundLabel(ob, i), err))
 			continue
 		}
+		// Verbatim, then through the checks the save applies: a block the core would refuse, or one on
+		// an outbound that has no such field, is not imported, and the note says so.
+		var note string
+		e.Multiplex, note = model.NormalizeMultiplex(e.Protocol, multiplexFromSingbox(ob))
+		if note != "" {
+			notes = append(notes, fmt.Sprintf("singbox: outbound %q: %s", outboundLabel(ob, i), note))
+		}
 		add(e)
 	}
 
 	for i, ep := range cfg.Endpoints {
 		typ := sbStr(ep, "type")
-		// sing-box's top-level endpoints array currently only carries "wireguard"; an
-		// empty/absent type defaults to wireguard since that is the only endpoint form
-		// the generator emits. An unknown endpoint type is an error.
-		if typ != "" && typ != "wireguard" {
+		// The generator emits wireguard, openvpn-client and openconnect endpoints; an empty type
+		// is wireguard, the form older configs used. Any other endpoint type is an error.
+		var e *model.Endpoint
+		var err error
+		switch typ {
+		case "", "wireguard":
+			e, err = singboxWireGuardEndpoint(ep)
+		case "openvpn-client":
+			e, err = singboxOpenVPNEndpoint(ep)
+		case "openconnect":
+			e, err = singboxOpenConnectEndpoint(ep)
+		default:
 			errs = append(errs, fmt.Sprintf("singbox: endpoint %q: unsupported endpoint type %q", outboundLabel(ep, i), typ))
 			continue
 		}
-		e, err := singboxWireGuardEndpoint(ep)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("singbox: endpoint %q: %v", outboundLabel(ep, i), err))
 			continue
@@ -162,7 +202,28 @@ func ParseSingbox(text string) (eps []model.Endpoint, errs []string) {
 		add(e)
 	}
 
-	return eps, errs
+	return eps, errs, notes
+}
+
+// multiplexFromSingbox reads an outbound's "multiplex" block as sing-box spells it (the generator's
+// multiplexJSON), nil when there is none. The caller normalises it.
+func multiplexFromSingbox(ob map[string]any) *model.Multiplex {
+	mx, ok := ob["multiplex"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	m := &model.Multiplex{
+		Enabled:        sbBool(mx, "enabled"),
+		Protocol:       sbStr(mx, "protocol"),
+		MaxConnections: sbInt(mx, "max_connections"),
+		MinStreams:     sbInt(mx, "min_streams"),
+		MaxStreams:     sbInt(mx, "max_streams"),
+		Padding:        sbBool(mx, "padding"),
+	}
+	if b, ok := mx["brutal"].(map[string]any); ok && sbBool(b, "enabled") {
+		m.Brutal = &model.Brutal{Enabled: true, UpMbps: sbInt(b, "up_mbps"), DownMbps: sbInt(b, "down_mbps")}
+	}
+	return m
 }
 
 // outboundLabel returns a stable human label for an outbound/endpoint error: its
@@ -179,6 +240,32 @@ func outboundLabel(ob map[string]any, i int) string {
 // parsers use, so a re-Generate round-trips. server/server_port -> Server/Port and
 // the tag -> Name for every type.
 func singboxOutboundToEndpoint(typ string, ob map[string]any) (*model.Endpoint, error) {
+	// An ECH config read from a file is on the machine the config came from, and the router cannot
+	// read it; an inline config wins over the path in sing-box, so only a path alone is refused.
+	if tl, ok := ob["tls"].(map[string]any); ok {
+		if ech, ok := tl["ech"].(map[string]any); ok && sbBool(ech, "enabled") && sbText(ech, "config") == "" {
+			if err := sbRefuseFiles(ech, "config_path"); err != nil {
+				return nil, fmt.Errorf("tls.ech: %w", err)
+			}
+		}
+	}
+	e, err := singboxOutboundFields(typ, ob)
+	if err != nil {
+		return nil, err
+	}
+	if e.TLS != nil {
+		e.TLS.ECH = settleECH(e.TLS.ECH, e.TLS.Type)
+		if tl, ok := ob["tls"].(map[string]any); ok {
+			if err := singboxPins(tl, e.TLS); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return e, nil
+}
+
+// singboxOutboundFields is singboxOutboundToEndpoint's per-type mapping.
+func singboxOutboundFields(typ string, ob map[string]any) (*model.Endpoint, error) {
 	e := &model.Endpoint{
 		Engine: model.EngineSingBox,
 		Server: sbStr(ob, "server"),
@@ -237,7 +324,22 @@ func singboxOutboundToEndpoint(typ string, ob map[string]any) (*model.Endpoint, 
 			if pw := sbStr(obfs, "password"); pw != "" {
 				e.Params["obfs_password"] = pw
 			}
+			for _, k := range []string{"min_packet_size", "max_packet_size"} {
+				if n := sbInt(obfs, k); n > 0 {
+					e.Params["obfs_"+k] = n
+				}
+			}
 		}
+		// The 1.14 additions (generator/hysteria2_114.go) read back the same way.
+		for _, k := range []string{"hop_interval", "hop_interval_max", "bbr_profile"} {
+			if v := sbStr(ob, k); v != "" {
+				e.Params[k] = v
+			}
+		}
+		if sbBool(ob, "disable_chrome_parrot") {
+			e.Params["disable_chrome_parrot"] = true
+		}
+		sbQUICTuning(ob, e.Params)
 		// server_ports ("start:end" form) -> hop_ports ("start-end"), the importer's
 		// spelling that generator.singBoxPortRange converts back.
 		if hp := hopPortsFromSingbox(ob["server_ports"]); hp != "" {
@@ -277,6 +379,7 @@ func singboxOutboundToEndpoint(typ string, ob map[string]any) (*model.Endpoint, 
 		if sbBool(ob, "zero_rtt_handshake") {
 			e.Params["zero_rtt_handshake"] = true
 		}
+		sbQUICTuning(ob, e.Params)
 		e.TLS = tlsFromSingbox(ob, e.Server)
 		if e.TLS == nil {
 			e.TLS = &model.TLS{Enabled: true, Type: "tls", SNI: e.Server}
@@ -309,6 +412,14 @@ func singboxOutboundToEndpoint(typ string, ob map[string]any) (*model.Endpoint, 
 			e.Params["password"] = pw
 		}
 		e.TLS = tlsFromSingbox(ob, e.Server)
+	case "snell":
+		if err := fillSnellFromSingbox(e, ob); err != nil {
+			return nil, err
+		}
+	case "ssh":
+		if err := fillSSHFromSingbox(e, ob); err != nil {
+			return nil, err
+		}
 	default:
 		return nil, fmt.Errorf("unsupported outbound type %q", typ)
 	}
@@ -424,6 +535,15 @@ func transportFromSingbox(ob map[string]any) *model.Transport {
 		if hdrs, ok := t["headers"].(map[string]any); ok {
 			tr.Host = sbStr(hdrs, "Host")
 		}
+		// Early data: the model carries it the way the share links do, as "?ed=N" on the path, and
+		// the generator turns that back into max_early_data + the Sec-WebSocket-Protocol header. Fold
+		// it in so a sing-box outbound (the generator's own output included) keeps its early data on
+		// import. Only the Xray-compatible header is expressible in that form; another header name
+		// would come back as Sec-WebSocket-Protocol, so the field is left out rather than changed.
+		if med := sbInt(t, "max_early_data"); med > 0 && !strings.Contains(tr.Path, "?") &&
+			strings.EqualFold(sbStr(t, "early_data_header_name"), "Sec-WebSocket-Protocol") {
+			tr.Path += "?ed=" + strconv.Itoa(med)
+		}
 	case "grpc":
 		tr.ServiceName = sbStr(t, "service_name")
 	case "http":
@@ -481,6 +601,8 @@ func tlsFromSingbox(ob map[string]any, server string) *model.TLS {
 	if sbBool(tl, "record_fragment") {
 		t.RecordFragment = true
 	}
+	// Encrypted Client Hello, settled against the protocol and Reality by the caller (settleECH).
+	t.ECH = singboxECH(tl)
 	return t
 }
 
@@ -599,6 +721,19 @@ func sbReserved(v any) []int {
 		out = append(out, n)
 	}
 	return out
+}
+
+// sbQUICTuning reads the QUIC fields sing-box 1.14 gives the hysteria2 and tuic outbounds
+// (model.QUICTuningOf) back into params, so a Generate->import round-trip keeps them. A packet size
+// quic-go would not use as given is brought as the size the source config ran with
+// (model.QUICEffectiveInitialPacketSize), which saving accepts.
+func sbQUICTuning(ob map[string]any, params map[string]any) {
+	if n := model.QUICEffectiveInitialPacketSize(sbInt(ob, model.ParamQUICInitialPacketSize)); n > 0 {
+		params[model.ParamQUICInitialPacketSize] = n
+	}
+	if sbBool(ob, model.ParamQUICDisablePMTUD) {
+		params[model.ParamQUICDisablePMTUD] = true
+	}
 }
 
 // sbBool reads a boolean field, tolerating the bool / "true" / "1" shapes a value

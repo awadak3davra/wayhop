@@ -87,9 +87,10 @@ func looksLikeHost(s string) bool {
 // askRoute asks which destination to trace; the next plain message from the chat answers it.
 func (b *Bot) askRoute(ctx context.Context, chat int64, lang string) {
 	b.asks.set(chat, "route", b.now().Add(askFor))
-	cctx, cancel := context.WithTimeout(ctx, sendWait)
-	defer cancel()
-	if _, err := b.api.SendMessage(cctx, chat, b.view(lang).RoutePrompt(), SendOptions{Ask: "youtube.com"}); err != nil {
+	if err := b.interactive(ctx, func(c context.Context) error {
+		_, err := b.api.SendMessage(c, chat, b.view(lang).RoutePrompt(), SendOptions{Ask: "youtube.com"})
+		return err
+	}); err != nil {
 		b.logf("telegram: send to %d: %v", chat, err)
 	}
 }
@@ -106,7 +107,7 @@ func (b *Bot) route(ctx context.Context, v view, chat int64, target string, m *M
 	case errors.Is(err, ErrBadTarget) || target == "":
 		text = v.t("rt.bad")
 	case err != nil:
-		text = v.t("err.backend", esc(err.Error()))
+		text = v.t("err.backend", esc(errorText(v, err)))
 	default:
 		text, kb = v.Trace(tr, b.status(ctx))
 	}
@@ -178,7 +179,7 @@ func (b *Bot) ping(ctx context.Context, v view, chat int64, target string) {
 	case errors.Is(err, ErrBadTarget):
 		b.reply(ctx, chat, v.t("rt.bad"), nil)
 	case err != nil:
-		b.reply(ctx, chat, v.t("err.backend", esc(err.Error())), nil)
+		b.reply(ctx, chat, v.t("err.backend", esc(errorText(v, err))), nil)
 	default:
 		b.reply(ctx, chat, v.Ping(p), nil)
 	}
@@ -197,7 +198,7 @@ func (b *Bot) lookup(ctx context.Context, v view, chat int64, target string) {
 	case errors.Is(err, ErrBadTarget):
 		b.reply(ctx, chat, v.t("rt.bad"), nil)
 	case err != nil:
-		b.reply(ctx, chat, v.t("err.backend", esc(err.Error())), nil)
+		b.reply(ctx, chat, v.t("err.backend", esc(errorText(v, err))), nil)
 	default:
 		b.reply(ctx, chat, v.Lookup(l), nil)
 	}

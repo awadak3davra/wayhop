@@ -11,6 +11,7 @@ STATE=$WORK/running
 LOG=$WORK/logger.log
 ARGS=$WORK/args
 STARTS=$WORK/starts
+NOFILE=$WORK/nofile
 mkdir -p "$BIN"
 
 cat >"$BIN/pidof" <<'EOF'
@@ -41,6 +42,8 @@ PROG=$WORK/wayhop
 cat >"$PROG" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >"$WAYHOP_TEST_ARGS"
+# shellcheck disable=SC3045
+ulimit -n >"$WAYHOP_TEST_NOFILE"
 echo start >>"$WAYHOP_TEST_STARTS"
 : >"$WAYHOP_TEST_STATE"
 echo '2026/08/14 21:03:44 apply: strict native runtime ready'
@@ -59,6 +62,7 @@ run_init() {
 	WAYHOP_TEST_LOG=$LOG \
 	WAYHOP_TEST_ARGS=$ARGS \
 	WAYHOP_TEST_STARTS=$STARTS \
+	WAYHOP_TEST_NOFILE=$NOFILE \
 	sh "$INIT" "$@"
 }
 
@@ -67,12 +71,23 @@ ok() {
 	pass=$((pass + 1))
 }
 
-run_init start test >/dev/null
+# Started from a shell at 1024 open files, the daemon gets 16384: the init raises the limit before
+# it starts the daemon, which on Keenetic is otherwise 1024 soft / 4096 hard ("too many open files"
+# on a busy router). Asserted only where this host lets a process go that high at all.
+# shellcheck disable=SC3045
+(ulimit -Sn 1024 2>/dev/null; run_init start test >/dev/null)
 [ -f "$STATE" ]
 ok
 
 [ "$(cat "$ARGS")" = "--config $WORK/config.json" ]
 ok
+
+# shellcheck disable=SC3045
+hard=$(ulimit -Hn)
+if [ "$hard" = unlimited ] || [ "$hard" -ge 16384 ]; then
+	[ "$(cat "$NOFILE")" = 16384 ]
+	ok
+fi
 
 sleep 1
 grep -q 'call:-t wayhop apply: strict native runtime ready' "$LOG"

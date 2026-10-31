@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -22,9 +23,11 @@ import (
 	"wayhop/internal/generator"
 	"wayhop/internal/importer"
 	"wayhop/internal/model"
+	"wayhop/internal/nativeplan"
 	"wayhop/internal/pbr"
 	"wayhop/internal/platform"
 	"wayhop/internal/plugin"
+	"wayhop/internal/store"
 )
 
 // handleImport parses a share link / conf into an endpoint WITHOUT saving it
@@ -51,11 +54,16 @@ func (s *Server) handleGetProfile(w http.ResponseWriter, r *http.Request) {
 	// export — so it must not be disk-cached by the browser or an intermediary, matching the
 	// no-store policy on backup/config-export/subscription/job-snapshot/endpoint-export.
 	w.Header().Set("Cache-Control", "no-store")
+	p := s.store.Profile()
 	if r.URL.Query().Get("lite") == "1" {
-		writeJSON(w, http.StatusOK, liteProfileOf(s.store.Profile(), s.cidrCheckedAt))
+		// The panel's form carries each object's revision, which an edit of it sends back in If-Match
+		// (QA-152; see revision.go). The full form is the backup format and does not.
+		lp := liteProfileOf(p, s.cidrCheckedAt)
+		lp.Revs = profileRevsOf(p)
+		writeJSON(w, http.StatusOK, lp)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.store.Profile())
+	writeJSON(w, http.StatusOK, p)
 }
 
 // liteList is a routing list without its feed cache, carrying the cache's SIZE instead.
@@ -89,6 +97,31 @@ type liteList struct {
 type liteProfile struct {
 	model.Profile
 	RoutingLists []liteList `json:"routing_lists"`
+	// Revs is each connection's, group's and routing list's revision as read here, the If-Match of an
+	// edit made from it (QA-152).
+	Revs *profileRevs `json:"revs,omitempty"`
+}
+
+// profileRevs maps each object's id to its revision, per kind (the ids of different kinds may meet).
+type profileRevs struct {
+	Endpoints    map[string]string `json:"endpoints"`
+	Groups       map[string]string `json:"groups"`
+	RoutingLists map[string]string `json:"routing_lists"`
+}
+
+func profileRevsOf(p model.Profile) *profileRevs {
+	out := &profileRevs{Endpoints: make(map[string]string, len(p.Endpoints)), Groups: make(map[string]string, len(p.Groups)),
+		RoutingLists: make(map[string]string, len(p.RoutingLists))}
+	for i := range p.Endpoints {
+		out.Endpoints[p.Endpoints[i].ID] = model.EndpointRev(p.Endpoints[i])
+	}
+	for i := range p.Groups {
+		out.Groups[p.Groups[i].ID] = model.GroupRev(p.Groups[i])
+	}
+	for i := range p.RoutingLists {
+		out.RoutingLists[p.RoutingLists[i].ID] = model.RoutingListRev(p.RoutingLists[i])
+	}
+	return out
 }
 
 // liteProfileOf strips the feed caches, keeping their sizes.
@@ -98,6 +131,7 @@ type liteProfile struct {
 // backups whose restore leaves every feed-backed list empty — and an empty cache on a list with a
 // source is a hard Apply blocker (see unfetchedFeedFindings), so the router would come back from its
 // own backup unable to apply until every feed was re-fetched.
+//
 // checkedAt reports when a list was last fetched, or 0 when that is unknown. Passed in rather than
 // read from a global so the shape stays testable without a Server.
 func liteProfileOf(p model.Profile, checkedAt func(id string) int64) liteProfile {
@@ -128,6 +162,9 @@ func liteProfileOf(p model.Profile, checkedAt func(id string) int64) liteProfile
 func (s *Server) handleRestoreProfile(w http.ResponseWriter, r *http.Request) {
 	var p model.Profile
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		if writeBodyTooLarge(w, err, "the profile") {
+			return
+		}
 		writeErr(w, http.StatusBadRequest, "invalid profile JSON")
 		return
 	}
@@ -142,53 +179,127 @@ func (s *Server) handleRestoreProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpsertEndpoint(w http.ResponseWriter, r *http.Request) {
+	rev := profileRevOf(r)
 	var e model.Endpoint
 	if err := json.NewDecoder(r.Body).Decode(&e); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid endpoint JSON")
 		return
 	}
-	if code, msg := s.gateEndpoint(r.Context(), e); code != 0 {
-		writeErr(w, code, msg)
+	// Pins as typed in the form (any case, colons, base64) are stored in one form (model/pin.go).
+	e.TLS.CanonicalizePins()
+	status, body := s.saveEndpoint(r.Context(), e, r.URL.Query(), rev)
+	writeJSON(w, status, body)
+}
+
+// handlePatchEndpoint switches one connection on or off and changes nothing else (QA-152).
+//
+// The switch used to post the whole connection as the page had loaded it, so a switch flipped in a
+// page left open put back whatever another tab had changed since. It sends only {"enabled": bool}
+// now; the rest is read here, from the profile as it is, and saved through the same checks as a full
+// save (the capability gate, ?detach=1 and ?replace_with= for an exit something still routes
+// through). The read and the write are one revision of the connection: one that loses a race to
+// another write of it is read again rather than saved over it. Any field but "enabled" is refused, so
+// a caller that meant to change more hears that it did not.
+func (s *Server) handlePatchEndpoint(w http.ResponseWriter, r *http.Request) {
+	enabled, ok := decodeEnabledOnly(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, `only {"enabled": true|false} can be changed here; save the whole connection with POST /api/endpoints`)
 		return
+	}
+	id := r.PathValue("id")
+	status, out := http.StatusPreconditionFailed, any(nil)
+	for attempt := 0; attempt < 3 && status == http.StatusPreconditionFailed; attempt++ {
+		p := s.store.Profile()
+		cur := p.EndpointByID(id)
+		if cur == nil {
+			writeErr(w, http.StatusNotFound, fmt.Sprintf("connection %q does not exist", id))
+			return
+		}
+		e := *cur // a value copy: only Enabled changes, so nothing it shares with the profile is written
+		e.Enabled = enabled
+		status, out = s.saveEndpoint(r.Context(), e, r.URL.Query(), store.At(model.EndpointRev(*cur)))
+	}
+	if saved, ok := out.(savedRev[model.Endpoint]); ok {
+		// was and rev let a page whose copy had was keep it, its switch flipped, as rev.
+		out = map[string]any{"id": id, "enabled": enabled, "rev": saved.Rev, "was": saved.Was}
+	}
+	writeJSON(w, status, out)
+}
+
+// saveEndpoint is the save behind POST /api/endpoints and PATCH /api/endpoints/{id}, committed only
+// while the stored connection is still at rev. It returns the status and the body to answer with: on
+// success the connection and its revisions (savedRev).
+func (s *Server) saveEndpoint(ctx context.Context, e model.Endpoint, q url.Values, rev store.Rev) (int, any) {
+	fail := func(code int, msg string) (int, any) { return code, map[string]any{"error": msg} }
+	e.Import = "" // a parse's format, never stored (model.Endpoint.Import)
+	if code, msg := s.gateEndpoint(ctx, e); code != 0 {
+		return fail(code, msg)
+	}
+	// Enabled, an endpoint the core cannot load fails model.Validate and with it every Apply of the
+	// whole profile (QA-028). Refuse it here, where the caller can still fix it, as the gate does.
+	if e.Enabled {
+		if p := model.EndpointParamProblem(&e); p != "" {
+			name := e.Name
+			if name == "" {
+				name = e.ID
+			}
+			return fail(http.StatusUnprocessableEntity, fmt.Sprintf("%s (%s): %s. Save it disabled if you need to retain it as a draft.",
+				name, e.Protocol, p))
+		}
+	}
+	refused := func(err error, code int) (int, any) {
+		if isStale(err) {
+			return http.StatusPreconditionFailed, staleBody("This connection")
+		}
+		return fail(code, err.Error())
+	}
+	done := func(saved store.Saved) (int, any) {
+		return http.StatusOK, savedRev[model.Endpoint]{Object: e, Saved: saved}
 	}
 	// Switching an exit OFF breaks a reference exactly as deleting it would, so it is answered the
 	// same way: ?replace_with= moves what routed through it, ?detach=1 parks those dependents, and a
 	// bare refusal carries the full set plus the outbounds they could move to instead of naming one
 	// internal id and stopping. See handleDeleteEndpoint — same question, same two answers.
 	if !e.Enabled {
-		if r.URL.Query().Get("detach") == "1" {
-			if err := s.store.SetEndpointDisabledDetaching(e); err != nil {
-				writeErr(w, http.StatusConflict, err.Error())
-				return
+		if q.Get("detach") == "1" {
+			saved, err := s.store.SetEndpointDisabledDetachingAt(e, rev)
+			if err != nil {
+				return refused(err, http.StatusConflict)
 			}
-			writeJSON(w, http.StatusOK, e)
-			return
+			return done(saved)
 		}
-		if replacement := strings.TrimSpace(r.URL.Query().Get("replace_with")); replacement != "" {
-			if err := s.store.SetEndpointDisabledReplacing(e, replacement); err != nil {
-				writeErr(w, http.StatusConflict, err.Error())
-				return
+		if replacement := strings.TrimSpace(q.Get("replace_with")); replacement != "" {
+			saved, err := s.store.SetEndpointDisabledReplacingAt(e, replacement, rev)
+			if err != nil {
+				return refused(err, http.StatusConflict)
 			}
-			writeJSON(w, http.StatusOK, e)
-			return
+			return done(saved)
 		}
 	}
-	if err := s.store.UpsertEndpoint(e); err != nil {
+	saved, err := s.store.UpsertEndpointAt(e, rev)
+	if err != nil {
+		if isStale(err) {
+			return http.StatusPreconditionFailed, staleBody("This connection")
+		}
 		if !e.Enabled {
 			if blockers := s.store.EndpointDisableBlockers(e.ID); len(blockers) != 0 {
-				writeJSON(w, http.StatusConflict, map[string]any{
+				return http.StatusConflict, map[string]any{
 					"error":        err.Error(),
 					"code":         "ENDPOINT_IN_USE",
 					"dependents":   blockers,
 					"replacements": s.store.EndpointDisableReplacements(e.ID),
-				})
-				return
+				}
 			}
 		}
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
+		// An edit that would strand a DNS server asking this connection's pushed resolvers (another
+		// protocol or engine) is a conflict with something else in the profile, not a bad request.
+		var stranded *store.StrandedResolverError
+		if errors.As(err, &stranded) {
+			return fail(http.StatusConflict, err.Error())
+		}
+		return fail(http.StatusBadRequest, err.Error())
 	}
-	writeJSON(w, http.StatusOK, e)
+	return done(saved)
 }
 
 // gateEndpoint refuses an ENABLED endpoint unless the host can execute the exact engine/protocol
@@ -225,12 +336,24 @@ func (s *Server) gateEndpoint(ctx context.Context, e model.Endpoint) (int, strin
 		// skipped) and every adopted native tunnel would become un-enableable.
 		return 0, ""
 	}
+	if e.Engine == model.EngineByeDPI && s.byedpiUnavailable() {
+		// The capabilities below can all be met on KeeneticOS (the core and its SOCKS client), and every
+		// Apply after it would then fail on the planner's refusal.
+		return http.StatusUnprocessableEntity, nativeplan.ByeDPIOnKeenetic + "." +
+			" Save it disabled if you are preparing a configuration for elsewhere."
+	}
 	requirements, err := endpointCapabilityRequirements(e)
 	if err != nil {
 		return http.StatusUnprocessableEntity, err.Error() +
 			" Save it disabled if you need to retain it as a draft."
 	}
-	set := s.capabilitySet(ctx, false)
+	return s.gateCapabilities(e, requirements, s.capabilitySet(ctx, false))
+}
+
+// gateCapabilities is gateEndpoint's answer for an enabled endpoint whose requirements are known,
+// against set. The connection form asks it too (enginePluginOffers), so the panel offers exactly what
+// a save accepts.
+func (s *Server) gateCapabilities(e model.Endpoint, requirements []string, set platform.CapabilitySet) (int, string) {
 	// Get synthesizes unknown for an id this build does not evaluate. That is deliberate here: an
 	// enabled future operation must not bypass the gate through an absent matrix entry.
 	for _, requirement := range requirements {
@@ -249,13 +372,51 @@ func (s *Server) gateEndpoint(ctx context.Context, e model.Endpoint) (int, strin
 		if cap.Remedy != "" {
 			msg += " " + cap.Remedy
 		}
+		// The router's own AmneziaWG definitely cannot create it, and the planner then runs it on
+		// WayHop's AmneziaWG engine, which needs none of these operations (QA-133: before KeeneticOS
+		// 4.2 no new AmneziaWG connection could be saved at all). Refused only when that engine cannot
+		// run it here either.
+		if _, onPlugin := s.enginePluginLane(e, set); onPlugin {
+			why := s.awgPluginCannotRun(e)
+			if why == "" {
+				return 0, ""
+			}
+			msg += " Nor can WayHop's AmneziaWG engine: " + why + "."
+		}
 		return http.StatusUnprocessableEntity, msg +
 			" Save it disabled if you are preparing a configuration for elsewhere."
+	}
+	// The router's own could create it, and the planner may still run it on WayHop's engine: settings
+	// beyond what the router's own carries (AmneziaWG 2 on KeeneticOS 4.2 to 5.0), or a connection set
+	// to run on amneziawg-go. Then the native operations are never used, and only whether the engine can
+	// run it here decides - accepted without it, every Apply failed to bring the connection up.
+	if lane, onPlugin := s.enginePluginLane(e, set); onPlugin {
+		if why := s.awgPluginCannotRun(e); why != "" {
+			msg := "this host cannot activate this connection: WayHop's AmneziaWG engine would run it, because " +
+				lane.Reason + ". The engine cannot run it here: " + why + "."
+			if lane.Remedy != "" {
+				msg += " " + lane.Remedy
+			}
+			return http.StatusUnprocessableEntity, msg +
+				" Save it disabled if you are preparing a configuration for elsewhere."
+		}
 	}
 	return 0, ""
 }
 
+// byedpiUnavailable reports whether this router cannot run a ByeDPI connection at all: KeeneticOS,
+// whose native planner refuses one (nativeplan.ByeDPIOnKeenetic). The demo never takes the native
+// plan, so its router runs one as any other.
+func (s *Server) byedpiUnavailable() bool {
+	return s.detectedPlatform() == platform.Keenetic && !s.config().Demo
+}
+
 func endpointCapabilityRequirements(e model.Endpoint) ([]string, error) {
+	if e.Engine == model.EngineByeDPI {
+		// ciadpi runs beside the core, which reaches it through a SOCKS outbound: the core is what has
+		// to be there. A missing ciadpi binary is the Apply review's to report (endpoint.engine.byedpi).
+		return []string{platform.CapEngineSingbox, platform.CapProtocolPrefix + string(model.ProtoSOCKS)}, nil
+	}
 	proto := model.Protocol(strings.ToLower(strings.TrimSpace(string(e.Protocol))))
 	if proto == "" {
 		return nil, fmt.Errorf("endpoint protocol is empty")
@@ -270,16 +431,14 @@ func endpointCapabilityRequirements(e model.Endpoint) ([]string, error) {
 			platform.NativeOperationCapabilityID(string(proto), platform.NativeRemove),
 		}, nil
 	case model.ProtoVLESS, model.ProtoVMess, model.ProtoTrojan, model.ProtoShadowsocks,
-		model.ProtoHysteria2, model.ProtoTUIC, model.ProtoAnyTLS, model.ProtoSOCKS, model.ProtoHTTP:
+		model.ProtoHysteria2, model.ProtoTUIC, model.ProtoAnyTLS, model.ProtoSOCKS, model.ProtoHTTP,
+		model.ProtoOpenVPN, model.ProtoSnell, model.ProtoOpenConnect, model.ProtoSSH:
 		if e.Engine != model.EngineSingBox {
 			return nil, fmt.Errorf("protocol %s requires the sing-box compatibility add-on", proto)
 		}
 		return []string{platform.CapEngineSingbox, platform.CapProtocolPrefix + string(proto)}, nil
 	case model.ProtoOlcRTC:
-		if e.Engine != model.EngineOlcRTC {
-			return nil, fmt.Errorf("protocol %s requires the olcRTC engine", proto)
-		}
-		return []string{platform.CapEngineOlcRTC}, nil
+		return nil, fmt.Errorf("olcRTC is no longer supported: the project ended and WayHop removed it, so this connection cannot be enabled")
 	default:
 		return nil, fmt.Errorf("protocol %q is not supported by this WayHop build", proto)
 	}
@@ -353,16 +512,22 @@ func (s *Server) handleDeleteEndpoint(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpsertGroup(w http.ResponseWriter, r *http.Request) {
+	rev := profileRevOf(r)
 	var g model.Group
 	if err := json.NewDecoder(r.Body).Decode(&g); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid group JSON")
 		return
 	}
-	if err := s.store.UpsertGroup(g); err != nil {
+	saved, err := s.store.UpsertGroupAt(g, rev)
+	if err != nil {
+		if isStale(err) {
+			writeStale(w, "This group")
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, g)
+	writeJSON(w, http.StatusOK, savedRev[model.Group]{Object: g, Saved: saved})
 }
 
 func (s *Server) handleDeleteGroup(w http.ResponseWriter, r *http.Request) {
@@ -410,6 +575,7 @@ func (s *Server) handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 // --- Routing lists (the "Routing" page) ---
 
 func (s *Server) handleUpsertRoutingList(w http.ResponseWriter, r *http.Request) {
+	rev := profileRevOf(r)
 	var rl model.RoutingList
 	if err := json.NewDecoder(r.Body).Decode(&rl); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid routing list JSON")
@@ -422,11 +588,70 @@ func (s *Server) handleUpsertRoutingList(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("refresh_hours must be 0 (default 24h) or %d–%d hours for a CIDR-source list (flash protection)", model.MinCIDRRefreshHours, model.MaxCIDRRefreshHours))
 		return
 	}
-	if err := s.store.UpsertRoutingList(rl); err != nil {
+	saved, err := s.store.UpsertRoutingListAt(rl, rev)
+	if err != nil {
+		if isStale(err) {
+			writeStale(w, "This routing list")
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, rl)
+	// The answer is the list as stored, which the store may have adjusted (a carried format dropped,
+	// QA-150), so a page that keeps its copy as saved.Rev keeps what that revision is. Its feed caches
+	// are left out, as in the lite profile. A write that landed in between leaves the list as sent.
+	p := s.store.Profile()
+	for i := range p.RoutingLists {
+		if stored := p.RoutingLists[i]; stored.ID == rl.ID && model.RoutingListRev(stored) == saved.Rev {
+			rl = stored
+			rl.CIDRCache, rl.DomainCache = nil, nil
+		}
+	}
+	writeJSON(w, http.StatusOK, savedRev[model.RoutingList]{Object: rl, Saved: saved})
+}
+
+// handlePatchRoutingList switches one routing list on or off and changes nothing else, for the same
+// reason and in the same way as handlePatchEndpoint (QA-152): the switch posted the list as the page
+// had loaded it, so it put back the entries, outbound or URL another tab had saved since. The
+// refresh-hours bound is not checked again: this write does not change them, and a list saved before
+// the bound existed must still be switchable.
+func (s *Server) handlePatchRoutingList(w http.ResponseWriter, r *http.Request) {
+	enabled, ok := decodeEnabledOnly(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, `only {"enabled": true|false} can be changed here; save the whole list with POST /api/routing`)
+		return
+	}
+	id := r.PathValue("id")
+	for attempt := 0; ; attempt++ {
+		p := s.store.Profile()
+		var rl *model.RoutingList
+		for i := range p.RoutingLists {
+			if p.RoutingLists[i].ID == id {
+				rl = &p.RoutingLists[i]
+				break
+			}
+		}
+		if rl == nil {
+			writeErr(w, http.StatusNotFound, fmt.Sprintf("routing list %q does not exist", id))
+			return
+		}
+		next := *rl // a value copy: only Enabled changes; the feed caches it shares are kept as they are
+		next.Enabled = enabled
+		saved, err := s.store.UpsertRoutingListAt(next, store.At(model.RoutingListRev(*rl)))
+		switch {
+		case err == nil:
+			// was and rev as in handlePatchEndpoint.
+			writeJSON(w, http.StatusOK, map[string]any{"id": id, "enabled": enabled, "rev": saved.Rev, "was": saved.Was})
+			return
+		case isStale(err) && attempt < 2:
+			continue // another write of this list landed between the read and this one: read it again
+		case isStale(err):
+			writeStale(w, "This routing list")
+		default:
+			writeErr(w, http.StatusBadRequest, err.Error())
+		}
+		return
+	}
 }
 
 func (s *Server) handleDeleteRoutingList(w http.ResponseWriter, r *http.Request) {
@@ -476,9 +701,37 @@ var (
 	routingCatalogETag string
 )
 
+// routingPresetsFor is the catalog as this platform can carry it. A domain feed needs no core only
+// where a resolver plane turns its names into set members: KeeneticOS's dnsmasq ipset. Elsewhere the
+// names reach no kernel plane and the core matches them (QA-066), so offering such a preset as coreless
+// on a router without sing-box saved a list that then blocked every Apply.
+func routingPresetsFor(p platform.Platform) []model.RoutingPreset {
+	presets := model.RoutingPresets()
+	if p == platform.Keenetic {
+		return presets
+	}
+	for i := range presets {
+		if presets[i].DomainSource != "" {
+			presets[i].RequiresCore = true
+			// The catalog text describes KeeneticOS, where the resolver carries these feeds. Here
+			// the badge says "needs sing-box", so the description must not promise the opposite
+			// (QA-122).
+			presets[i].Description = coreRequiredText.Replace(presets[i].Description)
+		}
+	}
+	return presets
+}
+
+// coreRequiredText rewrites the catalog's "no proxy core needed" sentences for a router where a
+// domain feed runs in the proxy core.
+var coreRequiredText = strings.NewReplacer(
+	"Resolver-carried, no proxy core needed.", "On this router it runs in the proxy core.",
+	"Carried by the router's own resolver — no proxy core needed.", "On this router it runs in the proxy core.",
+)
+
 func routingCatalogCached() ([]byte, string) {
 	routingCatalogOnce.Do(func() {
-		b, err := json.Marshal(model.RoutingPresets())
+		b, err := json.Marshal(routingPresetsFor(platform.Detect()))
 		if err != nil {
 			b = []byte("[]") // a static catalog can't really fail to marshal; degrade to empty
 		}
@@ -610,10 +863,58 @@ func (s *Server) handleEndpointCheck(w http.ResponseWriter, r *http.Request) {
 	opts.Hybrid = false
 	opts.KernelExcludeV4 = nil
 	opts.KernelExcludeV6 = nil
+	// Nor the operator's core override: it is written against the whole config, and its rules and
+	// prepended outbounds name tags this one-connection profile does not have, so it would fail the
+	// check for reasons that are not this connection's. Apply checks the override with the profile.
+	opts.CoreOverride = ""
 
 	res, err := generator.Generate(&mini, opts)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error(), "checked_by": checkedByGenerator})
+		return
+	}
+	// A Hysteria2 realm or gecko obfuscation the known core cannot carry is rendered without it, so
+	// the config is valid while the connection can never come up: on 1.13 a realm connection checked
+	// "configuration is valid" and Apply then raised an exit with no address (QA-059). Say so here,
+	// as the Apply review does. An unknown core version says nothing, there as here.
+	if generator.RealmNeedsNewerCore(&e, opts.CoreVersion) {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "checked_by": checkedByGenerator,
+			"error": "a Hysteria2 realm needs sing-box 1.14 or newer; this router runs " + opts.CoreVersion + ", so this connection cannot come up"})
+		return
+	}
+	if generator.GeckoNeedsNewerCore(&e, opts.CoreVersion) {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "checked_by": checkedByGenerator,
+			"error": "gecko obfuscation needs sing-box 1.14 or newer; this router runs " + opts.CoreVersion + ", so this connection cannot reach its server"})
+		return
+	}
+	// ECH the known core leaves out passes the check as a config without it, so it is said here too.
+	coreName := strings.TrimSpace(strings.SplitN(opts.CoreVersion, "\n", 2)[0])
+	if generator.ECHDroppedByCore(&e, opts.CoreVersion) {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "checked_by": checkedByGenerator,
+			"error": "this router's " + coreName + " was built with a Go older than 1.24 and has no ECH, so this connection is applied without it and sends its server name in the clear"})
+		return
+	}
+	if generator.ECHQueryNameNeedsNewerCore(&e, opts.CoreVersion) {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "checked_by": checkedByGenerator,
+			"error": "an ECH query server name needs sing-box 1.13 or newer; this router runs " + coreName + ", so the ECH config is looked up under the server name instead, and the connection fails unless that name publishes one"})
+		return
+	}
+	if generator.QUICTuningNeedsNewerCore(&e, opts.CoreVersion) {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "checked_by": checkedByGenerator,
+			"error": "the QUIC packet size settings need sing-box 1.14 or newer; this router runs " + coreName + ", so this connection is applied without them"})
+		return
+	}
+	if need := generator.PinCoreNeeded(&e, opts.CoreVersion); need != "" {
+		cov, _ := generator.PinsOf(&e, opts.CoreVersion)
+		then := "checks the certificate's chain and name instead, which a self-signed certificate fails"
+		switch {
+		case cov.Enforced:
+			then = "checks only the pins this core can"
+		case cov.Insecure:
+			then = "accepts any certificate, because its certificate checks are off"
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "checked_by": checkedByGenerator,
+			"error": "this connection's certificate pin needs sing-box " + need + " or newer; this router runs " + coreName + ", so it is applied without the pin and " + then})
 		return
 	}
 
@@ -767,15 +1068,27 @@ func fastModeDomainWarning(p *model.Profile, mode string, kernelCarriesDomains b
 // endpoints WITHOUT saving them, so the user can pick which to import.
 func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		URL  string `json:"url"`
-		Text string `json:"text"`
+		URL       string `json:"url"`
+		Text      string `json:"text"`
+		UserAgent string `json:"user_agent"`
+		// HWIDMode chooses the x-hwid (competitor gap 25): "off", "generate" (WayHop's own random ID,
+		// made once and kept), "custom" (HWID), or absent to keep the stored one.
+		HWIDMode string `json:"hwid_mode"`
+		HWID     string `json:"hwid"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
+	body.UserAgent = strings.TrimSpace(body.UserAgent)
+	if !validSubscriptionUserAgent(body.UserAgent) {
+		writeErr(w, http.StatusBadRequest, "user_agent must be printable ASCII, at most 256 characters")
+		return
+	}
+	body.HWID = strings.TrimSpace(body.HWID)
 	text := body.Text
 	name := "" // subscription display name, from the server's Profile-Title header (URL path only)
+	hwid := "" // the x-hwid the fetch sent (URL path only)
 	if body.URL != "" {
 		u, perr := url.Parse(body.URL)
 		if perr != nil {
@@ -786,6 +1099,10 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "subscription url must be an http(s) URL")
 			return
 		}
+		if err := checkHWIDRequest(body.HWIDMode, body.HWID); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 		defer cancel()
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, body.URL, nil)
@@ -793,7 +1110,15 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "bad url: "+err.Error())
 			return
 		}
-		req.Header.Set("User-Agent", "wayhop")
+		if hwid, err = s.subscriptionHWID(body.HWIDMode, body.HWID, body.URL); err != nil {
+			code := http.StatusInternalServerError
+			if errors.Is(err, errStoredHWID) {
+				code = http.StatusBadRequest
+			}
+			writeErr(w, code, err.Error())
+			return
+		}
+		setSubscriptionHeaders(req.Header, body.UserAgent, hwid, s.detectedPlatform())
 		resp, err := s.subscriptionFetchClient().Do(req)
 		if err != nil {
 			writeErr(w, http.StatusBadGateway, "fetch failed: "+err.Error())
@@ -801,7 +1126,7 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			writeErr(w, http.StatusBadGateway, "subscription returned status "+resp.Status)
+			writeErr(w, http.StatusBadGateway, subscriptionStatusError(resp.Status, resp.StatusCode, hwid))
 			return
 		}
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
@@ -811,16 +1136,32 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 		// can re-fetch it later and add newly-rotated endpoints. This does NOT enable
 		// refresh (RefreshHours stays untouched — opt-in); it only records the source.
 		s.cfgMu.Lock()
-		if s.cfg.Subscription.URL != body.URL {
-			s.cfg.Subscription.URL = body.URL
+		// The User-Agent and HWID that fetched it are kept with it, so the scheduled refresh asks the
+		// same way. Only here, after the fetch: the HWID belongs to this URL, and a failed import (or
+		// one that never got here) must leave the stored URL asking as before.
+		sub := &s.cfg.Subscription
+		if sub.URL != body.URL || sub.UserAgent != body.UserAgent || sub.HWID != hwid {
+			sub.URL, sub.UserAgent, sub.HWID = body.URL, body.UserAgent, hwid
 			if err := s.cfg.Save(); err != nil {
 				log.Printf("wayhop: could not persist subscription URL for auto-refresh: %v", err)
 			}
 		}
 		s.cfgMu.Unlock()
 	}
-	eps, errs := importer.ParseSubscription(text)
-	writeJSON(w, http.StatusOK, map[string]any{"endpoints": eps, "errors": errs, "name": name})
+	// Notes are what an entry carried that its endpoint keeps differently or not at all (a Clash smux
+	// setting sing-box has no field for): said in the preview, where the operator still chooses.
+	eps, errs, notes := importer.ParseSubscriptionNotes(text)
+	if notes == nil {
+		notes = []string{}
+	}
+	out := map[string]any{"endpoints": eps, "errors": errs, "name": name, "notes": notes}
+	if body.URL != "" {
+		// The panel shows the ID it was fetched with ("" = none), e.g. one just generated, and reads
+		// the mode from it: "generate" when it is the generated one.
+		out["hwid"] = hwid
+		out["generated_hwid"] = s.config().Subscription.GeneratedHWID
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // subscriptionFetchClient is an http.Client for fetching a user-supplied
@@ -830,20 +1171,39 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 // DIAL time on the already-resolved IP, so it also covers redirects and
 // DNS-rebinding. Redirects are capped. (allowInternalFetch disables the guard for
 // tests that point at a loopback httptest server.)
+// subscriptionUserAgent is the User-Agent a subscription is fetched with: the configured one, or
+// "wayhop". Provider panels pick the format by it and some refuse a client they do not know
+// (OpenClash and Passwall2 let the user set it; competitor gap 2).
+func subscriptionUserAgent(ua string) string {
+	if ua = strings.TrimSpace(ua); ua != "" {
+		return ua
+	}
+	return "wayhop"
+}
+
+// validSubscriptionUserAgent accepts what can go in a header unchanged: printable ASCII, no line
+// breaks, at most 256 characters. Empty means the default.
+func validSubscriptionUserAgent(ua string) bool {
+	if len(ua) > 256 {
+		return false
+	}
+	for i := 0; i < len(ua); i++ {
+		if ua[i] < 0x20 || ua[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Server) subscriptionFetchClient() *http.Client {
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	if !s.allowInternalFetch {
 		dialer.Control = blockInternalDial
 	}
 	return &http.Client{
-		Timeout:   15 * time.Second,
-		Transport: &http.Transport{DialContext: dialer.DialContext},
-		CheckRedirect: func(_ *http.Request, via []*http.Request) error {
-			if len(via) >= 5 {
-				return fmt.Errorf("stopped after 5 redirects")
-			}
-			return nil
-		},
+		Timeout:       15 * time.Second,
+		Transport:     &http.Transport{DialContext: dialer.DialContext},
+		CheckRedirect: subscriptionRedirect, // capped; no Referer, no HWID to another host
 	}
 }
 
@@ -925,10 +1285,64 @@ func (s *Server) handleBulkEndpoints(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
+	// One snapshot for the merge AND the write (At its generation): an import that loses a race to
+	// another save is merged again from what that save left, not written over it (QA-152).
+	for attempt := 0; ; attempt++ {
+		p, gen := s.store.Snapshot()
+		status, out := s.bulkImport(r.Context(), p.Endpoints, body.Endpoints, gen)
+		if status == http.StatusPreconditionFailed && attempt < 2 {
+			continue
+		}
+		writeJSON(w, status, out)
+		return
+	}
+}
+
+// bulkImport merges incoming into existing, read at generation gen, and saves the result only while
+// the profile is still at gen, returning the answer.
+func (s *Server) bulkImport(ctx context.Context, existing, incoming []model.Endpoint, gen uint64) (int, any) {
+	fail := func(code int, msg string) (int, any) { return code, map[string]any{"error": msg} }
 	// Skip content-duplicate imports: re-fetching a subscription (fresh IDs each time)
 	// would otherwise pile up identical endpoints. An incoming endpoint whose ID already
 	// exists is an in-place update, not a dupe, and is kept (see importer.DedupeNew).
-	eps, dupes := importer.DedupeNew(s.store.Profile().Endpoints, body.Endpoints)
+	eps, dupes := importer.DedupeNew(existing, incoming)
+
+	// An in-place update is the link's connection with what the user owns carried over
+	// (importer.Reimport, QA-148), so the user's edits survive it. One whose link-derived part is
+	// exactly as stored is not written and is counted as unchanged; the answer says how many were
+	// added, updated and unchanged instead of calling all of them "imported".
+	byID := make(map[string]*model.Endpoint, len(existing))
+	for i := range existing {
+		byID[existing[i].ID] = &existing[i]
+	}
+	// A public-key pin kept from the stored connection is said once here: it came from Set up Server or
+	// the form, no link carries one, and a server whose key changed is refused while it stays - which
+	// is what an operator re-importing a link to fix a failing exit needs to know.
+	linkOf := make(map[string]model.Endpoint, len(incoming))
+	for _, e := range incoming {
+		linkOf[e.ID] = e
+	}
+	keyPinNotes := make([]string, 0)
+	added, updated, unchanged := 0, 0, 0
+	kept := eps[:0]
+	for _, e := range eps {
+		have, ok := byID[e.ID]
+		if ok && e.ID != "" && importer.KeptServerKeyPin(e, linkOf[e.ID]) {
+			keyPinNotes = append(keyPinNotes, e.Name+" ("+string(e.Protocol)+"): kept: server public-key pin. Set up "+
+				"Server or the connection form added it and no link carries one; if the server's key changed, remove it in the connection's form.")
+		}
+		switch {
+		case !ok || e.ID == "":
+			added++
+		case importer.SameEndpoint(*have, e):
+			unchanged++
+			continue
+		default:
+			updated++
+		}
+		kept = append(kept, e)
+	}
+	eps = kept
 
 	// The single-endpoint gate is worth nothing if the bulk path walks around it, and bulk is the
 	// path a subscription import takes — the largest source of protocols this host may not have.
@@ -942,19 +1356,30 @@ func (s *Server) handleBulkEndpoints(w http.ResponseWriter, r *http.Request) {
 	//
 	// Unknown is different and refuses the batch: the host has not finished answering, so disabling
 	// would be a guess in one direction and enabling a guess in the other.
-	gated := make([]string, 0)
+	gated, notes := make([]string, 0), keyPinNotes
 	for i := range eps {
-		code, msg := s.gateEndpoint(r.Context(), eps[i])
+		code, msg := s.gateEndpoint(ctx, eps[i])
 		switch code {
 		case 0:
 			// nothing in the way
 		case http.StatusServiceUnavailable:
-			writeErr(w, http.StatusServiceUnavailable, "this host has not finished reporting what it can run, "+
+			return fail(http.StatusServiceUnavailable, "this host has not finished reporting what it can run, "+
 				"so this import would be a guess: "+msg)
-			return
 		default:
 			eps[i].Enabled = false
 			gated = append(gated, eps[i].Name+" ("+string(eps[i].Protocol)+"): "+msg)
+		}
+		// The same holds for an entry that cannot load at all (QA-028: a sing-box openvpn-client with
+		// no certificate). Stored enabled it fails model.Validate, and that blocks every Apply.
+		if eps[i].Enabled {
+			if p := model.EndpointParamProblem(&eps[i]); p != "" {
+				eps[i].Enabled = false
+				gated = append(gated, eps[i].Name+" ("+string(eps[i].Protocol)+"): "+p)
+			}
+		}
+		// Said once, here, and not on every Apply: nothing about it can or need be changed.
+		if generator.ECHConfigOnReality(&eps[i]) {
+			notes = append(notes, eps[i].Name+" ("+string(eps[i].Protocol)+"): "+echOnRealityNote)
 		}
 	}
 	// Persist the whole deduped set in ONE write. A per-endpoint UpsertEndpoint loop rewrites the
@@ -962,17 +1387,32 @@ func (s *Server) handleBulkEndpoints(w http.ResponseWriter, r *http.Request) {
 	// flash wear that an unauthenticated LAN client (or a large legit subscription) could trigger.
 	// Endpoints with no ID are skipped and surfaced, mirroring the prior per-endpoint behavior.
 	errs := []string{}
-	skipped, err := s.store.UpsertEndpoints(eps)
+	skipped, err := s.store.UpsertEndpointsIfGen(eps, gen)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "persist endpoints: "+err.Error())
-		return
+		if isStale(err) {
+			return http.StatusPreconditionFailed, staleBody("The connections")
+		}
+		// An import that replaces a connection a DNS server asks for its pushed resolvers, with one of
+		// another protocol or engine, is refused as a whole: nothing was written.
+		var stranded *store.StrandedResolverError
+		if errors.As(err, &stranded) {
+			return fail(http.StatusConflict, "nothing was imported: "+err.Error())
+		}
+		return fail(http.StatusInternalServerError, "persist endpoints: "+err.Error())
 	}
 	for range skipped {
 		errs = append(errs, "skipped an endpoint with no id")
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"saved": len(eps) - len(skipped), "duplicates": dupes,
-		"errors": errs, "stored_disabled": gated})
+	// saved is every connection written (added + updated), as before; the three counts say which.
+	return http.StatusOK, map[string]any{"saved": len(eps) - len(skipped), "added": added - len(skipped),
+		"updated": updated, "unchanged": unchanged, "duplicates": dupes,
+		"errors": errs, "stored_disabled": gated, "notes": notes}
 }
+
+// echOnRealityNote is what an import says of a Reality link that also carries an ECH config (v2rayN
+// writes ech= on those too). The connection form says it again under Reality.
+const echOnRealityNote = "its link also carries an ECH config, which is not used: sing-box cannot combine ECH " +
+	"with Reality, so it runs over Reality without it. The config is kept so that sharing gives the link back whole."
 
 // routingMode resolves the effective routing mode from a config snapshot: "" derives
 // from Gateway (back-compat — TUN when gateway is on, else mixed-proxy-only); an explicit
@@ -990,6 +1430,144 @@ func (s *Server) routingMode(c config.Config) string {
 	return mode
 }
 
+// hostVerdictCache keeps the kernel-PBR and accelerator verdicts for as long as a capability
+// observation stays trustworthy (capStaleAfter), and takes the fresh answer whenever the capability
+// set is probed again - an explicit ?refresh=1 included. They used to be detected once for the
+// daemon's lifetime (QA-129): the remedy the review prints for a refused fast or hybrid mode
+// (`opkg install nftables`, `opkg install ipset iptables`) never lifted the refusal until a
+// restart, while /api/native/capabilities, which probes fresh, already reported the mode usable; and
+// a flow-offload module installed later was never compiled for.
+//
+// A stale accelerator is probed again inside the request that asks (/api/health among them), and
+// the probe is a full platform.DetectCapabilities: accelProbe makes the requests that find it stale
+// together wait for one probe instead of each running its own.
+type hostVerdictCache struct {
+	mu      sync.Mutex
+	pbrAt   time.Time
+	pbr     bool
+	accelAt time.Time
+	accel   platform.Accel
+	// accelProbe is closed when the accelerator probe in flight has noted its answer; nil when none is.
+	accelProbe chan struct{}
+	// detectAccel observes the accelerator; nil in production, where it is a full
+	// platform.DetectCapabilities. Tests answer for it.
+	detectAccel func() platform.Accel
+}
+
+// demoAccel is the demo's capable OpenWrt box, so the demo UI can exercise the offload knobs.
+var demoAccel = platform.Accel{Kind: "nft-flowtable", HW: true}
+
+// accelKind returns this host's forwarding-accelerator kind ("nft-flowtable" | "ppe" | ""). It gates
+// WayHop's nft flow-offload so a flowtable is compiled ONLY on a host whose kernel supports it —
+// never on Keenetic (firmware PPE, no nftables) or a kernel without CONFIG_NF_FLOW_TABLE, where the
+// best-effort offload transaction would just be rejected.
+func (s *Server) accelKind() string {
+	return s.accel().Kind
+}
+
+// accelHW reports whether a HARDWARE fast path is present. Separate from accelKind because "auto"
+// must distinguish a kernel that can only do software offload from one that can do both — resolving
+// auto to "hw" on the former would compile a flowtable the kernel then rejects.
+func (s *Server) accelHW() bool {
+	return s.accel().HW
+}
+
+// accel is the accelerator the daemon decides with, kind and HW from one detection so the two can
+// never be read from different ones: the last observation while it is fresh (see hostVerdictCache),
+// else a new one - the probe already in flight, when another caller started it.
+func (s *Server) accel() platform.Accel {
+	if s.config().Demo {
+		return demoAccel
+	}
+	v := &s.hostVerdicts
+	v.mu.Lock()
+	if !v.accelAt.IsZero() && time.Since(v.accelAt) < capStaleAfter {
+		a := v.accel
+		v.mu.Unlock()
+		return a
+	}
+	if inFlight := v.accelProbe; inFlight != nil {
+		v.mu.Unlock()
+		<-inFlight
+		v.mu.Lock()
+		a := v.accel
+		v.mu.Unlock()
+		return a
+	}
+	done := make(chan struct{})
+	v.accelProbe = done
+	detect := v.detectAccel
+	v.mu.Unlock()
+	defer func() {
+		v.mu.Lock()
+		v.accelProbe = nil
+		v.mu.Unlock()
+		close(done)
+	}()
+	if detect == nil {
+		detect = func() platform.Accel { return platform.DetectCapabilities().Accel }
+	}
+	return s.noteAccel(detect())
+}
+
+// noteAccel keeps an accelerator just observed by a full capability probe, so every reader decides
+// with it, and returns the one to decide with (the demo's in demo mode).
+func (s *Server) noteAccel(observed platform.Accel) platform.Accel {
+	if s.config().Demo {
+		return demoAccel
+	}
+	s.hostVerdicts.mu.Lock()
+	s.hostVerdicts.accel, s.hostVerdicts.accelAt = observed, time.Now()
+	s.hostVerdicts.mu.Unlock()
+	return observed
+}
+
+// kernelPBRAvailable reports whether this host can run WayHop's nftables kernel-PBR plane. It CANNOT
+// on Keenetic (KeeneticOS ships no nftables and the native routing backend is not yet wired into the
+// apply path — see cmd/wayhop/main.go) or on any host without the `nft` binary. The answer is kept
+// while it is fresh (see hostVerdictCache) and probed again after. When false, the daemon skips the
+// nft plane entirely — Apply proceeds in monitor/sing-box mode, and the reconcile loop + PBR health
+// probe are no-ops — instead of exec-failing `nft` on every apply and every 30s reconcile (the P0
+// that made fast/hybrid unusable on Keenetic).
+func (s *Server) kernelPBRAvailable() bool {
+	s.hostVerdicts.mu.Lock()
+	if !s.hostVerdicts.pbrAt.IsZero() && time.Since(s.hostVerdicts.pbrAt) < capStaleAfter {
+		available := s.hostVerdicts.pbr
+		s.hostVerdicts.mu.Unlock()
+		return available
+	}
+	s.hostVerdicts.mu.Unlock()
+	return s.refreshKernelPBR()
+}
+
+// refreshKernelPBR probes the kernel-PBR plane now and keeps the answer: what a capability probe
+// asks, so the review's verdict and every later reader move with it.
+func (s *Server) refreshKernelPBR() bool {
+	available := s.detectKernelPBR()
+	s.hostVerdicts.mu.Lock()
+	s.hostVerdicts.pbr, s.hostVerdicts.pbrAt = available, time.Now()
+	s.hostVerdicts.mu.Unlock()
+	return available
+}
+
+func (s *Server) detectKernelPBR() bool {
+	// A test/mock runner (not the real ExecRunner) records commands without touching the host, so
+	// the gate — which exists only to avoid exec-failing `nft` on a live router — does not apply:
+	// the plane logic must run so tests observe it. Only the real ExecRunner path is gated.
+	if _, isExec := s.pbrRunner.(pbr.ExecRunner); !isExec {
+		return true
+	}
+	switch {
+	case s.config().Demo:
+		return true // demo poses as a capable OpenWrt box (nft never actually runs)
+	case platform.Detect() == platform.Keenetic:
+		return keeneticKernelPBRPresent()
+	default:
+		_, err := exec.LookPath("nft")
+		return err == nil
+	}
+}
+
 // pbrCompileOptions builds the pbr.Options the kernel-PBR compiler is driven with for a
 // config, so the read-only preview handler compiles the SAME plan the apply path does — in
 // particular the flow-offload flowtable, which is baked into the plan at Compile time, so a
@@ -997,65 +1575,6 @@ func (s *Server) routingMode(c config.Config) string {
 // Offload applies to "fast" mode only (it accelerates the general kernel fast-path that
 // exists only there; in hybrid, general traffic transits the capture-all TUN). The WAN+LAN
 // host probe runs ONLY in the opt-in case: offload set, no explicit device list, not demo.
-// accelKind returns this host's forwarding-accelerator kind ("nft-flowtable" | "ppe" | ""),
-// detected once and cached. It gates WayHop's nft flow-offload so a flowtable is compiled ONLY on a
-// host whose kernel supports it — never on Keenetic (firmware PPE, no nftables) or a kernel without
-// CONFIG_NF_FLOW_TABLE, where the best-effort offload transaction would just be rejected. Demo
-// pretends to be a capable OpenWrt box so the demo UI can exercise the offload knobs.
-func (s *Server) accelKind() string {
-	s.detectAccel()
-	return s.accelKindCached
-}
-
-// accelHW reports whether a HARDWARE fast path is present. Separate from accelKind because "auto"
-// must distinguish a kernel that can only do software offload from one that can do both — resolving
-// auto to "hw" on the former would compile a flowtable the kernel then rejects.
-func (s *Server) accelHW() bool {
-	s.detectAccel()
-	return s.accelHWCached
-}
-
-// detectAccel probes once and caches both fields together, so kind and HW can never be read from
-// two different detections.
-func (s *Server) detectAccel() {
-	s.accelOnce.Do(func() {
-		if s.config().Demo {
-			s.accelKindCached, s.accelHWCached = "nft-flowtable", true
-			return
-		}
-		a := platform.DetectCapabilities().Accel
-		s.accelKindCached, s.accelHWCached = a.Kind, a.HW
-	})
-}
-
-// kernelPBRAvailable reports whether this host can run WayHop's nftables kernel-PBR plane. It CANNOT
-// on Keenetic (KeeneticOS ships no nftables and the native routing backend is not yet wired into the
-// apply path — see cmd/wayhop/main.go) or on any host without the `nft` binary. Detected once and
-// cached. When false, the daemon skips the nft plane entirely — Apply proceeds in monitor/sing-box
-// mode, and the reconcile loop + PBR health probe are no-ops — instead of exec-failing `nft` on every
-// apply and every 30s reconcile (the P0 that made fast/hybrid unusable on Keenetic).
-func (s *Server) kernelPBRAvailable() bool {
-	s.pbrAvailOnce.Do(func() {
-		// A test/mock runner (not the real ExecRunner) records commands without touching the host, so
-		// the gate — which exists only to avoid exec-failing `nft` on a live router — does not apply:
-		// the plane logic must run so tests observe it. Only the real ExecRunner path is gated.
-		if _, isExec := s.pbrRunner.(pbr.ExecRunner); !isExec {
-			s.pbrAvail = true
-			return
-		}
-		switch {
-		case s.config().Demo:
-			s.pbrAvail = true // demo poses as a capable OpenWrt box (nft never actually runs)
-		case platform.Detect() == platform.Keenetic:
-			s.pbrAvail = keeneticKernelPBRPresent()
-		default:
-			_, err := exec.LookPath("nft")
-			s.pbrAvail = err == nil
-		}
-	})
-	return s.pbrAvail
-}
-
 func (s *Server) pbrCompileOptions(c config.Config) pbr.Options {
 	opts := pbr.Options{}
 	// KeeneticOS carries domain matchers through dnsmasq rather than the kernel: the resolver adds
@@ -1108,6 +1627,7 @@ func (s *Server) genOptionsWithPlan(p *model.Profile, c config.Config) (generato
 	mode := s.routingMode(c)
 	opts := generator.Options{
 		MixedPort:   c.Ports.Mixed,
+		ProbePort:   c.Ports.Probe(),
 		ClashAddr:   managedClashAddress(c),
 		ClashSecret: c.Clash.Secret,
 		CacheFile:   filepath.Join(filepath.Dir(c.SingBox.Config), "cache.db"),
@@ -1123,12 +1643,22 @@ func (s *Server) genOptionsWithPlan(p *model.Profile, c config.Config) (generato
 		TunEnabled: mode == "tun" || mode == "hybrid",
 		TunMTU:     c.GatewayMTU,
 		TunAddr:    c.GatewayAddr,
+		// The schema follows the core that will read it: 1.15 refuses to start on two fields the
+		// 1.12 schema needs (see generator/coreversion.go). "" (unknown) keeps the 1.12 schema.
+		CoreVersion:  s.coreVersion(c),
+		CoreOverride: c.CoreOverride,
 	}
+	// A list sent to a KeeneticOS access policy is generated and kernel-routed by the policy's mark,
+	// which only the router knows; read only when such a list exists. A policy it does not have stays
+	// unknown here, and Generate names it.
+	opts.NDMPolicies = s.reviewNDMPolicies(context.Background(), c, p).marks
 	if (mode != "hybrid" && mode != "fast") || p == nil {
 		return opts, nil
 	}
 	// Flow-offload (fast mode only) is baked into the plan at Compile; see pbrCompileOptions.
-	plan, _, err := pbr.Compile(p, s.pbrCompileOptions(c))
+	compileOpts := s.pbrCompileOptions(c)
+	compileOpts.NDMPolicies = opts.NDMPolicies
+	plan, _, err := pbr.Compile(p, compileOpts)
 	if err != nil {
 		// Fail-safe: never emit a half-hybrid config that excludes CIDRs nothing routes.
 		// Fall back to the non-hybrid (TUN) shape and return no plan — both planes agree

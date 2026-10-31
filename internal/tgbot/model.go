@@ -23,10 +23,14 @@ type Backend interface {
 	Pulse(ctx context.Context) Pulse
 	// Boot describes this daemon start, for the "back online" alert.
 	Boot() BootInfo
-	// ConfirmApply keeps the configuration under test (the panel's Keep).
-	ConfirmApply(ctx context.Context) error
-	// RollbackApply restores the committed configuration (the panel's Roll back).
-	RollbackApply(ctx context.Context) error
+	// ConfirmApply keeps the configuration under test (the panel's Keep) if it is still the test Apply
+	// named window (FailSafePulse.Window); ErrWindowChanged when a newer one runs in its place. The
+	// check is the daemon's, under its apply lock: a Test Apply holds that lock for its whole run, so
+	// the bot's own look at the window cannot see one that is about to be recorded.
+	ConfirmApply(ctx context.Context, window string) error
+	// RollbackApply restores the committed configuration (the panel's Roll back), for the test Apply
+	// named window as ConfirmApply.
+	RollbackApply(ctx context.Context, window string) error
 	// Trace explains where traffic to a domain or IP goes: what it resolves to, the live connections
 	// and the exits they took, and the configured rules and lists that reference it.
 	Trace(ctx context.Context, target string) (Trace, error)
@@ -62,6 +66,10 @@ type Backend interface {
 	// ApplyTest applies the reviewed revision as a test (the fail-safe window, not saved),
 	// acknowledging the findings the review listed as needing it.
 	ApplyTest(ctx context.Context, rev string) error
+	// SetRouting is the panel's routing switch: on=false takes WayHop's routing off the router (the
+	// tunnels stay up, unrouted, and every client goes out through the WAN), on=true restores the
+	// last applied configuration. The configuration itself is not touched either way.
+	SetRouting(ctx context.Context, on bool) error
 	// Backup is the panel's full backup: every connection, group, list and saved server. It holds
 	// every secret.
 	Backup(ctx context.Context) (name string, data []byte, err error)
@@ -87,6 +95,9 @@ type UpdateInfo struct {
 	NoChannel bool   // the release list is not published: this build does not self-update
 	Auto      bool   // auto-update is on
 	Err       string // the check failed, in a sentence
+	// Note is the last update's outcome when it is news: a rollback or a failure the update
+	// supervisor recorded (the daemon's sentence).
+	Note string
 }
 
 // UpdateResult is what an install did.
@@ -120,6 +131,10 @@ type ApplyPreview struct {
 
 // ErrBadTarget is the refusal of a target that is not a hostname or an IP address.
 var ErrBadTarget = errors.New("not a domain name or an IP address")
+
+// ErrWindowChanged is the refusal of a Keep or Roll back whose test Apply a newer one replaced while
+// the decision waited for the daemon: nothing was changed.
+var ErrWindowChanged = errors.New("a newer test Apply replaced the one this decision was for, so nothing was changed")
 
 // ErrBusy refuses what the router runs one at a time while another run is under way.
 var ErrBusy = errors.New("already running")
@@ -239,10 +254,14 @@ type LookupResult struct {
 
 // Pulse is what the alert watcher compares from one tick to the next.
 type Pulse struct {
+	// RoutingOff: WayHop's routing is switched off. Every exit the stopped core carried fails at once
+	// then, by design, so the watcher holds back exit and uplink news while it is set.
+	RoutingOff bool
 	LocalFault bool
 	Core       CorePulse
 	FailSafe   FailSafePulse
 	Mem        MemPulse
+	Disk       DiskPulse
 }
 
 // CorePulse is the crash-restart supervisor's view of sing-box.
@@ -265,6 +284,18 @@ type FailSafePulse struct {
 	// one, a rollback somebody pressed does not.
 	Checked bool
 	CheckOK bool
+	// Window names the test Apply that is pending or runs unsaved ("" when unknown). Keep and Roll
+	// back buttons carry it, so a button left from an earlier window cannot decide this one.
+	Window string
+	// Committed is the committed revision named as Window names a test Apply. A Test that was kept
+	// keeps its name there, which tells a Keep from a newer Test replacing it when both happen between
+	// two pulses.
+	Committed string
+	// RollbackOutstanding: a rollback of the tested configuration failed part way and is not finished
+	// (the daemon's record, whatever the window's phase says), with its error. Keep is refused while
+	// it is set; Roll back retries.
+	RollbackOutstanding bool
+	RollbackError       string
 }
 
 // MemPulse is RAM use.
@@ -273,12 +304,22 @@ type MemPulse struct {
 	UsedPct float64
 }
 
+// DiskPulse is the free space on the filesystem WayHop lives on (its binary, and on most installs
+// its configuration): a router's overlay is a few tens of MB, and once it is full a settings save,
+// an Apply and an update all fail.
+type DiskPulse struct {
+	Known     bool
+	FreeBytes uint64
+}
+
 // BootInfo describes the daemon start.
 type BootInfo struct {
 	DaemonStart time.Time
 	RouterUp    time.Duration // the router's uptime when the daemon started; 0 = unknown
 	LastSeen    time.Time     // the last heartbeat before this start; zero = none recorded
 	Version     string
+	// UpdateNote is an update rolled back or failed just before this start (the daemon's sentence).
+	UpdateNote string
 }
 
 // Store persists the bot's settings. Update runs fn on a copy and saves the result atomically.
@@ -305,6 +346,16 @@ type Status struct {
 	Update     SelfUpdate
 	// Feeds are the routing lists whose feed refreshes are failing (see FailingFeeds).
 	Feeds []FeedIssue
+	// Routing is the routing switch.
+	Routing Routing
+}
+
+// Routing is the routing switch's state. The zero value is "on": WayHop routes.
+type Routing struct {
+	Off   bool
+	Since time.Time // when it was switched off (zero when unknown)
+	By    string    // "panel" | "telegram"
+	Err   string    // why removing or restoring routing last failed; "" = clean
 }
 
 // Core is the routing core's state.
@@ -424,6 +475,10 @@ type FailSafe struct {
 	Armed     bool
 	Remaining time.Duration
 	Health    string // up | down | unknown: the last connectivity check
+	Window    string // the test Apply under way (see FailSafePulse.Window)
+	// RollbackOutstanding: a failed rollback of that test Apply is not finished (see FailSafePulse),
+	// armed window or not; the status then offers Roll back alone.
+	RollbackOutstanding bool
 }
 
 // SelfUpdate is the self-updater's view.
@@ -456,6 +511,7 @@ type Health int
 // Headline verdicts, from best to worst.
 const (
 	HealthGood Health = iota
+	HealthRoutingOff
 	HealthTesting
 	HealthDegraded
 	HealthLocalFault
@@ -467,6 +523,9 @@ func (s Status) Verdict() Health {
 	up, down := s.ExitCounts()
 	coreDown := s.Core.Available && !s.Core.Running && !s.Core.NativeOnly
 	switch {
+	case s.Routing.Off:
+		// Switched off on purpose: the stopped core and the exits it carried are not news.
+		return HealthRoutingOff
 	case coreDown:
 		return HealthDown
 	case s.LocalFault:

@@ -86,9 +86,22 @@ func fuzzimporter_seeds() []string {
 		"tuic://uuid-aaa:passbbb@5.6.7.8:443?congestion_control=bbr&udp_relay_mode=native&sni=tuic.example#TU",
 		"wireguard://privkey@1.2.3.4:51820?publickey=PUB&presharedkey=PSK&address=10.0.0.2/32,fd00::2/128#WG",
 		"wg://privkey@5.6.7.8?publickey=PUB",
+		// Hiddify's multiplex parameters, which no link switches on: a full set, and broken numbers and a mux.cool type.
+		"vless://u@192.0.2.1:443?security=tls&muxtype=smux&muxmaxc=4&mux=4&muxsmax=8&muxpad=true&muxup=50&muxdown=100#M",
+		"trojan://p@192.0.2.2:443?MUXTYPE=mux.cool&muxmaxc=-1&muxup=x&muxdown=#N",
 		wgConf,
 		awgConf,
 		olcrtc,
+		// .ovpn profiles and a one-proxy Clash config, the two scheme-less formats added after the
+		// corpus was written (an unclosed block, a static key, a tls-auth with its direction argument).
+		"client\ndev tun\nproto udp\nremote vpn.example.com 1194\nremote 192.0.2.10 443 tcp-client\nauth-user-pass\n<ca>\nCA\n</ca>\n<tls-crypt>\nK\n</tls-crypt>\n",
+		"client\nremote 198.51.100.7\ntls-auth [inline] 1\n<ca>\nCA\n</ca>\n<cert>\nC\n</cert>\n<key>\nK\n</key>\n<tls-auth>\nK\n</tls-auth>\n",
+		"dev tun\nremote 203.0.113.5 1194\nifconfig 10.8.0.2 10.8.0.1\n<secret>\nK\n</secret>\n",
+		"client\nremote vpn.example.com\n<ca>\nunclosed",
+		"proxies:\n  - {name: s, type: snell, server: 192.0.2.1, port: 8443, psk: abcdefghijkl, version: 4}\n",
+		// Surge [Proxy] lines: a profile, a bare v6 line, and quoted and broken fields.
+		"[General]\na = b\n[Proxy]\ns = snell, 192.0.2.1, 1, psk=abcdefghijkl, version=6, mode=unshaped, udp-port=2\nh = hysteria2, h, 2, password=p, port-hopping=1;5-6, port-hopping-interval=x, gecko-password=g\n[Proxy Group]\ng = select, s\n",
+		"t = trojan, 192.0.2.1, 443, password=\"p,q\", ws=true, ws-headers=Host:|:x|host, alpn=\"h2\nx = tuic-v5, , , uuid=",
 
 		// --- empty / whitespace ---
 		"",
@@ -138,7 +151,7 @@ func fuzzimporter_seeds() []string {
 		"[Interface]\n=\n=value\nkey=\n[Peer]\nEndpoint=:99999999999",
 		"[Interface]\nJc=notanumber\n[Peer]\nEndpoint=h.example",
 
-		// --- olcRTC detection without a usable room ---
+		// --- retired olcRTC configs, refused with a reason ---
 		"provider: jitsi",
 		"auth:\n  provider: telemost\nnet:\n  transport: datachannel\n",
 
@@ -176,8 +189,8 @@ func TestFuzzParse_SeedsDoNotPanic(t *testing.T) {
 //     Enabled, so those are populated too).
 //
 // NOTE on Server: the importer intentionally tolerates an empty Server on
-// success for several branches (vmess without "add", a hostless URL authority,
-// olcRTC whose room is not a URL). That is current, deliberate behavior — not a
+// success for several branches (vmess without "add", a hostless URL authority).
+// That is current, deliberate behavior — not a
 // panic — so it is NOT asserted here. The non-empty-Server guarantee is checked
 // separately against the known-good seed links in TestFuzzParse_ValidSeedsHaveServer.
 func fuzzimporter_assertParseInvariant(t *testing.T, in string) {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"wayhop/internal/config"
 	"wayhop/internal/model"
 	"wayhop/internal/serverstore"
 	"wayhop/internal/version"
@@ -17,9 +18,9 @@ const backupSchemaVersion = 1
 
 // backupBundle is the single-file, portable snapshot of the user's whole setup:
 // the routing profile (endpoints/groups/rules/lists — which carries connection
-// SECRETS, intended for a PERSONAL backup), the saved-server registry, and the
+// SECRETS, intended for a PERSONAL backup), the saved-server registry, the
 // two non-access-critical config knobs that shape routing (routing_mode +
-// gateway). It deliberately omits the access-critical config (listen/ports/host
+// gateway), and the subscription HWIDs. It deliberately omits the access-critical config (listen/ports/host
 // allow-list/clash secret) so a restore can NEVER move the
 // panel's address or lock the operator out (see handleBackupRestore).
 type backupBundle struct {
@@ -29,6 +30,13 @@ type backupBundle struct {
 	Servers     []serverstore.Server `json:"servers,omitempty"`      // saved-server registry (no SSH creds — see serverstore)
 	RoutingMode string               `json:"routing_mode,omitempty"` // config.RoutingMode
 	Gateway     bool                 `json:"gateway"`                // config.Gateway
+	// SubscriptionHWID is config.Subscription.HWID: the ID a device-limited provider knows this router
+	// by. The URL can be had from the provider again; this cannot, and a router back from a reflash
+	// with a new one takes another device slot. A secret like the rest of this personal file.
+	SubscriptionHWID string `json:"subscription_hwid,omitempty"`
+	// SubscriptionGeneratedHWID is config.Subscription.GeneratedHWID, carried for the same reason:
+	// "Generate" on the restored router must present the device the provider already counts.
+	SubscriptionGeneratedHWID string `json:"subscription_generated_hwid,omitempty"`
 }
 
 // handleBackupExport (GET /api/backup) streams the whole-setup backup as a
@@ -46,6 +54,9 @@ func (s *Server) buildBackupBundle() backupBundle {
 		Servers:     s.servers.List(),
 		RoutingMode: cfg.RoutingMode,
 		Gateway:     cfg.Gateway,
+
+		SubscriptionHWID:          cfg.Subscription.HWID,
+		SubscriptionGeneratedHWID: cfg.Subscription.GeneratedHWID,
 	}
 }
 
@@ -73,6 +84,9 @@ func (s *Server) handleBackupExport(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 	var bundle backupBundle
 	if err := json.NewDecoder(r.Body).Decode(&bundle); err != nil {
+		if writeBodyTooLarge(w, err, "the backup") {
+			return
+		}
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -93,6 +107,10 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 	// routing_mode fails the restore closed (nothing changed) instead of AFTER the profile and
 	// server registry were already overwritten — that's the "a bad bundle changes NOTHING" contract.
 	if err := s.validateRestoreConfig(bundle.RoutingMode, bundle.Gateway); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid config in backup: "+err.Error())
+		return
+	}
+	if _, _, err := restoredHWIDs(bundle.SubscriptionHWID, bundle.SubscriptionGeneratedHWID, config.Subscription{}); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid config in backup: "+err.Error())
 		return
 	}
@@ -136,9 +154,12 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 	cand.Gateway = bundle.Gateway
 	if _, why := s.gateRoutingMode(r.Context(), cur, cand); why != "" {
 		mode = cur.RoutingMode
-		modeNote = why
+		// A whole sentence, because the panel shows it as it is beside the restore's own message
+		// (QA-153): that one says the routing mode was restored, so this one has to say it was not.
+		modeNote = fmt.Sprintf("The backup's routing mode (%s) was not restored; this router stays in %s mode: %s",
+			s.routingMode(cand), s.routingMode(cur), why)
 	}
-	if err := s.restoreConfig(mode, bundle.Gateway); err != nil {
+	if err := s.restoreConfig(mode, bundle.Gateway, bundle.SubscriptionHWID, bundle.SubscriptionGeneratedHWID); err != nil {
 		writeErr(w, http.StatusBadRequest, "restore config failed: "+err.Error())
 		return
 	}
@@ -169,15 +190,16 @@ func (s *Server) validateRestoreConfig(routingMode string, gateway bool) error {
 	return candidate.Validate()
 }
 
-// restoreConfig sets only RoutingMode + Gateway on the live config and saves it,
+// restoreConfig sets only RoutingMode + Gateway, and the subscription HWIDs the
+// bundle has ("" keeps the current one), on the live config and saves it,
 // under cfgMu (the single authority for s.cfg writes — see (*Server).config()).
 // It validates the candidate config before persisting and leaves the live config
 // untouched if validation fails, so a bundle carrying an unknown routing_mode
 // can never brick startup. Save() can still fail (full overlay / EROFS / IO)
-// AFTER the in-memory mutation, so — like persistConfig — we snapshot the two
+// AFTER the in-memory mutation, so — like persistConfig — we snapshot the
 // knobs and roll them back on a failed Save, keeping the live config consistent
 // with the (atomically-untouched) disk file rather than diverging until reboot.
-func (s *Server) restoreConfig(routingMode string, gateway bool) error {
+func (s *Server) restoreConfig(routingMode string, gateway bool, hwid, generatedHWID string) error {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 	candidate := *s.cfg
@@ -186,11 +208,16 @@ func (s *Server) restoreConfig(routingMode string, gateway bool) error {
 	if err := candidate.Validate(); err != nil {
 		return err
 	}
-	oldMode, oldGateway := s.cfg.RoutingMode, s.cfg.Gateway
+	keep, keepGen, err := restoredHWIDs(hwid, generatedHWID, s.cfg.Subscription)
+	if err != nil {
+		return err
+	}
+	oldMode, oldGateway, oldSub := s.cfg.RoutingMode, s.cfg.Gateway, s.cfg.Subscription
 	s.cfg.RoutingMode = routingMode
 	s.cfg.Gateway = gateway
+	s.cfg.Subscription.HWID, s.cfg.Subscription.GeneratedHWID = keep, keepGen
 	if err := s.cfg.Save(); err != nil {
-		s.cfg.RoutingMode, s.cfg.Gateway = oldMode, oldGateway // roll back: keep memory == disk
+		s.cfg.RoutingMode, s.cfg.Gateway, s.cfg.Subscription = oldMode, oldGateway, oldSub // roll back: keep memory == disk
 		return err
 	}
 	return nil

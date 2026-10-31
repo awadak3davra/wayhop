@@ -42,7 +42,9 @@ const dicts = fs.readdirSync(SRC).filter((f) => f.endsWith('.json') && f !== 'la
 // Indic and Middle-Eastern dictionaries were removed rather than left untranslated, because a
 // language in the picker that nobody maintains is a promise the panel cannot keep. The guard stays
 // so a generator run that silently emits fewer than the tracked sources cannot quietly drop one.
-const EXPECTED_DICTS = 9;
+// Simplified Chinese (zh-CN) came back as a complete dictionary, every key translated rather than
+// restored from the stale one that was removed, which makes it 10.
+const EXPECTED_DICTS = 10;
 if (dicts.length < EXPECTED_DICTS) {
   console.error(`${SRC} holds ${dicts.length} dictionary file(s); the panel ships ${EXPECTED_DICTS + 1} `
     + 'languages and a generator that quietly emits fewer would remove them from the UI.');

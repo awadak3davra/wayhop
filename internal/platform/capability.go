@@ -3,7 +3,9 @@ package platform
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -66,6 +68,7 @@ const (
 	ReasonBackendNotWired       ReasonCode = "BACKEND_NOT_WIRED"
 	ReasonMissingBinary         ReasonCode = "MISSING_BINARY"
 	ReasonBinaryTooOld          ReasonCode = "BINARY_TOO_OLD"
+	ReasonBinaryLacksFeature    ReasonCode = "BINARY_LACKS_FEATURE" // built without the needed tag
 	ReasonBinaryNotRunnable     ReasonCode = "BINARY_NOT_RUNNABLE"
 	ReasonMissingKernelModule   ReasonCode = "MISSING_KERNEL_MODULE"
 	ReasonMissingFirmwareComp   ReasonCode = "MISSING_FIRMWARE_COMPONENT"
@@ -132,7 +135,6 @@ const (
 
 	CapEngineSingbox   = "engine.singbox"
 	CapEngineAmneziaWG = "engine.amneziawg"
-	CapEngineOlcRTC    = "engine.olcrtc"
 
 	CapIPv6Routing = "ipv6.routing"
 
@@ -413,6 +415,24 @@ func Evaluate(caps Capabilities, rt RuntimeFacts) CapabilitySet {
 	// Proxy protocols: one capability each, all gated on the same runnable core.
 	for _, proto := range caps.SingboxRequired {
 		id := CapProtocolPrefix + proto
+		if min, gated := singboxMinMinor[proto]; gated && core.State.Usable() && singboxMinor(rt.SingboxVersion) < min {
+			add(newCap(id, yes, yes, no, ReasonBinaryTooOld,
+				proto+" needs sing-box 1."+strconv.Itoa(min)+" or newer",
+				"sing-box "+rt.SingboxVersion,
+				// The package feeds trail: OpenWrt 25.12 ships 1.13, and the Components page will not
+				// replace a binary the package manager owns, so say how to get past that too (QA-024).
+				"Update sing-box to 1."+strconv.Itoa(min)+" or newer on the Components page. If the package manager owns it and its feed is older (OpenWrt 25.12 ships 1.13), remove the package there and install the release build.", BlocksFeature))
+			continue
+		}
+		if tag, needs := singboxProtocolTag[proto]; needs && core.State.Usable() {
+			if tags := singboxBuildTags(rt.SingboxVersion); tags != nil && !tags[tag] {
+				add(newCap(id, yes, yes, no, ReasonBinaryLacksFeature,
+					proto+" needs a sing-box built with "+tag+", and this one was built without it",
+					"sing-box build tags: "+strings.Join(sortedKeys(tags), ","),
+					"Install the release build of sing-box on the Components page, or a package built with "+tag+".", BlocksFeature))
+				continue
+			}
+		}
 		if core.State.Usable() {
 			add(newCap(id, yes, yes, yes, ReasonNone, "", "", "", BlocksNothing))
 			continue
@@ -502,9 +522,6 @@ func Evaluate(caps Capabilities, rt RuntimeFacts) CapabilitySet {
 		add(newCap(CapEngineAmneziaWG, no, yes, no, ReasonPlatformUnsupported,
 			"AmneziaWG is not available on this platform", "", "", BlocksFeature))
 	}
-	add(newCap(CapEngineOlcRTC, VerdictUnknown, no, VerdictUnknown, ReasonBackendNotWired,
-		"this WayHop build does not have a content-addressed olcRTC executor, so it cannot safely start or roll back that engine",
-		"strict execution classifies olcRTC as unavailable", "Keep this connection disabled.", BlocksFeature))
 
 	// ---- IPv6 ---------------------------------------------------------------------------------
 	if rt.IPv6Routable {
@@ -572,4 +589,56 @@ func (s CapabilitySet) computeRev() string {
 		h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// singboxVersionRe finds the first x.y.z in a bare version or in raw `sing-box version` output.
+var singboxVersionRe = regexp.MustCompile(`(\d+)\.(\d+)\.(\d+)`)
+
+// singboxMinor is the 1.x minor of a sing-box version string, or -1 when it names none.
+func singboxMinor(v string) int {
+	m := singboxVersionRe.FindStringSubmatch(v)
+	if m == nil || m[1] != "1" {
+		return -1
+	}
+	n, err := strconv.Atoi(m[2])
+	if err != nil {
+		return -1
+	}
+	return n
+}
+
+// singboxProtocolTag is the build tag a core-carried protocol needs. sing-box compiles these in or
+// out (OpenWrt's package has a SINGBOX_WITH_* switch for each), and a build without one rejects the
+// whole generated config, so every Apply fails rather than only the endpoint that needed it.
+var singboxProtocolTag = map[string]string{
+	"hysteria2": "with_quic", "tuic": "with_quic", "wireguard": "with_wireguard",
+	"openvpn": "with_openvpn", "openconnect": "with_openconnect",
+}
+
+// singboxBuildTags reads the "Tags:" line of `sing-box version` output (the runtime facts keep the
+// whole output). nil when there is no such line: an unknown build is not a build without the tag.
+func singboxBuildTags(version string) map[string]bool {
+	for _, line := range strings.Split(version, "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "Tags:")
+		if !ok {
+			continue
+		}
+		tags := map[string]bool{}
+		for _, t := range strings.Split(rest, ",") {
+			if t = strings.TrimSpace(t); t != "" {
+				tags[t] = true
+			}
+		}
+		return tags
+	}
+	return nil
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

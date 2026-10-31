@@ -91,6 +91,18 @@ function rlFirstTunnel() {
 
 function rlOutboundFor(suggest) { return suggest === "block" ? "block" : suggest === "direct" ? "direct" : rlFirstTunnel(); }
 
+// rlKeepsFormat is the daemon's rule for a rule-set format carried to a new URL
+// (model.CarriedRuleSetFormat, QA-150): kept when the new URL's file name has no extension (a mirror,
+// a query-string feed: dropped, the generator would skip the list) or names the same format; dropped,
+// to be inferred from the URL again, when it names the other format or is a plain-text list (.lst),
+// which would otherwise be loaded as what it is not and stop the core.
+function rlKeepsFormat(format, url) {
+  const name = String(url || "").split(/[?#]/)[0].replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*/i, "").split("/").pop();
+  const dot = name.lastIndexOf("."), ext = dot < 0 ? "" : name.slice(dot).toLowerCase();
+  const kind = dot < 0 ? "" : ext === ".srs" ? "binary" : ext === ".json" ? "source" : "text";
+  return kind === "" || kind === format;
+}
+
 function rlSlug(s) {
   // A name in a non-Latin script (Cyrillic, CJK, etc.) strips to an empty body —
   // fall back to "list" so it isn't just "rl-". Uniqueness is then enforced by
@@ -120,7 +132,7 @@ function routingRow(rl, idx, total) {
   // Mutate rl in place (it IS the state.profile.routing_lists element) so the two
   // dropdowns compose: without this, the 2nd save spreads the stale closure and
   // reverts the 1st change, because saveRoutingList intentionally doesn't reload.
-  const routeSel = routingOutboundSelect(rl.outbound, true);
+  const routeSel = addKeeneticPolicies(routingOutboundSelect(rl.outbound, true));
   routeSel.setAttribute("aria-label", t("Route matching traffic via")); // programmatic name — the row has no per-select <label>
   routeSel.onchange = () => { const prev = rl.outbound, next = routeSel.value; rl.outbound = next; saveRoutingList(rl, t("route → {0}", nameOf(next) || next), () => { if (rl.outbound === next) { rl.outbound = prev; routeSel.value = prev; } }); }; // revert only if a newer edit hasn't superseded this one
   const dlSel = routingOutboundSelect(rl.download_via || "direct", false);
@@ -170,7 +182,8 @@ function routingRow(rl, idx, total) {
 async function saveRoutingList(rl, msg, revert) {
   if (applyInFlight) { toast(t("Apply in progress — finish it first"), "err"); if (revert) revert(); return; } // don't mutate the staged config mid-Apply (mirrors toggleRoutingList); revert the optimistic dropdown change
   try {
-    await api.post("/api/routing", rl);
+    // The whole list goes back, so it must still be the list as saved (QA-152).
+    keepRev(rl, await api.post("/api/routing", rl, ifMatch(rl)));
     updateDirty(); // the route-via / download-via change is STAGED — light Apply/Save (mirrors toggleRoutingList)
     toast(msg || t("Saved"), "ok");
   } catch (e) {
@@ -235,7 +248,7 @@ function openRoutingList(rl) {
     el("option", { value: "manual" }, "Manual domains / IPs"));
   const source = el("input", { type: "text", value: rl.source || "", placeholder: "https://…/list.srs" });
   const manual = el("textarea", { rows: "6", class: "rl-ta", placeholder: t("one per line:\n{0}", "example.com\nopenai.com\n104.18.0.0/16") }, asList(rl.manual).join("\n"));
-  const routeSel = routingOutboundSelect(rl.outbound, true);
+  const routeSel = addKeeneticPolicies(routingOutboundSelect(rl.outbound, true));
   const dlSel = routingOutboundSelect(rl.download_via || "direct", false);
   const srcField = el("div", { class: "field" }, el("label", {}, "Rule-set URL"), source);
   const manField = el("div", { class: "field" }, el("label", {}, "Domains / IP-CIDRs (one per line)"), manual);
@@ -269,9 +282,13 @@ function openRoutingList(rl) {
     el("label", { style: "margin-top:8px" }, "Auto-update interval"),
     cidrHours,
     el("div", { class: "hint" }, "Keep this list's IP-CIDRs current from a feed: asn:N,N (RIPEstat announced prefixes) or an https text list. Cached + unioned with Manual entries; active in hybrid/fast. Auto-updates on the interval above (min 6h, and only rewrites flash when the list actually changes); or click «↻ Refresh sources» then Apply.", cachedNote));
+  // A list can have both a URL and manual entries (the model takes both, and lists from the API or a
+  // backup do). Such a list opens in URL mode, and its manual entries were hidden and saved as []
+  // on any edit (QA-154). They stay shown and saved beside the URL.
+  const both = !!(rl.source && asList(rl.manual).length);
   function applyMode() {
     srcField.style.display = mode.value === "url" ? "" : "none";
-    manField.style.display = mode.value === "manual" ? "" : "none";
+    manField.style.display = mode.value === "manual" || both ? "" : "none";
   }
   mode.value = rl.source ? "url" : (rl.manual && rl.manual.length ? "manual" : "url");
   mode.onchange = applyMode; applyMode();
@@ -300,13 +317,23 @@ function openRoutingList(rl) {
   scopeSel.onchange = renderScopeGroups; renderScopeGroups();
   const scopeField = el("div", { class: "field" }, el("label", {}, t("Applies to")), scopeSel, scopeGroupsWrap,
     el("div", { class: "hint" }, t("Limit this list to certain devices — e.g. route or block it only for the kids' devices. All devices = everyone (default).")));
+  // TLS fragmentation (sing-box route options): only a list routed direct uses it, so the field shows
+  // only then, and leaving direct clears it rather than keeping a hidden setting.
+  const fragSel = el("select", {}, el("option", { value: "" }, t("Off")),
+    el("option", { value: "record" }, t("TLS records")), el("option", { value: "handshake" }, t("TCP segments")));
+  fragSel.value = rl.tls_fragment || "";
+  const fragField = el("div", { class: "field" }, el("label", {}, t("Split the TLS handshake")), fragSel,
+    el("div", { class: "hint" }, t("Against DPI that reads the site name in the TLS handshake. Try TLS records first; works only in tun or hybrid mode.")));
+  const syncFrag = () => { fragField.style.display = routeSel.value === "direct" ? "" : "none"; };
+  routeSel.addEventListener("change", syncFrag); syncFrag();
 
   async function save(btn) {
     if (!name.value.trim()) return toast("Name required", "err");
     const body = { id: rl.id || rlUniqueId(rlSlug(name.value)), name: name.value.trim(), outbound: routeSel.value,
       download_via: dlSel.value === "direct" ? "" : dlSel.value, enabled: rl.enabled };
-    if (mode.value === "url") { body.source = source.value.trim(); body.manual = []; }
-    else { body.manual = manual.value.split("\n").map(s => s.trim()).filter(Boolean); body.source = ""; }
+    const lines = manual.value.split("\n").map(s => s.trim()).filter(Boolean);
+    if (mode.value === "url") { body.source = source.value.trim(); body.manual = both ? lines : []; }
+    else { body.manual = lines; body.source = ""; }
     // Independent kernel-CIDR auto-refresh feed (the store preserves the system cache on a
     // same-source edit and drops it when this changes). Omit cidr_cache — server-managed.
     body.cidr_source = cidrSrc.value.trim();
@@ -325,7 +352,10 @@ function openRoutingList(rl) {
     // dropping it makes a list whose URL extension doesn't reveal the format (a .json
     // source, or a query-string URL) silently re-infer wrong and fail to load. Catalog
     // presets all set format:"binary". (Empty = generator infers from the URL.)
-    if (rl.format && body.source) body.format = rl.format;
+    // On a new URL the format stays only while rlKeepsFormat says so: kept, a preset moved to a .json
+    // list was read as binary, and a rule set that fails to load stops the whole core (QA-150).
+    if (rl.format && body.source && (body.source === (rl.source || "").trim() || rlKeepsFormat(rl.format, body.source))) body.format = rl.format;
+    body.tls_fragment = routeSel.value === "direct" ? fragSel.value : "";
     // Device scope: "" (all clients) or "only" + the checked device-group ids.
     body.scope_mode = (scopeSel.value === "only" || scopeSel.value === "except") ? scopeSel.value : "";
     if (body.scope_mode) {
@@ -333,7 +363,8 @@ function openRoutingList(rl) {
       if (!body.scope_groups.length) return toast(t("Pick at least one device group, or choose All devices"), "err");
     } else { body.scope_groups = []; }
     if (btn) { if (btn.disabled) return; btn.disabled = true; } // in-flight guard — no duplicate POST from a double-click (mirrors the group editors)
-    try { await api.post("/api/routing", body); back.remove(); await loadProfile(); route(); toast(editing ? t("Saved {0}", body.name) : t("Added {0}", body.name), "ok"); }
+    // An edit is refused, nothing saved, if the list was saved by anything else since it was loaded (QA-152).
+    try { await api.post("/api/routing", body, ifMatch(rl)); back.remove(); await loadProfile(); route(); toast(editing ? t("Saved {0}", body.name) : t("Added {0}", body.name), "ok"); }
     catch (e) { if (btn) btn.disabled = false; toast(e.message, "err"); }
   }
   const body = el("div", {},
@@ -341,12 +372,28 @@ function openRoutingList(rl) {
     el("div", { class: "field" }, el("label", {}, "Source"), mode),
     srcField, manField, cidrField,
     el("div", { class: "field" }, el("label", {}, "Route matching traffic via"), routeSel),
+    fragField,
     scopeField,
     el("div", { class: "field" }, el("label", {}, "Download the list via"), dlSel),
     el("div", { class: "hint" }, "Download-via lets a blocked list source (GitHub) be fetched through a working tunnel."));
   const back = modal({ title: editing ? "Edit routing list" : "New routing list", body,
     footer: [el("button", { class: "btn btn-ghost", onclick: () => back.remove() }, "Cancel"),
     el("button", { class: "btn btn-primary", onclick: (e) => save(e.currentTarget) }, editing ? "Save" : "Add")] });
+}
+
+// The router's own KeeneticOS access policies as list exits (competitor gap 6): NDM then routes the
+// list by the policy's ladder, fail-back and drop. Asked once per load, shared by every select on the
+// page; a router that is not KeeneticOS answers 422 and the selects stay as they are.
+function addKeeneticPolicies(sel) {
+  state.ndmPoliciesP = state.ndmPoliciesP || api.get("/api/keenetic/policies")
+    .then(ps => (state.ndmPolicies = ps || []))
+    .catch(e => { if (e.status !== 422) toast(e.message, "err"); return (state.ndmPolicies = []); });
+  state.ndmPoliciesP.then(ps => ps.forEach(pol => {
+    const v = "ndm-policy:" + pol.name, label = "⌂ " + (pol.description || pol.name) + " · " + t("Keenetic access policy");
+    const have = [...sel.options].find(o => o.value === v); // routingOutboundSelect's "⚠ unavailable" until now
+    if (have) have.textContent = label; else sel.appendChild(el("option", { value: v }, label));
+  }));
+  return sel;
 }
 
 async function openRoutingCatalog() {
@@ -399,6 +446,15 @@ async function openRoutingCatalog() {
   const back = modal({ title: "Preset routing lists", body });
 }
 
+// refusedLines names, by list, the lines a refreshed feed loaded without as too broad for any list
+// (QA-111): not failures, and the refresh answers them apart. name(id), if given, names the list.
+// Also called by app.js's refreshCidrSources, whose button only this page renders.
+function refusedLines(r, name) {
+  const of = id => name ? name(id) : ((state.profile.routing_lists || []).find(l => l.id === id) || {}).name || id;
+  return Object.entries((r && r.refused) || {}).map(([id, x]) =>
+    t("{0}: refused as too broad: {1}", of(id), x.slice(0, 3).join(", ") + (x.length > 3 ? " +" + (x.length - 3) : "")));
+}
+
 async function addPreset(p, back) {
   // The catalog knows how fast each feed moves, so a preset arrives already set to re-fetch at that
   // cadence instead of inheriting one default for all of them. It is an ordinary list field
@@ -416,10 +472,77 @@ async function addPreset(p, back) {
     // one that caused it. Fetch it now, as part of adding it, so the list arrives with its contents.
     if (body.cidr_source || body.domain_source) {
       toast(t("Fetching {0}…", p.name), "info");
-      try { await api.post("/api/routing/refresh", {}); }
-      catch (e) { toast(t("{0} was added but its source could not be fetched: {1}", p.name, e.message), "err"); }
+      // This list only (QA-032): refetching every feed kept Apply blocked for tens of seconds, and its
+      // per-feed failures arrive in a 200 that was never read, so a failed fetch went unsaid.
+      try {
+        const r = await api.post("/api/routing/refresh", { id: body.id });
+        if (r && r.errors && r.errors.length) toast(t("{0} was added but its source could not be fetched: {1}", p.name, redactSecrets(r.errors.join("; "))), "err");
+        refusedLines(r, () => p.name).forEach(m => toast(m, "info")); // loaded, without lines no list may carry
+      } catch (e) { toast(t("{0} was added but its source could not be fetched: {1}", p.name, e.message), "err"); }
     }
     await loadProfile();
     route();
   } catch (e) { toast(e.message, "err"); }
+}
+
+// Routing lists from what the operator already runs (competitor gap 14): the Keenetic's own FQDN
+// object-groups, or a HydraRoute Neo domain.conf / ip.list pasted in. The server only parses, and
+// changes nothing; each chosen group becomes an ordinary list through POST /api/routing, as a preset
+// does. The Keenetic half asks once on open and stays hidden where the router is not a Keenetic
+// (the server answers 422), so no platform guess is needed here.
+async function openRoutingImport() {
+  const rows = el("div", {});
+  const picked = new Map(); // checkbox -> the server's suggested list
+  const routeSel = addKeeneticPolicies(routingOutboundSelect(rlOutboundFor("proxy"), true));
+  const show = (res) => {
+    rows.textContent = "";
+    picked.clear();
+    // The heading names the router's own lists; a paste's results replace them and must not sit under it.
+    keen.hidden = res.source !== "keenetic";
+    (res.groups || []).forEach(g => {
+      const s = g.suggested;
+      const ok = !!(s && (s.manual || []).length);
+      const box = el("input", { type: "checkbox", checked: ok || undefined, disabled: !ok || undefined });
+      if (ok) picked.set(box, s);
+      const bits = [t("{0} names, {1} networks", (g.domains || []).length, (g.cidrs || []).length)];
+      if (g.route) bits.push(t("was routed via {0}", g.route));
+      const skipped = g.skipped_total || (g.skipped || []).length;
+      if (skipped) bits.push(t("{0} skipped", skipped));
+      if (g.refused) bits.push(g.refused);
+      rows.appendChild(el("label", { class: "conn" }, box,
+        el("div", { class: "body" }, el("div", { class: "name" }, ok ? s.name : (g.description || g.name)),
+          el("div", { class: "sub" }, bits.join(" · ")))));
+    });
+    if (!picked.size) rows.appendChild(el("div", { class: "hint" }, t("Nothing to import")));
+  };
+  const keen = el("div", { hidden: true }, el("div", { class: "card-title" }, t("This Keenetic's own lists")));
+  const text = el("textarea", { rows: 5, placeholder: t("Paste a HydraRoute domain.conf or ip.list") });
+  const read = el("button", { class: "btn btn-sm", onclick: async () => {
+    try { show(await api.post("/api/routing/import/hydraroute", { text: text.value })); }
+    catch (e) { toast(e.message, "err"); }
+  } }, t("Read"));
+  async function add(btn) {
+    const lists = [...picked].filter(([box]) => box.checked).map(([, s]) => s);
+    if (!lists.length) return toast(t("Nothing to import"), "err");
+    if (btn.disabled) return;
+    btn.disabled = true;
+    let n = 0;
+    for (const s of lists) {
+      const body = { id: rlUniqueId(rlSlug(s.name)), name: s.name, manual: s.manual, outbound: routeSel.value, enabled: true };
+      // One at a time, each against the profile the previous one changed, so ids stay unique.
+      try { await api.post("/api/routing", body); n++; await loadProfile(); }
+      catch (e) { toast(s.name + ": " + e.message, "err"); }
+    }
+    back.remove();
+    if (n) toast(t("Added {0} lists", n), "ok");
+    route();
+  }
+  const body = el("div", {}, keen, rows,
+    el("div", { class: "field" }, text, read),
+    el("div", { class: "field" }, el("label", {}, t("Route matching traffic via")), routeSel));
+  const back = modal({ title: t("Import routing lists"), body,
+    footer: [el("button", { class: "btn btn-ghost", onclick: () => back.remove() }, t("Cancel")),
+      el("button", { class: "btn btn-primary", onclick: (e) => add(e.currentTarget) }, t("Add selected"))] });
+  try { show(await api.get("/api/routing/import/keenetic")); }
+  catch (e) { if (e.status !== 422) toast(e.message, "err"); }
 }

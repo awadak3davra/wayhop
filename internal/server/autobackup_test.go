@@ -94,3 +94,32 @@ func TestPruneBackups_NeverDeletesJustWritten(t *testing.T) {
 		t.Errorf("middle backup should have been pruned (keep=1, not the just-written), stat err = %v", err)
 	}
 }
+
+// pruneBackups globs only finished backups, so the temp a crash left mid-write (a whole setup with
+// its endpoint keys) was never counted against retention and never removed: credentials the operator
+// had rotated stayed on disk, and repeated crashes filled the overlay. The next scheduled write sweeps
+// them; it is the only writer of the directory.
+func TestAutoBackup_SweepsTempsACrashLeftBehind(t *testing.T) {
+	s, _ := backup_newServer(t)
+	dir := filepath.Join(t.TempDir(), "backups")
+	s.cfg.Backup.Dir = dir
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	orphan := filepath.Join(dir, "wayhop-backup-20260101T000000Z.json.123456.tmp")
+	older := filepath.Join(dir, "wayhop-backup-20260101T000000Z.json")
+	for _, p := range []string{orphan, older} {
+		if err := os.WriteFile(p, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.writeAutoBackup(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)); err != nil {
+		t.Fatalf("writeAutoBackup: %v", err)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("an orphaned backup temp survived the next backup: %v", err)
+	}
+	if _, err := os.Stat(older); err != nil {
+		t.Fatalf("a finished backup inside retention must be kept: %v", err)
+	}
+}

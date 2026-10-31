@@ -234,10 +234,10 @@ try {
     rev: REV, pending: true, nothing_configured: false, applied_rev: 'b'.repeat(64), applied_at: '2026-08-15T10:00:00Z',
     verdict: 'warning',
     findings: [
-      { id: 'endpoint.engine.olcrtc', code: 'ENGINE_UNAVAILABLE', severity: 'degraded', blocks: 'feature',
-        ack_required: true, acked: false, title: 'INJECTED: olcRTC connections will not start',
+      { id: 'endpoint.engine.amneziawg', code: 'ENGINE_UNAVAILABLE', severity: 'degraded', blocks: 'feature',
+        ack_required: true, acked: false, title: 'INJECTED: AmneziaWG connections will not start',
         detail: 'INJECTED: the engine binary is not installed.', remedy: 'INJECTED: install it in Updater.',
-        count: 1, items: ['olc-1'] },
+        count: 1, items: ['awg-1'] },
     ],
     changes: { baseline_available: true, baseline_rev: 'c'.repeat(64), count: 1, may_interrupt: false, requires_apply: true,
       by_subsystem: { connections: [{ id: 'ep1', object_name: 'demo-reality', field: 'enabled', before: 'off', after: 'on',
@@ -247,7 +247,7 @@ try {
     probe: { at: 0, age_s: 0, stale: false, error: '' },
     platform: { name: 'demo', core_available: true, core_running: true, kernel_plane: false, native_vpn: false },
   };
-  const seed = `(() => { reviewedPlan = ${JSON.stringify(PLAN)}; ackedFindings.clear(); ackedFindings.add('endpoint.engine.olcrtc'); })()`;
+  const seed = `(() => { reviewedPlan = ${JSON.stringify(PLAN)}; ackedFindings.clear(); ackedFindings.add('endpoint.engine.amneziawg'); })()`;
   const OK200 = { applied: true, ok: true, saved: false, rev: REV, duration_ms: 12, failsafe: { pending: false, phase: 'idle' },
     summary: {}, problems: [], warnings: [] };
 
@@ -288,7 +288,7 @@ try {
   record('rapid clicks fire exactly one apply', applyPosts === 1, `posts=${applyPosts}`);
   record('Apply posts {save, rev, ack} — the reviewed rev and the ticked acknowledgements',
     !!lastApplyPayload && lastApplyPayload.save === false && lastApplyPayload.rev === REV
-      && Array.isArray(lastApplyPayload.ack) && lastApplyPayload.ack.includes('endpoint.engine.olcrtc')
+      && Array.isArray(lastApplyPayload.ack) && lastApplyPayload.ack.includes('endpoint.engine.amneziawg')
       && Object.keys(lastApplyPayload).sort().join(',') === 'ack,rev,save',
     `payload=${JSON.stringify(lastApplyPayload)}`);
   // (The two swallowed clicks toast "Apply in progress" as .err — that is the re-entry guard speaking,
@@ -389,7 +389,7 @@ try {
   await c.eval(clearToasts); await c.eval(closePanels);
   await c.eval(seed);
   setFault({ kind: 'status', match: '/api/apply', code: 400, payload: { code: 'INVALID_CONFIG', error: 'sing-box rejected the generated config',
-    detail: 'FATAL[0000] decode config: INJECTED outbound[2]: missing server', remedy: 'fix the connection "olc-1"' } });
+    detail: 'FATAL[0000] decode config: INJECTED outbound[2]: missing server', remedy: 'fix the connection "awg-1"' } });
   await c.eval(`applyConfig(true); void 0;`);
   await sleep(3000);
   const a10 = await c.eval(OBSERVE);
@@ -431,14 +431,14 @@ try {
   await c.eval(clearToasts); await c.eval(closePanels);
   await c.eval(seed);
   setFault({ kind: 'payload', match: '/api/apply', code: 200, payload: Object.assign({}, OK200, { ok: false,
-    problems: [{ stage: 'plugins', message: 'INJECTED: olcRTC did not start', remedy: 'install the engine in Updater' }] }) });
+    problems: [{ stage: 'plugins', message: 'INJECTED: AmneziaWG did not start', remedy: 'install the engine in Updater' }] }) });
   await c.eval(`applyConfig(true); void 0;`);
   await sleep(3000);
   const a13 = await c.eval(OBSERVE);
   // The config IS applied here, so the toast may say so — what it must not be is a plain success (an
   // ok toast, or a banner that is not the attention one). The banner carries the problem and its remedy.
   record('200 ok:false -> the banner lists the problem + remedy (ab-err), an err toast, no ok toast',
-    /attention/i.test(a13.bannerText || '') && /INJECTED: olcRTC did not start/.test(a13.bannerText || '') && /install the engine/i.test(a13.bannerText || '')
+    /attention/i.test(a13.bannerText || '') && /INJECTED: AmneziaWG did not start/.test(a13.bannerText || '') && /install the engine/i.test(a13.bannerText || '')
       && /ab-err/.test(a13.bannerClass || '') && a13.errToast && !a13.okToast,
     `banner=${JSON.stringify(a13.bannerText)} class=${JSON.stringify(a13.bannerClass)} toasts=${JSON.stringify(a13.toasts)}`);
   await c.eval(`setApplyPhase(""); void 0;`);

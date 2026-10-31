@@ -14,6 +14,7 @@ import (
 
 	"wayhop/internal/model"
 	"wayhop/internal/nativedns"
+	"wayhop/internal/platform"
 	"wayhop/internal/store"
 )
 
@@ -26,18 +27,41 @@ func (s *Server) handleGetDNS(w http.ResponseWriter, r *http.Request) {
 	// with the new rev — a client editing that stale plane would then pass the SetDNSIfGen CAS with a
 	// version it never actually saw, silently discarding the other edit. See store.Snapshot.
 	p, rev := s.store.Snapshot()
+	// tun: whether the core this plane is generated into keeps fakeip servers, so the page names the
+	// resolver that really answers what no rule matches (model.DNSSettings.DefaultServer).
+	tun := s.runningDNSPlaneTUN()
 	// ?template=1 always returns a freshly-computed secure-default template (detour pointed at the
 	// current primary route), regardless of what is configured — this is what the panel's "Apply
 	// secure defaults" button loads so it can re-seed even a profile that already has DNS.
 	if r.URL.Query().Get("template") == "1" {
-		writeJSON(w, http.StatusOK, map[string]any{"dns": secureDNSTemplate(&p), "configured": p.DNS != nil, "template": true, "rev": rev})
+		writeJSON(w, http.StatusOK, map[string]any{"dns": secureDNSTemplate(&p), "configured": p.DNS != nil, "template": true, "rev": rev, "tun": tun})
 		return
 	}
 	if p.DNS != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"dns": p.DNS, "configured": true, "rev": rev})
+		writeJSON(w, http.StatusOK, map[string]any{"dns": p.DNS, "configured": true, "rev": rev, "tun": tun})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"dns": secureDNSTemplate(&p), "configured": false, "rev": rev})
+	writeJSON(w, http.StatusOK, map[string]any{"dns": secureDNSTemplate(&p), "configured": false, "rev": rev, "tun": tun})
+}
+
+// dnsPlaneTUN reports whether the core is generated with its TUN inbound, the only plane that keeps
+// fakeip servers: in tun and hybrid mode (executionGeneratorOptions), and on KeeneticOS in every mode,
+// where every core config is generated with its TUN (keenetic.AssembleSingboxConfig and
+// executionKeeneticCompatibilityOptions). The Apply check and the DNS page both read it, so the
+// finding and the page name the same resolver.
+func dnsPlaneTUN(mode string, plat platform.Platform) bool {
+	return mode == "tun" || mode == "hybrid" || plat == platform.Keenetic
+}
+
+// runningDNSPlaneTUN is dnsPlaneTUN for the running daemon: its effective routing mode on the
+// platform it runs on (the demo stands in for an OpenWrt router, as planCapabilities does).
+func (s *Server) runningDNSPlaneTUN() bool {
+	c := s.config()
+	plat := s.detectedPlatform()
+	if c.Demo {
+		plat = platform.Platform(platform.DemoCapabilities().Platform)
+	}
+	return dnsPlaneTUN(s.routingMode(c), plat)
 }
 
 // dnsRevHeader carries the profile generation the client's DNS plane was read at.

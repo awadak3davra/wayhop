@@ -29,6 +29,25 @@ func TeardownCommands(plan *Plan) []string {
 	return out
 }
 
+// RouteTeardownCommands is the routes half of TeardownCommands alone: the `no …` removal of every
+// route the Plan added, and nothing about its interfaces. It is what turning WayHop's routing off
+// submits, because that leaves the tunnels themselves up (unrouted) so turning routing back on is
+// immediate. Pure — no device I/O.
+func RouteTeardownCommands(plan *Plan) []string {
+	if plan == nil {
+		return nil
+	}
+	out := make([]string, 0, len(plan.Routes))
+	for _, r := range plan.Routes {
+		out = append(out, "no "+routeKey(r))
+	}
+	return out
+}
+
+// RouteKey is the identity of a rendered route line (see routeKey): the tokens `show
+// running-config` prints first for that route, so a caller can tell whether it is still in force.
+func RouteKey(line string) string { return routeKey(line) }
+
 // routeKey trims a rendered route line to its identity tokens, dropping any trailing
 // `auto`/`reject`/`!comment` so a `no` removal matches the route by key. The identity WIDTH is
 // address-family-specific: v4 is "ip route <dst> <mask> <target>" (5 tokens); v6 is

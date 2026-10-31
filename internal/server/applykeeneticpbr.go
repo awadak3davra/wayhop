@@ -68,11 +68,19 @@ func keeneticPBRPreamble(artifact executionKernelIpsetArtifactV1) (string, error
 		// the host with no applet: BusyBox for ip, and xtables-multi for the whole iptables family
 		// on Entware, which answers "ERROR: No valid subcommand given". The rule lives in
 		// executionMulticallApplet so the probe, the argv runner and this preamble cannot disagree.
+		// iptables waits for the xtables lock only when asked (-w; 1.4.21 takes no argument). Without
+		// it a `-C ... || -A` that met NDM's own rebuild or the reconcile's run of this same script read
+		// the lock's exit 4 as "rule absent" and appended another jump: four v6 PREROUTING jumps on
+		// the live router after ten hours, and a lost -N left the v4 chain missing (QA-067).
+		wait := ""
+		if tool == executionToolIptables || tool == executionToolIp6tables {
+			wait = " -w"
+		}
 		if applet := executionMulticallApplet(resolved, tool); applet != "" {
-			fmt.Fprintf(&b, "%s() { %s %s \"$@\"; }\n", tool, resolved, applet)
+			fmt.Fprintf(&b, "%s() { %s %s%s \"$@\"; }\n", tool, resolved, applet, wait)
 			continue
 		}
-		fmt.Fprintf(&b, "%s() { %s \"$@\"; }\n", tool, resolved)
+		fmt.Fprintf(&b, "%s() { %s%s \"$@\"; }\n", tool, resolved, wait)
 	}
 	return b.String(), nil
 }
@@ -84,13 +92,23 @@ func keeneticPBRPreamble(artifact executionKernelIpsetArtifactV1) (string, error
 // install it, and mutating a live router to answer "what could you do" is not a trade worth making.
 // Nothing is executed on the strength of this: the artifact records each binary's digest and the
 // executor re-verifies it before and after running anything.
-func keeneticKernelPBRPresent() bool {
+// A variable so tests can stand in a router that has the tools.
+var keeneticKernelPBRPresent = func() bool {
 	for _, tool := range []string{executionToolIpset, executionToolIptables} {
 		if _, err := exec.LookPath(tool); err != nil {
 			return false
 		}
 	}
 	return true
+}
+
+// keeneticKernelPlaneCarriesLists reports whether the Keenetic kernel plane routes the lists in this
+// routing mode: the tools being installed is not enough, the plane is built only in hybrid and fast
+// (apply.go, applymaterialize.go). In tun and mixed - mixed is the default - a router with Entware's
+// ipset and iptables was told its lists rode the plane, so neither NDM routes nor the compatibility
+// core carried them and every list left by the WAN with a clean review (QA-061).
+func keeneticKernelPlaneCarriesLists(mode string) bool {
+	return (mode == "hybrid" || mode == "fast") && keeneticKernelPBRPresent()
 }
 
 // keeneticDomainsViaDNSMasq reports whether a domain can reach the kernel plane on this router.
@@ -131,8 +149,12 @@ func keeneticKernelCarriesDomains(capture *executionNativeCaptureV1) bool {
 
 // keeneticPBROptions is the plan-independent shape of the Keenetic plane. WanIface comes from the
 // host facts rather than render_ipset.go's default, which is a live router.
+//
+// The LAN bridge is recorded even with interception off. The teardown deletes the DNS redirect and
+// the encrypted-DNS refusals on it whatever this plane's own switches were, because the plane it
+// replaces may have had them on, and without an interface it could delete nothing (QA-114).
 func keeneticPBROptions(wanIface string) pbr.IpsetOptions {
-	return pbr.IpsetOptions{WanIface: wanIface}
+	return pbr.IpsetOptions{WanIface: wanIface, DNSInterceptLAN: keeneticLANIface}
 }
 
 // keeneticLANIface is where clients arrive on KeeneticOS: the bridge every LAN segment joins. DNS
@@ -146,7 +168,6 @@ func keeneticPBROptionsFor(wanIface string, p *model.Profile) pbr.IpsetOptions {
 	o := keeneticPBROptions(wanIface)
 	if p != nil && p.DNS != nil && p.DNS.Enabled && p.DNS.Intercept {
 		o.DNSIntercept = true
-		o.DNSInterceptLAN = keeneticLANIface
 		o.DNSRejectEncrypted = p.DNS.InterceptRejectEncrypted
 	}
 	return o

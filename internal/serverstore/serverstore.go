@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 
 	"wayhop/internal/atomicfile"
 )
@@ -39,6 +40,9 @@ type Store struct {
 // Open loads servers.json, creating an empty list if absent.
 func Open(path string) (*Store, error) {
 	s := &Store{path: path}
+	// A temp a crash left between atomicfile.Write's create and rename stays for good otherwise, one
+	// more per crash. No writer exists before Open returns.
+	atomicfile.RemoveStale(path)
 	data, err := os.ReadFile(path)
 	// Treat a missing OR empty/whitespace-only file identically: start from an empty
 	// list and rewrite a valid file. An existing zero-length / whitespace-only file is
@@ -59,7 +63,18 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("read servers %s: %w", path, err)
 	}
 	if err := json.Unmarshal(data, &s.srv); err != nil {
-		return nil, fmt.Errorf("parse servers %s: %w", path, err)
+		// main treats an Open error as fatal, so an unparsable list kept the whole daemon (and the panel)
+		// down, respawn after respawn — over a convenience list that holds no secrets. The usual shape
+		// is a USB stick that acknowledged a FLUSH and lost the block: the right length, all NULs, which
+		// the TrimSpace guard above does not catch. Set the file aside for whoever wants its bytes and
+		// start empty, as apply-state does with a corrupt record.
+		s.srv = nil
+		aside := fmt.Sprintf("%s.corrupt-%d", path, time.Now().Unix())
+		if rerr := os.Rename(path, aside); rerr != nil {
+			log.Printf("wayhop: servers %s is unreadable (%v) and could not be set aside (%v); starting with an empty list", path, err, rerr)
+		} else {
+			log.Printf("wayhop: servers %s is unreadable (%v); moved it to %s and starting with an empty list", path, err, aside)
+		}
 	}
 	return s, nil
 }
@@ -154,6 +169,42 @@ func (s *Store) Patch(id string, fn func(*Server)) error {
 		}
 	}
 	return fmt.Errorf("server %q: %w", id, ErrNotFound)
+}
+
+// PatchOrCreate applies fn to the stored server with id, first creating it from init (with ID set to
+// id) when no record carries that id, and persists — find, create and mutate under ONE hold of s.mu.
+// Patch-then-Upsert was two acquisitions: two callers creating the same new id both missed in Patch,
+// then each Upsert replaced the whole record, so the later one dropped what the earlier one had
+// merged. Persist-then-commit as in Patch. created reports that the record did not exist before.
+func (s *Store) PatchOrCreate(id string, init Server, fn func(*Server)) (created bool, err error) {
+	if id == "" {
+		return false, errors.New("server id is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cand := make([]Server, len(s.srv), len(s.srv)+1)
+	copy(cand, s.srv)
+	i := -1
+	for j := range cand {
+		if cand[j].ID == id {
+			i = j
+			break
+		}
+	}
+	if i < 0 {
+		init.ID = id
+		cand = append(cand, init)
+		i, created = len(cand)-1, true
+	}
+	// Deep-clone the only reference field, as Patch does: fn must not reach the live element's (or the
+	// caller's init's) backing array when the save below fails.
+	cand[i].Installed = append([]string{}, cand[i].Installed...)
+	fn(&cand[i])
+	if err := s.saveLocked(cand); err != nil {
+		return false, err
+	}
+	s.srv = cand
+	return created, nil
 }
 
 // Delete removes a server by id.

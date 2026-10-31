@@ -2,6 +2,7 @@ package server
 
 import (
 	"testing"
+	"time"
 
 	"wayhop/internal/model"
 	"wayhop/internal/platform"
@@ -50,7 +51,7 @@ func TestPreflightWiring_IgnoresDisabledRules(t *testing.T) {
 	s := applystate_server(t)
 	s.cfg.RoutingMode = "fast"
 	s.cfg.Offload = ""
-	s.pbrAvailOnce.Do(func() { s.pbrAvail = true }) // a capable nft host, so only the mode is judged
+	s.hostVerdicts.pbr, s.hostVerdicts.pbrAt = true, time.Now() // a capable nft host, so only the mode is judged
 
 	prof := s.store.Profile()
 	prof.Rules = []model.Rule{{ID: "r1", Domain: []string{"example.com"}, Outbound: model.OutboundDirect, Disabled: true}}
@@ -79,7 +80,7 @@ func TestPreflightWiring_NeverNil(t *testing.T) {
 	s := applystate_server(t)
 	s.cfg.RoutingMode = "tun"
 	s.cfg.Offload = ""
-	s.pbrAvailOnce.Do(func() { s.pbrAvail = true })
+	s.hostVerdicts.pbr, s.hostVerdicts.pbrAt = true, time.Now()
 
 	got := s.preflight(platform.Capabilities{
 		Platform: "openwrt", Accel: platform.Accel{Kind: "nft-flowtable", HW: true}, SingboxPresent: true,

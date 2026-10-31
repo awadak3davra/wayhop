@@ -222,7 +222,7 @@ func probeAutoOffloadDevicesWithIO(ctx context.Context, host applyHostIO) ([]str
 		return nil, []string{err}
 	}
 	var devices, probeErrors []string
-	route, err := host.runCommand(ctx, "ip", "-o", "route", "show", "default")
+	route, err := host.runCommand(ctx, "ip", "-o", "-4", "route", "show", "default")
 	if err != nil {
 		probeErrors = append(probeErrors, applyHostDefaultRouteError)
 	} else if device := parseDefaultRouteDev(route); device != "" {

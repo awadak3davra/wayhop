@@ -52,6 +52,11 @@ type Status struct {
 	LastError   string `json:"last_error,omitempty"` // why a rollback failed, if it did
 }
 
+// ErrSuperseded is what a rollback reports when a newer Apply, Keep or Disarm replaced its window
+// before it could run. A rollback closure that skips for that reason returns it rather than nil: a
+// skip is not a rollback, and RollbackNow must not report one.
+var ErrSuperseded = errors.New("a newer Apply, Keep or routing switch replaced this fail-safe window before the rollback ran — nothing was rolled back")
+
 // Manager runs at most one pending fail-safe window at a time.
 type Manager struct {
 	mu             sync.Mutex
@@ -181,7 +186,7 @@ func (m *Manager) run(ctx context.Context, myEpoch int64, check func() Health, r
 			// this claim wins just before the supersede (see Arm / server/failsafe.go).
 			if rollback != nil && m.claimRollback(myEpoch) {
 				if err := rollback(); err != nil {
-					m.markRollbackFailed(err)
+					m.markRollbackFailed(myEpoch, err)
 				} else {
 					m.markRollbackDone(myEpoch)
 				}
@@ -244,9 +249,15 @@ func (m *Manager) markRollbackDone(myEpoch int64) {
 }
 
 // markRollbackFailed records that the rollback could not restore the config, so
-// Status reports the truth ("rollback_failed") instead of a false "rolled_back".
-func (m *Manager) markRollbackFailed(err error) {
+// Status reports the truth ("rollback_failed") instead of a false "rolled_back". Epoch-gated like
+// markRollbackDone: a superseded window's closure reports ErrSuperseded, and marking the NEW window
+// failed would show a rollback error for a configuration nobody tried to roll back.
+func (m *Manager) markRollbackFailed(myEpoch int64, err error) {
 	m.mu.Lock()
+	if m.epoch != myEpoch {
+		m.mu.Unlock()
+		return
+	}
 	m.phase = "rollback_failed"
 	m.rollbackFailed = true
 	if err != nil {
@@ -303,7 +314,13 @@ func (m *Manager) tickHealth(now int64, h Health) Action {
 			}
 		}
 		m.lastAt = now
-		m.phase = "unverified"
+		// After the rollback the phase is its verdict (rolled_back / rollback_failed), and the next
+		// healthy tick closes the window without touching it. Relabelling it here closed windows as
+		// "unverified": no rollback toast in the panel, a quiet "ended" in Telegram, and a failed
+		// rollback hidden behind it. Mirrors the degraded branch below.
+		if !m.rolledBack && !m.rollbackFailed {
+			m.phase = "unverified"
+		}
 		return ActNone
 	}
 	ok := h == HealthUp
@@ -316,12 +333,19 @@ func (m *Manager) tickHealth(now int64, h Health) Action {
 			m.pending = false // internet recovered after rollback
 			return ActDone
 		}
+		// A manual Roll back that failed (QA-147) leaves rolledBack false but its verdict in phase: the
+		// Test is still partly on the router, so neither "armed" nor "live_unsaved" is true. The window
+		// closes on the failure it already reports.
 		if now >= m.deadline {
 			m.pending = false // stayed healthy through the keep window -> live (unsaved)
-			m.phase = "live_unsaved"
+			if !m.rollbackFailed {
+				m.phase = "live_unsaved"
+			}
 			return ActDone
 		}
-		m.phase = "armed"
+		if !m.rollbackFailed {
+			m.phase = "armed"
+		}
 		return ActNone
 	}
 
@@ -340,7 +364,13 @@ func (m *Manager) tickHealth(now int64, h Health) Action {
 	// before the caller runs it, so the next tick is free to reboot whether or not it succeeded.
 	if badFor >= int64(m.d.RebootAfter/time.Millisecond) && m.rolledBack {
 		m.pending = false
-		m.phase = "reboot"
+		// "reboot" is announced as one (a critical Telegram alert, the panel's escalation toast), so it
+		// is only the phase when run() will actually reboot — the same condition it checks. With
+		// auto-reboot off, the default, the window closes on its rollback verdict instead, which also
+		// keeps a rollback_failed visible rather than overwriting it with a reboot that never happens.
+		if m.allowReboot && m.reboot != nil {
+			m.phase = "reboot"
+		}
 		return ActReboot
 	}
 	if !m.rolledBack && badFor >= int64(m.d.RollbackAfter/time.Millisecond) {
@@ -348,7 +378,7 @@ func (m *Manager) tickHealth(now int64, h Health) Action {
 		m.phase = "rolled_back"
 		return ActRollback
 	}
-	if !m.rolledBack {
+	if !m.rolledBack && !m.rollbackFailed {
 		m.phase = "degraded"
 	}
 	return ActNone
@@ -373,6 +403,49 @@ func (m *Manager) Confirm() {
 	}
 }
 
+// Disarm closes the window without a verdict: neither the tested configuration nor the previous one
+// is declared good, and no rollback or reboot may follow. It is for a caller that has taken the
+// router out of the window's hands altogether (WayHop's routing turned off), where a rollback would
+// put back exactly what the operator just removed. Like Confirm it bumps the epoch, so a rollback
+// already dispatched and parked on the caller's lock sees !IsCurrent and skips. Reports whether a
+// window was pending.
+func (m *Manager) Disarm() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	was := m.pending
+	m.pending = false
+	m.phase = "idle"
+	m.epoch++
+	if m.cancel != nil {
+		m.cancel()
+		m.cancel = nil
+	}
+	return was
+}
+
+// MarkRolledBack records that the caller rolled the window's configuration back itself: a failed Apply
+// whose rollback restored the committed configuration while this window's own rollback was
+// outstanding. A window left holding on rollback_failed would close later announcing a failed rollback
+// (Telegram's loud "closed, but the rollback failed", the panel's error) for a router that runs the
+// committed configuration, or reboot it. Like Confirm it bumps the epoch, so a rollback already
+// dispatched and parked on the caller's lock skips. Only a pending window, or a closed one whose verdict
+// is still the failed rollback, is touched.
+func (m *Manager) MarkRolledBack() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.pending && m.phase != "rollback_failed" {
+		return
+	}
+	m.pending = false
+	m.phase = "rolled_back"
+	m.rolledBack, m.rollbackDone, m.rollbackFailed = true, true, false
+	m.lastErr = ""
+	m.epoch++
+	if m.cancel != nil {
+		m.cancel()
+	}
+}
+
 // RollbackNow performs an immediate manual rollback. It only commits the "rolled_back" success state
 // (and disarms the reboot fallback) on a GENUINE success:
 //   - no prior dispatch: claim it and invoke rb().
@@ -388,8 +461,28 @@ func (m *Manager) Confirm() {
 // Do NOT report false success or cancel the still-armed reboot fallback while the config is broken —
 // the original bug: the old code unconditionally set phase="rolled_back" and returned nil even after
 // the auto path's rollback had errored, disarming the reboot last resort over a live-broken config.
-func (m *Manager) RollbackNow() error {
+func (m *Manager) RollbackNow() error { return m.rollbackNow(0, false) }
+
+// Epoch is the current window's epoch, for RollbackNowAt. Read it under the lock that serializes the
+// next Apply's Arm (the server's applyMu), together with what tells the caller which window it is.
+func (m *Manager) Epoch() int64 {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.epoch
+}
+
+// RollbackNowAt is RollbackNow for the window epoch names: ErrSuperseded, touching nothing, when a
+// newer Apply has armed its own window since. A Roll back the caller checked against one test Apply
+// must not claim the next one's rollback: the closure RollbackNow runs is the current window's, so a
+// Test armed between the caller's check and this call was rolled back in its place, untested.
+func (m *Manager) RollbackNowAt(epoch int64) error { return m.rollbackNow(epoch, true) }
+
+func (m *Manager) rollbackNow(epoch int64, only bool) error {
+	m.mu.Lock()
+	if only && m.epoch != epoch {
+		m.mu.Unlock()
+		return ErrSuperseded
+	}
 	rb := m.rollback
 	if m.dispatched && !m.rollbackDone && !m.rollbackFailed {
 		m.mu.Unlock()
@@ -400,6 +493,19 @@ func (m *Manager) RollbackNow() error {
 	// dispatch — runs rb() below.
 	priorSucceeded := m.rollbackDone && !m.rollbackFailed
 	m.dispatched = true // claim the fire-once dispatch (already true after an auto/failed dispatch)
+	if !priorSucceeded {
+		// This call's rb() is now the one in flight. A retry after a failed dispatch left rollbackFailed
+		// set, so a second press during it (two owners, a double tap in Telegram) passed the in-flight
+		// check above and ran the rollback again: over the configuration the first one had just restored,
+		// with a second webhook, and when that redundant run failed a false "FAILED" and rollback_failed
+		// on a closed window. The outcome below sets one of the two again, so a retry after this one
+		// fails still runs.
+		m.rollbackDone, m.rollbackFailed = false, false
+	}
+	// The window this call claimed. rb() runs unlocked and the production closure waits for applyMu,
+	// which a Test Apply holds while it arms its OWN window (or Keep/Disarm close this one); every
+	// write below is only for this window.
+	ep := m.epoch
 	if priorSucceeded {
 		m.pending = false
 		m.phase = "rolled_back"
@@ -412,16 +518,31 @@ func (m *Manager) RollbackNow() error {
 	}
 	m.mu.Unlock()
 
+	var rbErr error
 	if rb != nil {
-		if err := rb(); err != nil {
-			// Leave the window ARMED (pending untouched, ctx not cancelled) so the reboot fallback
-			// can still escalate, and surface the real error rather than a false success.
-			m.markRollbackFailed(err)
-			return err
-		}
+		rbErr = rb()
+	}
+	m.mu.Lock()
+	// A closure can also find its window replaced before the epoch says so: Keep records the Test as
+	// committed under the caller's lock and calls Confirm after releasing it. Marking that skip as a
+	// failed rollback flashed rollback_failed (a loud alert) before Confirm's verdict.
+	if m.epoch != ep || errors.Is(rbErr, ErrSuperseded) {
+		// Superseded while rb() ran or waited. The success tail used to run anyway: on a closure that
+		// had skipped it closed the NEW window, cancelled its run() — no auto-rollback, no reboot for an
+		// untested configuration — and reported "rolled back"; after a Keep it overwrote "committed".
+		// The window that replaced this one owns the state now: touch nothing. What rb() reported
+		// stands — ErrSuperseded when it skipped, nil only if it ran before the window was replaced.
+		m.mu.Unlock()
+		return rbErr
+	}
+	if rbErr != nil {
+		m.mu.Unlock()
+		// Leave the window ARMED (pending untouched, ctx not cancelled) so the reboot fallback
+		// can still escalate, and surface the real error rather than a false success.
+		m.markRollbackFailed(ep, rbErr)
+		return rbErr
 	}
 	// Genuine success: commit the rolled-back state, clear the prior error, and stop the window.
-	m.mu.Lock()
 	m.pending = false
 	m.phase = "rolled_back"
 	m.rolledBack = true

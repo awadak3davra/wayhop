@@ -10,10 +10,12 @@ import (
 // uciShowFromCommands turns what RenderUCI emits into what ReadUCI parses, so the two halves of the
 // OpenWrt write-back can be compared against each other.
 //
-// The mapping is fixed by RenderUCI itself, not guessed: it deletes every https-dns-proxy section
-// first and then adds one per DoH resolver in order, so the `[-1]` ("the section just added") in the
-// Nth add block is `[N]` in uci show output. A `uci -q delete` means the setting is absent, which in
-// show output is simply a line that is not there.
+// The mapping is fixed by RenderUCI itself, not guessed: a plane with no adopted instance (no
+// "https-dns-proxy[N]" source) gets one added per DoH resolver in order, so on a router with no
+// instances the `[-1]` ("the section just added") in the Nth add block is `[N]` in uci show output. A
+// `uci -q delete` or `del_list` means the setting is absent, which in show output is simply a line
+// that is not there. uciwriteback_keeps_test.go runs plans against a router that already has
+// instances and lists.
 func uciShowFromCommands(cmds []string) string {
 	var out []string
 	idx := -1

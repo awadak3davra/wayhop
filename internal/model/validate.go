@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 )
 
@@ -16,7 +17,7 @@ import (
 //
 // The message is unchanged: the type carries the class, so nothing the operator reads moves.
 type DisabledRefError struct {
-	Kind   string // "group" | "rule" | "routing list" — the object HOLDING the reference
+	Kind   string // "group" | "rule" | "routing list" | "DNS server" — the object HOLDING the reference
 	ID     string // its id
 	Target string // what it points at
 	msg    string
@@ -43,7 +44,7 @@ func disabledRef(kind, id, target, format string, a ...any) error {
 // Kind/ID name the object to fix, Target names what it pointed at. The message is unchanged: the
 // type carries the class, so nothing the operator reads moves.
 type UnresolvedRefError struct {
-	Kind   string // "group" | "rule" | "routing list" — the object HOLDING the broken reference
+	Kind   string // "group" | "rule" | "routing list" | "DNS server" — the object HOLDING the broken reference
 	ID     string // its id, so a caller can name or act on it instead of saying "profile"
 	Target string // the reference that did not resolve
 	msg    string
@@ -111,6 +112,47 @@ func ValidRefreshHours(rl RoutingList) bool {
 	return rl.RefreshHours >= MinCIDRRefreshHours && rl.RefreshHours <= MaxCIDRRefreshHours
 }
 
+// RuleSetURLKind is what a Source URL's file name says it is: "binary" for a .srs rule set, "source"
+// for a .json one, "text" for any other extension (a plain-text .lst or .txt list, which sing-box
+// cannot load as a rule set), and "" when the last path segment has no extension at all (a mirror or
+// a query-string feed), which says nothing. The ?query and #fragment are not part of the name.
+func RuleSetURLKind(source string) string {
+	path := source
+	if i := strings.IndexAny(path, "?#"); i >= 0 {
+		path = path[:i]
+	}
+	if i := strings.Index(path, "://"); i >= 0 {
+		path = path[i+3:]
+		if j := strings.IndexByte(path, '/'); j >= 0 {
+			path = path[j:]
+		} else {
+			path = ""
+		}
+	}
+	name := path[strings.LastIndexByte(path, '/')+1:]
+	dot := strings.LastIndexByte(name, '.')
+	switch {
+	case dot < 0:
+		return ""
+	case strings.EqualFold(name[dot:], ".srs"):
+		return "binary"
+	case strings.EqualFold(name[dot:], ".json"):
+		return "source"
+	}
+	return "text"
+}
+
+// CarriedRuleSetFormat reports whether a rule-set format carried over from a list's old URL still
+// holds for its new one (QA-150). A URL whose file name says nothing (a mirror with no extension, a
+// query-string feed) keeps it: dropped, the generator would skip a list it has no way to read. A URL
+// that names the same format keeps it too. One that names the other format, or a plain-text list,
+// does not: kept, sing-box would read the file as what it is not, and a rule set that fails to load
+// stops the whole core. The panel's form holds the same rule (page-routing.js rlKeepsFormat).
+func CarriedRuleSetFormat(format, newSource string) bool {
+	kind := RuleSetURLKind(newSource)
+	return kind == "" || kind == format
+}
+
 // Validate checks structural integrity: unique IDs, resolvable members and
 // rule targets, and sane ports. It returns the first problem found.
 func (p *Profile) Validate() error {
@@ -159,6 +201,9 @@ func (p *Profile) Validate() error {
 		if e.PersistentKeepalive != 0 && (e.PersistentKeepalive < 1 || e.PersistentKeepalive > 65535) {
 			return fmt.Errorf("endpoint %q: persistent_keepalive %d out of range (1-65535)", e.ID, e.PersistentKeepalive)
 		}
+		if msg := QUICTuningProblem(&e); msg != "" {
+			return fmt.Errorf("endpoint %q: %s", e.ID, msg)
+		}
 		// Only WayHop's own AmneziaWG engine can move a connection onto amneziawg-go. Refused rather
 		// than ignored elsewhere: a flag the planner would never read is a setting that looks in force.
 		if e.AWGUserspace && (e.Engine != EngineAmneziaWG || !e.OwnsResource()) {
@@ -180,11 +225,23 @@ func (p *Profile) Validate() error {
 			}
 			continue
 		}
-		if e.Server == "" {
-			return fmt.Errorf("endpoint %q: empty server", e.ID)
+		if e.Engine == EngineByeDPI {
+			// A local proxy the daemon starts on loopback: no server, port or protocol of its own,
+			// only the strategy, which must parse as ciadpi flags.
+			if _, err := ByeDPIStrategy(e.Params); err != nil {
+				return fmt.Errorf("endpoint %q (byedpi): %v", e.ID, err)
+			}
+			continue
 		}
-		if e.Port < 1 || e.Port > 65535 {
-			return fmt.Errorf("endpoint %q: port %d out of range", e.ID, e.Port)
+		// A Hysteria2 connection made through a realm has no server of its own: the rendezvous hands
+		// out the server's addresses at connect time, and the generator emits neither field.
+		if !e.UsesRealm() {
+			if e.Server == "" {
+				return fmt.Errorf("endpoint %q: empty server", e.ID)
+			}
+			if e.Port < 1 || e.Port > 65535 {
+				return fmt.Errorf("endpoint %q: port %d out of range", e.ID, e.Port)
+			}
 		}
 		if e.Protocol == "" {
 			return fmt.Errorf("endpoint %q: empty protocol", e.ID)
@@ -198,11 +255,8 @@ func (p *Profile) Validate() error {
 		// leaving the last-good live config in place. Disabled endpoints aren't
 		// emitted by the generator, so they're exempt (a half-edited draft is fine).
 		if e.Enabled {
-			if missing := missingProtoParam(&e); missing != "" {
-				return fmt.Errorf("endpoint %q (%s): missing required %s", e.ID, e.Protocol, missing)
-			}
-			if bad := invalidProtoParam(&e); bad != "" {
-				return fmt.Errorf("endpoint %q (%s): %s", e.ID, e.Protocol, bad)
+			if p := endpointLoadProblem(&e); p != "" {
+				return fmt.Errorf("endpoint %q (%s): %s", e.ID, e.Protocol, p)
 			}
 		}
 	}
@@ -369,6 +423,11 @@ func (p *Profile) Validate() error {
 				}
 			}
 		}
+		// Only a routing list can be handed to an NDM access policy: a rule's matchers (ports,
+		// geosite, sources) have no kernel-plane form behind the policy's mark yet.
+		if _, ok := NDMPolicyName(r.Outbound); ok {
+			return fmt.Errorf("rule %q: outbound %q is a KeeneticOS access policy, which only a routing list can use", r.ID, r.Outbound)
+		}
 		if !isResolvable(r.Outbound, ids) {
 			return unresolvedRef("rule", r.ID, r.Outbound, "rule %q: outbound %q does not resolve", r.ID, r.Outbound)
 		}
@@ -423,11 +482,20 @@ func (p *Profile) Validate() error {
 		// bounds (they were legal before 0.4.1). The CRUD boundary (handleUpsertRoutingList) rejects
 		// new out-of-range writes with a 400 via ValidRefreshHours, and the auto-refresh ticker
 		// clamps whatever is persisted (cidrIntervalHours) — bad legacy data degrades, never bricks.
-		if !isResolvable(rl.Outbound, ids) {
-			return unresolvedRef("routing list", rl.ID, rl.Outbound, "routing list %q: outbound %q does not resolve", rl.ID, rl.Outbound)
-		}
-		if !isBuiltin(rl.Outbound) && !enabled[rl.Outbound] {
-			return disabledRef("routing list", rl.ID, rl.Outbound, "routing list %q: outbound %q targets a disabled endpoint", rl.ID, rl.Outbound)
+		// An NDM access policy is not an object of this profile, so there is nothing here to resolve
+		// it against: only its shape is checked. Whether the router has it is the host-aware review's
+		// question, asked again at every Apply because NDM owns the name.
+		if name, ok := NDMPolicyName(rl.Outbound); ok {
+			if !ValidNDMPolicyName(name) {
+				return fmt.Errorf("routing list %q: outbound %q: an access policy name is letters, digits, '_' and '-' (e.g. %sPolicy1)", rl.ID, rl.Outbound, NDMPolicyPrefix)
+			}
+		} else {
+			if !isResolvable(rl.Outbound, ids) {
+				return unresolvedRef("routing list", rl.ID, rl.Outbound, "routing list %q: outbound %q does not resolve", rl.ID, rl.Outbound)
+			}
+			if !isBuiltin(rl.Outbound) && !enabled[rl.Outbound] {
+				return disabledRef("routing list", rl.ID, rl.Outbound, "routing list %q: outbound %q targets a disabled endpoint", rl.ID, rl.Outbound)
+			}
 		}
 		// Device scoping: mode enum + referenced groups must exist. "only"/"except" need a group.
 		switch rl.ScopeMode {
@@ -440,10 +508,20 @@ func (p *Profile) Validate() error {
 				return fmt.Errorf("routing list %q: scope references unknown device group %q", rl.ID, gid)
 			}
 		}
+		switch rl.TLSFragment {
+		case "", TLSFragmentRecord, TLSFragmentHandshake:
+		default:
+			return fmt.Errorf("routing list %q: invalid tls_fragment %q (record|handshake)", rl.ID, rl.TLSFragment)
+		}
 		if (rl.ScopeMode == "only" || rl.ScopeMode == "except") && len(rl.ScopeGroups) == 0 {
 			return fmt.Errorf("routing list %q: scope_mode %q needs at least one device group", rl.ID, rl.ScopeMode)
 		}
 		if rl.DownloadVia != "" {
+			// The download is the core's own connection, and the core reaches a policy only through a
+			// routed list's outbound; a detour into one is not offered.
+			if _, ok := NDMPolicyName(rl.DownloadVia); ok {
+				return fmt.Errorf("routing list %q: download_via %q is a KeeneticOS access policy, which can only carry the list's traffic", rl.ID, rl.DownloadVia)
+			}
 			if !isResolvable(rl.DownloadVia, ids) {
 				return unresolvedRef("routing list", rl.ID, rl.DownloadVia, "routing list %q: download_via %q does not resolve", rl.ID, rl.DownloadVia)
 			}
@@ -459,7 +537,7 @@ func (p *Profile) Validate() error {
 	// DNS plane (the "DNS" section) — greenfield, so a strict check can't brick a legacy profile.
 	// Detours resolve against the endpoint/group namespace built above; rule_sets against RoutingLists.
 	if p.DNS != nil {
-		if err := validateDNS(p.DNS, ids, enabled); err != nil {
+		if err := validateDNS(p.DNS, ids, enabled, p.Endpoints); err != nil {
 			return err
 		}
 	}
@@ -492,6 +570,44 @@ func validCIDRSource(s string) bool {
 		}
 	}
 	return true
+}
+
+// EndpointParamProblem names what would stop an enabled endpoint from loading (a missing identity
+// param, or a value the core rejects) in Validate's words, or "" when nothing does. The bulk import
+// stores such an endpoint disabled, since enabled it would fail Validate and with it every Apply.
+// It also refuses a multiplex setting the core cannot take (muxProblem), which Validate does not:
+// the generator leaves that out, so it costs one connection its multiplex rather than every Apply.
+func EndpointParamProblem(e *Endpoint) string {
+	if p := endpointLoadProblem(e); p != "" {
+		return p
+	}
+	return muxProblem(e)
+}
+
+// endpointLoadProblem is EndpointParamProblem without the settings the generator drops on its own:
+// what Validate refuses, because the core would fail the whole shared config over it.
+func endpointLoadProblem(e *Endpoint) string {
+	if e.Engine == EngineByeDPI {
+		// The upsert, bulk import and subscription refresh ask this, not Validate: without it a
+		// strategy Validate refuses was stored enabled and failed the next Apply instead (#89).
+		if _, err := ByeDPIStrategy(e.Params); err != nil {
+			return err.Error()
+		}
+		return ""
+	}
+	if missing := missingProtoParam(e); missing != "" {
+		return "missing required " + missing
+	}
+	if p := invalidProtoParam(e); p != "" {
+		return p
+	}
+	// TLS settings the protocol params do not cover: an ECH config sing-box would load and then fail
+	// every handshake with, or an ECH pairing it refuses at load; a certificate pin that is not a
+	// SHA-256 hash.
+	if p := echProblem(e); p != "" {
+		return p
+	}
+	return pinProblem(e)
 }
 
 // missingProtoParam returns the name of the first mandatory identity param the
@@ -529,6 +645,27 @@ func missingProtoParam(e *Endpoint) string {
 		// bringing ALL routing down AFTER the pre-apply check already passed. Catch
 		// it here, before Generate emits it, so the apply fails safely.
 		return firstEmpty("private_key", "peer_public_key")
+	case ProtoSnell:
+		// sing-box requires the pre-shared key, and Snell v6 one of 12 to 255 bytes.
+		if k := get("psk"); k == "" {
+			return "psk"
+		} else if snellVersion(e.Params) == 6 && (len(k) < 12 || len(k) > 255) {
+			return "psk (Snell v6 needs 12 to 255 bytes)"
+		}
+		return ""
+	case ProtoSSH:
+		// Not a load error, unlike the rest: an exit with no credential at all can never log in.
+		if sshMissingAuth(e) {
+			return "password or private_key"
+		}
+		return ""
+	case ProtoOpenVPN:
+		// sing-box refuses a TLS-mode client without a trust anchor, and a static-key one without
+		// its key and both tunnel addresses.
+		if get("mode") == "static_key" {
+			return firstEmpty("static_key", "address", "peer_address")
+		}
+		return firstEmpty("ca")
 	}
 	return ""
 }
@@ -569,6 +706,15 @@ func invalidProtoParam(e *Endpoint) string {
 		if u := get("uuid"); u != "" && !isUUIDish(u) {
 			return fmt.Sprintf("invalid uuid %q (want 8-4-4-4-12 hex)", u)
 		}
+	case ProtoHysteria2:
+		// A malformed realm address leaves the generator no rendezvous or realm name to give the core,
+		// and this connection no server; refused here so it is said at save, not at Apply.
+		if _, err := Hy2RealmOf(e); err != nil {
+			return err.Error()
+		}
+	case ProtoSSH:
+		// A host key or private key sing-box cannot parse fails the shared config at load.
+		return sshParamProblem(e)
 	case ProtoShadowsocks:
 		// An unsupported method bricks the shared config (sing-box "unknown method").
 		// missingProtoParam already rejected an empty method, so a non-empty one here
@@ -578,13 +724,25 @@ func invalidProtoParam(e *Endpoint) string {
 		}
 		// SS-2022 (2022-blake3-*) needs a base64 PSK of an exact byte length:
 		// aes-128 -> 16, aes-256 / chacha20 -> 32. sing-box rejects a wrong one.
+		// A multi-user server (sing-box `users`, the panels built on it) hands each client
+		// "iPSK:uPSK": the server's identity key, then the user's. sing-box takes that form for
+		// the AES ciphers (each part checked like a single key) and refuses it for chacha20
+		// ("no EIH"), so only the AES ciphers may carry more than one key.
 		if m := get("method"); strings.HasPrefix(m, "2022-blake3-") {
 			want := 32
 			if strings.Contains(m, "aes-128") {
 				want = 16
 			}
-			if pw := get("password"); pw != "" && b64Len(pw) != want {
-				return fmt.Sprintf("%s needs a %d-byte base64 key", m, want)
+			if pw := get("password"); pw != "" {
+				keys := strings.Split(pw, ":")
+				if len(keys) > 1 && !strings.Contains(m, "-aes-") {
+					return fmt.Sprintf("%s takes a single key (identity keys iPSK:uPSK need an AES 2022 method)", m)
+				}
+				for _, k := range keys {
+					if b64Len(k) != want {
+						return fmt.Sprintf("%s needs a %d-byte base64 key", m, want)
+					}
+				}
 			}
 		}
 	}
@@ -714,4 +872,19 @@ func validSourceIface(s string) bool {
 		}
 	}
 	return true
+}
+
+// snellVersion reads a Snell endpoint's version as the importers and the API store it: an int, a
+// float64 after a JSON round-trip, or a string. 0 when absent or unreadable.
+func snellVersion(p map[string]any) int {
+	switch v := p["version"].(type) {
+	case int:
+		return v
+	case float64:
+		return int(v)
+	case string:
+		n, _ := strconv.Atoi(strings.TrimSpace(v))
+		return n
+	}
+	return 0
 }

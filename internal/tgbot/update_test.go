@@ -34,6 +34,16 @@ func TestUpdateViews(t *testing.T) {
 	if _, kb := viewer.Update(avail); strings.Contains(toJSON(kb), cbAsk+actInstall) {
 		t.Fatal("a viewer got Install")
 	}
+	// A feed-installed WayHop is installable from the bot too: the daemon drives the package manager.
+	pkgAvail := UpdateInfo{Current: "0.5.7", Latest: "0.5.8-r1", Available: true, Decided: true, Managed: "apk"}
+	if text, kb := owner.Update(pkgAvail); !strings.Contains(text, "0.5.8-r1 is available") || kb.Rows[0][0].CallbackData != cbAsk+actInstall {
+		t.Errorf("a package update offered no Install:\n%s %+v", text, kb)
+	}
+	// The last update's outcome, when it is news, follows whatever the check found.
+	noted := UpdateInfo{Current: "0.5.7", Latest: "0.5.7", Decided: true, Note: "The update to v0.5.8 was rolled back at 2026-10-17 14:00: it crashes on start."}
+	if text, _ := owner.Update(noted); !strings.Contains(text, "Last update: The update to v0.5.8 was rolled back") {
+		t.Errorf("the rollback was not reported:\n%s", text)
+	}
 }
 
 func TestUpdateFromMaintenance(t *testing.T) {

@@ -122,7 +122,12 @@ func (s *Server) awgComponent(ctx context.Context, prof model.Profile) awgCompon
 	if nativePlan && p == platform.OpenWrt && len(running) > 0 {
 		moves = s.openWrtUserspaceMoves(prof, capset, lane)
 	}
-	out.Builtin = awgBuiltin(probe, firmwareOwned, nativePlan && nativeplan.NativeAWGAvailable(capset), nativeplan.NativeAWGGenerationFor(p, kernel))
+	builtinGeneration := nativeplan.NativeAWGGenerationFor(p, kernel)
+	if nativePlan && p == platform.Keenetic {
+		// KeeneticOS's own AmneziaWG is what its firmware release takes (QA-127), as the planner asks it.
+		builtinGeneration = nativeplan.KeeneticAWGGeneration(capset)
+	}
+	out.Builtin = awgBuiltin(probe, firmwareOwned, nativePlan && nativeplan.NativeAWGAvailable(capset), builtinGeneration)
 	for _, e := range prof.Endpoints {
 		if !e.Enabled || e.Engine != model.EngineAmneziaWG || !e.OwnsResource() {
 			continue

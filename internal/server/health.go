@@ -59,18 +59,30 @@ func (s *Server) handleFailoverState(w http.ResponseWriter, r *http.Request) {
 // selfSwitchingGroups names the groups whose routing-list tables this daemon owns and re-points on
 // health changes. Empty where that owner does not run — it is the answer for THIS platform, not a
 // claim about what the feature could do elsewhere.
+//
+// A capability, not a health reading: the tables the list failover loop can re-point
+// (listFailoverTables), in the plan the router holds. Built from the loop's election, a group whose
+// members were all down dropped out exactly during the outage, and the Failover card said it does
+// not switch by itself while the loop stood ready to re-point it when a member came back.
 func (s *Server) selfSwitchingGroups() []string {
 	// Same precondition as the loop itself — this must report what that loop will actually do, on any
-	// platform where it runs.
-	if s == nil || !iprouteAvailable() {
+	// platform where it runs. Routing switched off, it re-points nothing.
+	if s == nil || s.store == nil || s.monitor == nil || s.config().Demo || s.routingIsOff() {
+		return nil
+	}
+	if s.routeTables == nil && !iprouteAvailable() {
+		return nil
+	}
+	plan, profile := s.supervisedKernelPlan()
+	if plan == nil {
 		return nil
 	}
 	seen := map[string]bool{}
 	var out []string
-	for _, t := range s.listFailoverTargets() {
-		if t.Group != "" && !seen[t.Group] {
-			seen[t.Group] = true
-			out = append(out, t.Group)
+	for _, t := range listFailoverTables(plan, profile, kernelIfaceByEndpoint(profile)) {
+		if !seen[t.Group.ID] {
+			seen[t.Group.ID] = true
+			out = append(out, t.Group.ID)
 		}
 	}
 	return out

@@ -57,6 +57,10 @@ func TestReachViaIface_Validation(t *testing.T) {
 	if r := ReachViaIface(ctx, "nwg1", "has spaces $$", 5000); r.Reachable || r.Err == "" {
 		t.Errorf("invalid target: reachable=%v err=%q, want unreachable + a non-empty err", r.Reachable, r.Err)
 	}
+	// An interface this host does not have is named as the cause, before any dial.
+	if r := ReachViaIface(ctx, "wrnope0", "https://example.com", 5000); r.Reachable || r.Err != "interface wrnope0 is not present" {
+		t.Errorf("missing iface: reachable=%v err=%q", r.Reachable, r.Err)
+	}
 	// WAN (iface "") relabels Egress to "direct" before any probe — assert that on a
 	// path that returns before curl runs (invalid target), so the unit test makes no
 	// network call. The iface guard must NOT reject the empty WAN interface.

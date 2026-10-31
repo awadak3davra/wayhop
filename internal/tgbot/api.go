@@ -49,13 +49,28 @@ func NewClient(base, token string, hc *http.Client) *Client {
 	return &Client{base: base, token: token, hc: hc}
 }
 
-// APIError is a Bot API refusal ({"ok":false,...}) or a non-JSON HTTP failure.
+// APIError is a Bot API refusal: {"ok":false,...} in Telegram's own envelope.
 type APIError struct {
 	Method      string
-	Code        int    // error_code, or the HTTP status when the body was not the Bot API's
+	Code        int    // error_code, or the HTTP status when Telegram gave none
 	Description string // Telegram's own words, e.g. "Bad Request: message is not modified"
 	RetryAfter  int    // seconds to wait before retrying (429 flood control), 0 when not given
 	MigrateTo   int64  // a group became a supergroup with this id, 0 when not given
+}
+
+// HTTPError is an answer that did not come from the Bot API: a captive portal, a provider's block
+// page, a proxy's error. It is a transport failure, retried like a dropped connection, and never
+// read as Telegram's verdict: a proxy's 404 is not a rejected token, and its 403 is not a chat that
+// blocked the bot. Either reading used to cost dearly, ten minutes asleep as "unauthorized" or an
+// alert dropped as undeliverable, over a page that had nothing to do with Telegram.
+type HTTPError struct {
+	Method  string
+	Status  int    // the HTTP status, for the log
+	Summary string // what came back, cut short, the token removed
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("telegram %s: not a Bot API answer: %s", e.Method, e.Summary)
 }
 
 func (e *APIError) Error() string {
@@ -111,7 +126,9 @@ func retryAfter(err error) time.Duration {
 }
 
 type envelope struct {
-	OK          bool            `json:"ok"`
+	// OK is a pointer so that JSON which is not the Bot API's (a proxy's {"error": ...}) is told
+	// apart from a refusal: every Bot API answer carries "ok".
+	OK          *bool           `json:"ok"`
 	Result      json.RawMessage `json:"result"`
 	ErrorCode   int             `json:"error_code"`
 	Description string          `json:"description"`
@@ -123,14 +140,20 @@ type envelope struct {
 
 // call POSTs params as JSON to method and decodes the result into out (nil to discard).
 func (c *Client) call(ctx context.Context, method string, params any, out any) error {
+	return c.callAt(ctx, method, params, out, nil)
+}
+
+// callAt is call that also records in at, when at is not nil, the server's own time of the answer
+// (its Date header); at stays zero when the server gave none.
+func (c *Client) callAt(ctx context.Context, method string, params any, out any, at *time.Time) error {
 	body, err := json.Marshal(params)
 	if err != nil {
 		return fmt.Errorf("telegram %s: encode: %w", method, err)
 	}
-	return c.do(ctx, method, "application/json", bytes.NewReader(body), out)
+	return c.do(ctx, method, "application/json", bytes.NewReader(body), out, at)
 }
 
-func (c *Client) do(ctx context.Context, method, contentType string, body io.Reader, out any) error {
+func (c *Client) do(ctx context.Context, method, contentType string, body io.Reader, out any, at *time.Time) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/bot"+c.token+"/"+method, body)
 	if err != nil {
 		return c.scrub(fmt.Errorf("telegram %s: %w", method, err))
@@ -142,6 +165,11 @@ func (c *Client) do(ctx context.Context, method, contentType string, body io.Rea
 		return c.scrub(fmt.Errorf("telegram %s: %w", method, err))
 	}
 	defer resp.Body.Close()
+	if at != nil {
+		if d, err := http.ParseTime(resp.Header.Get("Date")); err == nil {
+			*at = d
+		}
+	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return c.scrub(fmt.Errorf("telegram %s: read: %w", method, err))
@@ -150,12 +178,14 @@ func (c *Client) do(ctx context.Context, method, contentType string, body io.Rea
 		return fmt.Errorf("telegram %s: response larger than %d bytes", method, maxResponseBytes)
 	}
 	var env envelope
-	if err := json.Unmarshal(raw, &env); err != nil {
-		// Not the Bot API: a captive portal, a block page, a proxy error. Say what came back.
-		return &APIError{Method: method, Code: resp.StatusCode, Description: httpSummary(resp.StatusCode, raw)}
+	if err := json.Unmarshal(raw, &env); err != nil || env.OK == nil {
+		// Not the Bot API: a captive portal, a block page, a proxy error. Say what came back, with
+		// the token taken out first: an error page may echo the request path, and the path carries
+		// it; cut first, a half token would slip past the scrub.
+		return &HTTPError{Method: method, Status: resp.StatusCode, Summary: httpSummary(resp.StatusCode, []byte(c.scrubText(string(raw))))}
 	}
-	if !env.OK {
-		ae := &APIError{Method: method, Code: env.ErrorCode, Description: env.Description}
+	if !*env.OK {
+		ae := &APIError{Method: method, Code: env.ErrorCode, Description: c.scrubText(env.Description)}
 		if ae.Code == 0 {
 			ae.Code = resp.StatusCode
 		}
@@ -177,10 +207,42 @@ func (c *Client) do(ctx context.Context, method, contentType string, body io.Rea
 // scrub removes the token from err's text. The token is a bearer credential for the whole bot, and
 // errors end up in the daemon log and in the panel.
 func (c *Client) scrub(err error) error {
-	if err == nil || c.token == "" || !strings.Contains(err.Error(), c.token) {
+	if err == nil {
 		return err
 	}
-	return errors.New(strings.ReplaceAll(err.Error(), c.token, "<token>"))
+	s := c.scrubText(err.Error())
+	if s == err.Error() {
+		return err
+	}
+	// Unwrapped, it gives the first cause that does not carry the token (a *url.Error does, the
+	// dial or timeout error inside it does not), so a timeout still reads as one.
+	cause := errors.Unwrap(err)
+	for cause != nil && c.scrubText(cause.Error()) != cause.Error() {
+		cause = errors.Unwrap(cause)
+	}
+	return scrubbed{s, cause}
+}
+
+// scrubbed is an error with the token taken out of its text.
+type scrubbed struct {
+	text string
+	err  error
+}
+
+func (e scrubbed) Error() string { return e.text }
+func (e scrubbed) Unwrap() error { return e.err }
+
+// scrubText removes the token from s: whole, and its secret half on its own, which is what is left
+// of it in a path that escaped the colon ("123456%3AAAH...") or split it.
+func (c *Client) scrubText(s string) string {
+	if c.token == "" {
+		return s
+	}
+	s = strings.ReplaceAll(s, c.token, "<token>")
+	if _, secret, ok := strings.Cut(c.token, ":"); ok && len(secret) >= 8 {
+		s = strings.ReplaceAll(s, secret, "<token>")
+	}
+	return s
 }
 
 // httpSummary is a short, printable description of a non-Bot-API response.
@@ -245,6 +307,9 @@ type Message struct {
 	Chat      Chat   `json:"chat"`
 	Date      int64  `json:"date"`
 	Text      string `json:"text,omitempty"`
+	// recv is when the update carrying the message was sent, on the clock of the server that sent
+	// it (zero: not known, the router's clock stands in). Not part of the Bot API.
+	recv time.Time
 	// A group that became a supergroup is announced in both chats: the old one names the new id,
 	// the new one the old.
 	MigrateToChatID   int64 `json:"migrate_to_chat_id,omitempty"`
@@ -324,13 +389,22 @@ func (c *Client) GetMe(ctx context.Context) (User, error) {
 // GetUpdates long-polls for updates after offset. timeout is the server-side hold in seconds; the
 // caller's context must outlive it.
 func (c *Client) GetUpdates(ctx context.Context, offset int64, timeout int) ([]Update, error) {
+	ups, _, err := c.pollUpdates(ctx, offset, timeout)
+	return ups, err
+}
+
+// pollUpdates is GetUpdates that also says when the server sent its answer, by the server's clock
+// (zero when it did not say). A command's age is measured on that clock, the one its own date is
+// on: a router whose clock is off would otherwise drop fresh commands, or replay old ones.
+func (c *Client) pollUpdates(ctx context.Context, offset int64, timeout int) ([]Update, time.Time, error) {
 	var ups []Update
-	err := c.call(ctx, "getUpdates", map[string]any{
+	var at time.Time
+	err := c.callAt(ctx, "getUpdates", map[string]any{
 		"offset":          offset,
 		"timeout":         timeout,
 		"allowed_updates": []string{"message", "callback_query", "channel_post"},
-	}, &ups)
-	return ups, err
+	}, &ups, &at)
+	return ups, at, err
 }
 
 // SendMessage sends HTML text to chat and returns the sent message.
@@ -461,6 +535,6 @@ func (c *Client) SendDocument(ctx context.Context, chat int64, name string, data
 		return Message{}, fmt.Errorf("telegram sendDocument: %w", err)
 	}
 	var m Message
-	err = c.do(ctx, "sendDocument", mw.FormDataContentType(), &buf, &m)
+	err = c.do(ctx, "sendDocument", mw.FormDataContentType(), &buf, &m, nil)
 	return m, err
 }

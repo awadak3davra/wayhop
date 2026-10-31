@@ -2,12 +2,14 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"wayhop/internal/cidrfeed"
@@ -20,13 +22,36 @@ import (
 // apply — the refreshed CIDRs activate on the next /api/apply (the normal, fail-safe-
 // protected path), matching the app's stage-then-Apply model and avoiding a second apply
 // path. Returns per-list cache sizes + any per-feed errors so the UI can report
-// "refreshed N, M failed".
+// "refreshed N, M failed", and under refused, by list ID, the entries a feed that did load carried
+// and no list may (QA-111): those are named, not counted as failures.
+//
+// A body naming one list ({"id": "..."}) refreshes only that one. Adding a preset fetches its feed so
+// it does not arrive empty; with no id that meant refetching every feed (antifilter, refilter, ...)
+// while Apply stayed blocked on the new list, and folding the other feeds' failures into the answer
+// about this one (QA-032). No body, or an empty id, still refreshes everything.
 func (s *Server) handleRoutingRefresh(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
-	changed, errs := s.refreshAll(ctx)
+	var body struct {
+		ID string `json:"id"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body) // absent or empty: refresh all
+	var changed bool
+	var errs []error
+	if body.ID != "" {
+		changed, errs = s.refreshListByID(ctx, body.ID)
+	} else {
+		changed, errs = s.refreshAll(ctx)
+	}
 	errStrs := make([]string, 0, len(errs))
+	refused := map[string][]string{}
 	for _, e := range errs {
+		for _, r := range feedRefusals(e) {
+			refused[r.id] = append(refused[r.id], r.refused...)
+		}
+		if e = feedFault(e); e == nil {
+			continue
+		}
 		// A feed's address can carry its credential (a token in the path or query, a user in it),
 		// and these strings end up in screenshots and bug reports.
 		errStrs = append(errStrs, redactSubscriptionError(e.Error()))
@@ -46,6 +71,7 @@ func (s *Server) handleRoutingRefresh(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"changed": changed,
 		"errors":  errStrs,
+		"refused": refused,
 		"lists":   lists,
 		"note":    "CIDRs refreshed into each list's cache — click Apply to activate.",
 	})
@@ -57,6 +83,11 @@ func (s *Server) handleRoutingRefresh(w http.ResponseWriter, r *http.Request) {
 // Safety: a fetch error OR a zero-entry result returns changed=false + an error and leaves the cache
 // untouched (last-good), so a transient feed/RIPEstat failure never empties a live carve-out. Empty
 // CIDRSource → (nil,false,nil).
+//
+// Entries no list may carry (cidrfeed.Screen: the default route, two /1 halves, anything shorter
+// than an IPv4 /4 or an IPv6 /8) are refused here, the one place a feed's content enters the
+// profile (QA-111). The rest of the feed is returned as usual, with a *feedRefusal error that counts
+// and names what was left out; a feed with nothing else is a zero-entry result and keeps last-good.
 func (s *Server) fetchOne(ctx context.Context, rl model.RoutingList) (cidrs []string, changed bool, err error) {
 	if rl.CIDRSource == "" {
 		return nil, false, nil
@@ -65,8 +96,16 @@ func (s *Server) fetchOne(ctx context.Context, rl model.RoutingList) (cidrs []st
 	if err != nil {
 		return nil, false, fmt.Errorf("refresh %q: %w", rl.ID, err)
 	}
+	got, refused := cidrfeed.Screen(got)
 	if len(got) == 0 {
+		if len(refused) > 0 {
+			return nil, false, fmt.Errorf("refresh %q: source returned 0 valid entries (%d skipped, %s) — keeping last-good",
+				rl.ID, skipped+len(refused), refusedWords(refused))
+		}
 		return nil, false, fmt.Errorf("refresh %q: source returned 0 valid entries (%d skipped) — keeping last-good", rl.ID, skipped)
+	}
+	if len(refused) > 0 {
+		err = &feedRefusal{id: rl.ID, refused: refused}
 	}
 	sort.Strings(got)
 	// The fetch happened, whatever it found. Recorded here rather than at the call sites so the two
@@ -74,9 +113,76 @@ func (s *Server) fetchOne(ctx context.Context, rl model.RoutingList) (cidrs []st
 	// where nothing else records that anything was checked.
 	s.noteCIDRChecked(rl.ID)
 	if slices.Equal(got, rl.CIDRCache) {
-		return got, false, nil // unchanged — don't churn the store / trigger a re-apply
+		return got, false, err // unchanged — don't churn the store / trigger a re-apply
 	}
-	return got, true, nil
+	return got, true, err
+}
+
+// feedRefusal is a feed that loaded without the entries a list may not carry. It travels as an
+// error, so the refresh loop's log names those entries, but it is not a failure: the list did take
+// the feed's other networks, so noteFeedRefresh does not count it as a feed that stopped updating,
+// and the refresh's answer lists it under refused, apart from its errors.
+type feedRefusal struct {
+	id      string
+	refused []string
+}
+
+func (e *feedRefusal) Error() string {
+	return fmt.Sprintf("refresh %q: %s; the rest of the feed was loaded", e.id, refusedWords(e.refused))
+}
+
+// refusedNamed is how many refused entries an error names before "and N more": enough to find a typo
+// in the feed, bounded however many such lines a rewritten body carries.
+const refusedNamed = 5
+
+// refusedWords counts and names the entries cidrfeed.Screen refused.
+func refusedWords(refused []string) string {
+	names := strings.Join(refused[:min(len(refused), refusedNamed)], ", ")
+	if more := len(refused) - refusedNamed; more > 0 {
+		names += fmt.Sprintf(" and %d more", more)
+	}
+	unit := "entries"
+	if len(refused) == 1 {
+		unit = "entry"
+	}
+	return fmt.Sprintf("refused %d %s too broad for a list (shorter than IPv4 /%d or IPv6 /%d): %s",
+		len(refused), unit, cidrfeed.MinPrefixBitsV4, cidrfeed.MinPrefixBitsV6, names)
+}
+
+// feedFault is a refresh error without its feedRefusals, nil when they were all it held: what is left
+// is what failed.
+func feedFault(err error) error {
+	if _, ok := err.(*feedRefusal); ok {
+		return nil
+	}
+	j, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		return err
+	}
+	var left []error
+	for _, e := range j.Unwrap() {
+		if f := feedFault(e); f != nil {
+			left = append(left, f)
+		}
+	}
+	return errors.Join(left...)
+}
+
+// feedRefusals are the feedRefusals a refresh error holds, joined ones included: feedFault's other
+// half.
+func feedRefusals(err error) []*feedRefusal {
+	if r, ok := err.(*feedRefusal); ok {
+		return []*feedRefusal{r}
+	}
+	j, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		return nil
+	}
+	var out []*feedRefusal
+	for _, e := range j.Unwrap() {
+		out = append(out, feedRefusals(e)...)
+	}
+	return out
 }
 
 // refreshOne fetches a routing list's CIDRSource and, when the result differs from the list's current
@@ -154,15 +260,35 @@ func (s *Server) refreshAll(ctx context.Context) (changed bool, errs []error) {
 			continue
 		}
 		s.noteFeedRefresh(rl, time.Now(), err)
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
+		// A list can change and still answer with an error: one of its two feeds failed, or its feed
+		// loaded without entries no list may carry. What changed is staged either way, and the answer
+		// says so, or the panel reported "No changes" over a cache that needs Apply.
 		if ch {
 			changed = true
 		}
+		if err != nil {
+			errs = append(errs, err)
+		}
 	}
 	return changed, errs
+}
+
+// refreshListByID refreshes one list's feeds, recording the outcome as refreshAll does.
+func (s *Server) refreshListByID(ctx context.Context, id string) (changed bool, errs []error) {
+	p := s.store.Profile()
+	rl := p.RoutingListByID(id)
+	if rl == nil {
+		return false, []error{fmt.Errorf("refresh %q: no such list", id)}
+	}
+	if rl.CIDRSource == "" && rl.DomainSource == "" {
+		return false, nil
+	}
+	ch, err := s.refreshOne(ctx, *rl)
+	s.noteFeedRefresh(*rl, time.Now(), err)
+	if err != nil {
+		return ch, []error{err}
+	}
+	return ch, nil
 }
 
 // feedNeverLoaded reports a list with a feed whose content has never been written: its timestamp is

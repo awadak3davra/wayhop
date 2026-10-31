@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -153,4 +154,23 @@ func Location() *time.Location {
 		cache.loc, cache.at = Load(), time.Now()
 	}
 	return cache.loc
+}
+
+// Label names t's zone for people: its abbreviation where it has one ("CEST", "MSK"), else the
+// offset ("+03", "+05:30"). A POSIX zone written as "<+03>-3" is already named by its offset. A time
+// shown to the owner carries it, so a reader can tell router time from their own.
+func Label(t time.Time) string {
+	name, off := t.Zone()
+	if name != "" && name != "Local" {
+		return name
+	}
+	sign := "+"
+	if off < 0 {
+		sign, off = "-", -off
+	}
+	s := sign + fmt.Sprintf("%02d", off/3600)
+	if m := off % 3600 / 60; m != 0 {
+		s += fmt.Sprintf(":%02d", m)
+	}
+	return s
 }

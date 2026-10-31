@@ -9,19 +9,25 @@ import (
 // ReadUCI parses `uci show https-dns-proxy` + `uci show dhcp` into a NativeDNS. Each https-dns-proxy
 // instance becomes a DoH resolver (its resolver_url) in index order; dnsmasq's noresolv, its plain
 // upstreams, and the doh_backup_server plaintext fallbacks (the geo-allowed last-resort tier) round it
-// out. Tolerant: unknown lines are ignored, split-DNS "/domain/upstream" entries and the loopback
+// out. Tolerant: unknown lines are ignored, split-DNS "/domain/upstream" entries and dnsmasq's
 // references to the DoH proxies are skipped (the proxies are already captured), so a firmware quirk
-// can't break adoption. Pure — the caller supplies the two `uci show` outputs.
+// can't break adoption. What it skips is not WayHop's to manage: RenderUCI leaves it on the router.
+// Pure — the caller supplies the two `uci show` outputs.
 func ReadUCI(httpsDNSProxy, dhcp string) NativeDNS {
 	nd := NativeDNS{Platform: "openwrt"}
 
 	// 1) https-dns-proxy instances → DoH resolvers, in index order.
-	type inst struct{ url, port string }
+	type inst struct{ url, addr, port string }
 	byIdx := map[int]*inst{}
 	maxIdx := -1
+	globalAddr := "" // the package's own default for instances without listen_addr (newer releases)
 	for _, ln := range strings.Split(httpsDNSProxy, "\n") {
 		key, vals := parseUCILine(ln)
 		if key == "" || len(vals) == 0 {
+			continue
+		}
+		if key == "https-dns-proxy.config.listen_addr" {
+			globalAddr = strings.TrimSpace(vals[0])
 			continue
 		}
 		idx, field, ok := uciSectionIndex(key)
@@ -37,34 +43,63 @@ func ReadUCI(httpsDNSProxy, dhcp string) NativeDNS {
 		switch field {
 		case "resolver_url":
 			byIdx[idx].url = vals[0]
+		case "listen_addr":
+			byIdx[idx].addr = strings.TrimSpace(vals[0])
 		case "listen_port":
-			byIdx[idx].port = vals[0]
+			byIdx[idx].port = strings.TrimSpace(vals[0])
 		}
 	}
-	dohPorts := map[string]bool{}
+	dohRefs := map[string]bool{} // "host#port" of each proxy, as dnsmasq refers to it
 	for i := 0; i <= maxIdx; i++ {
 		in := byIdx[i]
 		if in == nil || strings.TrimSpace(in.url) == "" {
 			continue
 		}
-		nd.Resolvers = append(nd.Resolvers, NativeResolver{
-			Kind: KindDoH, Address: in.url, Tier: TierHidden,
-			Source: fmt.Sprintf("https-dns-proxy[%d]", i),
-		})
-		if in.port != "" {
-			dohPorts[in.port] = true
+		// Port and ListenAddr are where the instance listens. RenderUCI updates this instance in place
+		// and points dnsmasq there, so the write-back neither moves the proxies nor recreates their
+		// sections (which cost every option it does not model, QA-116). Without listen_port the package
+		// starts the instance on its counter: 5053, plus one for each instance started before it, so
+		// 5053+N for @https-dns-proxy[N] (net/https-dns-proxy init script, 21.02 to master).
+		addr := in.addr
+		if addr == "" {
+			addr = globalAddr
 		}
+		port := atoiSafe(in.port)
+		if in.port == "" {
+			port = 5053 + i
+		}
+		nd.Resolvers = append(nd.Resolvers, NativeResolver{
+			Kind: KindDoH, Address: in.url, Port: port, Tier: TierHidden,
+			Source: fmt.Sprintf("https-dns-proxy[%d]", i), ListenAddr: addr,
+		})
+		dohRefs[dohRefHost(addr)+"#"+strconv.Itoa(port)] = true
 	}
 
-	// 2) dnsmasq (dhcp.@dnsmasq[0]): noresolv + plain fallbacks + any plain upstream not pointing at a
-	// captured DoH proxy.
+	// 2) dnsmasq: noresolv + plain fallbacks + any plain upstream not pointing at a captured DoH proxy,
+	// from the first dnsmasq section only. That is the section RenderUCI writes (@dnsmasq[0]), and the
+	// plane holds one forwarder: one server order, one noresolv, one strictorder. A second instance
+	// (another port or interface) has its own; merged into the plane, the write-back copied them onto
+	// the first instance. Writing each value back to the section it came from would need a section on
+	// every resolver and per-section switches, and a tier order across two forwarders means nothing,
+	// so the other sections are left as they are, both ways. uci show prints a named first section by
+	// name and an anonymous one as @dnsmasq[0]; a dump without section lines still names it so.
+	main := ""
 	for _, ln := range strings.Split(dhcp, "\n") {
 		key, vals := parseUCILine(ln)
-		if key == "" {
+		parts := strings.SplitN(key, ".", 3)
+		if len(parts) < 2 {
 			continue
 		}
-		field := uciField(key)
-		switch field {
+		if len(parts) == 2 {
+			if main == "" && len(vals) > 0 && vals[0] == "dnsmasq" {
+				main = parts[1]
+			}
+			continue
+		}
+		if parts[1] != main && parts[1] != "@dnsmasq[0]" {
+			continue
+		}
+		switch parts[2] {
 		case "noresolv":
 			if len(vals) > 0 && vals[0] == "1" {
 				nd.NoResolv = true
@@ -93,7 +128,7 @@ func ReadUCI(httpsDNSProxy, dhcp string) NativeDNS {
 					continue
 				}
 				host, port := splitServerRef(v)
-				if host == "127.0.0.1" && dohPorts[port] { // loopback ref to a DoH proxy already captured
+				if dohRefs[host+"#"+port] { // dnsmasq's ref to a DoH proxy already captured
 					continue
 				}
 				nd.Resolvers = append(nd.Resolvers, NativeResolver{
@@ -161,20 +196,31 @@ func uciSectionIndex(key string) (int, string, bool) {
 	return idx, field, true
 }
 
-// uciField returns the last dotted segment of a key (the option name).
-func uciField(key string) string {
-	if i := strings.LastIndexByte(key, '.'); i >= 0 {
-		return key[i+1:]
-	}
-	return key
-}
-
-// splitServerRef splits a dnsmasq server ref "IP#PORT" into host + port ("" if none).
+// splitServerRef splits a dnsmasq server ref "IP#PORT" into host + port ("" if none). A binding
+// (`@interface`, `@source[#port]`) follows the server's port in dnsmasq's syntax; it stays on the host
+// ("IP@wan" for "IP#53@wan") so serverRef can put the port back in front of it.
 func splitServerRef(v string) (string, string) {
-	if i := strings.IndexByte(v, '#'); i >= 0 {
-		return v[:i], v[i+1:]
+	addr, bind := v, ""
+	if j := strings.IndexByte(v, '@'); j >= 0 {
+		addr, bind = v[:j], v[j:]
+	}
+	if i := strings.IndexByte(addr, '#'); i >= 0 {
+		return addr[:i] + bind, addr[i+1:]
 	}
 	return v, ""
+}
+
+// dohRefHost is the address dnsmasq reaches an https-dns-proxy instance on, written the way the
+// package writes its own dnsmasq entry: a wildcard bind is reached on the loopback of its family, and
+// an instance with no listen_addr listens on 127.0.0.1.
+func dohRefHost(listenAddr string) string {
+	switch listenAddr = strings.TrimSpace(listenAddr); listenAddr {
+	case "", "0.0.0.0", "::ffff:0.0.0.0":
+		return "127.0.0.1"
+	case "::":
+		return "::1"
+	}
+	return listenAddr
 }
 
 func atoiSafe(s string) int { n, _ := strconv.Atoi(s); return n }

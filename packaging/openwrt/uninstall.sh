@@ -22,6 +22,7 @@ VAR=/var/lib/wayhop
 INIT="$INITD/wayhop"
 BINARY="$SBIN/wayhop"
 BACKUP="$SBIN/wayhop.bak"
+BACKUP_GZ="$SBIN/wayhop.bak.gz"   # the rollback copy, where the overlay was too full for a plain one
 
 # --- output helpers (colour only on a TTY) ---------------------------------
 if [ -t 1 ]; then
@@ -150,7 +151,7 @@ if [ "$CLEANED" = 1 ]; then ok "WayHop routing rules cleared"; else info "no Way
 # ===========================================================================
 hdr "Remove"
 REMOVED=""
-for f in "$INIT" "$BINARY" "$BACKUP"; do
+for f in "$INIT" "$BINARY" "$BACKUP" "$BACKUP_GZ"; do
   if [ -e "$f" ]; then
     if rm -f "$f"; then ok "removed $f"; REMOVED="$REMOVED $f"
     else warn "could not remove $f"; fi
@@ -158,8 +159,9 @@ for f in "$INIT" "$BINARY" "$BACKUP"; do
     info "$f already absent"
   fi
 done
-# stray staging artifacts from an interrupted install
-for f in "$SBIN/wayhop.new" "$INITD/wayhop.new"; do
+# stray staging artifacts from an interrupted install or panel self-update
+for f in "$SBIN/wayhop.new" "$SBIN/wayhop.bak.new" "$SBIN/wayhop.bak.gz.new" "$SBIN/wayhop.bak.tmp" \
+         "$SBIN/wayhop.rb" "$SBIN/.wayhop.new" "$INITD/wayhop.new"; do
   if [ -e "$f" ]; then
     if rm -f "$f"; then ok "removed $f (stale staging file)"
     else warn "could not remove $f (stale staging file)"; fi

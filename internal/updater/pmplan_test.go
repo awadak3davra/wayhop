@@ -276,8 +276,8 @@ func TestPlanPM_NoPackageManager_IsBlockedNotCrashing(t *testing.T) {
 
 // The install branch names the package from the engine ID, because with nothing on disk there is no
 // owner to ask. That guess is wrong for most of this panel's engines: measured against the test router's
-// own feed, only sing-box and dnscrypt-proxy exist as packages — mihomo, xray, hysteria, amneziawg-go
-// and olcrtc do not. A plan built on the guess reads as runnable, the operator confirms it, and apk
+// own feed, only sing-box and dnscrypt-proxy exist as packages — mihomo, xray, hysteria and
+// amneziawg-go do not. A plan built on the guess reads as runnable, the operator confirms it, and apk
 // fails on a package that was never there.
 func TestPlanPM_Install_RefusesAPackageTheFeedDoesNotHave(t *testing.T) {
 	// An engine whose binary is absent, and a feed that has never heard of it. `apk list` answers

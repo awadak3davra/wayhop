@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -25,6 +28,8 @@ import (
 	"wayhop/internal/qr"
 	"wayhop/internal/speedtest"
 	"wayhop/internal/tgbot"
+	"wayhop/internal/updater"
+	"wayhop/internal/updatetx"
 	"wayhop/internal/version"
 )
 
@@ -82,8 +87,16 @@ func (s *Server) UpdateTelegram(fn func(*config.Telegram) error) error {
 	return nil
 }
 
+// errTelegramPathDown refuses a dial when the chosen path cannot carry the bot right now: a group with
+// no healthy member, a connection deleted or disabled since. The bot then stays offline and says why,
+// instead of reaching Telegram over the ordinary path, which is the one the choice was made to avoid
+// (it may be blocked, or watched).
+var errTelegramPathDown = errors.New("the path chosen for the bot cannot carry it now")
+
 // telegramClient is the HTTP client the bot reaches Telegram with. The socket is bound at dial time,
-// like the component downloader's, so a group follows its healthy member without a restart.
+// like the component downloader's, so a group follows its healthy member without a restart. Unlike
+// the downloader's, a choice that resolves to nothing fails closed: no Telegram traffic leaves by
+// another way when a route was chosen.
 func (s *Server) telegramClient(t config.Telegram) *http.Client {
 	tr := &http.Transport{
 		TLSHandshakeTimeout:   15 * time.Second,
@@ -96,12 +109,12 @@ func (s *Server) telegramClient(t config.Telegram) *http.Client {
 		tr.Proxy = http.ProxyURL(&url.URL{Scheme: "socks5", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(s.config().Ports.Mixed))})
 	}
 	dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second, Control: func(network, address string, c syscall.RawConn) error {
-		if via == "" || via == viaLocalProxy {
+		if via == "" || via == model.OutboundDirect || via == viaLocalProxy {
 			return nil
 		}
 		iface := s.outboundIface(via)
 		if iface == "" {
-			return nil
+			return fmt.Errorf("%w (%q)", errTelegramPathDown, via)
 		}
 		return netdiag.BindToDevice(iface)(network, address, c)
 	}}
@@ -148,6 +161,15 @@ func (b tgBackend) Status(ctx context.Context) tgbot.Status {
 		st.LocalFault = s.monitor.LocalFault()
 	}
 	st.Groups = b.groups(ctx)
+	if v := s.routingSwitchView(); !v.Enabled {
+		st.Routing = tgbot.Routing{Off: true, By: v.By, Err: v.Error}
+		if v.Since > 0 {
+			st.Routing.Since = time.Unix(v.Since, 0)
+		}
+		// With the core stopped on purpose every exit it carries fails at once, which is what the
+		// monitor's "the uplink, not the tunnels" verdict looks for. It is neither.
+		st.LocalFault = false
+	}
 
 	si := readSystemInfo()
 	if cfg.Demo {
@@ -172,8 +194,12 @@ func (b tgBackend) Status(ctx context.Context) tgbot.Status {
 					health = "up"
 				}
 			}
-			st.FailSafe = tgbot.FailSafe{Armed: true, Remaining: time.Duration(fs.SecondsLeft) * time.Second, Health: health}
+			st.FailSafe = tgbot.FailSafe{Armed: true, Remaining: time.Duration(fs.SecondsLeft) * time.Second, Health: health,
+				Window: applyWindow(s.liveRevision())}
 		}
+	}
+	if s.liveRollbackFailed() != nil {
+		st.FailSafe.RollbackOutstanding, st.FailSafe.Window = true, applyWindow(s.liveRevision())
 	}
 	return st
 }
@@ -305,6 +331,8 @@ var protocolLabels = map[model.Protocol]string{
 	model.ProtoShadowsocks: "Shadowsocks", model.ProtoHysteria2: "Hysteria2", model.ProtoTUIC: "TUIC",
 	model.ProtoAnyTLS: "AnyTLS", model.ProtoWireGuard: "WireGuard", model.ProtoAmneziaWG: "AmneziaWG",
 	model.ProtoOlcRTC: "olcRTC", model.ProtoSOCKS: "SOCKS", model.ProtoHTTP: "HTTP",
+	model.ProtoOpenVPN: "OpenVPN", model.ProtoSnell: "Snell",
+	model.ProtoOpenConnect: "OpenConnect", model.ProtoSSH: "SSH",
 }
 
 // exitKinds maps every endpoint and group id to its kind, from one read of the profile.
@@ -360,24 +388,6 @@ func (b tgBackend) Events(limit int) tgbot.EventLog {
 	return out
 }
 
-// zoneLabel names t's zone for people: its abbreviation where it has one ("CEST", "MSK"), else the
-// offset ("+03", "+05:30"). A POSIX zone written as "<+03>-3" is already named by its offset.
-func zoneLabel(t time.Time) string {
-	name, off := t.Zone()
-	if name != "" && name != "Local" {
-		return name
-	}
-	sign := "+"
-	if off < 0 {
-		sign, off = "-", -off
-	}
-	s := sign + fmt.Sprintf("%02d", off/3600)
-	if m := off % 3600 / 60; m != 0 {
-		s += fmt.Sprintf(":%02d", m)
-	}
-	return s
-}
-
 // telegramView is what GET /api/telegram returns: the settings without the token, the connection
 // state, and the chats that asked to be let in.
 type telegramView struct {
@@ -396,6 +406,12 @@ type telegramView struct {
 	Zone      string           `json:"zone"`
 	Bot       tgbot.Info       `json:"bot"`
 	Strangers []tgbot.Stranger `json:"strangers"`
+	// ViaPaths is every connection and group the bot can be bound to, the same list the component
+	// downloader offers: an exit an engine carries has no link to bind to and goes through the local
+	// proxy instead. ViaIface is the link the saved choice resolves to right now, "" for the ordinary
+	// path, the local proxy, or a choice that cannot carry the bot now (which then keeps it offline).
+	ViaPaths []downloadPath `json:"via_paths"`
+	ViaIface string         `json:"via_iface,omitempty"`
 }
 
 func (s *Server) handleTelegramGet(w http.ResponseWriter, r *http.Request) {
@@ -406,7 +422,14 @@ func (s *Server) handleTelegramGet(w http.ResponseWriter, r *http.Request) {
 		Bot: s.telegram().Info(), Strangers: s.telegram().Gate().Strangers(),
 	}
 	now := time.Now().In(localtz.Location())
-	v.Clock, v.Zone = now.Format("15:04"), zoneLabel(now)
+	v.Clock, v.Zone = now.Format("15:04"), localtz.Label(now)
+	v.ViaPaths = s.downloadPathChoices()
+	if v.ViaPaths == nil {
+		v.ViaPaths = []downloadPath{}
+	}
+	if t.Via != "" && t.Via != viaLocalProxy {
+		v.ViaIface = s.outboundIface(t.Via)
+	}
 	if v.Chats == nil {
 		v.Chats = []config.TelegramChat{}
 	}
@@ -477,7 +500,7 @@ func (s *Server) handleTelegramPut(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if msg := s.checkTelegramVia(strings.TrimSpace(in.Via)); msg != "" {
+	if msg := s.checkTelegramVia(strings.TrimSpace(in.Via), s.Telegram().Via); msg != "" {
 		writeErr(w, http.StatusBadRequest, msg)
 		return
 	}
@@ -495,18 +518,44 @@ func (s *Server) handleTelegramPut(w http.ResponseWriter, r *http.Request) {
 	s.handleTelegramGet(w, r)
 }
 
-// checkTelegramVia refuses a path that names nothing: the ordinary path, the local proxy, or an
-// endpoint or group of the saved profile. A choice that later stops matching (the tunnel was deleted)
-// falls back to the ordinary path at dial time, like the component downloader's.
-func (s *Server) checkTelegramVia(via string) string {
-	if via == "" || via == viaLocalProxy || s.store == nil {
+// checkTelegramVia refuses a new path that cannot carry the bot: one that names nothing, a disabled
+// connection, one an engine carries (VLESS, Trojan: no link to bind a socket to), a group with no
+// member that has a link, or one whose members are all down right now. Each of those resolved to
+// the ordinary path at dial time, so the bot went straight out while the panel showed a tunnel.
+// The ordinary path and the local proxy are always accepted, and so is the saved choice unchanged:
+// every save sends the whole settings, and the alert switches must stay savable while the chosen
+// group is down. A saved choice that stops resolving keeps the bot offline (telegramClient).
+func (s *Server) checkTelegramVia(via, saved string) string {
+	if via == "" || via == viaLocalProxy || via == saved || s.store == nil {
 		return ""
 	}
 	p := s.store.Profile()
-	if p.EndpointByID(via) != nil || p.GroupByID(via) != nil {
+	e, g := p.EndpointByID(via), p.GroupByID(via)
+	if e == nil && g == nil {
+		return "via: no connection or group with id " + strconv.Quote(via)
+	}
+	for _, c := range s.downloadPathChoices() {
+		if c.ID != via {
+			continue
+		}
+		if c.Iface == "" {
+			return "via: no member of " + strconv.Quote(c.Name) + " is up right now, so it cannot carry the bot; choose it again once one is"
+		}
 		return ""
 	}
-	return "via: no connection or group with id " + strconv.Quote(via)
+	if e != nil && !e.Enabled {
+		return "via: " + strconv.Quote(nameOrID(e.Name, e.ID)) + " is disabled, so it cannot carry the bot"
+	}
+	var msg string
+	if e != nil {
+		msg = "via: " + strconv.Quote(nameOrID(e.Name, e.ID)) + " has no network link of its own to bind the bot to"
+	} else {
+		msg = "via: no member of " + strconv.Quote(nameOrID(g.Name, g.ID)) + " has a network link of its own to bind the bot to"
+	}
+	if s.config().Ports.Mixed > 0 {
+		msg += "; choose WayHop's local proxy, which follows your routing and can send the bot through it"
+	}
+	return msg
 }
 
 // handleTelegramCheck tries a token (the typed one, or the saved one) with getMe, through the path
@@ -520,6 +569,10 @@ func (s *Server) handleTelegramCheck(w http.ResponseWriter, r *http.Request) {
 	t := s.Telegram()
 	if err := in.tokenFollowsServer(t); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if msg := s.checkTelegramVia(strings.TrimSpace(in.Via), t.Via); msg != "" {
+		writeJSONNoStore(w, http.StatusOK, map[string]any{"ok": false, "error": msg})
 		return
 	}
 	in.Enabled = true
@@ -551,6 +604,12 @@ func (s *Server) handleTelegramPair(w http.ResponseWriter, r *http.Request) {
 		Role string `json:"role"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
+	// With no token there is no bot to send the code to; the panel offered one anyway and said "send
+	// /start CODE to your bot" on a router that had none (QA-034).
+	if s.Telegram().Token == "" {
+		writeErr(w, http.StatusConflict, "set up the bot token first: there is no bot to send a pairing code to")
+		return
+	}
 	code, exp := s.telegram().Gate().NewCode(in.Role)
 	link := s.telegram().DeepLink(code)
 	out := map[string]any{
@@ -632,6 +691,12 @@ func (s *Server) handleTelegramChatPut(w http.ResponseWriter, r *http.Request) {
 			if in.Role != "" {
 				if in.Role == config.TelegramOwner && id < 0 {
 					return errors.New("a group or channel cannot be an owner: everyone in it could press the owner's buttons")
+				}
+				// A channel's subscribers can press the buttons on its posts without being in it, so a
+				// viewer channel let anyone who can see it mute it, switch its alerts off and post the
+				// device list into it (QA-102). Pairing forces a channel to alerts; this was the way back.
+				if in.Role != config.TelegramAlerts && t.Chats[i].Type == "channel" {
+					return errors.New("a channel can only receive alerts: anyone who can see it could press its buttons")
 				}
 				if in.Role == config.TelegramAlerts {
 					menuGoes(t, t.Chats[i])
@@ -737,7 +802,7 @@ func (s *Server) handleTelegramStrangerAllow(w http.ResponseWriter, r *http.Requ
 	if st.Type == "channel" {
 		role = config.TelegramAlerts
 	}
-	rec := config.TelegramChat{ID: id, Name: st.Name, Role: role, Lang: tgbot.LangFor(st.Lang), PairedAt: time.Now().Unix()}
+	rec := config.TelegramChat{ID: id, Name: st.Name, Type: st.Type, Role: role, Lang: tgbot.LangFor(st.Lang), PairedAt: time.Now().Unix()}
 	err := s.UpdateTelegram(func(t *config.Telegram) error {
 		for _, c := range t.Chats {
 			if c.ID == id {
@@ -768,12 +833,13 @@ func (s *Server) handleTelegramStrangerDelete(w http.ResponseWriter, r *http.Req
 	s.handleTelegramGet(w, r)
 }
 
-// Pulse is the cheap part of the state the alert watcher reads every few seconds: RAM only, no
-// network, no profile compile.
+// Pulse is the cheap part of the state the alert watcher reads every few seconds: RAM, free space,
+// no network, no profile compile.
 func (b tgBackend) Pulse(ctx context.Context) tgbot.Pulse {
 	s := b.s
 	var p tgbot.Pulse
-	if s.monitor != nil {
+	p.RoutingOff = s.routingIsOff()
+	if s.monitor != nil && !p.RoutingOff {
 		p.LocalFault = s.monitor.LocalFault()
 	}
 	wd := s.supervisionStats()
@@ -783,7 +849,17 @@ func (b tgBackend) Pulse(ctx context.Context) tgbot.Pulse {
 		p.FailSafe = tgbot.FailSafePulse{Pending: fs.Pending, Phase: fs.Phase, SecondsLeft: fs.SecondsLeft, LastError: fs.LastError,
 			Checked: fs.LastCheckAt > 0, CheckOK: fs.LastCheckOk}
 	}
-	p.FailSafe.Live = s.liveRevision() != nil
+	live := s.liveRevision()
+	p.FailSafe.Live, p.FailSafe.Window = live != nil, applyWindow(live)
+	// Keep makes the live revision the committed one as it is, so a kept Test keeps its window's name
+	// there: the watcher tells a Keep from a newer Test replacing it when both fall inside one pulse.
+	p.FailSafe.Committed = applyWindow(s.committedRevision())
+	// The failed rollback the record is waiting on. The window's phase says it only for the window's
+	// own rollback: a Roll back after the window closed and boot's rollback set nothing the bot read,
+	// so it stayed silent and its earlier message kept offering a Keep the daemon refuses.
+	if mark := s.liveRollbackFailed(); mark != nil {
+		p.FailSafe.RollbackOutstanding, p.FailSafe.RollbackError = true, mark.Error
+	}
 	if s.config().Demo {
 		p.Mem = tgbot.MemPulse{Known: true, UsedPct: demoSystemInfo(time.Now()).MemUsedPct}
 	} else if raw, err := os.ReadFile("/proc/meminfo"); err == nil {
@@ -791,7 +867,34 @@ func (b tgBackend) Pulse(ctx context.Context) tgbot.Pulse {
 			p.Mem = tgbot.MemPulse{Known: true, UsedPct: float64(total-avail) / float64(total) * 100}
 		}
 	}
+	// One statfs of the filesystem the Diagnostics battery's storage check reads; never in the demo,
+	// whose disk is a development machine's.
+	if !s.config().Demo {
+		if free, ok := updater.AvailBytes(selfDir()); ok {
+			p.Disk = tgbot.DiskPulse{Known: true, FreeBytes: free}
+		}
+	}
 	return p
+}
+
+// selfDir is the directory of the running binary, read once: the filesystem whose free space the
+// storage alert watches, as diskSpaceCheck does.
+var selfDir = sync.OnceValue(func() string {
+	if exe, err := os.Executable(); err == nil {
+		return filepath.Dir(exe)
+	}
+	return "/"
+})
+
+// applyWindow names a test Apply for the bot's Keep and Roll back buttons: the revision it applied
+// and when, hashed short, so a button names the one test it was offered for and fits Telegram's
+// 64-byte callback data. "" when nothing runs unsaved.
+func applyWindow(live *appliedRevision) string {
+	if live == nil {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(live.Rev + "@" + strconv.FormatInt(live.At, 10)))
+	return hex.EncodeToString(sum[:5])
 }
 
 // Boot describes this daemon start for the "back online" alert.
@@ -805,6 +908,13 @@ func (b tgBackend) Boot() tgbot.BootInfo {
 // heartbeat overwrites it.
 func (s *Server) readBootInfo() tgbot.BootInfo {
 	bi := tgbot.BootInfo{DaemonStart: s.startedAt, Version: version.Version}
+	// An update the supervisor rolled back (or failed) just before this start is the reason for it.
+	if etc := s.updateDir(); etc != "" {
+		if r, ok := updatetx.ReadResult(etc); ok && (r.Result == "rolled_back" || r.Result == "failed") &&
+			s.startedAt.Sub(time.Unix(r.At, 0)) < 15*time.Minute && s.startedAt.Sub(time.Unix(r.At, 0)) > -15*time.Minute {
+			bi.UpdateNote = r.Note(s.startedAt.In(s.updateZone()))
+		}
+	}
 	if raw, err := os.ReadFile("/proc/uptime"); err == nil {
 		if f := strings.Fields(string(raw)); len(f) > 0 {
 			if up, err := strconv.ParseFloat(f[0], 64); err == nil {
@@ -878,16 +988,19 @@ func (b tgBackend) ClaimDigest(day string) bool {
 	return true
 }
 
-func (b tgBackend) ConfirmApply(ctx context.Context) error {
-	code, resp := b.s.applyConfirm(ctx)
+// ConfirmApply keeps the test Apply named window (applyWindow), and nothing else: a newer Test that
+// replaced it while the press waited for applyMu is refused as tgbot.ErrWindowChanged.
+func (b tgBackend) ConfirmApply(ctx context.Context, window string) error {
+	code, resp := b.s.applyConfirm(ctx, window)
 	if code != http.StatusOK {
 		return applyRespErr(resp)
 	}
 	return nil
 }
 
-func (b tgBackend) RollbackApply(ctx context.Context) error {
-	code, resp := b.s.applyRollback(ctx)
+// RollbackApply rolls back the test Apply named window, as ConfirmApply keeps it.
+func (b tgBackend) RollbackApply(ctx context.Context, window string) error {
+	code, resp := b.s.applyRollback(ctx, window)
 	if code != http.StatusOK {
 		return applyRespErr(resp)
 	}
@@ -899,6 +1012,9 @@ func (b tgBackend) RollbackApply(ctx context.Context) error {
 
 // applyRespErr turns the panel's error body into one sentence.
 func applyRespErr(resp map[string]any) error {
+	if resp["code"] == applyCodeWindowChanged {
+		return tgbot.ErrWindowChanged
+	}
 	for _, k := range []string{"error", "message"} {
 		if msg, _ := resp[k].(string); msg != "" {
 			if d, _ := resp["detail"].(string); d != "" {
@@ -1331,6 +1447,15 @@ func (b tgBackend) RestartDaemon(ctx context.Context) error {
 	return cmd.Start()
 }
 
+// SetRouting is the panel's routing switch (routingswitch.go), recorded as switched from Telegram.
+// The demo flips the switch and touches nothing, exactly as the panel's does.
+func (b tgBackend) SetRouting(ctx context.Context, on bool) error {
+	if _, err := b.s.setRouting(ctx, on, routingByTelegram); err != nil {
+		return applyRespErr(err.body())
+	}
+	return nil
+}
+
 // RefreshLists is the Routing page's "Refresh sources", counted per list.
 func (b tgBackend) RefreshLists(ctx context.Context) (tgbot.ListsRefresh, error) {
 	s := b.s
@@ -1430,7 +1555,14 @@ func (b tgBackend) Backup(ctx context.Context) (string, []byte, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	return "wayhop-backup-" + time.Now().Format("20060102-1504") + ".json", data, nil
+	return backupName(time.Now(), localtz.Location()), data, nil
+}
+
+// backupName names the bot's backup by the router's own clock, the one the caption beside it gives:
+// Go alone reads UTC on KeeneticOS and on OpenWrt without zoneinfo, and a file named three hours off
+// its caption reads as another backup.
+func backupName(t time.Time, loc *time.Location) string {
+	return "wayhop-backup-" + t.In(loc).Format("20060102-1504") + ".json"
 }
 
 // UpdateCheck is the Components page's self row, as the bot reads it.
@@ -1442,7 +1574,7 @@ func (b tgBackend) UpdateCheck(ctx context.Context) tgbot.UpdateInfo {
 		// Latest is the release tag exactly as published: it is what the install asks for.
 		Current: str("current"), Latest: str("latest"),
 		Available: flag("update_available"), Decided: flag("version_comparable"),
-		NoChannel: flag("no_channel"), Auto: flag("auto_update"),
+		NoChannel: flag("no_channel"), Auto: flag("auto_update"), Note: str("last_update_note"),
 	}
 	if flag("native_managed") {
 		info.Managed = str("package_manager")

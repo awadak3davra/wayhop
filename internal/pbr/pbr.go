@@ -36,6 +36,11 @@ const (
 	EgressWAN       EgressKind = "wan"       // the system default route (main table)
 	EgressInterface EgressKind = "interface" // route out a kernel netdev (awg0/awg1/wr-xxxx)
 	EgressBlackhole EgressKind = "blackhole" // drop (block list)
+	// EgressNDMPolicy is a destination one of KeeneticOS's own access policies routes. It classifies
+	// a routing list's outbound and never appears in Plan.Egresses: the zone carries the policy's
+	// whole mark and NDM's own rule, table and blackhole route it, so WayHop installs no table, ip rule
+	// or failover entry for it, and no WayHop egress is renumbered by its presence.
+	EgressNDMPolicy EgressKind = "ndm_policy"
 )
 
 // Egress is one kernel routing destination with its assigned fwmark + routing table.
@@ -82,6 +87,15 @@ type Zone struct {
 	// (renders `ether/ip saddr != …`). Used for a RoutingList's "except" scope: mark for EVERY device
 	// except the group's members (AND of negations = the De Morgan of the group's any-member OR).
 	SrcNegate bool `json:"src_negate,omitempty"`
+	// NDMPolicy names the KeeneticOS access policy that routes this zone ("" for every other zone).
+	// Mark is then a WayHop slot in the plan's own bits, set, saved and restored like any egress mark,
+	// and NDMMark is the policy's whole mark as NDM reported it at capture. After the CONNMARK save the
+	// chain rewrites the slot into NDMMark (NDM's rule matches it exactly: `fwmark 0xffffaab`, no mask).
+	// The slot is what the connection remembers: NDM's marks fill the mask's bits with 0xff, so saving
+	// the policy mark itself restored only 0x00ff0000 on a later packet whose destination had left the
+	// set - a mark no rule matches, routed by the main table to the WAN (gap 6 review).
+	NDMPolicy string `json:"ndm_policy,omitempty"`
+	NDMMark   uint32 `json:"ndm_mark,omitempty"`
 }
 
 // Warning flags model content the IP-based Phase-1 compiler does not kernel-route.
@@ -134,6 +148,12 @@ type Options struct {
 	// Zone.Domains (for the Keenetic dnsmasq-ipset plane) instead of warning-and-dropping them.
 	// Default false → the OpenWrt nft path is byte-identical (domains stay warnings).
 	CollectDomainZones bool
+
+	// NDMPolicies is KeeneticOS's access policies by name → mark, as `show ip policy` read them for
+	// this compile. A routing list sent to "ndm-policy:<name>" becomes a zone carrying that mark; a
+	// name absent here is warned about and not kernel-routed. Empty off KeeneticOS, so no other plane
+	// can produce such a zone.
+	NDMPolicies map[string]uint32
 }
 
 func (o *Options) withDefaults() {
@@ -267,6 +287,13 @@ func Compile(p *model.Profile, opt Options) (*Plan, []Warning, error) {
 		case model.OutboundBlock:
 			return EgressBlackhole, "", true
 		}
+		if name, ok := model.NDMPolicyName(tag); ok {
+			if _, known := opt.NDMPolicies[name]; known {
+				return EgressNDMPolicy, "", true
+			}
+			warn(scope, "access policy "+name+" is not among this router's access policies — not kernel-routed")
+			return "", "", false
+		}
 		if e := p.EndpointByID(tag); e != nil {
 			if ifc := kernelIface(e); ifc != "" {
 				return EgressInterface, ifc, true
@@ -370,8 +397,12 @@ func Compile(p *model.Profile, opt Options) (*Plan, []Warning, error) {
 			warn(scope, "kernel set name collided with another id → renamed to "+name)
 		}
 		usedNames[name] = true
-		usedEgress[egTag] = struct{}{}
 		z := Zone{Name: name, EgressTag: egTag, V4: v4, V6: v6, Domains: domains}
+		if policy, ok := model.NDMPolicyName(egTag); ok {
+			z.NDMPolicy = policy // routed by NDM: no WayHop egress, mark or table is allocated for it
+		} else {
+			usedEgress[egTag] = struct{}{}
+		}
 		// Source-scoped zone (Phase C): the source matchers narrow this zone so its mark is set
 		// ONLY for the matching source. source_ip_cidr → SrcV4/SrcV6; mac/iface/port pass through
 		// as family-agnostic nft prefixes. With a dest the dest set bounds it; source-only (no
@@ -400,6 +431,11 @@ func Compile(p *model.Profile, opt Options) (*Plan, []Warning, error) {
 		// rule for the same IP. Unmatched traffic falls through to WAN (the main table)
 		// on its own; the generator's route.final handles the in-TUN default.
 		if r.Default {
+			continue
+		}
+		// Only a routing list may be sent to an access policy; model.Validate refuses it on a rule.
+		if _, ok := model.NDMPolicyName(r.Outbound); ok {
+			warn(r.ID, "an access policy can carry a routing list only — rule not kernel-routed")
 			continue
 		}
 		// Source matchers (source_ip_cidr/mac/iface/port) build a source-scoped zone on BOTH
@@ -647,7 +683,26 @@ func Compile(p *model.Profile, opt Options) (*Plan, []Warning, error) {
 		markByTag[e.Tag] = e.Mark
 		kindByTag[e.Tag] = e.Kind
 	}
+	// A policy's slot continues WayHop's own numbering after the last egress, one per policy in name
+	// order, so a plan without policy lists keeps every mark it had.
+	slotOf := map[string]uint32{}
+	var policies []string
+	for _, z := range plan.Zones {
+		if z.NDMPolicy != "" && slotOf[z.NDMPolicy] == 0 {
+			slotOf[z.NDMPolicy] = 1
+			policies = append(policies, z.NDMPolicy)
+		}
+	}
+	sort.Strings(policies)
+	for i, name := range policies {
+		slotOf[name] = uint32(len(plan.Egresses)+1+i) * opt.MarkStep
+	}
 	for i := range plan.Zones {
+		if policy := plan.Zones[i].NDMPolicy; policy != "" {
+			plan.Zones[i].Mark = slotOf[policy]
+			plan.Zones[i].NDMMark = opt.NDMPolicies[policy]
+			continue
+		}
 		plan.Zones[i].Mark = markByTag[plan.Zones[i].EgressTag]
 	}
 	// Both render planes emit ONE non-terminating mark per zone, so for OVERLAPPING destination CIDRs
@@ -854,6 +909,29 @@ func nftName(id string) string {
 		}
 	}
 	return b.String()
+}
+
+// NDMPolicySlot is one KeeneticOS access policy a plan routes to: the WayHop slot its zones set and
+// save, and the policy's own mark the slot is rewritten into.
+type NDMPolicySlot struct {
+	Name string
+	Slot uint32
+	Mark uint32
+}
+
+// NDMPolicySlots lists the plan's access policies once each, in slot order.
+func (pl *Plan) NDMPolicySlots() []NDMPolicySlot {
+	var out []NDMPolicySlot
+	seen := map[string]bool{}
+	for _, z := range pl.Zones {
+		if z.NDMPolicy == "" || seen[z.NDMPolicy] {
+			continue
+		}
+		seen[z.NDMPolicy] = true
+		out = append(out, NDMPolicySlot{Name: z.NDMPolicy, Slot: z.Mark, Mark: z.NDMMark})
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].Slot < out[b].Slot })
+	return out
 }
 
 // orderZonesForEmit is the precedence the kernel plane really applies, extracted so it can be

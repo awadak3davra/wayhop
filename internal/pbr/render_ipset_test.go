@@ -88,6 +88,10 @@ func TestKeeneticRender_DomainAndIPZones(t *testing.T) {
 	td := plan.RenderTeardownScript(Options{}, io)
 	mustContain(t, td, "ipset destroy wr_list_youtube_4")
 	mustContain(t, td, "iptables -t mangle -D PREROUTING -j WR_PREROUTING")
+	// Every jump goes, for both families: one -D left the duplicates lock races had added, the chain
+	// stayed referenced and -X failed quietly (QA-067).
+	mustContain(t, td, "while iptables -t mangle -D PREROUTING -j WR_PREROUTING 2>/dev/null; do :; done")
+	mustContain(t, td, "while ip6tables -t mangle -D PREROUTING -j WR_PREROUTING 2>/dev/null; do :; done")
 	mustContain(t, td, "ip route flush table 151")
 }
 

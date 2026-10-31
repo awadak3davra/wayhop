@@ -14,7 +14,7 @@ import (
 // exec simply fails and this returns nil, so an accidental call is harmless.
 func probeOffloadDevices() []string {
 	var devs []string
-	if out, err := exec.Command("ip", "-o", "route", "show", "default").Output(); err == nil {
+	if out, err := exec.Command("ip", "-o", "-4", "route", "show", "default").Output(); err == nil {
 		if d := parseDefaultRouteDev(string(out)); d != "" {
 			devs = append(devs, d)
 		}
@@ -74,6 +74,13 @@ func parseBridgeLinks(out string) []string {
 func parseDefaultRouteDev(out string) string {
 	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Fields(line)
+		// Only a default route answers. BusyBox ip (KeeneticOS's /opt/sbin/ip) ignores the `default`
+		// selector without -4 and prints the whole main table; the first line with a `dev` was the
+		// default only while one existed, and with the WAN down a tunnel's host route would have been
+		// taken for it (QA-095).
+		if len(fields) == 0 || fields[0] != "default" {
+			continue
+		}
 		for i := 0; i+1 < len(fields); i++ {
 			if fields[i] == "dev" {
 				return fields[i+1]

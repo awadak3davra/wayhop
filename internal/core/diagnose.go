@@ -59,6 +59,19 @@ func ClassifyStartFailure(lines []string) StartFailure {
 			if strings.Contains(ln, "invalid sing-box rule-set file") {
 				f.Detail += " (a cached rule-set file is invalid; note that `sing-box check` cannot catch this — remote rule-sets load only at runtime)"
 			}
+			// srs.Read refuses a binary rule-set whose format byte is newer than this core's ceiling
+			// (1.12 reads up to v3, 1.13 v4, 1.14 v5). The file is intact, so a re-download fetches the
+			// same bytes and the cache advice above would loop the operator (QA-064).
+			if strings.Contains(ln, "unsupported version") {
+				newer := "update the core in Components, or point the list at a source published in an older format (clearing the cache does not help a rule-set that is too new: the same file is downloaded again)"
+				if strings.Count(ln, "initial rule-set:") > strings.Count(ln, "unsupported version") {
+					f.Detail = "the core aborted while initializing routing rule-sets — some are compiled in a newer format than this core reads, others are corrupt or could not be downloaded"
+					f.Remedy = newer + "; for the others, " + f.Remedy
+				} else {
+					f.Detail = "the core aborted while initializing routing rule-sets — a rule-set is compiled in a newer format than this core reads"
+					f.Remedy = newer
+				}
+			}
 			return f
 		case reAddrInUse.MatchString(ln):
 			return StartFailure{

@@ -79,6 +79,10 @@ func (s *Server) refreshSubscriptionOnce(ctx context.Context) (added int, err er
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return 0, fmt.Errorf("%w: subscription url must be an http(s) URL, got %q", errSubConfig, u.Scheme)
 	}
+	// Same for the HWID (see errStoredHWID).
+	if h := c.Subscription.HWID; h != "" && !validHWID(h) {
+		return 0, fmt.Errorf("%w: %v", errSubConfig, errStoredHWID)
+	}
 
 	rctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -86,7 +90,7 @@ func (s *Server) refreshSubscriptionOnce(ctx context.Context) (added int, err er
 	if err != nil {
 		return 0, fmt.Errorf("%w: build subscription request: %v", errSubConfig, err)
 	}
-	req.Header.Set("User-Agent", "wayhop")
+	setSubscriptionHeaders(req.Header, c.Subscription.UserAgent, c.Subscription.HWID, s.detectedPlatform())
 
 	resp, err := s.subscriptionFetchClient().Do(req) // SSRF-guarded (blockInternalDial)
 	if err != nil {
@@ -94,7 +98,7 @@ func (s *Server) refreshSubscriptionOnce(ctx context.Context) (added int, err er
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("subscription returned status %s", resp.Status)
+		return 0, errors.New(subscriptionStatusError(resp.Status, resp.StatusCode, c.Subscription.HWID))
 	}
 
 	b, rerr := io.ReadAll(io.LimitReader(resp.Body, 8<<20)) // 8 MiB cap, matches handleSubscription
@@ -176,6 +180,10 @@ func (s *Server) refreshSubscriptionOnce(ctx context.Context) (added int, err er
 			case http.StatusServiceUnavailable:
 				return 0, fmt.Errorf("capabilities are still unknown, so this refresh would be a guess")
 			default:
+				toAdd[i].Enabled = false
+			}
+			// One the core cannot load at all would fail model.Validate and so every Apply (QA-028).
+			if toAdd[i].Enabled && model.EndpointParamProblem(&toAdd[i]) != "" {
 				toAdd[i].Enabled = false
 			}
 		}

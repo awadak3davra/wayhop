@@ -184,13 +184,13 @@ func TestWatcherApplyWindow(t *testing.T) {
 	w := newWatcher()
 	w.step(testNow, Pulse{}, EventLog{}, sampleStatus)
 
-	armed := Pulse{FailSafe: FailSafePulse{Pending: true, Live: true, Phase: "armed", SecondsLeft: 300}}
+	armed := Pulse{FailSafe: FailSafePulse{Pending: true, Live: true, Phase: "armed", SecondsLeft: 300, Window: "w9"}}
 	got := w.step(testNow.Add(5*time.Second), armed, EventLog{}, sampleStatus)
 	if len(got) != 1 || got[0].Sev != SevAction || got[0].Incident != "apply" {
 		t.Fatalf("armed: %q", texts(got))
 	}
 	text, kb := rendered(got[0], "en", roleOwner)
-	if !strings.Contains(text, "rolls back by itself in 5:00") || kb.Rows[0][0].CallbackData != cbKeep || kb.Rows[0][1].CallbackData != cbRollback {
+	if !strings.Contains(text, "rolls back by itself in 5:00") || kb.Rows[0][0].CallbackData != cbKeep+"w9" || kb.Rows[0][1].CallbackData != cbRollback+"w9" {
 		t.Fatalf("owner view %q %+v", text, kb)
 	}
 	if _, kb := rendered(got[0], "en", roleViewer); len(kb.Rows) != 1 || kb.Rows[0][0].CallbackData != cbStatus {
@@ -257,6 +257,228 @@ func TestWatcherApplyKeptAndUnsaved(t *testing.T) {
 	}
 }
 
+// A failed rollback keeps the tested revision on record (it is what a retry undoes), so when its window
+// closes at the reboot threshold with auto-reboot off the pulse reads pending=false, live=true. That
+// was told as "the test window passed with the internet up" plus "runs unsaved, a reboot brings the
+// previous one back" with a Keep button: all false, and the Keep is refused.
+func TestWatcherRollbackFailedWindowClosesLoud(t *testing.T) {
+	w := newWatcher()
+	w.step(testNow, Pulse{}, EventLog{}, sampleStatus)
+	w.step(testNow.Add(5*time.Second), Pulse{FailSafe: FailSafePulse{Pending: true, Live: true, Phase: "armed", SecondsLeft: 300, Window: "w9"}}, EventLog{}, sampleStatus)
+	failed := FailSafePulse{Pending: true, Live: true, Phase: "rollback_failed", LastError: "core: sing-box did not stop",
+		Window: "w9", Checked: true}
+	w.step(testNow.Add(2*time.Minute), Pulse{FailSafe: failed}, EventLog{}, sampleStatus)
+
+	failed.Pending = false
+	got := w.step(testNow.Add(6*time.Minute), Pulse{FailSafe: failed}, EventLog{}, sampleStatus)
+	if len(got) != 1 || got[0].Sev != SevCritical || !got[0].Resolves || got[0].Edit || got[0].Closed == nil {
+		t.Fatalf("closed on a failed rollback: %q %+v", texts(got), got)
+	}
+	for _, lang := range Languages {
+		text, kb := rendered(got[0], lang, roleOwner)
+		if !strings.Contains(text, "sing-box did not stop") || strings.Contains(text, T(lang, "al.apply.passed")) {
+			t.Errorf("%s: %q", lang, text)
+		}
+		if len(kb.Rows) != 2 || len(kb.Rows[0]) != 1 || kb.Rows[0][0].CallbackData != cbRollback+"w9" {
+			t.Errorf("%s: the owner gets Roll back alone to retry: %+v", lang, kb)
+		}
+	}
+	if text, _ := rendered(got[0], "en", roleOwner); !strings.Contains(text, "the rollback failed") {
+		t.Errorf("text %q", text)
+	}
+	if got = w.step(testNow.Add(6*time.Minute+5*time.Second), Pulse{FailSafe: failed}, EventLog{}, sampleStatus); len(got) != 0 {
+		t.Fatalf("the tested revision still on record is not news: %q", texts(got))
+	}
+
+	// The retry works: the record lets go of the Test.
+	got = w.step(testNow.Add(7*time.Minute), Pulse{FailSafe: FailSafePulse{Phase: "rollback_failed", Checked: true}}, EventLog{}, sampleStatus)
+	if len(got) != 1 || !got[0].Resolves {
+		t.Fatalf("rolled back later: %+v", got)
+	}
+	if text, _ := rendered(got[0], "en", roleOwner); !strings.Contains(text, "Rolled back") {
+		t.Errorf("text %q", text)
+	}
+}
+
+// While the window still holds after a failed rollback (for its reboot fallback), its message kept
+// counting down "rolls back by itself unless you keep it" with a Keep button the daemon refuses.
+func TestWatcherCountdownAfterAFailedRollbackOffersTheRetry(t *testing.T) {
+	w := newWatcher()
+	w.step(testNow, Pulse{}, EventLog{}, sampleStatus)
+	w.step(testNow.Add(5*time.Second), Pulse{FailSafe: FailSafePulse{Pending: true, Live: true, Phase: "armed", SecondsLeft: 300, Window: "w9"}}, EventLog{}, sampleStatus)
+
+	failed := FailSafePulse{Pending: true, Live: true, Phase: "rollback_failed", LastError: "core: sing-box did not stop",
+		Window: "w9", Checked: true}
+	got := w.step(testNow.Add(2*time.Minute), Pulse{FailSafe: failed}, EventLog{}, sampleStatus)
+	if len(got) != 2 || got[0].Sev != SevCritical || !got[1].Edit {
+		t.Fatalf("rollback failed + countdown: %+v", got)
+	}
+	text, kb := rendered(got[1], "en", roleOwner)
+	if !strings.Contains(text, "rollback failed") || !strings.Contains(text, "sing-box did not stop") {
+		t.Errorf("the countdown still reads as a running test: %q", text)
+	}
+	if len(kb.Rows) != 2 || len(kb.Rows[0]) != 1 || kb.Rows[0][0].CallbackData != cbRollback+"w9" {
+		t.Errorf("after a failed rollback the owner gets Roll back alone: %+v", kb)
+	}
+}
+
+// rollbackRetryOnly reports whether kb offers the owner Roll back for window and no Keep.
+func rollbackRetryOnly(kb *Keyboard, window string) bool {
+	if kb == nil || len(kb.Rows) == 0 || len(kb.Rows[0]) != 1 || kb.Rows[0][0].CallbackData != cbRollback+window {
+		return false
+	}
+	for _, row := range kb.Rows {
+		for _, b := range row {
+			if strings.HasPrefix(b.CallbackData, cbKeep) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// A Roll back pressed after the window closed, and boot's rollback of a Test a restart left, can fail
+// too. Both mark the record, but the bot read only the window's phase: it said nothing, and the
+// "unsaved" message kept its Keep, which the daemon now refuses.
+func TestWatcherRollbackFailedAfterTheWindowIsTold(t *testing.T) {
+	w := newWatcher()
+	unsaved := FailSafePulse{Live: true, Phase: "live_unsaved", Window: "w9"}
+	w.step(testNow, Pulse{FailSafe: unsaved}, EventLog{}, sampleStatus)
+	failed := unsaved
+	failed.RollbackOutstanding, failed.RollbackError = true, "core: sing-box did not restart"
+
+	got := w.step(testNow.Add(time.Minute), Pulse{FailSafe: failed}, EventLog{}, sampleStatus)
+	// Loud, and it closes the incident: the "unsaved" message it replies to loses its Keep.
+	if len(got) != 1 || got[0].Sev != SevCritical || !got[0].Resolves || got[0].Edit || got[0].Closed == nil {
+		t.Fatalf("a failed rollback after the window: %q %+v", texts(got), got)
+	}
+	for _, lang := range Languages {
+		text, kb := rendered(got[0], lang, roleOwner)
+		if !strings.Contains(text, "sing-box did not restart") || !rollbackRetryOnly(kb, "w9") {
+			t.Errorf("%s: %q %+v", lang, text, kb)
+		}
+		if _, kb := rendered(got[0], lang, roleViewer); rollbackRetryOnly(kb, "w9") {
+			t.Errorf("%s: a viewer got the Roll back button", lang)
+		}
+	}
+	if got = w.step(testNow.Add(time.Minute+5*time.Second), Pulse{FailSafe: failed}, EventLog{}, sampleStatus); len(got) != 0 {
+		t.Fatalf("told twice: %q", texts(got))
+	}
+	// The retry works: the Test leaves the record.
+	got = w.step(testNow.Add(2*time.Minute), Pulse{FailSafe: FailSafePulse{Phase: "live_unsaved"}}, EventLog{}, sampleStatus)
+	if len(got) != 1 || !got[0].Resolves {
+		t.Fatalf("rolled back later: %q", texts(got))
+	}
+}
+
+// Boot rolls the Test back as the daemon starts, so its failure can be on record before the bot first
+// looks; that look only records a baseline, and the failure was never told.
+func TestWatcherRollbackOutstandingAtStartIsTold(t *testing.T) {
+	w := newWatcher()
+	failed := FailSafePulse{Live: true, Window: "w9", RollbackOutstanding: true, RollbackError: "uci: preflight refused"}
+	if got := w.step(testNow, Pulse{FailSafe: failed}, EventLog{}, sampleStatus); len(got) != 0 {
+		t.Fatalf("the first step only records a baseline: %q", texts(got))
+	}
+	got := w.step(testNow.Add(5*time.Second), Pulse{FailSafe: failed}, EventLog{}, sampleStatus)
+	if len(got) != 1 || got[0].Sev != SevCritical || !strings.Contains(texts(got)[0], "preflight refused") {
+		t.Fatalf("an outstanding rollback at start: %q", texts(got))
+	}
+	if got = w.step(testNow.Add(10*time.Second), Pulse{FailSafe: failed}, EventLog{}, sampleStatus); len(got) != 0 {
+		t.Fatalf("told twice: %q", texts(got))
+	}
+}
+
+// Inside the window the record is marked a moment before the phase turns rollback_failed, and after a
+// failed Roll back the next connectivity tick relabels the phase (degraded, armed, even rolled_back for
+// a rollback the window can no longer dispatch). The phase alone told the failure twice or not at all,
+// went back to a countdown with Keep, and closed the window as rolled back.
+func TestWatcherWindowRollbackFailureFollowsTheRecord(t *testing.T) {
+	w := newWatcher()
+	w.step(testNow, Pulse{}, EventLog{}, sampleStatus)
+	armed := FailSafePulse{Pending: true, Live: true, Phase: "armed", SecondsLeft: 300, Window: "w9"}
+	w.step(testNow.Add(5*time.Second), Pulse{FailSafe: armed}, EventLog{}, sampleStatus)
+
+	marked := armed
+	marked.RollbackOutstanding, marked.RollbackError = true, "core: sing-box did not restart"
+	got := w.step(testNow.Add(10*time.Second), Pulse{FailSafe: marked}, EventLog{}, sampleStatus)
+	if len(got) != 1 || got[0].Sev != SevCritical || !strings.Contains(texts(got)[0], "sing-box did not restart") {
+		t.Fatalf("the failed rollback, seen in the record first: %q", texts(got))
+	}
+	phased := marked
+	phased.Phase, phased.LastError = "rollback_failed", "core: sing-box did not restart"
+	if got = w.step(testNow.Add(15*time.Second), Pulse{FailSafe: phased}, EventLog{}, sampleStatus); len(got) != 0 {
+		t.Fatalf("told again when the phase caught up: %q", texts(got))
+	}
+	relabelled := marked
+	relabelled.Phase = "degraded"
+	if got = w.step(testNow.Add(20*time.Second), Pulse{FailSafe: relabelled}, EventLog{}, sampleStatus); len(got) != 0 {
+		t.Fatalf("a relabelled phase is not news: %q", texts(got))
+	}
+	got = w.step(testNow.Add(40*time.Second), Pulse{FailSafe: relabelled}, EventLog{}, sampleStatus)
+	if len(got) != 1 || !got[0].Edit {
+		t.Fatalf("countdown: %q", texts(got))
+	}
+	if text, kb := rendered(got[0], "en", roleOwner); !strings.Contains(text, "rollback failed") || !rollbackRetryOnly(kb, "w9") {
+		t.Fatalf("the countdown went back to a running test: %q %+v", text, kb)
+	}
+
+	closed := marked
+	closed.Pending, closed.Phase = false, "rolled_back"
+	got = w.step(testNow.Add(5*time.Minute), Pulse{FailSafe: closed}, EventLog{}, sampleStatus)
+	if len(got) != 1 || got[0].Sev != SevCritical || !strings.Contains(texts(got)[0], "the rollback failed") {
+		t.Fatalf("a window whose rollback is outstanding closed as: %q", texts(got))
+	}
+}
+
+// With auto-reboot on, a failed rollback's window ends in the reboot phase with the mark still set. The
+// mark was read first, so the bot sent "closed, but the rollback failed, roll back again" and never the
+// reboot: a retry asked of a router that is going down. Whether or not the bot saw the failure before.
+func TestWatcherRebootAfterAFailedRollbackIsTheReboot(t *testing.T) {
+	for _, seenFailure := range []bool{true, false} {
+		w := newWatcher()
+		w.step(testNow, Pulse{}, EventLog{}, sampleStatus)
+		armed := FailSafePulse{Pending: true, Live: true, Phase: "armed", SecondsLeft: 300, Window: "w9"}
+		w.step(testNow.Add(5*time.Second), Pulse{FailSafe: armed}, EventLog{}, sampleStatus)
+		failed := armed
+		failed.Phase, failed.LastError, failed.Checked = "rollback_failed", "core: sing-box did not restart", true
+		failed.RollbackOutstanding, failed.RollbackError = true, "core: sing-box did not restart"
+		if seenFailure {
+			w.step(testNow.Add(2*time.Minute), Pulse{FailSafe: failed}, EventLog{}, sampleStatus)
+		}
+
+		rebooting := failed
+		rebooting.Pending, rebooting.Phase = false, "reboot"
+		got := w.step(testNow.Add(6*time.Minute), Pulse{FailSafe: rebooting}, EventLog{}, sampleStatus)
+		if len(got) != 1 || got[0].Sev != SevCritical || !got[0].Resolves {
+			t.Fatalf("seen=%v: the window closed on a reboot as %q", seenFailure, texts(got))
+		}
+		for _, lang := range Languages {
+			text, kb := rendered(got[0], lang, roleOwner)
+			if text != T(lang, "al.apply.reboot") {
+				t.Errorf("seen=%v %s: %q, want the reboot", seenFailure, lang, text)
+			}
+			if kb != nil && rollbackRetryOnly(kb, "w9") {
+				t.Errorf("seen=%v %s: Roll back offered on a router that is rebooting", seenFailure, lang)
+			}
+		}
+	}
+}
+
+// The status view's buttons follow the same rule: Keep is refused while a rollback is outstanding,
+// and Roll back retries it whether the window still holds or not.
+func TestStatusOffersOnlyTheRetryWhileARollbackIsOutstanding(t *testing.T) {
+	for _, armed := range []bool{true, false} {
+		s := sampleStatus()
+		s.FailSafe = FailSafe{Armed: armed, Remaining: time.Minute, Window: "w9", RollbackOutstanding: true}
+		if _, kb := (view{lang: "en", now: testNow, role: roleOwner}).Status(s); !rollbackRetryOnly(kb, "w9") {
+			t.Errorf("armed=%v: owner keyboard %+v", armed, kb)
+		}
+		if _, kb := (view{lang: "en", now: testNow, role: roleViewer}).Status(s); rollbackRetryOnly(kb, "w9") {
+			t.Errorf("armed=%v: a viewer got Roll back", armed)
+		}
+	}
+}
+
 func TestWatcherMemory(t *testing.T) {
 	w := newWatcher()
 	hi := Pulse{Mem: MemPulse{Known: true, UsedPct: 95}}
@@ -277,6 +499,62 @@ func TestWatcherMemory(t *testing.T) {
 	}
 }
 
+// The storage alert the documentation promises, in the memory's way: a few low pulses in a row open
+// it, a level between the marks changes nothing, and it closes once there is clearly room again.
+func TestWatcherStorage(t *testing.T) {
+	const mib = 1 << 20
+	for _, tc := range []struct {
+		name  string
+		free  []uint64 // MiB free, one pulse each, after a baseline with room
+		want  []string // incident and whether it resolves, per alert
+		texts []string // in the alerts, English
+	}{
+		{"low for a while", []uint64{2, 2, 2, 2}, []string{"disk open"}, []string{"almost full</b>: 2 MB free"}},
+		{"a dip is not an incident", []uint64{2, 2, 9, 2, 2}, nil, nil},
+		{"low, then room again", []uint64{1, 1, 1, 4, 4, 6}, []string{"disk open", "disk resolves"}, []string{"almost full", "has room again: 6 MB free"}},
+		{"between the marks it stays open", []uint64{1, 1, 1, 4, 4}, []string{"disk open"}, nil},
+		{"unknown free space says nothing", []uint64{0, 0, 0, 0}, nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newWatcher()
+			w.step(testNow, Pulse{Disk: DiskPulse{Known: true, FreeBytes: 50 * mib}}, EventLog{}, sampleStatus)
+			var got []Alert
+			for i, f := range tc.free {
+				p := Pulse{Disk: DiskPulse{Known: f != 0, FreeBytes: f * mib}}
+				got = append(got, w.step(testNow.Add(time.Duration(i+1)*watchEvery), p, EventLog{}, sampleStatus)...)
+			}
+			var desc []string
+			for _, a := range got {
+				d := a.Incident + " open"
+				if a.Resolves {
+					d = a.Incident + " resolves"
+				}
+				desc = append(desc, d)
+				if a.Kind != KindSystem {
+					t.Errorf("kind %q", a.Kind)
+				}
+			}
+			if strings.Join(desc, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("alerts %q, want %q: %q", desc, tc.want, texts(got))
+			}
+			for i, w := range tc.texts {
+				if text, _ := rendered(got[i], "en", roleOwner); !strings.Contains(text, w) {
+					t.Errorf("alert %d lacks %q: %s", i, w, text)
+				}
+			}
+		})
+	}
+	w := newWatcher()
+	w.step(testNow, Pulse{}, EventLog{}, sampleStatus)
+	var got []Alert
+	for i := 1; i <= diskLowSamples; i++ {
+		got = append(got, w.step(testNow.Add(time.Duration(i)*watchEvery), Pulse{Disk: DiskPulse{Known: true, FreeBytes: mib}}, EventLog{}, sampleStatus)...)
+	}
+	if text, _ := rendered(got[0], "uk", roleViewer); !strings.Contains(text, "Накопичувач роутера майже заповнений") {
+		t.Fatalf("uk: %s", text)
+	}
+}
+
 func TestBootAlert(t *testing.T) {
 	start := testNow.Add(-time.Minute)
 	cases := []struct {
@@ -292,6 +570,8 @@ func TestBootAlert(t *testing.T) {
 		{"reboot, no record", BootInfo{DaemonStart: start, RouterUp: time.Minute}, "The router restarted</b> at 14:30", SevInfo},
 		{"daemon only", BootInfo{DaemonStart: start, RouterUp: 40 * 24 * time.Hour, Version: "0.5.7"}, "WayHop restarted (0.5.7)", SevInfo},
 		{"stale record", BootInfo{DaemonStart: start, RouterUp: time.Minute, LastSeen: testNow.Add(-30 * 24 * time.Hour)}, "The router restarted", SevInfo},
+		{"rolled back", BootInfo{DaemonStart: start, RouterUp: 40 * 24 * time.Hour, Version: "0.5.7", UpdateNote: "The update to v0.5.8 was rolled back at 2026-10-17 14:28: it crashes on start."},
+			"WayHop restarted (0.5.7).\n⚠️ Last update: The update to v0.5.8 was rolled back", SevWarning},
 	}
 	for _, c := range cases {
 		a := bootAlert(c.bi, testNow)

@@ -55,3 +55,21 @@ func TestUnsupportedSingboxEndpoints(t *testing.T) {
 		}
 	}
 }
+
+// The 1.14 endpoints are build options as well (OpenWrt's package: SINGBOX_WITH_OPENVPN /
+// _OPENCONNECT, default on). The tag line is the real one from the 1.14.4 release build.
+func TestUnsupportedSingboxEndpoints_OpenVPNOpenConnect(t *testing.T) {
+	p := &model.Profile{Endpoints: []model.Endpoint{
+		{ID: "ov", Name: "ovpn", Protocol: model.ProtoOpenVPN, Enabled: true},
+		{ID: "oc", Name: "ocsrv", Protocol: model.ProtoOpenConnect, Enabled: true},
+	}}
+	release := parseSingboxTags("sing-box version 1.14.4\n\nTags: with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_clash_api,with_tailscale,with_ccm,with_ocm,with_cloudflared,with_naive_outbound,with_purego,with_usbip,with_openvpn,with_openconnect,badlinkname,tfogo_checklinkname0\n")
+	if bad := unsupportedSingboxEndpoints(p, release); len(bad) != 0 {
+		t.Errorf("release build: %v", bad)
+	}
+	bad := unsupportedSingboxEndpoints(p, map[string]bool{"with_quic": true})
+	j := strings.Join(bad, " | ")
+	if len(bad) != 2 || !strings.Contains(j, `"ovpn" (openvpn) needs with_openvpn`) || !strings.Contains(j, `"ocsrv" (openconnect) needs with_openconnect`) {
+		t.Errorf("build without them: %v", bad)
+	}
+}

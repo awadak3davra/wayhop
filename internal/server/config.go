@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"reflect"
@@ -84,14 +86,21 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	// browser/proxy cache, matching handleConfigExport / subscription / backup / job-snapshot.
 	w.Header().Set("Cache-Control", "no-store")
 	cfg := s.config()
+	// The revision a save of these settings sends back in If-Match (QA-152), of the copy being served
+	// and before its secrets are masked.
+	rev := configRev(&cfg)
 	if cfg.Subscription.URL != "" {
 		cfg.Subscription.URL = config.RedactedMark
 	}
+	// The HWIDs stay readable here: the Subscription tab shows the one it sends and the generated
+	// one "Generate" would send, and on its own an ID opens nothing - the URL beside it is masked.
 	if cfg.Auth.PasswordHash != "" {
 		cfg.Auth.PasswordHash = config.RedactedMark
 	}
 	cfg.Telegram = cfg.Telegram.Redacted()
-	writeJSON(w, http.StatusOK, cfg)
+	// GET /api/telegram-bridge is where the secret is shown, inside the link a client needs.
+	cfg.TelegramBridge = cfg.TelegramBridge.Redacted()
+	writeJSON(w, http.StatusOK, configWithRev{Config: cfg, Rev: rev})
 }
 
 // handleConfigDefaults returns the configuration a fresh install would start with.
@@ -187,21 +196,38 @@ func completeValue(rv reflect.Value) any {
 // whether a daemon restart is required for the change to take effect (see
 // restartNeeded); hot fields apply on the next Apply or immediately.
 func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
-	in, err := decodeConfigBody(r)
+	old := s.config() // snapshot BEFORE persist (cfgMu is non-reentrant) for the restart diff
+	// If-Match, when sent, is the configRev the page's copy was read at (QA-152). Checked here so a
+	// stale page hears that before any complaint about the values it holds, and again under cfgMu
+	// where the save commits.
+	want := ifMatchValue(r)
+	if want == "*" {
+		want = ""
+	}
+	if want != "" && want != configRev(&old) {
+		writeStale(w, "The settings")
+		return
+	}
+	in, err := decodeConfigBody(r, old)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	old := s.config() // snapshot BEFORE persist (cfgMu is non-reentrant) for the restart diff
 	if code, msg := s.gateRoutingMode(r.Context(), old, *in); code != 0 {
 		writeErr(w, code, msg)
 		return
 	}
-	if err := s.persistConfig(in); err != nil {
+	rev, err := s.persistConfigAt(in, want, nil)
+	if err != nil {
+		if errors.Is(err, errStaleConfig) {
+			writeStale(w, "The settings")
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, "save failed: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"saved": true, "restart_needed": restartNeeded(old, *in)})
+	// rev is what the page's next save sends: its own save moved the revision on.
+	writeJSON(w, http.StatusOK, map[string]any{"saved": true, "restart_needed": restartNeeded(old, *in), "rev": rev})
 }
 
 // gateRoutingMode refuses a SWITCH to a routing mode this host cannot run. The mode decides which
@@ -248,12 +274,13 @@ func (s *Server) gateRoutingMode(ctx context.Context, old, next config.Config) (
 
 // decodeConfigBody decodes, reconciles, and validates a config request body,
 // returning a 400-worthy error for malformed JSON, a bad listen, or any value
-// that would not start (config.Validate). Shared by PUT and import.
-func decodeConfigBody(r *http.Request) (*config.Config, error) {
+// that would not start (config.Validate). old is the saved config (see keepSavedBridge).
+func decodeConfigBody(r *http.Request, old config.Config) (*config.Config, error) {
 	var in config.Config
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		return nil, fmt.Errorf("invalid JSON body")
 	}
+	keepSavedBridge(&in, old)
 	if err := reconcileListen(&in); err != nil {
 		return nil, err
 	}
@@ -274,15 +301,36 @@ func decodeConfigBody(r *http.Request) (*config.Config, error) {
 // BEFORE applying and restore it if Save() fails. A failed Save then leaves the
 // live config UNCHANGED and consistent with the (atomically-untouched) disk file.
 func (s *Server) persistConfig(in *config.Config) error {
+	return s.persistConfigThen(in, nil)
+}
+
+// persistConfigThen is persistConfig with then run on the live config, under cfgMu, between the
+// merge and the save, and rolled back with it: for a block applyConfigFields never copies that has
+// to change in the same write (a reset turning off a Telegram bridge its default ports land on).
+func (s *Server) persistConfigThen(in *config.Config, then func(live *config.Config)) error {
+	_, err := s.persistConfigAt(in, "", then)
+	return err
+}
+
+// persistConfigAt is persistConfigThen committed only while the saved settings are still at rev, a
+// configRev ("" commits whatever they are), checked under the same cfgMu hold as the save so no
+// other write can land between the two (QA-152). It returns the revision the save produced.
+func (s *Server) persistConfigAt(in *config.Config, rev string, then func(live *config.Config)) (string, error) {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
+	if rev != "" && configRev(s.cfg) != rev {
+		return "", errStaleConfig
+	}
 	snap := cloneConfig(s.cfg)
 	applyConfigFields(s.cfg, in)
+	if then != nil {
+		then(s.cfg)
+	}
 	if err := s.cfg.Save(); err != nil {
 		*s.cfg = snap // roll back the in-memory mutation: keep memory == disk
-		return err
+		return "", err
 	}
-	return nil
+	return configRev(s.cfg), nil
 }
 
 // cloneConfig returns a fully independent value copy of c suitable for restoring
@@ -342,6 +390,8 @@ func applyConfigFields(dst, in *config.Config) {
 	dst.RoutingMode = in.RoutingMode
 	dst.Offload = in.Offload
 	dst.RuleSetDetour = in.RuleSetDetour
+	dst.CoreRestart = in.CoreRestart
+	dst.CoreOverride = in.CoreOverride
 	dst.NativeFirewallZone = in.NativeFirewallZone
 	dst.OffloadDevices = in.OffloadDevices
 	dst.Ports = in.Ports
@@ -354,12 +404,24 @@ func applyConfigFields(dst, in *config.Config) {
 	dst.AllowAnyHost = in.AllowAnyHost
 	dst.Backup = in.Backup
 	// NOT copied: Telegram (its own /api/telegram/* endpoints and the bot's pairing write it; the
-	// Settings page sends a masked token, so copying it would store "***" as the token).
+	// Settings page sends a masked token, so copying it would store "***" as the token), nor
+	// TelegramBridge (PUT /api/telegram-bridge; the page holds its masked secret the same way).
 	// NOT copied: Auth (credential setup/rotation only) + Subscription (managed by its import settings endpoint) + Features (per-plugin
 	// toggles/settings persisted via PUT /api/features/{id}, never the bulk Settings PUT)
 	// + IgnoredDrift (dismissed drift warnings, written by setIgnoredDrift). The Settings page
 	// never sends `ignored_drift`, so copying it here would silently wipe every dismissal on the
 	// next save of an unrelated setting — the same silent-drop class from the other direction.
+}
+
+// keepSavedBridge puts the saved Telegram bridge into a Settings save or an import before it is
+// validated. The body's own telegram_bridge is never saved (applyConfigFields does not copy it), so
+// validating it checked something that would not exist: the page's copy, loaded whenever the page
+// was and possibly stale, with a masked secret. A stale copy refused saves for a bridge setting that
+// was no longer saved, and missed a new WayHop port landing on the bridge that was. With the saved
+// block in place, Validate's port check (config.TelegramBridgePortConflict) is the saved bridge
+// against the new ports.
+func keepSavedBridge(in *config.Config, old config.Config) {
+	in.TelegramBridge = old.TelegramBridge
 }
 
 // restartNeeded reports whether moving old->nw requires a daemon restart to take
@@ -380,7 +442,7 @@ func restartNeeded(old, nw config.Config) bool {
 func validatePorts(p config.Ports) error { return p.Validate() }
 
 // handleConfigExport returns the daemon config as a downloadable JSON attachment.
-// Secrets (clash secret, subscription URL, watchdog webhook) are REDACTED by
+// Secrets (clash secret, subscription URL and HWIDs, watchdog webhook) are REDACTED by
 // default so a backup shared for support can't leak credentials; ?secrets=1
 // includes them for a full personal backup. Read-only.
 func (s *Server) handleConfigExport(w http.ResponseWriter, r *http.Request) {
@@ -420,7 +482,19 @@ func (s *Server) handleConfigImport(w http.ResponseWriter, r *http.Request) {
 	if in.Watchdog.NotifyURL == config.RedactedMark {
 		in.Watchdog.NotifyURL = old.Watchdog.NotifyURL
 	}
-	// Subscription is never applied (see applyConfigFields), so its sentinel is moot.
+	if in.CoreOverride == config.RedactedMark {
+		in.CoreOverride = old.CoreOverride
+	}
+	// Subscription is never applied (see applyConfigFields), so its sentinel is moot - except the
+	// two HWIDs, which the provider knows this router by: a router restored after a reflash with a
+	// new one would take another device slot. Checked here, before anything is saved. Nor is the
+	// backup's telegram_bridge applied: the saved one is what gets checked (keepSavedBridge).
+	hwid, genHWID, herr := restoredHWIDs(in.Subscription.HWID, in.Subscription.GeneratedHWID, old.Subscription)
+	if herr != nil {
+		writeErr(w, http.StatusBadRequest, herr.Error())
+		return
+	}
+	keepSavedBridge(&in, old)
 	if err := reconcileListen(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -433,7 +507,9 @@ func (s *Server) handleConfigImport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, code, msg)
 		return
 	}
-	if err := s.persistConfig(&in); err != nil {
+	if err := s.persistConfigThen(&in, func(live *config.Config) {
+		live.Subscription.HWID, live.Subscription.GeneratedHWID = hwid, genHWID
+	}); err != nil {
 		writeErr(w, http.StatusInternalServerError, "save failed: "+err.Error())
 		return
 	}
@@ -457,11 +533,31 @@ func (s *Server) handleConfigReset(w http.ResponseWriter, r *http.Request) {
 	// Dashboard/health views until the next Apply+restart. It's an internal secret (not a
 	// panel-access vector), so preserving it is invisible to the user and avoids that outage.
 	def.Clash.Secret = old.Clash.Secret
+	// The Telegram bridge is not reset (applyConfigFields never copies it), so the defaults are
+	// validated with the saved bridge in place. Without it, a reset from Mixed 7891 with the bridge
+	// on 7890 saved Mixed 7890 beside the bridge on 7890, and from then on every unchanged Settings
+	// save was refused for a port clash the operator never made in Settings.
+	//
+	// Where a default port lands on the bridge's, the bridge is turned off rather than the reset
+	// refused. A reset is the way back from a broken configuration and must not hinge on an optional
+	// LAN service (the same reason the AllowedHosts fallback below drops entries rather than fail);
+	// the default ports are what the routing plane is built on, and of the two only the bridge can
+	// yield without breaking an Apply. Off keeps its secret and port, so it is one save to turn it
+	// back on elsewhere, and the reset's answer says it happened.
+	def.TelegramBridge = old.TelegramBridge
+	if def.TelegramBridge.Validate() != nil {
+		// Only a hand-edited config.json holds a bridge its own endpoint would refuse. The daemon does
+		// not run it and the reset does not write the block, so it is no reason to refuse the reset;
+		// the port decision below is made on the live block either way.
+		def.TelegramBridge = config.TelegramBridge{}
+	} else if def.TelegramBridgePortConflict() != nil {
+		def.TelegramBridge.Enabled = false
+	}
 	if err := reconcileListen(def); err != nil {
 		def.Listen = fmt.Sprintf(":%d", def.Ports.UI) // old listen was malformed; fall back to default host + preserved port
 	}
 	// Reset is a recovery action, so it must always produce a VALID config. The only
-	// preserved user-data that could be invalid is AllowedHosts (e.g. a blank entry
+	// other preserved user-data that could be invalid is AllowedHosts (e.g. a blank entry
 	// from a hand-edited config.json); if it makes the reset config invalid, drop it
 	// rather than refuse to reset. A final Validate guards against any other surprise.
 	if err := def.Validate(); err != nil {
@@ -471,9 +567,23 @@ func (s *Server) handleConfigReset(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := s.persistConfig(def); err != nil {
+	bridgeOff := false
+	err := s.persistConfigThen(def, func(live *config.Config) {
+		// Decided on the live block, under the lock: a bridge save may have landed since old was read.
+		if live.TelegramBridgePortConflict() != nil {
+			live.TelegramBridge.Enabled = false
+			bridgeOff = true
+		}
+	})
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "save failed: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"saved": true, "restart_needed": restartNeeded(old, *def)})
+	resp := map[string]any{"saved": true, "restart_needed": restartNeeded(old, *def)}
+	if bridgeOff {
+		log.Printf("wayhop: reset to defaults turned the Telegram bridge off: its port %d is one of the default ports now", old.TelegramBridge.EffectivePort())
+		resp["telegram_bridge_disabled"] = true
+		s.syncTelegramBridge() // a bridge save takes effect at once; so does this one
+	}
+	writeJSON(w, http.StatusOK, resp)
 }

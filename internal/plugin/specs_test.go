@@ -40,3 +40,17 @@ func TestManagerSpecsTracksLastSync(t *testing.T) {
 		t.Errorf("Specs after Sync(nil) = %v, want empty", got)
 	}
 }
+
+// After StopAll nothing may start again: an Apply or a Components install still running past the
+// daemon's shutdown called Sync, which created procs nobody would ever stop (QA-097).
+func TestSyncAfterStopAllStartsNothing(t *testing.T) {
+	m := New(t.TempDir(), t.TempDir())
+	m.StopAll()
+	m.Sync([]Spec{specs_awg("late")})
+	m.mu.Lock()
+	n := len(m.procs)
+	m.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("Sync after StopAll created %d proc(s)", n)
+	}
+}

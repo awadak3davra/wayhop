@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -10,6 +11,8 @@ import (
 	"strings"
 
 	"wayhop/internal/model"
+	"wayhop/internal/nativedns"
+	"wayhop/internal/platform"
 )
 
 // dohResolvers maps the IP of a well-known public DNS-over-HTTPS / DNS-over-TLS resolver to its
@@ -251,6 +254,16 @@ func domainRoutedLists(p model.Profile) []string {
 		if !l.Enabled {
 			continue
 		}
+		name := l.Name
+		if name == "" {
+			name = l.ID
+		}
+		// A fetched domain feed routes names exactly as typed ones do, and only for clients that ask
+		// this router: a list fed by one alone was missed, so the warning stayed silent for it.
+		if l.DomainSource != "" || len(l.DomainCache) > 0 {
+			out = append(out, name)
+			continue
+		}
 		for _, e := range l.Manual {
 			e = strings.TrimSpace(e)
 			if e == "" {
@@ -261,10 +274,6 @@ func domainRoutedLists(p model.Profile) []string {
 			}
 			if _, _, err := net.ParseCIDR(e); err == nil {
 				continue
-			}
-			name := l.Name
-			if name == "" {
-				name = l.ID
 			}
 			out = append(out, name)
 			break
@@ -312,7 +321,33 @@ func (s *Server) dnsInterceptApplied() bool {
 	if base == nil || base.Desired == nil {
 		return false
 	}
-	return dnsInterceptOn(base.Desired.Profile)
+	return interceptEnforced(base.Desired.Profile, base.Materialization.Kernel,
+		platform.Detect() == platform.Keenetic, dnsFirewallHijacks53)
+}
+
+// interceptEnforced is whether an applied profile's DNS interception is actually installed. The flag
+// alone was taken for the fact. WayHop renders the redirect only into the KeeneticOS kernel plane,
+// which exists only in hybrid and fast with zones; in mixed or tun, and on OpenWrt in every mode,
+// nothing installed it, yet this check passed on "answered by this router" (QA-068). Off KeeneticOS
+// the door is shut only if the firewall itself sends the LAN's :53 to this router.
+func interceptEnforced(p model.Profile, k executionKernelArtifactV1, keenetic bool, firewallHijacks53 func() bool) bool {
+	if !dnsInterceptOn(p) {
+		return false
+	}
+	if k.Ipset != nil {
+		return bytes.Contains(k.Ipset.Script, []byte("--dport 53 -j REDIRECT"))
+	}
+	if keenetic {
+		return false
+	}
+	return firewallHijacks53()
+}
+
+// dnsFirewallHijacks53 reads the firewall for a LAN :53 redirect to a local resolver. A firewall that
+// could not be read is not evidence of one. A var so tests do not run the host's nft or iptables.
+var dnsFirewallHijacks53 = func() bool {
+	ep := nativedns.RunEffectivePath(dnsExecRunner)
+	return !ep.RulesUnknown && ep.Hijack53
 }
 
 // listsMatchPhrase carries the subject AND its verb, because the count changes both: "1 list route

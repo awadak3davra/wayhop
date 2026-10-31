@@ -129,6 +129,10 @@ func TestValidateRejectsInvalidProtoParams(t *testing.T) {
 		{"ss2022-aes256-shortkey", map[string]any{"method": "2022-blake3-aes-256-gcm", "password": b64(6)}},
 		{"ss2022-aes128-wrong32", map[string]any{"method": "2022-blake3-aes-128-gcm", "password": b64(32)}},
 		{"ss2022-not-base64", map[string]any{"method": "2022-blake3-aes-256-gcm", "password": "!!!not base64!!!"}},
+		// iPSK:uPSK: every part is held to the cipher's key length, and chacha20 has no EIH.
+		{"ss2022-eih-short-user-key", map[string]any{"method": "2022-blake3-aes-128-gcm", "password": b64(16) + ":" + b64(6)}},
+		{"ss2022-eih-empty-part", map[string]any{"method": "2022-blake3-aes-256-gcm", "password": b64(32) + ":"}},
+		{"ss2022-chacha-eih", map[string]any{"method": "2022-blake3-chacha20-poly1305", "password": b64(32) + ":" + b64(32)}},
 		// Unsupported methods sing-box rejects with "unknown method" → would brick the
 		// whole shared config; real old-server links use these legacy ciphers.
 		{"ss-salsa20", map[string]any{"method": "salsa20", "password": "x"}},
@@ -153,6 +157,9 @@ func TestValidateRejectsInvalidProtoParams(t *testing.T) {
 	}{
 		{"ss2022-aes256-32B", map[string]any{"method": "2022-blake3-aes-256-gcm", "password": b64(32)}},
 		{"ss2022-aes128-16B", map[string]any{"method": "2022-blake3-aes-128-gcm", "password": b64(16)}},
+		// A multi-user server's client password (sing-box takes it for the AES 2022 ciphers).
+		{"ss2022-aes128-eih", map[string]any{"method": "2022-blake3-aes-128-gcm", "password": b64(16) + ":" + b64(16)}},
+		{"ss2022-aes256-eih", map[string]any{"method": "2022-blake3-aes-256-gcm", "password": b64(32) + ":" + b64(32)}},
 		{"ss-classic-anylen", map[string]any{"method": "aes-256-gcm", "password": "whatever"}}, // non-2022: no key-length rule
 		{"ss-chacha20-ietf-poly", map[string]any{"method": "chacha20-ietf-poly1305", "password": "w"}},
 		{"ss-legacy-cfb", map[string]any{"method": "aes-256-cfb", "password": "w"}},           // sing-box still ships this

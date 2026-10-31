@@ -44,9 +44,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 1.12.17 = the version on the test router today; 1.13.13 = the line that
-        # removed the wireguard outbound. Bump deliberately when WayHop moves.
-        singbox: ['1.12.17', '1.13.13']
+        # 1.12.17 = the oldest line WayHop generates for; 1.13.21 = the last 1.13 release,
+        # the line that removed the wireguard outbound, and what the routers run (test router
+        # 1.13.21, Keenetic 1.13.19, read 2026-10-29); 1.14.4 = the newest stable (2026-10-24), the
+        # first line whose deprecations (independent_cache, rule-set download_detour) the
+        # next minor refuses, so it also runs the CoreVersion-gated 1.14+ schema.
+        # Bump deliberately when WayHop moves. sha256 = the release asset's digest as
+        # GitHub publishes it (gh release view vX --json assets), checked before use.
+        include:
+          - { singbox: '1.12.17', sha256: '5c6cc2e753afb34a6f38802697c8040bdf6a7f3694ea67db861c1e093754f898' }
+          - { singbox: '1.13.21', sha256: '24f9ef8e7234e13e71e74c3598a4164c5fe07b7b67ccc6e96cf68b54789f72cd' }
+          - { singbox: '1.14.4', sha256: '699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968' }
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -56,17 +64,21 @@ jobs:
           set -euo pipefail
           ver='${{ matrix.singbox }}'
           curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${ver}/sing-box-${ver}-linux-amd64.tar.gz" -o sb.tgz
+          echo '${{ matrix.sha256 }}  sb.tgz' | sha256sum -c -
           tar -xzf sb.tgz
           echo "WR_SINGBOX=$PWD/sing-box-${ver}-linux-amd64/sing-box" >> "$GITHUB_ENV"
-      # Explicit allowlist, NOT the whole package: TestHybridSingBoxCheck is intentionally excluded
-      # because `sing-box check` on a hybrid config initializes TUN auto-redirect, which needs a
-      # router (nftables) environment and FATALs "auto-redirect: invalid argument" on a CI runner.
-      # Add any new sing-box-gated generator test to this list.
+      # Explicit allowlist, NOT the whole package: a config with a TUN inbound (hybrid or not) carries
+      # auto_redirect, and `sing-box check` initializes it, which needs a router (nftables)
+      # environment and FATALs "auto-redirect: invalid argument" on a CI runner. Every other test that
+      # uses WR_SINGBOX must be listed here: TestSingBoxGatedTestsRunInCI fails otherwise, and names
+      # the TUN ones it lets this list skip (ciCoreCheckExcluded). TestCoreVersionRuleSetFetch RUNS the
+      # core (loopback only, no TUN) because a refused rule-set download_detour fails at fetch time,
+      # which `check` never reaches.
       - name: sing-box ${{ matrix.singbox }} check on all-protocols + transport + clash + WG-conf configs
-        run: go test -run 'TestAllProtocolsGenerate|TestGeneratorTransportMatrix|TestClashSubscriptionGenerate|TestWireGuardConfGenerate|TestSourceRuleSingBoxCheck' -count=1 ./internal/generator/
+        run: go test -run 'TestAllProtocolsGenerate|TestGeneratorTransportMatrix|TestClashSubscriptionGenerate|TestWireGuardConfGenerate|TestSourceRuleSingBoxCheck|TestCoreVersionSingBoxCheck|TestRoutingListTLSFragmentSingBoxCheck|TestProbeInboundSingBoxCheck|TestCoreVersionRuleSetFetch|TestRealWorldLinksSingBoxCheck|TestOpenVPNSingBoxCheck|TestSnellSingBoxCheck|TestOpenConnectSingBoxCheck|TestHysteria2ExtrasSingBoxCheck|TestHysteria2RealmSingBoxCheck|TestNDMPolicySingBoxCheck|TestCoreOverrideSingBoxCheck|TestSSHSingBoxCheck|TestECHSingBoxCheck|TestMultiplexSingBoxCheck|TestQUICTuningSingBoxCheck|TestVPNDNSServerSingBoxCheck|TestMultiplexSingBoxRuntime|TestCertificatePinSingBoxCheck|TestCertificatePinSingBoxRuntime|TestServerSetupPinSingBoxRuntime|TestWGKeyEncodingsSingBoxCheck|TestGenerateDNSSecureDefault|TestGenerateDNSH3Path|TestGenerateDNSDirectDetourIsOmitted|TestGenerateDNSDropsUnreferencedDisabledServer|TestGenerateDNSRuleSetGeoSiteAND|TestDNSRuleWithNoListLeftIsDropped' -count=1 ./internal/generator/
 
   # --- source-build the engine binaries WayHop orchestrates ---
-  # Heavy (olcRTC pulls a large WebRTC stack and needs Go 1.26), so it is skipped
+  # Heavy (it clones and builds an external tree for five arches), so it is skipped
   # on PRs to keep them fast and runs on push / the weekly schedule / manual.
   engines:
     if: github.event_name != 'pull_request'
@@ -78,13 +90,13 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      # cache:false like every other job — this job builds EXTERNAL clones (awg/olc),
+      # cache:false like every other job — this job builds an EXTERNAL clone (awg),
       # so there is nothing in this repo for setup-go to cache, and a stale module-cache
       # tarball on the self-hosted runner was failing the restore (tar exit 2).
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with: { go-version: '1.26.10', cache: false }   # olcRTC go.mod requires go 1.26.3; amneziawg-go builds on it too; 1.26.9 closes the net/http advisories govulncheck reported on 1.26.6, 1.26.10 GO-2026-6809 (crypto/x509)
-      # Both steps clone into a FRESH directory under $RUNNER_TEMP and remove it on the way out.
-      # They used to clone into fixed `awg`/`olc` paths in the workspace, which is fine exactly once:
+        with: { go-version: '1.26.10', cache: false }   # amneziawg-go builds on it; 1.26.9 closes the net/http advisories govulncheck reported on 1.26.6, 1.26.10 GO-2026-6809 (crypto/x509)
+      # The step clones into a FRESH directory under $RUNNER_TEMP and removes it on the way out.
+      # It used to clone into a fixed `awg` path in the workspace, which is fine exactly once:
       # this is a persistent self-hosted runner, so the second run met its own leftovers and the job
       # died on `destination path 'awg' already exists and is not an empty directory` — leaving main
       # red for reasons that had nothing to do with the commit that triggered it.
@@ -99,14 +111,3 @@ jobs:
         run: |
           set -euo pipefail
           TMPDIR="${RUNNER_TEMP:-/tmp}" sh scripts/build-amneziawg-go.sh
-      - name: olcRTC cross-builds (arm64 + mipsle)
-        run: |
-          set -euo pipefail
-          work="$(mktemp -d "${RUNNER_TEMP:-/tmp}/olc.XXXXXX")"
-          trap 'rm -rf "$work"' EXIT
-          git clone --depth 1 https://github.com/openlibrecommunity/olcrtc "$work/olc"
-          cd "$work/olc"
-          out="${RUNNER_TEMP:-/tmp}"
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64           go build -trimpath -ldflags '-s -w' -o "$out/olcrtc-arm64"  ./cmd/olcrtc
-          CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -o "$out/olcrtc-mipsle" ./cmd/olcrtc
-          ls -la "$out/olcrtc-arm64" "$out/olcrtc-mipsle"

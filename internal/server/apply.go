@@ -11,9 +11,12 @@ import (
 	"strings"
 	"time"
 
+	"wayhop/internal/config"
 	"wayhop/internal/failsafe"
+	"wayhop/internal/keenetic"
 	"wayhop/internal/model"
 	"wayhop/internal/nativeplan"
+	"wayhop/internal/netvpn"
 	"wayhop/internal/pbr"
 	"wayhop/internal/platform"
 )
@@ -65,6 +68,11 @@ const (
 	applyCodeInvalidConfig  = "INVALID_CONFIG"
 	applyCodeApplyFailed    = "APPLY_FAILED"
 	applyCodeBusy           = "BUSY"
+	// applyCodeRollbackOutstanding is Keep refused while a failed rollback of the Test is unfinished.
+	applyCodeRollbackOutstanding = "ROLLBACK_OUTSTANDING"
+	// applyCodeWindowChanged is Keep or Roll back of a named test Apply when a newer Test runs in its
+	// place: it decides nothing, since nobody was asked about the newer one.
+	applyCodeWindowChanged = "WINDOW_CHANGED"
 )
 
 // applyError is a refusal or failure with everything the operator needs to act on it.
@@ -189,6 +197,13 @@ func (s *Server) runApply(ctx context.Context, req applyRequest) (*applyResult, 
 		s.setStage("")
 	}()
 
+	// Routing switched off: an Apply would put WayHop's routing back without anyone deciding to.
+	// Switching on restores the committed configuration; the change is applied after that.
+	if s.routingIsOff() {
+		return nil, &applyError{Status: http.StatusConflict, Code: routingCodeOff,
+			Message: "WayHop's routing is switched off",
+			Remedy:  "Switch routing on first (it restores the last applied configuration), then apply this change."}
+	}
 	desired, err := s.captureDesiredSnapshot()
 	if err != nil {
 		return nil, &applyError{Status: http.StatusServiceUnavailable, Code: applyCodeBusy,
@@ -239,10 +254,26 @@ func (s *Server) runApply(ctx context.Context, req applyRequest) (*applyResult, 
 			Remedy: "Check the router tools named in the detail and try again.", RolledBack: &rolledBack}
 	}
 
+	// The marks every plane is compiled with are the ones THIS capture read: the review checked the
+	// policies a moment ago, but NDM may have dropped or renumbered one since, and a list compiled
+	// against a stale mark would route by a rule that is gone.
+	ndmPolicies := applyNDMPolicies(desired.Config, nativeCapture)
+	if missing := missingNDMPolicies(&desired.Profile, ndmPolicies); len(missing) > 0 {
+		rolledBack := true // nothing was touched
+		return nil, &applyError{Status: http.StatusUnprocessableEntity, Code: applyCodeBlocked, Stage: "capture",
+			Message:    "routing lists are sent to access policies this router does not have: " + strings.Join(missing, ", "),
+			Remedy:     "Review again: send each list to an existing access policy, or point it at a connection.",
+			RolledBack: &rolledBack}
+	}
+
 	s.setStage("materialize")
 	var kernelPlan *pbr.Plan
+	var offloadWarning string
 	if mode := desiredRoutingMode(desired.Config); mode == "hybrid" || mode == "fast" {
-		kernelPlan, _, err = pbr.Compile(&desired.Profile, s.pbrCompileOptions(desired.Config))
+		kernelOpts := s.pbrCompileOptions(desired.Config)
+		kernelOpts.NDMPolicies = ndmPolicies
+		kernelOpts, offloadWarning = kernelOffloadForHost(kernelOpts, host.Host)
+		kernelPlan, _, err = pbr.Compile(&desired.Profile, kernelOpts)
 		if err != nil {
 			return nil, &applyError{Status: http.StatusBadRequest, Code: applyCodeInvalidConfig, Stage: "kernel",
 				Message: "the kernel routing plan could not be compiled", Detail: err.Error(),
@@ -254,8 +285,18 @@ func (s *Server) runApply(ctx context.Context, req applyRequest) (*applyResult, 
 	if baseline != nil && baseline.Materialization.known() {
 		previous = &baseline.Materialization
 	}
+	// A Test whose rollback failed part way is still the baseline (it is what the router has to be moved
+	// off), but it is no configuration to go back to: a failure below rolls back to the committed one.
+	outstanding := s.liveRollbackFailed()
+	if outstanding != nil && previous != nil {
+		// What the router carries is then part of each: the native objects to retire are those of both.
+		if committed := s.committedRevision(); committed != nil {
+			previous = ownershipBaseline(previous, &committed.Materialization, nativeCapture)
+		}
+	}
 	m, warnings, err := materialize(materializeInput{
 		desired: desired, host: host, native: nativeCapture, previous: previous, kernelPlan: kernelPlan,
+		ndmPolicies: ndmPolicies,
 	})
 	if err != nil {
 		stage, detail, remedy := materializeFailure(err)
@@ -265,6 +306,9 @@ func (s *Server) runApply(ctx context.Context, req applyRequest) (*applyResult, 
 	if warn := fastModeDomainWarning(&desired.Profile, desiredRoutingMode(desired.Config),
 		keeneticKernelCarriesDomains(nativeCapture)); warn != "" {
 		warnings = append(warnings, warn)
+	}
+	if offloadWarning != "" {
+		warnings = append(warnings, offloadWarning)
 	}
 	ops := s.productionExecOps()
 	if m.Core.Action == ExecutionEnsurePresent && ops.checkCore != nil {
@@ -279,15 +323,90 @@ func (s *Server) runApply(ctx context.Context, req applyRequest) (*applyResult, 
 	// From here on the router may change: mark the record so a crash converges to the committed
 	// state on the next start.
 	s.setInFlight(req.Save, desired.DesiredRev)
-	res, execErr := executeMaterialization(ctx, ops, &m, previous, s.setStage)
+	// Only this forward run refuses a changed WayHop-created interface; the rollback below gets the
+	// plain ctx and leaves such an interface as it is (withStrictNativePrepare).
+	res, execErr := executeMaterialization(withStrictNativePrepare(ctx), ops, &m, previous, s.setStage)
 	if execErr != nil {
 		rolledBack := false
 		if res.Mutated {
 			s.setStage("rollback")
-			if rbErr := s.rollbackTo(ctx, ops, baseline, &m); rbErr != nil {
+			target := baseline
+			if outstanding != nil {
+				// Rolling back to the Test put back the configuration whose own rollback was under way
+				// (the one that had broken connectivity), reported it as "the previous configuration was
+				// restored", and left the mark on it: the reconcile loop then kept the committed plane
+				// under that Test's core and interfaces.
+				target = s.committedRevision()
+			}
+			plane, rbErr := s.rollbackTo(ctx, ops, target, &m)
+			if rbErr == nil && outstanding != nil {
+				// That rollback undid this Apply only: its kernel retire list, its connection flush and its
+				// native reconcile are computed from m. The Test whose rollback was outstanding has its own:
+				// after an Apply that failed before its kernel step, the Test's ip rules stayed, the flush
+				// was skipped when m's plan equalled the committed one, the native interfaces only the Test
+				// had stayed, and recordRollback below dropped the Test, so nothing would ever retire them.
+				// The same rollback from the Test finishes that; over the committed configuration just
+				// restored it changes only what the Test left.
+				if plane, rbErr = s.rollbackTo(ctx, ops, target, &baseline.Materialization); rbErr != nil && plane == rollbackPlaneTested {
+					// Stopped before its kernel step: the plane is the committed one the first run installed.
+					plane = rollbackPlaneCommitted
+				}
+			}
+			if rbErr != nil {
 				log.Printf("apply: rollback after a failed apply: %v", rbErr)
+				// A rollback that stopped before its kernel step leaves the plane this Apply's own
+				// execution left: unchanged unless that reached its kernel step.
+				forwardPlane := kernelPlaneAfter(res, execErr)
+				switch {
+				case outstanding != nil:
+					// Still outstanding, now over this Apply's leftovers too; a plane this Apply changed
+					// is neither revision's.
+					if plane == rollbackPlaneTested && forwardPlane != rollbackPlaneTested {
+						plane = rollbackPlaneUnknown
+					}
+					s.noteRollbackFailed(baseline, plane, rbErr)
+				case baseline != nil && sameRevision(baseline, s.liveRevision()):
+					// The Test this Apply ran over could not be put back: it no longer runs as tested, and
+					// Keep must not save it (QA-140). Its plane is as tested when the rollback restored
+					// it, or when neither run got to the kernel step.
+					if plane == rollbackPlaneCommitted || (plane == rollbackPlaneTested && forwardPlane == rollbackPlaneTested) {
+						plane = rollbackPlaneTested
+					} else {
+						plane = rollbackPlaneUnknown
+					}
+					s.noteRollbackFailed(baseline, plane, rbErr)
+				default:
+					// The record named the committed configuration as running over this Apply's leftovers:
+					// Roll back answered that it was, and the reconcile loop put the committed plane back
+					// under this Apply's core (QA-140). This Apply becomes the live state with its rollback
+					// outstanding, which Roll back undoes and Keep refuses. Its own plane is in when it
+					// reached its kernel step; the committed one is when neither run did.
+					if plane == rollbackPlaneTested {
+						switch forwardPlane {
+						case rollbackPlaneTested:
+							plane = rollbackPlaneCommitted
+						case rollbackPlaneUnknown:
+							plane = rollbackPlaneUnknown
+						}
+					}
+					s.noteLiveRollbackOutstanding(&appliedRevision{
+						Rev: desired.DesiredRev, At: time.Now().Unix(),
+						Desired:         &appliedDesired{Profile: desired.Profile, Config: desired.Config},
+						Materialization: m,
+					}, plane, rbErr)
+				}
 			} else {
 				rolledBack = true
+				if outstanding != nil {
+					// The committed configuration is back: that also finished the rollback the record was
+					// waiting on, so the Test and its mark go, and so does a window still held open for
+					// it (it would close announcing a failed rollback for a router running the committed
+					// configuration).
+					s.recordRollback()
+					if s.failsafe != nil {
+						s.failsafe.MarkRolledBack()
+					}
+				}
 			}
 		}
 		s.recordFailure(desired.DesiredRev, execErr)
@@ -298,7 +417,9 @@ func (s *Server) runApply(ctx context.Context, req applyRequest) (*applyResult, 
 			stage, detail = stepErr.Step, stepErr.Err.Error()
 		}
 		msg := "the " + stageLabel(stage) + " could not be applied"
-		if rolledBack {
+		if rolledBack && outstanding != nil {
+			msg += "; the committed configuration was restored, which also completes the earlier rollback that had failed"
+		} else if rolledBack {
 			msg += "; the previous configuration was restored"
 		} else if res.Mutated {
 			msg += "; the previous configuration could NOT be fully restored"
@@ -316,6 +437,14 @@ func (s *Server) runApply(ctx context.Context, req applyRequest) (*applyResult, 
 	} else {
 		s.markKernelPlane(kernelPlaneUnknown)
 	}
+	// The plane restores each flow's saved mark first, so a flow the change moved would keep its old
+	// exit - or none - until it ended (competitor gap 5). Before recordApplied: the baseline is still
+	// the previous plan here.
+	var prev *pbr.Plan
+	if base := s.appliedBaseline(); base != nil {
+		prev = base.Materialization.kernelPlan()
+	}
+	s.flushStaleFlows(prev, m.kernelPlan())
 
 	rev := &appliedRevision{
 		Rev: desired.DesiredRev, At: time.Now().Unix(),
@@ -361,6 +490,18 @@ func (s *Server) runApply(ctx context.Context, req applyRequest) (*applyResult, 
 	return result, nil
 }
 
+// applyNDMPolicies is the access policies by name → mark an Apply compiles its planes with: the
+// native capture's on a router, the demo's synthetic set in demo, none anywhere else.
+func applyNDMPolicies(cfg config.Config, capture *executionNativeCaptureV1) map[string]uint32 {
+	if cfg.Demo {
+		return keenetic.PolicyMarks(demoNDMPolicies)
+	}
+	if capture == nil {
+		return nil
+	}
+	return capture.NDMPolicies
+}
+
 // captureForApply is the ONE host capture of an Apply: host facts (platform, core identity, kernel
 // tools, external interfaces) and the native (UCI/NDM) state. Demo synthesizes both.
 func (s *Server) captureForApply(ctx context.Context, desired DesiredSnapshot) (ExecutionHostFactsV1, *executionNativeCaptureV1, error) {
@@ -396,30 +537,77 @@ func (s *Server) captureForApply(ctx context.Context, desired DesiredSnapshot) (
 	return host, nil, nil
 }
 
+// nativeLeftoverError is a rollback whose only failure is the removal of the failed target's
+// router-native tunnels, routes and ladder: everything else is back to the baseline.
+type nativeLeftoverError struct{ err error }
+
+func (e *nativeLeftoverError) Error() string {
+	return "the router-native tunnels being rolled back could not be removed: " + e.err.Error()
+}
+
+func (e *nativeLeftoverError) Unwrap() error { return e.err }
+
+// onlyNativeLeftover reports whether every failure in err is a nativeLeftoverError.
+func onlyNativeLeftover(err error) bool {
+	var leftover *nativeLeftoverError
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, e := range joined.Unwrap() {
+			if !errors.As(e, &leftover) {
+				return false
+			}
+		}
+		return len(joined.Unwrap()) != 0
+	}
+	return errors.As(err, &leftover)
+}
+
 // rollbackTo re-executes the baseline materialization over the failed/tested one, or tears
-// everything WayHop installed down when there is no baseline. Caller holds applyMu.
-func (s *Server) rollbackTo(ctx context.Context, ops applyExecOps, base *appliedRevision, failed *executionMaterializationV1) error {
+// everything WayHop installed down when there is no baseline. On failure plane says how far it got
+// with the kernel plane (rollbackPlane*), which a caller that marks the rollback outstanding records
+// with it; an error onlyNativeLeftover accepts means the baseline is back and only the failed
+// target's router-native objects are left. Caller holds applyMu.
+func (s *Server) rollbackTo(ctx context.Context, ops applyExecOps, base *appliedRevision, failed *executionMaterializationV1) (plane string, err error) {
 	rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 	defer cancel()
 	if base == nil || !base.Materialization.known() {
-		err := teardownMaterialization(rbCtx, ops, failed)
+		err = teardownMaterialization(rbCtx, ops, failed)
 		s.markKernelPlane(kernelPlaneUnknown)
-		return err
+		if err == nil || onlyNativeLeftover(err) {
+			s.flushStaleFlows(failed.kernelPlan(), nil)
+			return rollbackPlaneCommitted, err
+		}
+		// The teardown goes on to every plane whatever failed before it, so the Test's plane is not as
+		// tested whichever step failed; with no committed revision nothing is put back either way.
+		return rollbackPlaneUnknown, err
 	}
-	target := s.rollbackMaterialization(rbCtx, ops, &base.Materialization, failed)
-	_, err := executeMaterialization(rbCtx, ops, target, failed, s.setStage)
-	if err == nil && target.Kernel.Action == ExecutionEnsurePresent {
+	target, abortErr := s.rollbackMaterialization(rbCtx, ops, &base.Materialization, failed)
+	res, err := executeMaterialization(rbCtx, ops, target, failed, s.setStage)
+	if err != nil {
+		return kernelPlaneAfter(res, err), err
+	}
+	if target.Kernel.Action == ExecutionEnsurePresent {
 		s.markKernelPlane(kernelPlanePresent)
 	}
-	return err
+	// Flows the rolled-back plan marked would keep its marks - renumbered, or for an exit the
+	// baseline does not have - until they end; a UDP flow with keepalives never does.
+	s.flushStaleFlows(failed.kernelPlan(), target.kernelPlan())
+	if abortErr != nil {
+		// The baseline runs again, but the failed target's tunnels, routes and ladder are still on the
+		// router. Reporting success made the record forget them and the API say rolled_back (QA-144);
+		// as a failure the record keeps what is left to undo, and Roll back retries the abort.
+		return rollbackPlaneCommitted, abortErr
+	}
+	return rollbackPlaneCommitted, nil
 }
 
 // rollbackMaterialization prepares the baseline for re-execution over failed: the kernel retire is
 // recomputed against what failed installed, and the native delta is reconciled from failed's target
 // to the baseline's (so the interfaces the failed apply created are removed and the baseline's are
 // kept). When that reconciliation is impossible the failed native target is aborted first and the
-// baseline is re-applied additively.
-func (s *Server) rollbackMaterialization(ctx context.Context, ops applyExecOps, base, failed *executionMaterializationV1) *executionMaterializationV1 {
+// baseline is re-applied additively; an abort that fails is returned, for rollbackTo to report once the
+// baseline is back.
+func (s *Server) rollbackMaterialization(ctx context.Context, ops applyExecOps, base, failed *executionMaterializationV1) (*executionMaterializationV1, error) {
+	var abortErr error
 	target := *base
 	target.Kernel = base.Kernel
 	bindKernelRetire(&target.Kernel, failed)
@@ -438,6 +626,7 @@ func (s *Server) rollbackMaterialization(ctx context.Context, ops applyExecOps, 
 		if ops.abortNative != nil {
 			if err := ops.abortNative(ctx, *failedNative); err != nil {
 				log.Printf("apply: rollback: native abort of the failed target: %v", err)
+				abortErr = &nativeLeftoverError{err}
 			}
 		}
 	default:
@@ -455,8 +644,9 @@ func (s *Server) rollbackMaterialization(ctx context.Context, ops applyExecOps, 
 		if err != nil {
 			log.Printf("apply: rollback: native reconcile from the failed target: %v — aborting it and re-applying the baseline additively", err)
 			if ops.abortNative != nil {
-				if abortErr := ops.abortNative(ctx, *failedNative); abortErr != nil {
-					log.Printf("apply: rollback: native abort of the failed target: %v", abortErr)
+				if err := ops.abortNative(ctx, *failedNative); err != nil {
+					log.Printf("apply: rollback: native abort of the failed target: %v", err)
+					abortErr = &nativeLeftoverError{err}
 				}
 			}
 			native := *target.Native
@@ -465,11 +655,61 @@ func (s *Server) rollbackMaterialization(ctx context.Context, ops applyExecOps, 
 			target.Native = &native
 			break
 		}
+		if baseNative.Platform == platform.OpenWrt {
+			delta.Target = rebaseOpenWrtRollback(baseNative, failedNative, networkUCI, firewallUCI)
+		}
 		target.Native = &executionNativeMaterializationV1{Delta: executionNativeDeltaV1{
 			SchemaVersion: executionNativeDeltaSchemaV1, Reconcile: *delta,
 		}, AWGKernel: cloneAWGKernelCapture(base.Native.AWGKernel)}
 	}
-	return &target
+	return &target, abortErr
+}
+
+// rebaseOpenWrtRollback rebuilds the baseline's write plan for each interface the failed apply left
+// modified, against the UCI as it is now. A recorded plan's Expected is the interface as it was when
+// the BASELINE was built — before the baseline itself, then the failed apply, changed it — so its
+// preflight refused ("the configuration changed after this plan was built") and the rollback of a
+// Test that edited an endpoint failed at native prepare, before the core step: rollback_failed in the
+// window, and after a reboot mid-window no sing-box at all. The rebuild happens only when the
+// interface is exactly what the failed plan wrote: anything else is someone else's edit, and the
+// recorded plan's refusal stands. base is never modified.
+func rebaseOpenWrtRollback(base, failed *nativeplan.Plan, networkUCI, firewallUCI string) *nativeplan.Plan {
+	if networkUCI == "" {
+		return base
+	}
+	tested := make(map[string]netvpn.Plan, len(failed.OpenWrt))
+	for _, plan := range failed.OpenWrt {
+		tested[plan.Iface] = plan
+	}
+	current := netvpn.ParseUCIShow(networkUCI)
+	var out *nativeplan.Plan
+	for i, plan := range base.OpenWrt {
+		wrote, ok := tested[plan.Iface]
+		if !ok || len(plan.PreflightAgainst(networkUCI)) == 0 {
+			continue
+		}
+		if now, exists := current[plan.Iface]; !exists || len(netvpn.DiffInterface(wrote.Intended, now)) != 0 {
+			continue
+		}
+		// The handler set is the one the baseline plan was resolved for: Intended carries the
+		// resolved protocol, and the router ran it before the failed apply replaced it.
+		rebuilt, err := netvpn.BuildPlanFor(plan.Intended, netvpn.RouterProtos{string(plan.Intended.Proto): true},
+			plan.Zone, networkUCI, firewallUCI)
+		if err != nil {
+			log.Printf("apply: rollback: %s cannot be rebuilt against the current configuration: %v", plan.Iface, err)
+			continue
+		}
+		if out == nil {
+			clone := *base
+			clone.OpenWrt = append([]netvpn.Plan(nil), base.OpenWrt...)
+			out = &clone
+		}
+		out.OpenWrt[i] = rebuilt
+	}
+	if out == nil {
+		return base
+	}
+	return out
 }
 
 // summarize describes the applied planes for the response.
@@ -563,35 +803,93 @@ func (s *Server) handleApplyStatus(w http.ResponseWriter, _ *http.Request) {
 	if s.failsafe != nil {
 		st = s.failsafe.Status()
 	}
+	// Keep is refused while a rollback is outstanding (applyConfirm), so the panel must not offer it:
+	// the banner showed "Keep & Save" over a Test that no longer ran as tested.
+	rbErr, rbFailed := "", false
+	if m := s.liveRollbackFailed(); m != nil {
+		rbErr, rbFailed = m.Error, true
+	}
+	live := s.liveRevision()
 	writeJSONNoStore(w, http.StatusOK, map[string]any{
-		"pending":       st.Pending,
-		"phase":         st.Phase,
-		"seconds_left":  st.SecondsLeft,
-		"last_check_ok": st.LastCheckOk,
-		"last_check_at": st.LastCheckAt,
-		"last_error":    st.LastError,
-		"in_progress":   s.applyInProgress.Load(),
-		"stage":         s.currentStage(),
-		"window_open":   s.liveRevision() != nil,
+		"rollback_failed": rbFailed,
+		"rollback_error":  rbErr,
+		"pending":         st.Pending,
+		"phase":           st.Phase,
+		"seconds_left":    st.SecondsLeft,
+		"last_check_ok":   st.LastCheckOk,
+		"last_check_at":   st.LastCheckAt,
+		"last_error":      st.LastError,
+		"in_progress":     s.applyInProgress.Load(),
+		"stage":           s.currentStage(),
+		"window_open":     live != nil,
+		// The test Apply this window is about, to name in Keep and Roll back ({"window": ...}).
+		"window": applyWindow(live),
 	})
+}
+
+// applyDecisionWindow reads the optional {"window": "..."} of a Keep or Roll back: the test Apply the
+// caller was shown, as /api/apply/status names it. An empty or absent body names none, which decides
+// whatever runs unsaved (the panel's banner posts {}).
+func applyDecisionWindow(r *http.Request) (string, error) {
+	var body struct {
+		Window string `json:"window"`
+	}
+	if r.Body == nil {
+		return "", nil
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	return body.Window, nil
 }
 
 // handleApplyConfirm (POST /api/apply/confirm) keeps a live (Test) configuration: the native state
 // is persisted, the live record becomes committed and the fail-safe window closes.
 func (s *Server) handleApplyConfirm(w http.ResponseWriter, r *http.Request) {
-	code, resp := s.applyConfirm(r.Context())
+	window, err := applyDecisionWindow(r)
+	if err != nil {
+		writeJSONNoStore(w, http.StatusBadRequest, map[string]any{"code": applyCodeInvalidRequest, "error": "invalid JSON body"})
+		return
+	}
+	code, resp := s.applyConfirm(r.Context(), window)
 	writeJSONNoStore(w, code, resp)
 }
 
+// windowChanged is the refusal of a Keep or Roll back whose test Apply a newer one replaced.
+func windowChanged() (int, map[string]any) {
+	return http.StatusConflict, map[string]any{"code": applyCodeWindowChanged,
+		"error": "a newer test Apply replaced the one this decision was for, so nothing was changed"}
+}
+
 // applyConfirm is Keep, for the panel and the Telegram bot alike: it answers with the HTTP status and
-// body the panel expects.
-func (s *Server) applyConfirm(ctx context.Context) (int, map[string]any) {
+// body the panel expects. window, when not empty, names the test Apply the caller was asked about
+// (applyWindow); a different one running unsaved is refused with WINDOW_CHANGED.
+func (s *Server) applyConfirm(ctx context.Context, window string) (int, map[string]any) {
 	s.applyMu.Lock()
 	live := s.liveRevision()
 	if live == nil {
 		s.applyMu.Unlock()
 		return http.StatusConflict, map[string]any{"code": "NO_WINDOW",
 			"error": "there is no unsaved configuration to keep"}
+	}
+	// Compared under applyMu, which a Test Apply holds for its whole run. The bot's own check reads the
+	// window before taking the lock: a Keep pressed on Test A's message while Test B ran from the panel
+	// passed it (B was not recorded yet), waited here for B to finish and then committed B, untested
+	// and never asked about.
+	if window != "" && applyWindow(live) != window {
+		s.applyMu.Unlock()
+		return windowChanged()
+	}
+	if failed := s.liveRollbackFailed(); failed != nil {
+		s.applyMu.Unlock()
+		// The rollback got part way: the router runs neither the Test as tested nor the committed
+		// configuration. Keeping it recorded a configuration that was not running as committed, and
+		// during boot's retry wait it also made the retry skip, so nothing ever converged it (after an
+		// OpenWrt reboot sing-box never started). Finishing the rollback, or applying again, is the
+		// way out; both are open.
+		return http.StatusConflict, map[string]any{"code": applyCodeRollbackOutstanding,
+			"error":  "the rollback of this test configuration failed part way, so it no longer runs as tested and cannot be kept: roll back again to finish, or apply the configuration again",
+			"detail": failed.Error}
 	}
 	ops := s.productionExecOps()
 	if live.Materialization.Native != nil && !s.config().Demo && ops.persistNative != nil {
@@ -619,14 +917,48 @@ func (s *Server) applyConfirm(ctx context.Context) (int, map[string]any) {
 // handleApplyRollback (POST /api/apply/rollback) restores the committed configuration. It works
 // whether or not a window is armed: with no live state there is nothing to roll back and it says so.
 func (s *Server) handleApplyRollback(w http.ResponseWriter, r *http.Request) {
-	code, resp := s.applyRollback(r.Context())
+	window, err := applyDecisionWindow(r)
+	if err != nil {
+		writeJSONNoStore(w, http.StatusBadRequest, map[string]any{"code": applyCodeInvalidRequest, "error": "invalid JSON body"})
+		return
+	}
+	code, resp := s.applyRollback(r.Context(), window)
 	writeJSONNoStore(w, code, resp)
 }
 
-// applyRollback is Roll back, for the panel and the Telegram bot alike.
-func (s *Server) applyRollback(ctx context.Context) (int, map[string]any) {
+// applyRollback is Roll back, for the panel and the Telegram bot alike. window, when not empty, names
+// the test Apply the caller was asked about, as for applyConfirm.
+func (s *Server) applyRollback(ctx context.Context, window string) (int, map[string]any) {
 	if s.failsafe != nil && s.failsafe.Status().Pending {
-		if err := s.failsafe.RollbackNow(); err != nil {
+		rollbackNow := s.failsafe.RollbackNow
+		if window != "" {
+			// Checked under applyMu, which a Test Apply holds while it records its revision and arms its
+			// window: a Roll back pressed on Test A's message while Test B ran waited for B and then rolled
+			// back the window it found, B's. The epoch read with it keeps RollbackNowAt to the window
+			// checked; the rollback itself takes applyMu, so it runs after the lock is let go.
+			s.applyMu.Lock()
+			cur, epoch := applyWindow(s.liveRevision()), s.failsafe.Epoch()
+			s.applyMu.Unlock()
+			if cur != "" && cur != window {
+				return windowChanged()
+			}
+			rollbackNow = func() error { return s.failsafe.RollbackNowAt(epoch) }
+		}
+		if err := rollbackNow(); err != nil {
+			// Pressed while an Apply held the lock, the rollback waits for it. When that Apply failed and its
+			// rollback restored the committed configuration, it closed this window as rolled back, which
+			// supersedes the press: the answer was "nothing was rolled back" (500) although the router had
+			// just been returned to the committed configuration, the outcome the press asked for.
+			if st := s.failsafe.Status(); errors.Is(err, failsafe.ErrSuperseded) && !st.Pending &&
+				st.Phase == "rolled_back" && s.liveRevision() == nil {
+				return http.StatusOK, map[string]any{"rolled_back": true, "failsafe": st,
+					"message": "the Apply that was running failed and restored the committed configuration, which also rolled back this test"}
+			}
+			// A newer Test armed after the check: nothing was rolled back, and its window is not this
+			// decision's.
+			if cur := applyWindow(s.liveRevision()); window != "" && errors.Is(err, failsafe.ErrSuperseded) && cur != "" && cur != window {
+				return windowChanged()
+			}
 			return http.StatusInternalServerError, map[string]any{"code": applyCodeApplyFailed,
 				"rolled_back": false, "error": err.Error(), "failsafe": s.failsafe.Status()}
 		}
@@ -642,8 +974,20 @@ func (s *Server) applyRollback(ctx context.Context) (int, map[string]any) {
 		}
 		return http.StatusOK, resp
 	}
-	err := s.rollbackTo(ctx, s.productionExecOps(), s.committedRevision(), &live.Materialization)
-	s.recordRollback()
+	// After the window passed the Test runs unsaved, and a newer Test can replace it the same way.
+	if window != "" && applyWindow(live) != window {
+		s.applyMu.Unlock()
+		return windowChanged()
+	}
+	plane, err := s.rollbackTo(ctx, s.productionExecOps(), s.committedRevision(), &live.Materialization)
+	if err == nil {
+		// Only a rollback that worked ends the live state: after a failure the record must still name
+		// what is left to undo, or the next Roll back finds nothing and says the committed
+		// configuration is running.
+		s.recordRollback()
+	} else {
+		s.noteRollbackFailed(live, plane, err)
+	}
 	s.applyMu.Unlock()
 	if err != nil {
 		return http.StatusInternalServerError, map[string]any{"code": applyCodeApplyFailed,

@@ -51,6 +51,63 @@ func readKeeneticRunningConfigWith(
 	return output, nil
 }
 
+// The access-policy listing prints each policy's whole route table: 10,761 B for 29 routes over two
+// policies on a live Keenetic, about 370 B a route. 8 MiB is some 22,000 routes, so a router with large
+// tables does not have every Apply that uses a policy refused for an over-long answer (gap 6 review).
+const (
+	keeneticPolicyTimeout = 10 * time.Second
+	keeneticPolicyLimit   = 8 << 20
+)
+
+// readKeeneticPolicies reads `show ip policy`, KeeneticOS's access policies with the mark and table
+// NDM routes each by. It is read at every Apply that routes a list into one, never stored as truth:
+// NDM numbers the policies itself and may renumber them when one is added or removed.
+func readKeeneticPolicies(ctx context.Context) (string, error) {
+	return readKeeneticPoliciesWith(ctx, runHostCommandBounded)
+}
+
+func readKeeneticPoliciesWith(
+	ctx context.Context,
+	run func(context.Context, time.Duration, int, time.Duration, string, ...string) (string, error),
+) (string, error) {
+	if ctx == nil || run == nil {
+		return "", errExecutionCaptureUnavailable
+	}
+	output, err := run(ctx, keeneticPolicyTimeout, keeneticPolicyLimit,
+		applyHostCommandWaitDelay, exactKeeneticNDMCPath, "-c", "show ip policy")
+	if err != nil {
+		return "", errExecutionCaptureUnavailable
+	}
+	// A router with no access policy answers with nothing, which is an observation, not a failure:
+	// every list pointing at a policy is then refused by name instead of the capture as a whole.
+	return output, nil
+}
+
+// keeneticPolicies reads and parses the router's access policies through the injectable reader.
+func (s *Server) keeneticPolicies(ctx context.Context) ([]keenetic.Policy, error) {
+	read := readKeeneticPolicies
+	if s != nil && s.keeneticPolicyReader != nil {
+		read = s.keeneticPolicyReader
+	}
+	out, err := read(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return keenetic.ParsePolicies(out), nil
+}
+
+// missingNDMPolicies lists, sorted, the access policies p's enabled routing lists point at that are
+// not in marks.
+func missingNDMPolicies(p *model.Profile, marks map[string]uint32) []string {
+	var missing []string
+	for _, name := range model.NDMPoliciesInUse(p) {
+		if _, ok := marks[name]; !ok {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}
+
 // hostSnapshotMatchesDesired reports whether host was captured against desired: the two are only
 // ever combined inside one Apply, so a mismatch is a programming error caught here rather than a
 // mixed observation reaching the materializer.
@@ -189,6 +246,17 @@ func (s *Server) captureExecutionNative(
 		readKeenetic = s.keeneticConfigReader
 	}
 	capture, err := captureExecutionNativeFrom(ctx, desired, host, read, readKeenetic)
+	// In the same host pass, and only when a list routes into an access policy: a profile that uses
+	// none must not gain a new way for its capture to fail.
+	if err == nil && platform.Platform(host.Host.Platform) == platform.Keenetic &&
+		len(model.NDMPoliciesInUse(&desired.Profile)) > 0 {
+		policies, policyErr := s.keeneticPolicies(ctx)
+		if policyErr != nil {
+			log.Printf("apply: Keenetic capture: access policies unavailable: %v", policyErr)
+			return executionNativeCaptureV1{}, fmt.Errorf("%w: access policies", errExecutionCaptureUnavailable)
+		}
+		capture.NDMPolicies = keenetic.PolicyMarks(policies)
+	}
 	if err == nil && s != nil && platform.Platform(host.Host.Platform) == platform.OpenWrt {
 		// In the same host pass: the UCI writer's generation is part of what the plan is compiled
 		// against, like the UCI itself.
@@ -259,11 +327,12 @@ func captureExecutionNativeFrom(
 			AdoptInterfaces:    adopt,
 			AdoptNDMNames:      ndmNames,
 			AdoptForeign:       foreign,
-			DomainsViaDNSMasq:  keeneticDomainsViaDNSMasq(),
-			ListsViaIpset:      keeneticKernelPBRPresent(),
+			DomainsViaDNSMasq:  keeneticKernelPlaneCarriesLists(desiredRoutingMode(desired.Config)) && keeneticDomainsViaDNSMasq(),
+			ListsViaIpset:      keeneticKernelPlaneCarriesLists(desiredRoutingMode(desired.Config)),
 			OccupiedInterfaces: occupied,
 			GlobalPriorities:   keenetic.GlobalPriorities(runningConfig),
 			KeeneticConfigRev:  keeneticRunningConfigRevision(runningConfig),
+			ndmPresent:         keeneticPresentIdentities(runningConfig),
 		}, nil
 	default:
 		return executionNativeCaptureV1{}, errExecutionCaptureUnavailable

@@ -29,10 +29,12 @@ func TestKeeneticPBRPreamblePinsEveryToolToItsAuthenticatedPath(t *testing.T) {
 	}
 	// The body of render_ipset.go calls these by bare name. Each must resolve to the probed binary
 	// and nothing else, which is the guarantee the argv runner gives the nft plane for free.
+	// iptables and ip6tables wait for the xtables lock: without -w a `-C || -A` that met NDM's own
+	// rebuild read the lock's exit 4 as "absent" and appended a duplicate jump (QA-067).
 	for _, want := range []string{
 		"ipset() { /opt/sbin/ipset \"$@\"; }",
-		"iptables() { /opt/sbin/iptables \"$@\"; }",
-		"ip6tables() { /opt/sbin/ip6tables \"$@\"; }",
+		"iptables() { /opt/sbin/iptables -w \"$@\"; }",
+		"ip6tables() { /opt/sbin/ip6tables -w \"$@\"; }",
 	} {
 		if !strings.Contains(preamble, want) {
 			t.Fatalf("preamble is missing %q:\n%s", want, preamble)

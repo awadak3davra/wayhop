@@ -55,11 +55,15 @@ func TestBuildScriptProtoMarkerPrecedesConfigPerProtocol(t *testing.T) {
 			t.Errorf("%s: emitted script lacks promised marker %q", o.ID, protoMarker)
 			continue
 		}
-		// Find the first WR_CLIENT_CONFIG marker line after the proto marker.
+		// Find the first WR_CLIENT_CONFIG marker line after the proto marker - or, for a protocol whose
+		// result is a link for people rather than a connection (MTProto), its WR_SHARE_LINK line.
 		rest := s[iProto+len(protoMarker):]
 		iCfg := strings.Index(rest, "WR_CLIENT_CONFIG")
+		if iLink := strings.Index(rest, ShareLinkMarker); iLink >= 0 && (iCfg < 0 || iLink < iCfg) {
+			iCfg = iLink
+		}
 		if iCfg < 0 {
-			t.Errorf("%s: no WR_CLIENT_CONFIG line follows the WR_PROTO marker", o.ID)
+			t.Errorf("%s: no WR_CLIENT_CONFIG or %s line follows the WR_PROTO marker", o.ID, ShareLinkMarker)
 			continue
 		}
 		// Between the proto marker and its config there must be no SECOND WR_PROTO=

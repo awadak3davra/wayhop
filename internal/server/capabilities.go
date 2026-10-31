@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"wayhop/internal/dnsaudit"
+	"wayhop/internal/model"
 	"wayhop/internal/platform"
 )
 
@@ -15,11 +16,11 @@ import (
 func (s *Server) handleNativeCapabilities(w http.ResponseWriter, r *http.Request) {
 	caps := platform.DetectCapabilities()
 	// Report the SAME accelerator facts the apply path uses, rather than a second independent probe.
-	// pbrCompileOptions reads the server's cached accelKind()/accelHW(), which carry the demo
-	// override; DetectCapabilities() does not. Overriding here — before both the serialised response
-	// and the preflight verdict — keeps every consumer reading one source of truth. On a real router
-	// both resolve to the same probe, so this only ever makes them agree.
-	caps.Accel = platform.Accel{Kind: s.accelKind(), HW: s.accelHW()}
+	// pbrCompileOptions reads the server's accelKind()/accelHW(), which carry the demo override;
+	// DetectCapabilities() does not. noteAccel keeps this fresh observation for them and returns the
+	// override - before both the serialised response and the preflight verdict - so every consumer
+	// reads one source of truth.
+	caps.Accel = s.noteAccel(caps.Accel)
 	off := s.offloadObservation(r.Context())
 	runtime := s.runtimeFacts(r.Context())
 	runtime.NativeOperations = cloneHostBoolMap(s.nativeOperations)
@@ -45,14 +46,17 @@ func (s *Server) handleNativeCapabilities(w http.ResponseWriter, r *http.Request
 	// what it IS doing, but neither tells the user that the configuration they are about to apply
 	// asks for something this box will silently discard. That verdict is computed here, server-side,
 	// against the same facts the apply path uses.
+	// engine_plugin is the save check's own answer for a new AmneziaWG connection the router's own
+	// cannot create (QA-133): the connection form offers it on WayHop's engine and says why.
 	writeJSON(w, http.StatusOK, struct {
 		platform.Capabilities
-		CapabilitySet platform.CapabilitySet `json:"capability_set"`
-		OffloadState  platform.OffloadState  `json:"offload_state"`
-		OffloadProbe  offloadProbeV1         `json:"offload_probe"`
-		Preflight     []platform.Unsupported `json:"preflight"`
-		Demo          bool                   `json:"demo,omitempty"`
-	}{caps, capabilitySet, off.State, off.Probe, s.preflight(caps, off.State), s.config().Demo})
+		CapabilitySet platform.CapabilitySet       `json:"capability_set"`
+		OffloadState  platform.OffloadState        `json:"offload_state"`
+		OffloadProbe  offloadProbeV1               `json:"offload_probe"`
+		Preflight     []platform.Unsupported       `json:"preflight"`
+		EnginePlugin  map[string]enginePluginOffer `json:"engine_plugin,omitempty"`
+		Demo          bool                         `json:"demo,omitempty"`
+	}{caps, capabilitySet, off.State, off.Probe, s.preflight(caps, off.State), s.enginePluginOffers(capabilitySet), s.config().Demo})
 }
 
 type offloadProbeV1 struct {
@@ -91,6 +95,19 @@ func (s *Server) offloadObservation(ctx context.Context) offloadObservationV1 {
 }
 
 func dnsPathUnsupported(a dnsaudit.Asymmetry) platform.Unsupported {
+	// A list sent to a KeeneticOS access policy: WayHop cannot see whether the policy leaves by a
+	// tunnel or by the WAN, and a DNS server's detour cannot name a policy, so the usual remedy could
+	// not be followed. Reported as advice with steps that can be taken, never as an Apply blocker - it
+	// refused a list on a WAN policy for a leak that did not exist (QA-063).
+	if _, policy := model.NDMPolicyName(a.TrafficVia); policy {
+		return platform.Unsupported{
+			Setting: "dns_path:" + a.RoutingListID, Value: a.TrafficVia, Severity: platform.SeverityDegraded,
+			Reason: a.Detail + "; whether that exposes anything depends on where the Keenetic access policy " +
+				"sends the traffic, which WayHop cannot see",
+			Remedy: "If the policy leaves through a tunnel, use an encrypted DNS server (DoH or DoT), or send " +
+				"the list to a WayHop tunnel or group so its lookups can follow it.",
+		}
+	}
 	severity, settingPrefix := platform.SeverityDegraded, "dns_path:"
 	if a.Exposed {
 		severity = platform.SeverityPrivacy

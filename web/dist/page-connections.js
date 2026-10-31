@@ -248,6 +248,7 @@ function dependentLabel(d) {
     download_via: t("routing list (list download)"),
     rule: t("rule"),
     dns_detour: t("DNS server"),
+    dns_server: t("DNS server"),
     group_member: t("failover group"),
   };
   return (kinds[d.kind] || d.kind) + " " + (d.name || d.id);
@@ -349,6 +350,13 @@ function fInput(id, label, value, opts) {
     el("input", { type: opts.type || "text", id, value: value != null ? String(value) : "", placeholder: opts.ph || "" }));
 }
 
+// fText is fInput for multi-line values: a private key, or host keys one per line.
+function fText(id, label, value, ph) {
+  return el("div", { class: "field" }, el("label", {}, label),
+    el("textarea", { id, rows: "3", spellcheck: "false", autocomplete: "off", placeholder: ph || "", style: "font-family:var(--mono);font-size:12px" },
+      value != null ? String(value) : ""));
+}
+
 function fSelect(id, label, options, value) {
   const opts = options.map(o => el("option", { value: o }, o));
   // If the stored value is not one of the known options (e.g. an SS-2022 cipher this
@@ -369,6 +377,175 @@ function fCheck(id, label, checked) {
   const c = el("input", { type: "checkbox", id });
   if (checked) c.setAttribute("checked", "true");
   return el("label", { class: "check" }, c, el("span", {}, label));
+}
+
+// fECH is Encrypted Client Hello (model.ECH): off, the server's config pasted (base64 as share links
+// carry it, or the PEM block sing-box prints), or looked up in DNS (kept for the record's TTL). sing-box
+// never runs the lookup over QUIC (hysteria2, tuic), so there only a pasted config is offered, and a
+// link that asked for the lookup opens on an empty config the save asks for, not on off. The caller
+// hides the box where ECH cannot apply (Reality) and calls box.sync() after; a hidden box is not read.
+function fECH(E, quic) {
+  E = E && E.enabled ? E : null;
+  const modes = [["off", t("Off")], ["config", t("Pasted config")]].concat(quic ? [] : [["dns", t("From DNS (HTTPS record)")]]);
+  const sel = el("select", { id: "f-ech" }, ...modes.map(([v, l]) => el("option", { value: v }, l)));
+  const mode = !E ? "off" : E.config ? "config" : "dns";
+  sel.value = modes.some(m => m[0] === mode) ? mode : "config";
+  const cfg = fText("f-ech-config", t("ECH config (base64 or PEM)"), E && E.config, "AEX+DQBB…");
+  const qsn = fInput("f-ech-qsn", t("Query server name (sing-box 1.13+, optional)"), E && E.query_server_name);
+  const hint = el("div", { class: "hint" }, t("The router's DNS looks the config up and keeps it for the record's TTL. Over plain DNS the name ECH hides goes out in the clear; with no answer, the connection fails."));
+  const ta = cfg.querySelector("textarea");
+  const box = el("div", { id: "f-ech-box" }, el("div", { class: "field" }, el("label", {}, "ECH"), sel), cfg, qsn, hint);
+  box.sync = () => {
+    const m = sel.value, bad = box.style.display !== "none" && m === "config" && !ta.value.trim();
+    cfg.style.display = m === "config" ? "" : "none";
+    qsn.style.display = hint.style.display = m === "dns" ? "" : "none";
+    ta.dataset.invalid = bad ? "1" : "";
+    ta.dataset.invalidLabel = bad ? t("ECH config (base64 or PEM)") : "";
+    ta.dataset.invalidWhy = bad ? t("required") : "";
+  };
+  sel.addEventListener("change", box.sync);
+  ta.addEventListener("input", box.sync);
+  box.sync();
+  return box;
+}
+
+// fPins is the server certificate's pins (model TLS.pin_cert_sha256): SHA-256 of the whole certificate,
+// as share links carry them (pcs=, pinSHA256). A pin an older WayHop kept in params.pin_sha256 is shown
+// here and kept where it is until the field is edited. sing-box checks them from 1.15, in place of the
+// certificate's chain and name; the Apply review says what an older core does. A stored pin that is
+// not a SHA-256 hash (such a legacy one, as its link held it) is marked but does not hold an unrelated
+// save: it is kept as stored, which the daemon accepts, and the Apply review reports it.
+function fPins(T, P) {
+  const v = [].concat(T.pin_cert_sha256 || [], P.pin_sha256 ? [P.pin_sha256] : []).join(",");
+  const box = fInputValidated("f-pins", "Server certificate pin (optional)", v, "SHA-256", x => pinListError(x) ? "SHA-256" : "");
+  const inp = box.querySelector("input"), asStored = () => { if (inp.value.trim() === v) inp.dataset.invalid = ""; };
+  inp.addEventListener("input", asStored);
+  asStored();
+  return box;
+}
+
+// fKeyPins shows the server's public-key pins (model TLS.pin_pubkey_sha256), which Set up Server adds
+// beside its link (QA-138); no share link carries one, so they are seen and removed here, not typed.
+// sing-box 1.13+ checks them in place of the chain whatever "Allow insecure TLS" says, so a server
+// whose key changed is refused until they go. Only a connection that has one shows the box.
+function fKeyPins(T) {
+  const v = (T.pin_pubkey_sha256 || []).join(", ");
+  if (!v) return null;
+  const inp = el("input", { type: "text", id: "f-pinkeys", value: v, readonly: "readonly", style: "font-family:var(--mono);font-size:12px" });
+  return el("div", { class: "field", id: "f-pinkeys-box" }, el("label", {}, t("Server public-key pin")),
+    el("div", { style: "display:flex;gap:8px" }, inp,
+      el("button", { type: "button", class: "btn", "aria-label": t("Remove") + " " + t("Server public-key pin"), onclick: () => { inp.value = ""; } }, t("Remove"))),
+    el("div", { class: "hint" }, t("sing-box 1.13 and later accept the server only if its public key matches, even with insecure TLS allowed. If the server's certificate changed, remove it and clear the certificate pin too, or run Set up Server again.")));
+}
+
+// splitPins and pinListError are model.SplitPinList and model.ParsePinSHA256: pins are separated by
+// commas, semicolons or white space; each is exactly 64 hex digits (':' or '-' between them allowed)
+// or canonical standard base64 of 32 bytes (44 characters, padded). pinListError names the first that
+// is neither, or "".
+function splitPins(v) { return String(v).split(/[,;\s]+/).filter(Boolean); }
+// pinHex is a pin as 64 lowercase hex digits, the stored form, whichever way it was written.
+function pinHex(p) {
+  const h = p.replace(/[:-]/g, "").toLowerCase();
+  if (/^[0-9a-f]{64}$/.test(h)) return h;
+  try { return [...atob(p)].map(c => c.charCodeAt(0).toString(16).padStart(2, "0")).join(""); } catch (e) { return p; }
+}
+function pinListError(v) {
+  return splitPins(v).find(p => {
+    const h = p.replace(/[:-]/g, "");
+    if (/^[0-9a-f]+$/i.test(h)) return h.length !== 64;
+    try { return !(/^[A-Za-z0-9+\/]{43}=$/.test(p) && btoa(atob(p)) === p); } catch (e) { return true; }
+  }) || "";
+}
+
+// echValue reads fECH's controls into tls.ech: null when the box is absent or hidden (the caller keeps
+// what the connection carried), undefined for off. A pasted PEM block or a wrapped value becomes the
+// bare base64 body, in the standard alphabet the model stores.
+function echValue() {
+  const box = document.getElementById("f-ech-box");
+  if (!box || box.style.display === "none") return null;
+  const v = id => document.getElementById(id).value.trim();
+  const m = v("f-ech");
+  if (m === "config") return { enabled: true, config: v("f-ech-config").replace(/-----[^-]*-----/g, "").replace(/\s+/g, "").replace(/-/g, "+").replace(/_/g, "/") };
+  if (m === "dns") return v("f-ech-qsn") ? { enabled: true, query_server_name: v("f-ech-qsn") } : { enabled: true };
+  return undefined;
+}
+
+// fMux is multiplex (model.Multiplex, sing-mux) on vless, vmess, trojan and shadowsocks: off, or a
+// protocol, the pool, padding and TCP Brutal. A connection without one starts at h2mux with 4
+// connections of at least 4 streams, since with no pool sing-mux reuses only an idle connection and
+// each concurrent stream dials its own. The hints say what the server must run: a sing-box inbound
+// refuses multiplexed connections unless multiplex is on in it (mihomo always takes them), Xray (3x-ui,
+// Marzban) drops every one, Vision does not reach the multiplexed streams, and TCP Brutal needs the
+// server's kernel module. TCP Brutal holds one connection, so while it is ticked the pool is hidden and
+// not saved (the daemon refuses a pool beside it). The switch and the protocol carry "Multiplex" in
+// their accessible names: the dialog has the connection's own Protocol too. collect() reads it with
+// box.value(), which keeps an imported default protocol ("") unless another is picked, so an untouched
+// save changes nothing.
+function fMux(M, flow) {
+  M = M || {};
+  const B = M.brutal || {}, fresh = !M.enabled;
+  const num = (id, label, v) => el("div", { style: "min-width:0" }, fInput(id, label, v || "", { type: "number" }));
+  const grid = (...kids) => el("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:10px" }, ...kids);
+  const on = fCheck("f-mux", t("Enabled"), M.enabled), br = fCheck("f-mux-brutal", "TCP Brutal", B.enabled);
+  const rates = el("div", {}, grid(num("f-mux-up", t("Upload, Mbps"), B.up_mbps), num("f-mux-down", t("Download, Mbps"), B.down_mbps)),
+    el("div", { class: "hint" }, t("TCP Brutal needs Linux on the server, its tcp-brutal module and Brutal in the inbound; otherwise every connection fails.")));
+  const vision = el("div", { class: "hint" }, t("Vision does not reach the multiplexed streams."));
+  const pool = grid(num("f-mux-maxc", t("Max connections"), fresh ? 4 : M.max_connections), num("f-mux-mins", t("Min streams"), fresh ? 4 : M.min_streams),
+    num("f-mux-maxs", t("Max streams"), M.max_streams));
+  const body = el("div", {}, fSelect("f-mux-proto", t("Protocol"), ["h2mux", "smux", "yamux"], M.protocol || "h2mux"),
+    pool, fCheck("f-mux-pad", t("Padding"), M.padding), br, rates, vision,
+    el("div", { class: "hint" }, t("The server needs multiplex switched on in its sing-box inbound, or mihomo; Xray, 3x-ui and Marzban servers drop every connection.")));
+  const box = el("div", { id: "f-mux-box" }, el("div", { class: "card-title", style: "margin:16px 0 8px" }, t("Multiplex")), on, body);
+  const q = sel => box.querySelector(sel);
+  q("#f-mux").setAttribute("aria-label", t("Multiplex") + " " + t("Enabled"));
+  q("#f-mux-proto").setAttribute("aria-label", t("Multiplex") + " " + t("Protocol"));
+  const sync = () => {
+    const brutal = q("#f-mux-brutal").checked;
+    body.style.display = q("#f-mux").checked ? "" : "none";
+    rates.style.display = brutal ? "" : "none";
+    pool.style.display = brutal ? "none" : "";
+    vision.style.display = flow && /vision/.test(flow.value) ? "" : "none";
+  };
+  box.value = () => {
+    if (!q("#f-mux").checked) return undefined;
+    const v = id => q("#" + id).value.trim(), n = id => parseInt(v(id), 10) || 0;
+    const m = { enabled: true }, proto = v("f-mux-proto");
+    if (proto !== "h2mux" || M.protocol) m.protocol = proto;
+    if (q("#f-mux-pad").checked) m.padding = true;
+    if (q("#f-mux-brutal").checked) m.brutal = { enabled: true, up_mbps: n("f-mux-up"), down_mbps: n("f-mux-down") };
+    else [["f-mux-maxc", "max_connections"], ["f-mux-mins", "min_streams"], ["f-mux-maxs", "max_streams"]].forEach(([id, k]) => { if (n(id)) m[k] = n(id); });
+    return m;
+  };
+  box.addEventListener("change", sync);
+  if (flow) flow.addEventListener("input", sync);
+  sync();
+  return box;
+}
+
+// fHWID is the subscription's x-hwid (competitor gap 25): off, WayHop's own random ID (the daemon makes
+// it once and keeps it apart, so off and a custom ID never lose it: a new one takes another device
+// slot), or the operator's own, which the daemon refuses unless Remnawave would read it. box.show(s)
+// takes {hwid, generated_hwid} as a fetch answers them, box.load(s) the stored ones unless the operator
+// already chose; box.body() is its part of POST /api/subscription, empty until either, so a tab whose
+// config failed to load cannot switch a working ID off. The ID field is named by the label and the
+// mode ("HWID Custom"), and both controls are described by the hint.
+function fHWID() {
+  let stored = "", gen = "", known = false;
+  const sel = el("select", { id: "sub-hwid", "aria-describedby": "sub-hwid-h" }, ...[["off", t("Off")], ["generate", t("Generated")], ["custom", t("Custom")]].map(([v, l]) => el("option", { value: v }, l)));
+  const id = el("input", { type: "text", maxlength: "64", spellcheck: "false", "aria-labelledby": "sub-hwid-l sub-hwid", "aria-describedby": "sub-hwid-h", placeholder: "A-Z a-z 0-9 = -, 10-64", style: "margin-top:6px" });
+  const sync = () => {
+    if (sel.value === "generate") id.value = gen;
+    id.readOnly = sel.value !== "custom";
+    id.style.display = sel.value === "off" || !id.value && id.readOnly ? "none" : "";
+  };
+  sel.addEventListener("change", () => { known = true; sync(); });
+  const box = el("div", { class: "field" }, el("label", { id: "sub-hwid-l", for: "sub-hwid" }, "HWID"), sel, id,
+    el("div", { class: "hint", id: "sub-hwid-h" }, t("Panels with a device limit (Remnawave) answer 404 without it. A generated ID is random and kept: a new one takes another device slot.")));
+  box.show = (s) => { stored = id.value = s.hwid || ""; gen = s.generated_hwid || ""; known = true; sel.value = !stored ? "off" : stored === gen ? "generate" : "custom"; sync(); };
+  box.load = (s) => { if (!known) box.show(s); };
+  box.body = () => known ? { hwid_mode: sel.value, hwid: sel.value === "custom" ? id.value.trim() : "" } : {};
+  sync();
+  return box;
 }
 
 async function loadRealityDests() {
@@ -412,19 +589,21 @@ function shortIdError(v) { return (/^[0-9a-fA-F]+$/.test(v) && v.length % 2 === 
 
 function openEditEndpoint(ep) {
   const external = ep && ep.engine === "external";
-  const form = external ? externalForm(ep) : manualForm(ep);
+  const byedpi = ep && ep.engine === "byedpi";
+  const form = external ? externalForm(ep) : byedpi ? byedpiForm(ep) : manualForm(ep);
   async function save() {
-    if (!external) {
+    if (!external && !byedpi) {
       const unavailable = form.supportError(); if (unavailable) return toast(unavailable, "err");
       const invalid = invalidFieldError(form); if (invalid) return toast(invalid, "err");
     }
     const e = form.collect();
     if (external) { if (!e.params.interface) return toast("Bound interface required", "err"); }
-    else if (!e.server || !e.port) return toast("Server and port required", "err");
-    try { await api.post("/api/endpoints", e); back.remove(); await loadProfile(); route(); toast(t("Updated {0}", e.name || e.id), "ok"); }
+    else if (!byedpi && needsServer(e) && (!e.server || !e.port)) return toast("Server and port required", "err");
+    // Refused, nothing saved, if this connection was saved by anything else since it was loaded (QA-152).
+    try { await api.post("/api/endpoints", e, ifMatch(ep)); back.remove(); await loadProfile(); route(); toast(t("Updated {0}", e.name || e.id), "ok"); }
     catch (err) { toast(redactSecrets(err.message), "err"); } // a validation error can echo a credential (e.g. a malformed TUIC uuid); redact like the paste/subscription paths
   }
-  const back = modal({ title: external ? "Edit external connection" : "Edit connection", body: form.el,
+  const back = modal({ title: external ? "Edit external connection" : byedpi ? "Edit ByeDPI" : "Edit connection", body: form.el,
     footer: [el("button", { class: "btn btn-ghost", onclick: () => back.remove() }, "Cancel"), el("button", { class: "btn btn-primary", onclick: save }, "Save")] });
 }
 
@@ -442,7 +621,7 @@ function friendlyImportError(raw, onRetry) {
   box.appendChild(el("div", { class: "ie-msg" }, msg));
   const acts = el("div", { class: "ie-actions" });
   if (onRetry) acts.appendChild(el("button", { class: "btn btn-sm", type: "button", onclick: onRetry }, t("Paste another link")));
-  acts.appendChild(el("button", { class: "btn btn-sm", type: "button", onclick: () => toast(t("Supported: VLESS · VMess · Trojan · AnyTLS · Shadowsocks · Hysteria2 · TUIC · WireGuard · AmneziaWG"), "info") }, t("View supported formats")));
+  acts.appendChild(el("button", { class: "btn btn-sm", type: "button", onclick: () => toast(t("Supported: VLESS · VMess · Trojan · AnyTLS · Shadowsocks · Hysteria2 · TUIC · WireGuard · AmneziaWG · OpenVPN · Snell · OpenConnect · SSH"), "info") }, t("View supported formats")));
   box.appendChild(acts);
   const det = el("details", { class: "ie-tech" });
   const safe = redactSecrets(raw); // both the display AND the clipboard get the redacted form
@@ -455,6 +634,14 @@ function friendlyImportError(raw, onRetry) {
   det.appendChild(el("button", { class: "btn btn-sm", type: "button", onclick: () => copyText(safe) }, t("Copy technical details")));
   box.appendChild(det);
   return box;
+}
+
+// skippedLines says why each subscription line was not imported. The daemon names the reason (an
+// option the core cannot carry, a retired engine, a malformed field); a bare count hid all of it.
+function skippedLines(errors, summary) {
+  const det = el("details", { class: "hint" }, el("summary", { style: "cursor:pointer" }, summary));
+  errors.forEach(e => det.appendChild(el("div", {}, redactSecrets(String(e)))));
+  return det;
 }
 
 function openAddConnection() {
@@ -506,7 +693,7 @@ function openAddConnection() {
         const saveBtn = el("button", { class: "btn btn-primary", onclick: async (ev) => {
           const unavailable = form.supportError(); if (unavailable) return toast(unavailable, "err");
           const invalid = invalidFieldError(form); if (invalid) return toast(invalid, "err");
-          const e = form.collect(); if (!e.server || !e.port) return toast("Server and port required", "err");
+          const e = form.collect(); if (needsServer(e) && (!e.server || !e.port)) return toast("Server and port required", "err");
           const b = ev.currentTarget; if (b.disabled) return; b.disabled = true; // guard against double-submit firing two POSTs before done() removes the modal
           // The id is derived from protocol+server+port at import time, and POST /api/endpoints is an
           // UPSERT — so a second account on a host that already has one lands on the same id and
@@ -546,7 +733,10 @@ function openAddConnection() {
     const form = manualForm(null);
     const addBtn = el("button", { class: "btn btn-primary", onclick: async (ev) => {
       const unavailable = form.supportError(); if (unavailable) return toast(unavailable, "err");
-      const e = form.collect(); if (!e.server || !e.port) return toast("Server and port required", "err");
+      // As the edit and paste paths do: a field marked invalid (a Reality key, an empty pasted ECH
+      // config) is named here, not saved as something else.
+      const invalid = invalidFieldError(form); if (invalid) return toast(invalid, "err");
+      const e = form.collect(); if (needsServer(e) && (!e.server || !e.port)) return toast("Server and port required", "err");
       const b = ev.currentTarget; if (b.disabled) return; b.disabled = true; // guard against double-submit firing two POSTs before done() removes the modal
       const { go, replacing } = await confirmEndpointReplace(e);
       if (!go) { b.disabled = false; return; }
@@ -554,16 +744,45 @@ function openAddConnection() {
     } }, "Add");
     return el("div", {}, form.el, el("div", { style: "margin-top:8px" }, addBtn));
   }
+  function byedpiTab() {
+    const form = byedpiForm(null);
+    const addBtn = el("button", { class: "btn btn-primary", onclick: async (ev) => {
+      const e = form.collect();
+      const b = ev.currentTarget; if (b.disabled) return; b.disabled = true;
+      const { go, replacing } = await confirmEndpointReplace(e);
+      if (!go) { b.disabled = false; return; }
+      try { await api.post("/api/endpoints", e); done(replacing ? t("Replaced {0}", replacing.name || replacing.id) : t("Added {0}", e.name || e.id)); } catch (err) { b.disabled = false; toast(err.message, "err"); }
+    } }, "Add");
+    return el("div", {}, form.el, el("div", { style: "margin-top:8px" }, addBtn));
+  }
   function subTab() {
     let found = [];
     const url = el("input", { type: "text", placeholder: t("{0} (optional)", "https://provider/subscription") });
+    // Provider panels pick the format by User-Agent and some refuse one they do not know (competitor
+    // gap 2). The daemon keeps the one a URL was fetched with, so it is shown again here.
+    const ua = el("input", { type: "text", placeholder: "wayhop", maxlength: "256", spellcheck: "false" });
+    const hw = fHWID();
+    api.get("/api/config").then(c => { if (c && c.subscription && c.subscription.user_agent && !ua.value) ua.value = c.subscription.user_agent; if (c && c.subscription) hw.load(c.subscription); }).catch(() => {});
     const ta = el("textarea", { placeholder: "…or paste the subscription text / base64 blob here" });
     const list = el("div", { class: "checks", style: "margin-top:14px" });
     const importBtn = el("button", { class: "btn btn-primary", disabled: "true", onclick: async (ev) => {
       const chosen = $$("input[type=checkbox]:checked", list).map(c => found[+c.value]);
       if (!chosen.length) return toast("Nothing selected", "err");
       const b = ev.currentTarget; if (b.disabled) return; b.disabled = true; // guard against double-submit firing two bulk POSTs before done() removes the modal
-      try { const r = await api.post("/api/endpoints/bulk", { endpoints: chosen }); done(tn("Imported {0} connection|Imported {0} connections", r.saved) + (r.duplicates ? tn(", {0} duplicate skipped|, {0} duplicates skipped", r.duplicates) : "") + (r.errors && r.errors.length ? t(", {0} failed", r.errors.length) : "")); } catch (e) { b.disabled = false; toast(redactSecrets(e.message), "err"); }
+      try {
+        const r = await api.post("/api/endpoints/bulk", { endpoints: chosen });
+        // The daemon stores what this host cannot carry, or what cannot load, DISABLED and says so in
+        // stored_disabled (QA-028); unreported, that flip read as a silent edit of the import.
+        const off = r.stored_disabled || [];
+        // A link imported again updates its connection and keeps the user's edits (QA-148), so the
+        // count says which: new, updated, or already as the link has it.
+        done(tn("Imported {0} connection|Imported {0} connections", r.added ?? r.saved)
+          + (r.updated ? tn(", {0} updated|, {0} updated", r.updated) : "")
+          + (r.unchanged ? tn(", {0} unchanged|, {0} unchanged", r.unchanged) : "")
+          + (r.duplicates ? tn(", {0} duplicate skipped|, {0} duplicates skipped", r.duplicates) : "") + (r.errors && r.errors.length ? t(", {0} failed", r.errors.length) : ""));
+        if (off.length) toast(t("disabled") + ": " + redactSecrets(off.join("; ")), "err");
+        if (r.notes && r.notes.length) toast(redactSecrets(r.notes.join("; ")), "info"); // e.g. an ECH config on a Reality link, not used
+      } catch (e) { b.disabled = false; toast(redactSecrets(e.message), "err"); }
     } }, "Import selected");
     const fetchBtn = el("button", { class: "btn", onclick: async (ev) => {
       const b = ev.currentTarget; if (b.disabled) return; b.disabled = true; // guard against a double-click firing two overlapping fetches that each clear `list` and reassign `found`, desyncing the checkbox indices
@@ -578,22 +797,26 @@ function openAddConnection() {
         return;
       }
       try {
-        const r = await api.post("/api/subscription", { url: url.value.trim(), text: ta.value });
+        const r = await api.post("/api/subscription", { url: url.value.trim(), text: ta.value, user_agent: ua.value.trim(), ...hw.body() });
+        if ("hwid" in r) hw.show(r); // the ID the provider was just asked with, e.g. one generated now
         found = r.endpoints || [];
-        if (!found.length) { list.appendChild(el("div", { class: "hint" }, r.errors && r.errors.length ? t("No connections found ({0} line errors).", r.errors.length) : t("No connections found."))); return; }
+        if (!found.length) { list.appendChild(r.errors && r.errors.length ? skippedLines(r.errors, t("No connections found ({0} line errors).", r.errors.length)) : el("div", { class: "hint" }, t("No connections found."))); return; }
         if (r.name) list.appendChild(el("div", { class: "hint", style: "color:var(--ink-2);margin-bottom:8px" }, t("From: {0}", r.name)));
         found.forEach((e, i) => list.appendChild(el("label", { class: "check" }, el("input", { type: "checkbox", value: String(i), checked: "true" }), el("span", {}, (e.name || e.id) + "  "), el("span", { class: "badge" }, e.protocol))));
-        if (r.errors && r.errors.length) list.appendChild(el("div", { class: "hint" }, r.errors.length + " line(s) skipped"));
+        if (r.errors && r.errors.length) list.appendChild(skippedLines(r.errors, r.errors.length + " line(s) skipped"));
+        if (r.notes && r.notes.length) list.appendChild(skippedLines(r.notes, r.notes.length + " note(s)")); // e.g. a Clash smux setting sing-box has no field for
         importBtn.removeAttribute("disabled");
       } catch (e) { list.appendChild(el("div", { class: "hint", style: "color:var(--err)" }, redactSecrets(e.message))); }
       finally { b.disabled = false; }
     } }, "Fetch / Parse");
     return el("div", {}, el("div", { class: "field" }, el("label", {}, "Subscription URL"), url),
+      el("div", { class: "field" }, el("label", {}, t("User-Agent (optional)")), ua,
+        el("div", { class: "hint" }, t("Some provider panels choose the format by it, e.g. sing-box or clash.meta."))), hw,
       el("div", { class: "field" }, el("label", {}, "or paste text / base64"), ta),
       el("div", { style: "display:flex;gap:10px" }, fetchBtn, importBtn), list);
   }
 
-  const tabKeys = [["paste", "Paste link"], ["manual", "Manual"], ["sub", "Subscription"]];
+  const tabKeys = [["paste", "Paste link"], ["manual", "Manual"], ["sub", "Subscription"], ["byedpi", "ByeDPI"]];
   const order = tabKeys.map(([k]) => k);
   function show(key) {
     Object.entries(tabEls).forEach(([k, t]) => {
@@ -604,7 +827,7 @@ function openAddConnection() {
     });
     content.setAttribute("aria-labelledby", "addconn-tab-" + key); // name the panel by its owning tab (ARIA tabs pattern)
     content.innerHTML = "";
-    content.appendChild(key === "paste" ? pasteTab() : key === "manual" ? manualTab() : subTab());
+    content.appendChild(key === "paste" ? pasteTab() : key === "manual" ? manualTab() : key === "byedpi" ? byedpiTab() : subTab());
     associateLabels(content); // the tab's fields are injected AFTER modal()'s one-shot associateLabels ran — re-wire them
   }
   const tabBar = el("div", { class: "tabs", role: "tablist" }, ...tabKeys.map(([k, label]) => {
@@ -727,6 +950,54 @@ function healthTargetPicker(input, endpointID) {
   return el("div", { style: "display:flex;align-items:center;margin-top:6px" }, btn, out, list);
 }
 
+// needsServer: every connection dials a server and port except a Hysteria2 one through a Realm, whose
+// rendezvous finds the server (QA-053: all three save paths refused one, so a pasted
+// hysteria2+realm:// link could not be imported here and an imported one could not be edited).
+function needsServer(e) { return !(e.protocol === "hysteria2" && e.params && e.params.realm); }
+
+// connectionProtocolSupport is how a new connection of proto is carried here: "native" when the
+// router (or the add-on core) takes it, "engine" when the router's own AmneziaWG cannot create it and
+// WayHop's AmneziaWG engine runs it instead, "" when a save switched on is refused. "engine" is the
+// daemon's own save check (engine_plugin in /api/native/capabilities, QA-133), not a second rule.
+function connectionProtocolSupport(proto, items, plugins) {
+  if (connectionProtocolRequirementIDs(proto).every(id => items[id] && items[id].state === "supported")) return "native";
+  return plugins && plugins[proto] && plugins[proto].carried ? "engine" : "";
+}
+
+// enginePluginNote says what the daemon answered of WayHop's AmneziaWG engine for a new connection:
+// that it runs it and why the router's own does not, with what is left to do - or, when it cannot
+// run it either, why. The daemon's words are shown as sent, like a capability's detail.
+function enginePluginNote(offer) {
+  if (!offer) return "";
+  const sentence = s => s ? s.charAt(0).toUpperCase() + s.slice(1) + (/[.!?]$/.test(s) ? "" : ".") : "";
+  if (!offer.carried) return sentence(offer.blocked || "");
+  return [t("Runs on WayHop's AmneziaWG engine (amneziawg-go), not the router's own."), sentence(offer.reason || ""),
+    offer.installed ? "" : t("Install amneziawg-go on the Components page first."), offer.remedy || ""]
+    .filter(Boolean).join(" ");
+}
+
+// nativeSupportNote is the protocol selector's hint where the router's own creates a new connection
+// of proto. An AmneziaWG one may still run on WayHop's engine: settings newer than the router's own
+// AmneziaWG (AmneziaWG 2 on KeeneticOS 4.2 to 5.0, a module older than them on OpenWrt) or amneziawg-go
+// chosen below. engine_plugin answers for a connection with no settings, so the hint says when, and the
+// Apply review names the engine each connection runs on.
+function nativeSupportNote(proto) {
+  return proto === "amneziawg"
+    ? t("Supported natively, unless its settings need a newer AmneziaWG than the router's or amneziawg-go is chosen below: then WayHop's engine runs it. The Apply review says which.")
+    : t("Supported natively: WayHop will use the router backend and can roll this connection back.");
+}
+
+// fQUIC is sing-box 1.14's QUIC tuning on Hysteria2 and TUIC (model.QUICTuningOf): the size QUIC starts
+// at and whether it probes for larger. On Hysteria2, Chrome's handshake replaces the size.
+function fQUIC(P, hy2) {
+  return el("div", {},
+    fInputValidated("f-quic-size", t("Initial QUIC packet size (bytes)"), P.initial_packet_size, "1200–1452",
+      v => /^\d+$/.test(v) && v >= 1200 && v <= 1452 ? "" : "1200–1452"),
+    fCheck("f-quic-nopmtud", t("No QUIC path MTU discovery"), P.disable_path_mtu_discovery),
+    el("div", { class: "hint" }, t("For PPPoE, LTE or a VPN inside a VPN, where large QUIC packets vanish. Needs sing-box 1.14+."),
+      hy2 ? " " + t("The size applies only with the Chrome fingerprint off.") : ""));
+}
+
 // manualForm builds the protocol form. Returns {el, collect}. Pass an endpoint to edit.
 function manualForm(ep) {
   ep = ep || {};
@@ -742,10 +1013,16 @@ function manualForm(ep) {
     else if (proto === "trojan") add(fInput("f-password", "Password", P.password));
     else if (proto === "anytls") add(fInput("f-password", "Password", P.password),
       fSniCheck("f-sni", "SNI", T.sni), fInput("f-fp", "uTLS fingerprint (chrome…, optional)", T.fingerprint),
-      fCheck("f-insecure", "Allow insecure TLS", T.insecure));
+      // Reality uses no pin (and no ECH): their fields are not shown there, and what it carries is kept.
+      fCheck("f-insecure", "Allow insecure TLS", T.insecure), T.type !== "reality" && fPins(T, P), T.type !== "reality" && fKeyPins(T), T.type !== "reality" && fECH(T.ech, false));
     else if (proto === "shadowsocks") add(fSelect("f-method", "Method", SS_METHODS, P.method || SS_METHODS[0]), fInput("f-password", "Password", P.password));
-    else if (proto === "hysteria2") add(fInput("f-password", "Password", P.password), fSniCheck("f-sni", "SNI", T.sni), fInput("f-obfs", "Obfs (salamander, optional)", P.obfs), fInput("f-obfspw", "Obfs password", P.obfs_password), fCheck("f-insecure", "Allow insecure TLS", T.insecure));
-    else if (proto === "tuic") add(fInput("f-uuid", "UUID", P.uuid), fInput("f-password", "Password", P.password), fSniCheck("f-sni", "SNI", T.sni), fInput("f-cc", "Congestion control (bbr/cubic)", P.congestion_control), fCheck("f-insecure", "Allow insecure TLS", T.insecure));
+    else if (proto === "hysteria2") add(fInput("f-password", "Password", P.password),
+      // A Realm (needs sing-box 1.14) stands in for server and port: the rendezvous finds the server.
+      fInput("f-realm", "Realm (realm://token@host/name, optional)", P.realm),
+      fInput("f-realm-stun", "Realm STUN servers (optional)", Array.isArray(P.realm_stun) ? P.realm_stun.join(",") : P.realm_stun),
+      fSniCheck("f-sni", "SNI", T.sni), fInput("f-obfs", "Obfs (salamander, optional)", P.obfs), fInput("f-obfspw", "Obfs password", P.obfs_password), fCheck("f-insecure", "Allow insecure TLS", T.insecure), fPins(T, P), fKeyPins(T),
+      fCheck("f-hy2-noparrot", "No Chrome QUIC fingerprint (Ed25519 servers)", P.disable_chrome_parrot), fECH(T.ech, true), fQUIC(P, true));
+    else if (proto === "tuic") add(fInput("f-uuid", "UUID", P.uuid), fInput("f-password", "Password", P.password), fSniCheck("f-sni", "SNI", T.sni), fInput("f-cc", "Congestion control (bbr/cubic)", P.congestion_control), fCheck("f-insecure", "Allow insecure TLS", T.insecure), fPins(T, P), fKeyPins(T), fECH(T.ech, true), fQUIC(P, false));
     else if (proto === "wireguard" || proto === "amneziawg") {
       add(fInput("f-pk", "Private key", P.private_key), fInput("f-ppk", "Peer public key", P.peer_public_key), fInput("f-psk", "Pre-shared key (optional)", P.pre_shared_key), fInput("f-addr", "Local address(es), comma-separated", asList(P.local_address).join(",")));
       // Per-tunnel link tuning (optional; blank = unset = current behavior). Read the
@@ -798,13 +1075,52 @@ function manualForm(ep) {
         add(el("div", { class: "field" }, el("label", {}, t("AmneziaWG engine")), eng,
           el("div", { class: "hint" }, t("amneziawg-go must be installed on the Components page. It is slower than the router's own AmneziaWG and holds 60-120 MB of RAM under load; the Apply review says which one each connection runs on."))));
       }
+    } else if (proto === "snell") {
+      // sing-box speaks Snell v4 (optional HTTP obfuscation) and v6 (traffic shaping); each version's
+      // own field is the one that applies, the other is ignored on save.
+      add(fInput("f-psk", "Pre-shared key", P.psk), fSelect("f-snell-ver", "Version", ["4", "6"], String(P.version || 4)),
+        fSelect("f-snell-obfs", "HTTP obfuscation (v4)", ["none", "http"], P.obfs_mode || "none"),
+        fInput("f-snell-host", "Obfs host (v4)", P.obfs_host),
+        fSelect("f-snell-mode", "Traffic shaping (v6)", ["default", "unshaped", "unsafe-raw"], P.mode || "default"));
+    } else if (proto === "openconnect") {
+      // No profile format exists, so everything is entered here. The router answers only what these
+      // fields hold; a server that asks anything else at sign-in will not connect, and the hint says so.
+      add(fSelect("f-oc-flavor", "Server type", ["anyconnect", "gp", "fortinet", "f5", "pulse", "nc"], P.flavor || "anyconnect"),
+        fInput("f-user", "Username", P.username), fInput("f-password", "Password", P.password, { type: "password" }),
+        fInput("f-oc-group", "Group (optional)", P.auth_group), fInput("f-oc-totp", "TOTP secret (optional)", P.totp_secret),
+        fInput("f-oc-cert", "Server certificate pin (optional)", P.server_cert),
+        fCheck("f-oc-noudp", "TLS only (no DTLS/ESP)", P.no_udp),
+        el("div", { class: "hint" }, t("The router cannot answer an interactive sign-in prompt: the server must accept just these fields.")));
+    } else if (proto === "ssh") {
+      // Any VPS that takes an SSH login is an exit: a password or a pasted PEM key (with its
+      // passphrase when encrypted), and the server's host keys - without them sing-box accepts any
+      // server, so the hint says what that costs and the Apply review repeats it. It also says the
+      // exit is TCP only (sing-box's ssh outbound has no UDP), before anyone routes calls through it.
+      // A key imported from a sing-box config is a list of lines; String() of it would join them
+      // with commas, which the next save refuses, so both lists are joined with line breaks.
+      add(fInput("f-user", "Username", P.user, { ph: "root" }),
+        fInput("f-password", "Password", P.password, { type: "password" }),
+        fText("f-ssh-key", "Private key", asList(P.private_key).join("\n"), "-----BEGIN OPENSSH PRIVATE KEY-----"),
+        fInput("f-ssh-pass", "Key passphrase (optional)", P.private_key_passphrase, { type: "password" }),
+        fText("f-ssh-hostkey", "Host keys (one per line, as ssh-keyscan prints them)", asList(P.host_key).join("\n"), "ssh-ed25519 AAAA…"),
+        el("div", { class: "hint" }, t("TCP only, no UDP (calls, games). Without a host key the router accepts any server, so whoever intercepts the connection can read it.")),
+        fInput("f-ssh-ver", "Client version (optional)", P.client_version, { ph: "SSH-2.0-OpenSSH_9.6" }));
+    } else if (proto === "openvpn") {
+      // The certificates and keys come from the pasted .ovpn; the form edits what an operator changes:
+      // the transport and the sign-in. A new one without a profile says where it starts.
+      add(fSelect("f-ovpn-net", "Transport", ["udp", "tcp"], P.network || "udp"),
+        fInput("f-user", "Username", P.username), fInput("f-password", "Password", P.password, { type: "password" }));
+      const have = [P.ca && "CA", P.cert && t("client certificate"), P.control_wrap && P.control_wrap.replace(/_/g, "-"),
+        P.mode === "static_key" && t("static key")].filter(Boolean);
+      add(el("div", { class: "hint" }, have.length
+        ? t("From the OpenVPN profile: {0}.", have.join(", "))
+        : t("Paste the .ovpn profile under Paste link: its certificates and keys come from it. This form edits the server, transport and sign-in.")));
+      if (Array.isArray(P.servers) && P.servers.length > 1) {
+        add(el("div", { class: "hint" }, t("The profile lists {0} servers; the fields above edit the first, the rest come from the profile.", P.servers.length)));
+      }
     } else if (proto === "olcrtc") {
-      add(fSelect("f-provider", "Meet provider", ["jitsi", "telemost", "wbstream"], P.provider || "jitsi"),
-        fInput("f-room", "Room URL / id", P.room),
-        fInput("f-key", "Shared key (64 hex)", P.key),
-        fSelect("f-transport", "Transport", ["datachannel", "vp8channel", "seichannel", "videochannel"], P.transport || "datachannel"),
-        fInput("f-dns", "DNS resolver", P.dns || "8.8.8.8:53"),
-        el("div", { class: "hint" }, "olcRTC tunnels through a WebRTC meet service to beat IP whitelists. Runs as a chained engine; needs the olcrtc binary on the router (Updater)."));
+      // Saved by an older build: olcRTC was removed, so the form explains instead of editing.
+      add(el("div", { class: "hint" }, t("olcRTC is no longer supported: the project ended and WayHop removed it. Delete this connection, or keep it disabled.")));
     } else if (proto === "socks" || proto === "http") add(fInput("f-user", "Username (optional)", P.username), fInput("f-password", "Password (optional)", P.password));
 
     if (["vless", "vmess", "trojan"].includes(proto)) {
@@ -814,10 +1130,18 @@ function manualForm(ep) {
       // only for Reality (a plain-TLS SNI must be the server's OWN domain, not a front).
       const frontHint = el("div", { class: "hint", id: "f-sni-fronthint", style: "margin:-2px 0 8px;display:none" },
         t("Reality mimics a real site — pick a major TLS-1.3 host (suggestions in the field), then Check it's reachable + TLS 1.3."));
+      // Pins are not used with Reality (its own key authenticates the server), so the field is hidden
+      // there; what a Reality link brought is kept, and the Apply review says it is unused.
+      const pinsBox = fPins(T, P), keyPinsBox = fKeyPins(T);
       add(fSelect("f-sec", "TLS", ["none", "tls", "reality"], T.type || (T.enabled ? "tls" : "none")),
-        fSniCheck("f-sni", "SNI", T.sni), frontHint, fInput("f-fp", "uTLS fingerprint (chrome…, optional)", T.fingerprint),
+        fSniCheck("f-sni", "SNI", T.sni), frontHint, fInput("f-fp", "uTLS fingerprint (chrome…, optional)", T.fingerprint), pinsBox, keyPinsBox,
         fInputValidated("f-pbk", "Reality public key", T.public_key, "base64 x25519 (43–44 chars)", realityPubkeyError),
         fInputValidated("f-sid", "Reality short id", T.short_id, "hex, even length, ≤16 (optional)", shortIdError));
+      // ECH applies to plain TLS only: sing-box refuses it with Reality. A Reality link's config (v2rayN
+      // writes one) is kept switched off, and said here rather than on every Apply.
+      const echBox = fECH(T.type === "reality" ? null : T.ech, false);
+      const realityECH = T.type === "reality" && T.ech && T.ech.config ? el("div", { class: "hint" }, t("This link's ECH config is not used: sing-box cannot combine ECH with Reality.")) : null;
+      add(echBox, realityECH);
       add(el("div", { class: "card-title", style: "margin:16px 0 8px" }, "Transport"));
       add(fSelect("f-tt", "Type", ["tcp", "ws", "grpc", "http", "httpupgrade"], R.type || "tcp"),
         fInput("f-path", "Path (ws/http)", R.path), fInput("f-host", "Host header (ws/http)", R.host),
@@ -838,10 +1162,17 @@ function manualForm(ep) {
         const on = secSel && secSel.value === "reality";
         if (sniInp) { if (on) sniInp.setAttribute("list", "f-sni-fronts"); else sniInp.removeAttribute("list"); }
         frontHint.style.display = on ? "" : "none";
+        pinsBox.style.display = on ? "none" : "";
+        if (keyPinsBox) keyPinsBox.style.display = pinsBox.style.display;
+        echBox.style.display = secSel && secSel.value === "tls" ? "" : "none";
+        if (realityECH) realityECH.style.display = on ? "" : "none";
+        echBox.sync();
       };
       if (secSel) secSel.addEventListener("change", syncFronts);
       syncFronts();
     }
+    // Multiplex: only these four outbounds have the field, so another protocol has no box and loses it.
+    if (["vless", "vmess", "trojan", "shadowsocks"].includes(proto)) add(fMux(ep.multiplex, dyn.querySelector("#f-flow")));
     associateLabels(dyn); // re-wire labels for the freshly-rebuilt protocol fields (a protocol switch bypasses modal()'s one-shot associateLabels)
   }
   renderDyn(proto0);
@@ -889,11 +1220,11 @@ function manualForm(ep) {
     const verified = !!items && !set.probe_error && !error;
     lastProtocolSet = verified ? response : null;
     protocolCapabilitiesVerified = verified;
+    const plugins = (verified && response.engine_plugin) || {};
     let enabledCount = 0;
     [...protoSel.options].forEach(option => {
-      const requirements = connectionProtocolRequirementIDs(option.value);
       const supported = verified && ((demo && option.value !== "olcrtc") ||
-        requirements.every(id => items[id] && items[id].state === "supported"));
+        connectionProtocolSupport(option.value, items, plugins) !== "");
       option.disabled = !supported;
       if (supported) enabledCount++;
       const base = option.dataset.baseLabel || option.value;
@@ -915,10 +1246,14 @@ function manualForm(ep) {
       protoSupportText.textContent = t("Demo mode: this connection is saved for interface preview; no router connection is activated.");
       protoRetry.style.display = "none";
     } else if (selected && selected.disabled) {
-      protoSupportText.textContent = t("This saved or imported type is retained but cannot be activated on this router. ") + capabilityReason(failed);
+      protoSupportText.textContent = t("This saved or imported type is retained but cannot be activated on this router. ") +
+        [capabilityReason(failed), enginePluginNote(plugins[protoSel.value])].filter(Boolean).join(" ");
+      protoRetry.style.display = "none";
+    } else if (connectionProtocolSupport(protoSel.value, items, plugins) === "engine") {
+      protoSupportText.textContent = enginePluginNote(plugins[protoSel.value]);
       protoRetry.style.display = "none";
     } else if (protoSel.value === "wireguard" || protoSel.value === "amneziawg") {
-      protoSupportText.textContent = t("Supported natively: WayHop will use the router backend and can roll this connection back.");
+      protoSupportText.textContent = nativeSupportNote(protoSel.value);
       protoRetry.style.display = "none";
     } else {
       protoSupportText.textContent = t("Supported through the optional sing-box compatibility add-on.");
@@ -940,6 +1275,11 @@ function manualForm(ep) {
     const option = protoSel.selectedOptions[0];
     if (!protocolCapabilitiesVerified) return t("Router support is not verified yet. Retry the capability check.");
     if (!option || option.disabled) return protoSupportText.textContent || t("This connection type is unavailable on this router.");
+    // An OpenVPN connection's certificates exist only in a pasted profile; saved without one it is a
+    // connection the next Apply refuses ("missing required ca"), so say where it starts instead.
+    if (option.value === "openvpn" && !P.ca && !P.static_key) {
+      return t("Paste the .ovpn profile under Paste link: its certificates and keys come from it. This form edits the server, transport and sign-in.");
+    }
     return "";
   }
   paintProtocolCapabilities(null, null);
@@ -949,7 +1289,7 @@ function manualForm(ep) {
     const g = id => { const e = document.getElementById(id); return e ? e.value.trim() : ""; };
     const gc = id => { const e = document.getElementById(id); return e ? e.checked : false; };
     const proto = g("f-proto");
-    const out = { id: ep.id || "", name: g("f-name"), protocol: proto, engine: proto === "amneziawg" ? "amneziawg" : proto === "olcrtc" ? "olcrtc" : "singbox", server: g("f-server"), port: parseInt(g("f-port"), 10) || 0, enabled: ep.enabled !== false, params: {} };
+    const out = { id: ep.id || "", name: g("f-name"), protocol: proto, engine: proto === "amneziawg" ? "amneziawg" : proto === "olcrtc" ? "olcrtc" : "singbox", server: g("f-server"), port: parseInt(g("f-port"), 10) || (proto === "openconnect" ? 443 : proto === "ssh" ? 22 : 0), enabled: ep.enabled !== false, params: {} };
     if (!out.id) out.id = (proto + "-" + out.server + "-" + out.port).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
     const p = out.params;
     if (["vless", "vmess", "tuic"].includes(proto)) p.uuid = g("f-uuid");
@@ -958,7 +1298,17 @@ function manualForm(ep) {
     if (["trojan", "anytls", "hysteria2", "tuic", "shadowsocks", "socks", "http"].includes(proto) && g("f-password")) p.password = g("f-password");
     if (proto === "shadowsocks") p.method = g("f-method");
     if (proto === "hysteria2" && g("f-obfs")) { p.obfs = g("f-obfs"); if (g("f-obfspw")) p.obfs_password = g("f-obfspw"); }
+    if (proto === "hysteria2" && gc("f-hy2-noparrot")) p.disable_chrome_parrot = true;
+    if (proto === "hysteria2" && g("f-realm")) {
+      p.realm = g("f-realm"); if (g("f-realm-stun")) p.realm_stun = g("f-realm-stun");
+      // No server to name it by, and one rendezvous serves many realms (QA-058): host, made unique.
+      if (!ep.id) out.id = rlUniqueId(("hysteria2-realm-" + (p.realm.split("/")[2] || "").replace(/^.*@/, "")).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/-$/, ""));
+    }
     if (proto === "tuic" && g("f-cc")) p.congestion_control = g("f-cc");
+    if (["hysteria2", "tuic"].includes(proto)) {
+      if (g("f-quic-size")) p.initial_packet_size = parseInt(g("f-quic-size"), 10);
+      if (gc("f-quic-nopmtud")) p.disable_path_mtu_discovery = true;
+    }
     if (["wireguard", "amneziawg"].includes(proto)) {
       p.private_key = g("f-pk"); p.peer_public_key = g("f-ppk"); if (g("f-psk")) p.pre_shared_key = g("f-psk"); if (g("f-addr")) p.local_address = g("f-addr").split(",").map(s => s.trim()).filter(Boolean);
       // Per-tunnel link tuning → top-level Endpoint fields (mtu / persistent_keepalive).
@@ -994,12 +1344,37 @@ function manualForm(ep) {
       if (g("f-fp")) out.tls.fingerprint = g("f-fp");
       if (T.alpn) out.tls.alpn = T.alpn;
     }
-    if (proto === "olcrtc") {
-      p.provider = g("f-provider"); p.room = g("f-room"); p.key = g("f-key");
-      if (g("f-transport")) p.transport = g("f-transport");
-      if (g("f-dns")) p.dns = g("f-dns");
-      if (!out.server && g("f-room")) { try { out.server = new URL(g("f-room")).hostname || out.server; } catch (_) {} }
-      if (!out.port) out.port = 443;
+    if (proto === "olcrtc") Object.assign(p, P); // a retired connection keeps what it was saved with
+    if (proto === "openconnect") {
+      if (g("f-oc-flavor") !== "anyconnect") p.flavor = g("f-oc-flavor");
+      for (const [id, key] of [["f-user", "username"], ["f-password", "password"], ["f-oc-group", "auth_group"],
+        ["f-oc-totp", "totp_secret"], ["f-oc-cert", "server_cert"]]) if (g(id)) p[key] = g(id);
+      if (gc("f-oc-noudp")) p.no_udp = true;
+    }
+    if (proto === "ssh") {
+      for (const [id, key] of [["f-user", "user"], ["f-password", "password"], ["f-ssh-key", "private_key"],
+        ["f-ssh-pass", "private_key_passphrase"], ["f-ssh-ver", "client_version"]]) if (g(id)) p[key] = g(id);
+      // One key per line; blank lines and ssh-keyscan's "# host SSH-2.0-..." banners are not keys.
+      const hk = g("f-ssh-hostkey").split("\n").map(s => s.trim()).filter(s => s && s[0] !== "#");
+      if (hk.length) p.host_key = hk;
+    }
+    if (proto === "snell") {
+      p.psk = g("f-psk");
+      p.version = parseInt(g("f-snell-ver"), 10) || 4;
+      if (p.version === 4 && g("f-snell-obfs") === "http") { p.obfs_mode = "http"; if (g("f-snell-host")) p.obfs_host = g("f-snell-host"); }
+      if (p.version === 6 && g("f-snell-mode") !== "default") p.mode = g("f-snell-mode");
+    }
+    if (proto === "openvpn") {
+      // Everything the profile carried stays; the form's three fields override their params.
+      Object.assign(p, P);
+      p.network = g("f-ovpn-net") || "udp";
+      // A profile with several remotes is dialled from its server list, never from the Server and
+      // Port fields, so an edit there changed nothing the core used (QA-151). As the form says, the
+      // fields are the list's first entry; the rest stay as the profile gave them.
+      if (Array.isArray(p.servers) && p.servers.length > 1) {
+        p.servers = [{ ...p.servers[0], server: out.server, port: out.port, network: p.network }, ...p.servers.slice(1)];
+      }
+      if (g("f-user")) { p.username = g("f-user"); p.password = g("f-password"); } else { delete p.username; delete p.password; }
     }
     if (document.getElementById("f-sec")) {
       const sec = g("f-sec");
@@ -1016,6 +1391,62 @@ function manualForm(ep) {
       const tt = g("f-tt");
       if (tt && tt !== "tcp") { out.transport = { type: tt }; if (g("f-path")) out.transport.path = g("f-path"); if (g("f-host")) out.transport.host = g("f-host"); if (tt === "grpc" && g("f-sname")) out.transport.service_name = g("f-sname"); }
     }
+    // What the original TLS block carried and this form has no control for goes back in, as the keep
+    // map below does for params (QA-035..037): an HTTPS proxy's whole block (the http form has no TLS
+    // fields), Reality on AnyTLS (no security select there), the fragment flags a sing-box import sets,
+    // insecure under Reality, uTLS on QUIC. Only into a block of the same type, and only where the form
+    // left the key unset, so a value the form does render is never resurrected after being cleared.
+    if (proto === "http" && T.enabled) out.tls = Object.assign({}, T);
+    else if (out.tls && T.enabled) {
+      if (proto === "anytls" && T.type === "reality") Object.assign(out.tls, { type: "reality", public_key: T.public_key, short_id: T.short_id });
+      if (T.type === out.tls.type) {
+        const carry = ["fragment", "record_fragment", "insecure"].concat(document.getElementById("f-fp") ? [] : ["fingerprint"]);
+        // Pins only where the form has no field for them (certificate pins: HTTPS proxy; key pins: none to show).
+        carry.push("pin_cert_may_be_ca", "pin_cert_beside_chain", "pin_cert_may_be_ca_of", "pin_cert_beside_chain_of",
+          ...(document.getElementById("f-pins") ? [] : ["pin_cert_sha256"]), ...(document.getElementById("f-pinkeys") ? [] : ["pin_pubkey_sha256"]));
+        carry.forEach(k => { if (T[k] !== undefined && out.tls[k] === undefined) out.tls[k] = T[k]; });
+      }
+    }
+    // ECH: from its controls where the form shows them (TLS, not Reality); elsewhere what the block
+    // carried goes back, like the keys above - the config a Reality link brought, kept switched off.
+    if (out.tls && proto !== "http") {
+      const ech = echValue();
+      if (ech) out.tls.ech = ech;
+      else if (ech === null && T.ech && T.type === out.tls.type) out.tls.ech = T.ech;
+      // Certificate pins from their field, cleared ones included; a form without it carries them above.
+      // Left as it was, the pins stay as stored, a legacy Hysteria pin in its parameter: the daemon
+      // refuses a malformed pin only in the field the form writes, so one kept from a link an older
+      // WayHop imported does not hold an unrelated edit, and the Apply review still reports it.
+      // Public-key pins from their box, which only shows them: Remove empties it, and the save drops them.
+      const keyPinsEl = document.getElementById("f-pinkeys");
+      if (keyPinsEl) { const k = splitPins(keyPinsEl.value); if (k.length) out.tls.pin_pubkey_sha256 = k; }
+      const pinsEl = document.getElementById("f-pins");
+      if (pinsEl && pinsEl.value.trim() === pinsEl.defaultValue) {
+        ["pin_cert_sha256", "pin_cert_may_be_ca", "pin_cert_beside_chain", "pin_cert_may_be_ca_of", "pin_cert_beside_chain_of"]
+          .forEach(k => { if (T[k] !== undefined) out.tls[k] = T[k]; });
+        if (P.pin_sha256) p.pin_sha256 = P.pin_sha256;
+      } else if (pinsEl) {
+        out.tls.pin_cert_sha256 = splitPins(g("f-pins"));
+        // Where the pins came from (model TLS.pin_cert_may_be_ca / _beside_chain) is about the pins a flag
+        // came with, not pins typed beside them: it holds while one of those remains, its _of list naming
+        // them when they are not all the pins. A legacy Hysteria pin has Hysteria's meaning.
+        const now = [...new Set(out.tls.pin_cert_sha256.map(pinHex))];
+        const had = flag => T[flag] ? (T[flag + "_of"] || T.pin_cert_sha256 || []).map(pinHex) : [];
+        const about = (flag, from) => {
+          const left = now.filter(h => from.includes(h));
+          delete out.tls[flag]; delete out.tls[flag + "_of"];
+          if (left.length) out.tls[flag] = true;
+          if (left.length && left.length < now.length) out.tls[flag + "_of"] = left;
+        };
+        about("pin_cert_may_be_ca", had("pin_cert_may_be_ca"));
+        about("pin_cert_beside_chain", had("pin_cert_beside_chain").concat(P.pin_sha256 ? [pinHex(P.pin_sha256)] : []));
+      }
+    }
+    // collect() starts from nothing, so the multiplex is set here or lost: from its box, which only the
+    // four protocols that carry one render.
+    const muxBox = document.getElementById("f-mux-box");
+    const mux = muxBox && muxBox.value();
+    if (mux) out.multiplex = mux;
     const healthEl = document.getElementById("f-health");
     const hv = healthEl ? healthEl.value.trim() : null; // null = field not rendered (preserve prior); "" = present-but-cleared (user wants the probe removed)
     if (hv) out.health = { url: hv, interval: (ep.health && ep.health.interval) || 60, tolerance: (ep.health && ep.health.tolerance) || 50 };
@@ -1030,27 +1461,72 @@ function manualForm(ep) {
     // udp_relay_mode/zero_rtt_handshake/udp_over_stream/heartbeat are all round-tripped
     // by the generator and otherwise lost. (New endpoints have empty P → no-op.)
     const keep = {
-      vless: ["packet_encoding"],
-      shadowsocks: ["udp_over_tcp", "plugin", "plugin_opts"],
-      hysteria2: ["hop_ports"],
-      tuic: ["udp_relay_mode", "zero_rtt_handshake", "udp_over_stream", "heartbeat"],
+      // vcn: a link's verify name (Xray's verifyPeerCertByName), and fm: its Xray finalmask (model
+      // ParamFinalMask), both kept only to be shared again.
+      vless: ["packet_encoding", "vcn", "fm"],
+      vmess: ["vcn", "fm"],
+      trojan: ["vcn", "fm"],
+      anytls: ["vcn", "fm"],
+      shadowsocks: ["udp_over_tcp", "plugin", "plugin_opts", "fm"],
+      hysteria2: ["hop_ports", "up_mbps", "down_mbps", "hop_interval", "hop_interval_max", "bbr_profile",
+        "obfs_min_packet_size", "obfs_max_packet_size", "vcn", "fm"],
+      tuic: ["udp_relay_mode", "zero_rtt_handshake", "udp_over_stream", "heartbeat", "vcn", "fm"],
+      snell: ["userkey", "reuse", "network"],
+      // sing-box 1.14's algorithm limits, from an import or the API; the form has no field for them.
+      ssh: ["cipher", "mac", "kex_algorithm"],
       // mtu / persistent_keepalive are NOT kept in params here — they are now surfaced as
       // explicit top-level Endpoint fields (out.mtu / out.persistent_keepalive) by the
       // WG/AWG branch above, which is their single source of truth (the generator reads the
       // top-level field). The collect() above migrates any legacy params.mtu into it.
-      wireguard: ["reserved"],
+      // peers: a multi-[Peer] wg-quick .conf (importer/conf.go); the form edits the first peer only.
+      wireguard: ["reserved", "peers"],
       // ONLY reserved: the sixteen obfuscation fields are all rendered by the AWG form above,
       // whose collect() deletes a cleared key ON PURPOSE ("blanking a field actually blanks it").
       // Listing them here resurrected every cleared value from P - clear h1, Save, and the old
       // h1 came silently back - because a user-deleted key and a never-rendered key both read as
       // undefined. A keep entry is for fields the form does NOT render, and for AWG that is
       // reserved alone.
-      amneziawg: ["reserved"],
+      // and the AmneziaWG 3.x keys no field renders, which must match the server's (importer/conf.go
+      // awgKeys3/awgBools3): a rename used to drop them and the tunnel stopped coming up (QA-021).
+      amneziawg: ["reserved", "peers", "header_protection_key", "content_padding_addition", "rekey_after_time",
+        "rekey_timeout", "reject_after_time", "keepalive_timeout", "max_handshake_attempts", "random_trailers",
+        "disable_cookies"],
     };
     (keep[proto] || []).forEach(k => { if (P[k] !== undefined && p[k] === undefined) p[k] = P[k]; });
     return out;
   }
   return { el: wrap, collect, supportError };
+}
+
+// byedpiForm edits a ByeDPI connection (engine "byedpi", competitor gap 4): ciadpi runs on the router
+// as a local SOCKS proxy, so there is no server; the one setting is its strategy, ciadpi's own flags,
+// which the daemon checks on save and refuses with the reason. The presets are upstream's examples.
+const BYEDPI_PRESETS = ["--disorder 1 --auto=torst --tlsrec 1+s", "--fake -1 --ttl 8", "--proto=http,tls --disorder 3 --auto=none"];
+function byedpiForm(ep) {
+  ep = ep || {};
+  const P = ep.params || {};
+  const name = el("input", { type: "text", id: "f-name", value: ep.name || "ByeDPI" });
+  const strat = el("input", { type: "text", id: "f-strategy", value: P.strategy || "", placeholder: BYEDPI_PRESETS[0], spellcheck: "false" });
+  const presets = el("div", { style: "display:flex;flex-wrap:wrap;gap:6px;margin-top:6px" }, ...BYEDPI_PRESETS.map(p =>
+    el("button", { type: "button", class: "btn btn-ghost", style: "font-family:var(--mono);font-size:12px", onclick: () => { strat.value = p; } }, p)));
+  const wrap = el("div", {},
+    el("div", { class: "hint", style: "margin-bottom:12px" },
+      t("ByeDPI runs on the router as a local proxy that reshapes the start of each connection so DPI cannot read the site name. Send a routing list to it; it needs the ByeDPI component.")),
+    el("div", { class: "field" }, el("label", {}, t("Name")), name),
+    el("div", { class: "field" }, el("label", {}, t("Strategy (ciadpi flags; empty = the first preset)")), strat, presets));
+  function collect() {
+    const g = id => { const e = document.getElementById(id); return e ? e.value.trim() : ""; };
+    const out = { ...ep, name: g("f-name"), engine: "byedpi", protocol: "socks", server: "", port: 0,
+      enabled: ep.enabled !== false, params: { ...P } };
+    if (!out.id) {
+      const base = (out.name || "byedpi").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "byedpi";
+      out.id = rlUniqueId(base.startsWith("byedpi") ? base : "byedpi-" + base); // a second "ByeDPI" replaced the first (QA-058)
+    }
+    const v = g("f-strategy");
+    if (v) out.params.strategy = v; else delete out.params.strategy;
+    return out;
+  }
+  return { el: wrap, collect };
 }
 
 // externalForm edits an external-interface endpoint (engine="external"). These have
@@ -1081,8 +1557,10 @@ function externalForm(ep) {
       health, healthTargetPicker(health, ep.id || "")));
   function collect() {
     const g = id => { const e = document.getElementById(id); return e ? e.value.trim() : ""; };
-    const out = { ...ep, name: g("f-name"), engine: "external", protocol: "", server: "", port: 0,
-      enabled: ep.enabled !== false, params: { ...P } };
+    // protocol, server and port are not on this form; an adopted tunnel's are kept as they were
+    // (a rename used to blank them - QA-042), a hand-made one has none.
+    const out = { ...ep, name: g("f-name"), engine: "external", protocol: ep.protocol || "", server: ep.server || "",
+      port: ep.port || 0, enabled: ep.enabled !== false, params: { ...P } };
     out.params.interface = g("f-iface");
     if (g("f-epip")) out.params.endpoint_ip = g("f-epip"); else delete out.params.endpoint_ip;
     const hv = g("f-health");

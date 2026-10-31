@@ -27,7 +27,20 @@ func (s *Server) handlePBRStatus(w http.ResponseWriter, r *http.Request) {
 
 	p := s.store.Profile()
 	compiledZones := 0
-	if fresh, _, err := pbr.Compile(&p, pbr.Options{}); err == nil {
+	// A list sent to a KeeneticOS access policy compiles to a zone only with that policy's mark. The
+	// installed plan carries the marks it was applied with, so the count is compared like for like
+	// without asking NDM on every poll; a policy list added since is uncompiled here, and stale - as it
+	// should read until the next Apply. Without them the count never matched (gap 6 review).
+	var opts pbr.Options
+	if installedPlan != nil {
+		for _, ps := range installedPlan.NDMPolicySlots() {
+			if opts.NDMPolicies == nil {
+				opts.NDMPolicies = map[string]uint32{}
+			}
+			opts.NDMPolicies[ps.Name] = ps.Mark
+		}
+	}
+	if fresh, _, err := pbr.Compile(&p, opts); err == nil {
 		compiledZones = len(fresh.Zones)
 	}
 	if masqIfaces == nil {
@@ -60,7 +73,9 @@ func (s *Server) handlePBRPreview(w http.ResponseWriter, r *http.Request) {
 	p := s.store.Profile()
 	// Compile with the SAME options the apply path uses (flow-offload flowtable et al.),
 	// so the preview reflects what Apply would actually install — a bare Options{} omits it.
-	plan, warns, err := pbr.Compile(&p, s.pbrCompileOptions(c))
+	opts := s.pbrCompileOptions(c)
+	opts.NDMPolicies = s.reviewNDMPolicies(r.Context(), c, &p).marks
+	plan, warns, err := pbr.Compile(&p, opts)
 	if err != nil || plan == nil {
 		msg := "no routing plan compiled (add routing lists with IP/CIDR sources)"
 		if err != nil {

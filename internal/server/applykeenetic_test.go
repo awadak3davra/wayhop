@@ -362,6 +362,65 @@ func TestExactKeeneticAdapterPersistReadFailureLeavesTargetRunning(t *testing.T)
 	}
 }
 
+// QA-141: a running config that changed after it was verified (the tunnel switched off in KeeneticOS
+// during the window) is refused, not torn down. Both callers keep the revision as running: a teardown
+// left the core and the kernel plane on deleted interfaces, and the Keep they offer could never
+// succeed again.
+func TestExactKeeneticAdapterPersistDriftLeavesTargetRunning(t *testing.T) {
+	runner := &exactKeeneticRecordRunner{}
+	adapter, _ := newExactKeeneticNativeAdapter(runner)
+	target := exactKeeneticTestTarget()
+	verified := exactKeeneticTargetRunningConfig(target)
+	drifted := strings.Replace(verified, "\nup\n", "\n", 1)
+	if drifted == verified {
+		t.Fatal("setup: the running config has no `up` line to drop")
+	}
+	adapter.readConfig = exactKeeneticConfigReader(drifted)
+	err := adapter.persist(context.Background(), exactKeeneticReconciliation(target, nil))
+	if !errors.Is(err, errExactKeeneticDrift) || !errors.Is(err, errExactKeeneticApply) {
+		t.Fatalf("error = %v, want the drift refusal", err)
+	}
+	if len(runner.batches) != 0 {
+		t.Fatalf("a drifted running config was torn down or saved: %#v", runner.batches)
+	}
+}
+
+// An abort is retried (Roll back, boot, switching routing on) after one that stopped part way, or after
+// the operator deleted a tunnel in KeeneticOS. It was one batch that stopped at the first refusal and
+// asked again for removals already done, so how NDM answers a `no` for something gone could make every
+// retry fail. What the running config no longer has is not asked for, and each removal goes on its own.
+func TestExactKeeneticAdapterAbortRetriesOnlyWhatIsLeft(t *testing.T) {
+	target := exactKeeneticTestTarget()
+	teardown := keenetic.TeardownCommands(target.Keenetic)
+	route, iface := teardown[0], teardown[1]
+
+	t.Run("what is gone is not asked for again", func(t *testing.T) {
+		runner := &exactKeeneticRecordRunner{}
+		adapter, _ := newExactKeeneticNativeAdapter(runner)
+		// An earlier attempt removed the route and stopped.
+		adapter.readConfig = exactKeeneticConfigReader(strings.Join(target.Keenetic.Interfaces[0], "\n"))
+		if err := adapter.abort(context.Background(), target); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(runner.batches, [][]string{{iface}}) {
+			t.Fatalf("batches = %#v, want only %q", runner.batches, iface)
+		}
+	})
+
+	t.Run("a refused removal does not keep the rest", func(t *testing.T) {
+		runner := &exactKeeneticRecordRunner{failAt: 1}
+		adapter, _ := newExactKeeneticNativeAdapter(runner)
+		adapter.readConfig = exactKeeneticConfigReader(exactKeeneticTargetRunningConfig(target))
+		err := adapter.abort(context.Background(), target)
+		if !errors.Is(err, errExactKeeneticApply) || !strings.Contains(err.Error(), route) || strings.Contains(err.Error(), "sensitive") {
+			t.Fatalf("error = %v, want the refused removal named and nothing from the device", err)
+		}
+		if !reflect.DeepEqual(runner.batches, [][]string{{route}, {iface}}) {
+			t.Fatalf("batches = %#v, want every removal tried", runner.batches)
+		}
+	})
+}
+
 func TestExactKeeneticAdapterCleansPreparedTargetOnFailureWithoutLeakingError(t *testing.T) {
 	runner := &exactKeeneticRecordRunner{failAt: 2}
 	adapter, _ := newExactKeeneticNativeAdapter(runner)

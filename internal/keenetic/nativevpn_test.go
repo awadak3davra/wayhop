@@ -1,6 +1,7 @@
 package keenetic
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -127,6 +128,41 @@ func TestWireguardCommands_MatchesLiveNDM(t *testing.T) {
 	}
 }
 
+// QA-038: the panel saves mtu and keepalive as top-level fields and removes the params, so the
+// native renderer must read the top-level fields first; it used to read only the params and the
+// values vanished after any edit.
+func TestWireguardCommands_TopLevelMTUAndKeepalive(t *testing.T) {
+	e := awgEndpoint()
+	delete(e.Params, "mtu")
+	delete(e.Params, "persistent_keepalive")
+	e.MTU, e.PersistentKeepalive = 1380, 25
+	cmds, err := WireguardCommands(e, WireguardOpts{Index: 0, Metric: 32764})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(cmds, "\n")
+	for _, want := range []string{"ip mtu 1380", "    keepalive-interval 25"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q\n%s", want, got)
+		}
+	}
+	// The top-level field wins over a stale param, as in plugin.go.
+	e = awgEndpoint()
+	e.MTU, e.PersistentKeepalive = 1380, 25
+	got = strings.Join(must(WireguardCommands(e, WireguardOpts{Index: 0, Metric: 1})), "\n")
+	if !strings.Contains(got, "ip mtu 1380") || strings.Contains(got, "ip mtu 1420") ||
+		!strings.Contains(got, "keepalive-interval 25") || strings.Contains(got, "keepalive-interval 21") {
+		t.Errorf("top-level fields must win over params:\n%s", got)
+	}
+}
+
+func must(c []string, err error) []string {
+	if err != nil {
+		panic(err)
+	}
+	return c
+}
+
 func TestWireguardCommands_PlainWGNoAsc(t *testing.T) {
 	e := model.Endpoint{
 		ID: "wg", Name: "Plain WG", Engine: model.EngineSingBox, Protocol: model.ProtoWireGuard,
@@ -173,6 +209,34 @@ func TestWireguardCommands_AWG2PartialExtKeepsAlignment(t *testing.T) {
 		if strings.Contains(line, "wireguard asc") && strings.Contains(line, "  ") {
 			t.Errorf("asc line has a collapsed empty slot (double space) that misaligns positional args: %q", line)
 		}
+	}
+}
+
+// QA-125. A set I1-I5 is a packet description with spaces in it. Bare, NDM splits it into several
+// arguments and every later value shifts; it is quoted the way the router prints values with spaces.
+func TestWireguardCommands_AWG2HeadersWithSpacesAreQuoted(t *testing.T) {
+	e := awgEndpoint()
+	e.Params["s3"], e.Params["s4"] = 25, 40
+	e.Params["i1"], e.Params["i2"] = "<b 0x1122><r 16>", "0x33"
+	e.Params["h1"], e.Params["h2"], e.Params["h3"], e.Params["h4"] = 101, 202, 303, 404
+	cmds, _ := WireguardCommands(e, WireguardOpts{Index: 5})
+	want := `wireguard asc 5 49 998 17 110 101 202 303 404 25 40 "<b 0x1122><r 16>" 0x33 "" "" ""`
+	if !slices.Contains(cmds, want) {
+		t.Errorf("asc = %q, want %q", strings.Join(cmds, "\n"), want)
+	}
+}
+
+// QA-124. A 2.0 set with S3/S4 and no I1-I5 is written the way KeeneticOS itself prints such an
+// interface (read from a live KeeneticOS 5.1.8 router): the unset headers as empty strings, `""`, not
+// "0", which is a value nobody set and is not what the router reads back.
+func TestWireguardCommands_AWG2UnsetHeadersAreEmptyStrings(t *testing.T) {
+	e := awgEndpoint()
+	e.Params["s3"], e.Params["s4"] = 25, 40
+	e.Params["h1"], e.Params["h2"], e.Params["h3"], e.Params["h4"] = 101, 202, 303, 404
+	cmds, _ := WireguardCommands(e, WireguardOpts{Index: 5})
+	want := `wireguard asc 5 49 998 17 110 101 202 303 404 25 40 "" "" "" "" ""`
+	if !slices.Contains(cmds, want) {
+		t.Errorf("asc = %q, want %q", strings.Join(cmds, "\n"), want)
 	}
 }
 
@@ -258,9 +322,15 @@ func TestWireguardCommands_BareV6AllowIPs(t *testing.T) {
 	if !strings.Contains(joined, "allow-ips :: 0") {
 		t.Errorf("a bare IPv6 local_address must still emit `allow-ips :: 0` (else v6 leaks to WAN):\n%s", joined)
 	}
-	// The bare v6 address is also configured on the interface (synthesized /128).
-	if !strings.Contains(joined, "ip address fd00::2 128") {
-		t.Errorf("bare v6 interface address must be emitted as /128:\n%s", joined)
+	// The bare v6 address is also configured on the interface (synthesized /128), as `ipv6 address`
+	// and where KeeneticOS prints it: after `ip tcp adjust-mss pmtu` (QA-123, read from a live router
+	// on KeeneticOS 5.1.8). `ip address` takes only the v4 address.
+	v6 := slices.Index(cmds, "ipv6 address fd00::2/128")
+	if v6 < 0 || v6 < slices.Index(cmds, "ip tcp adjust-mss pmtu") {
+		t.Errorf("bare v6 interface address must be `ipv6 address fd00::2/128` after `ip tcp`:\n%s", joined)
+	}
+	if strings.Contains(joined, "ip address fd00") {
+		t.Errorf("the v6 address was also sent as an `ip address`:\n%s", joined)
 	}
 }
 

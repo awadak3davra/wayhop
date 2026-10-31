@@ -41,6 +41,15 @@ func fromGzStream(r io.Reader, w io.Writer) error {
 	return err
 }
 
+// memberIs reports whether an archive member is the wanted binary: its name, or - for an engine that
+// ships it as <name>-<arch> (byedpi's ciadpi-aarch64) - a pattern ending in '*'.
+func memberIs(base, want string) bool {
+	if p, ok := strings.CutSuffix(want, "*"); ok {
+		return p != "" && strings.HasPrefix(base, p)
+	}
+	return base == want
+}
+
 func fromTarGzStream(r io.Reader, binName string, w io.Writer) error {
 	zr, err := gzip.NewReader(r)
 	if err != nil {
@@ -56,7 +65,7 @@ func fromTarGzStream(r io.Reader, binName string, w io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if h.Typeflag == tar.TypeReg && filepath.Base(h.Name) == binName {
+		if h.Typeflag == tar.TypeReg && memberIs(filepath.Base(h.Name), binName) {
 			_, err = io.Copy(w, io.LimitReader(tr, maxBin))
 			return err
 		}
@@ -70,7 +79,7 @@ func fromZipStream(ra io.ReaderAt, size int64, binName string, w io.Writer) erro
 		return err
 	}
 	for _, f := range zr.File {
-		if filepath.Base(f.Name) == binName {
+		if memberIs(filepath.Base(f.Name), binName) {
 			rc, err := f.Open()
 			if err != nil {
 				return err
@@ -125,7 +134,7 @@ func verifyDigestSum(sum, digest string, mandatory bool) error {
 
 // peakInstallDisk estimates the worst-case bytes the streaming install writes to the TARGET
 // filesystem for an asset of assetSize bytes. A COMPRESSED archive (.tar.gz/.gz/.zip) decompresses
-// ~2-3x on the way to disk, so it's sized 3x; a BARE binary asset (e.g. olcrtc-linux-arm64, which
+// ~2-3x on the way to disk, so it's sized 3x; a BARE binary asset (e.g. amneziawg-go-linux-arm64, which
 // the release ships uncompressed) writes ~its own size, so a flat 3x would wrongly refuse installs
 // that actually fit — it's sized 1x. Plus a margin. withBackup doubles it (self-update keeps a .bak
 // on the same fs). A zip additionally stages the archive, but that temp is bounded by assetSize and

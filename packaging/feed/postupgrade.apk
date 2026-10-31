@@ -3,8 +3,11 @@
 # binary takes over. The sibling+rename preserves
 # the previous live path if copying the payload fails.
 /usr/libexec/wayhop/harden-state.sh /etc/wayhop /var/lib/wayhop || exit 1
-cp /usr/libexec/wayhop/wayhop /usr/sbin/wayhop.new || exit 1
-chmod 0755 /usr/sbin/wayhop.new || exit 1
+# A hard link where the file system has them (see post-install): one copy on the flash, not two.
+rm -f /usr/sbin/wayhop.new
+ln /usr/libexec/wayhop/wayhop /usr/sbin/wayhop.new 2>/dev/null || cp /usr/libexec/wayhop/wayhop /usr/sbin/wayhop.new ||
+  { rm -f /usr/sbin/wayhop.new; exit 1; }   # a partial copy must not keep the last free bytes
+chmod 0755 /usr/sbin/wayhop.new || { rm -f /usr/sbin/wayhop.new; exit 1; }
 mv -f /usr/sbin/wayhop.new /usr/sbin/wayhop || exit 1
 if [ -x /etc/init.d/wayhop ]; then
   /etc/init.d/wayhop enable 2>/dev/null

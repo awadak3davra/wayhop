@@ -2,9 +2,8 @@ package importer
 
 // Clash / Clash-Meta YAML import. Clash configs are the dominant share format in
 // this ecosystem; a user routinely has a `proxies:` list and nothing else handy.
-// This file hand-rolls a FOCUSED YAML reader for that one section (mirroring
-// olcrtc.go's yamlVal no-dep ethos — the repo deliberately avoids a YAML
-// dependency) and maps each proxy to a model.Endpoint with the SAME Engine /
+// This file hand-rolls a FOCUSED YAML reader for that one section (the repo
+// deliberately avoids a YAML dependency) and maps each proxy to a model.Endpoint with the SAME Engine /
 // Protocol / Params keys importer.go produces for share links, so the generator
 // accepts the result unchanged. It is purely additive: a proxy it can't map is
 // collected as an error string and the rest still parse (partial success), and
@@ -12,6 +11,8 @@ package importer
 
 import (
 	"fmt"
+	"math"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -96,15 +97,33 @@ func isURLScheme(s string) bool {
 //	proxies:
 //	  - {name: a, type: ss, server: x, port: 8388, cipher: aes-256-gcm, password: p}
 func ParseClash(text string) (eps []model.Endpoint, errs []string) {
+	eps, errs, _ = parseClash(text)
+	return eps, errs
+}
+
+// What a Clash/mihomo proxy can express (sourceFields), across the types parseClash reads: the params
+// its converters write (clashHysteria2Extras and clashSnell included), the TLS fields and pins
+// (clashPins), the transport, and multiplex (smux).
+var clashFields = sourceFields{params: []string{"uuid", "alter_id", "security", "flow", "password", "method",
+	"plugin", "plugin_opts", "udp_over_tcp", "congestion_control", "udp_relay_mode", "up_mbps", "down_mbps",
+	"hop_ports", "obfs", "obfs_password", "obfs_min_packet_size", "obfs_max_packet_size", "bbr_profile", "hop_interval",
+	"hop_interval_max",
+	model.ParamQUICDisablePMTUD, "private_key", "peer_public_key", "pre_shared_key", "local_address", "reserved",
+	"mtu", "persistent_keepalive", "psk", "version", "network", "obfs_host", "obfs_mode", "reuse"},
+	tls: linkTLSFields, pins: true, transport: true, multiplex: true}
+
+// parseClash is ParseClash with its notes: what a proxy carried that the endpoint keeps differently
+// or not at all (a multiplex setting sing-box has no field for), one line per proxy and setting.
+func parseClash(text string) (eps []model.Endpoint, errs, notes []string) {
 	// Defensive BOM strip so a directly-pasted clash doc with a leading U+FEFF still
 	// parses (TrimSpace does not remove U+FEFF).
 	text = strings.TrimPrefix(text, "\uFEFF")
 	proxies, err := extractProxies(text)
 	if err != nil {
-		return nil, []string{fmt.Sprintf("clash: %v", err)}
+		return nil, []string{fmt.Sprintf("clash: %v", err)}, nil
 	}
 	if len(proxies) == 0 {
-		return nil, []string{"clash: no proxies found under proxies:"}
+		return nil, []string{"clash: no proxies found under proxies:"}, nil
 	}
 	seen := map[string]bool{}
 	for i, p := range proxies {
@@ -117,13 +136,62 @@ func ParseClash(text string) (eps []model.Endpoint, errs []string) {
 			errs = append(errs, fmt.Sprintf("clash proxy %q: %v", label, err))
 			continue
 		}
+		// `fingerprint` (a certificate pin) applies to every TLS proxy type, so it is read here once too.
+		if err := clashPins(p, e); err != nil {
+			label := p["name"]
+			if label == "" {
+				label = "#" + strconv.Itoa(i+1)
+			}
+			errs = append(errs, fmt.Sprintf("clash proxy %q: %v", label, err))
+			continue
+		}
+		// smux is a mapping any proxy type may carry, so it is read here once rather than per type.
+		var muxNotes []string
+		e.Multiplex, muxNotes = clashMultiplex(p, e.Protocol)
+		for _, n := range muxNotes {
+			notes = append(notes, fmt.Sprintf("clash proxy %q: %s", p["name"], n))
+		}
 		if e.ID == "" {
 			e.ID = genID(e)
 		}
 		e.ID = uniqueID(e.ID, seen)
 		eps = append(eps, *e)
 	}
-	return eps, errs
+	return eps, errs, notes
+}
+
+// clashMultiplex reads mihomo's `smux:` mapping (SingMuxOption, the sing-mux client sing-box calls
+// multiplex): enabled, protocol, max-connections, min-streams, max-streams, padding and brutal-opts
+// {enabled, up, down}, whose rates are mihomo strings (clashRate). model.NormalizeMultiplex keeps what
+// sing-box takes on this protocol and says what it dropped. statistic is mihomo's dashboard switch
+// and is not a connection setting; only-tcp (UDP bypasses the multiplex) has no sing-box field, so
+// the multiplex is kept and the note says UDP rides it too.
+func clashMultiplex(p proxyMap, proto model.Protocol) (*model.Multiplex, []string) {
+	if !truthy(p["smux.enabled"]) {
+		return nil, nil
+	}
+	m := &model.Multiplex{
+		Enabled:        true,
+		Protocol:       p["smux.protocol"],
+		MaxConnections: atoiDefault(p["smux.max-connections"], 0),
+		MinStreams:     atoiDefault(p["smux.min-streams"], 0),
+		MaxStreams:     atoiDefault(p["smux.max-streams"], 0),
+		Padding:        truthy(p["smux.padding"]),
+	}
+	if truthy(p["smux.brutal-opts.enabled"]) {
+		up, _ := clashRate(p["smux.brutal-opts.up"])
+		down, _ := clashRate(p["smux.brutal-opts.down"])
+		m.Brutal = &model.Brutal{Enabled: true, UpMbps: up, DownMbps: down}
+	}
+	out, note := model.NormalizeMultiplex(proto, m)
+	var notes []string
+	if note != "" {
+		notes = append(notes, note)
+	}
+	if out != nil && truthy(p["smux.only-tcp"]) {
+		notes = append(notes, "smux only-tcp is not carried: sing-box sends UDP through the multiplex as well")
+	}
+	return out, notes
 }
 
 // proxyMap is one proxy's flattened scalar fields. Nested mapping opts are folded
@@ -443,6 +511,8 @@ func proxyToEndpoint(p proxyMap) (*model.Endpoint, error) {
 		return clashTrojan(p, server, port, name)
 	case "anytls":
 		return clashAnyTLS(p, server, port, name)
+	case "snell":
+		return clashSnell(p, server, port, name)
 	case "vless":
 		return clashVLESS(p, server, port, name)
 	case "hysteria2", "hy2":
@@ -547,15 +617,20 @@ func clashVMess(p proxyMap, server string, port int, name string) (*model.Endpoi
 			"security": util.FirstNonEmpty(p["cipher"], "auto"),
 		},
 	}
-	e.Transport = clashTransport(p)
+	t, err := clashTransport(p)
+	if err != nil {
+		return nil, fmt.Errorf("vmess: %w", err)
+	}
+	e.Transport = t
 	if clashTLSEnabled(p) {
 		e.TLS = &model.TLS{
 			Enabled:     true,
 			Type:        "tls",
 			SNI:         util.FirstNonEmpty(p["servername"], p["sni"], wsHost(p), server),
-			Fingerprint: util.FirstNonEmpty(p["client-fingerprint"], p["fingerprint"]),
+			Fingerprint: clashUTLS(p),
 			Insecure:    clashInsecure(p),
 			ALPN:        clashList(p["alpn"]),
+			ECH:         settleECH(clashECH(p), "tls"),
 		}
 	}
 	return e, nil
@@ -574,16 +649,21 @@ func clashTrojan(p proxyMap, server string, port int, name string) (*model.Endpo
 		Enabled:  true,
 		Params:   map[string]any{"password": p["password"]},
 	}
-	e.Transport = clashTransport(p)
+	t, err := clashTransport(p)
+	if err != nil {
+		return nil, fmt.Errorf("trojan: %w", err)
+	}
+	e.Transport = t
 	// Trojan is TLS by default unless explicitly disabled (tls: false).
 	if clashTLSDefaultOn(p) {
 		e.TLS = &model.TLS{
 			Enabled:     true,
 			Type:        "tls",
 			SNI:         util.FirstNonEmpty(p["sni"], p["servername"], wsHost(p), server),
-			Fingerprint: util.FirstNonEmpty(p["client-fingerprint"], p["fingerprint"]),
+			Fingerprint: clashUTLS(p),
 			Insecure:    clashInsecure(p),
 			ALPN:        clashList(p["alpn"]),
+			ECH:         settleECH(clashECH(p), "tls"),
 		}
 	}
 	return e, nil
@@ -607,9 +687,10 @@ func clashAnyTLS(p proxyMap, server string, port int, name string) (*model.Endpo
 			Enabled:     true,
 			Type:        "tls",
 			SNI:         util.FirstNonEmpty(p["sni"], p["servername"], server),
-			Fingerprint: util.FirstNonEmpty(p["client-fingerprint"], p["fingerprint"]),
+			Fingerprint: clashUTLS(p),
 			Insecure:    clashInsecure(p),
 			ALPN:        clashList(p["alpn"]),
+			ECH:         settleECH(clashECH(p), "tls"),
 		},
 	}
 	return e, nil
@@ -628,10 +709,19 @@ func clashVLESS(p proxyMap, server string, port int, name string) (*model.Endpoi
 		Enabled:  true,
 		Params:   map[string]any{"uuid": p["uuid"]},
 	}
+	// mihomo carries Xray's VLESS Encryption in `encryption:`; sing-box has no such layer (see
+	// parseVLESS). The value is key material, so it is not echoed.
+	if enc := strings.ToLower(strings.TrimSpace(p["encryption"])); enc != "" && enc != "none" {
+		return nil, fmt.Errorf("vless: Xray VLESS encryption (encryption: ...) is not supported by sing-box")
+	}
 	if flow := p["flow"]; flow != "" {
 		e.Params["flow"] = flow
 	}
-	e.Transport = clashTransport(p)
+	t, err := clashTransport(p)
+	if err != nil {
+		return nil, fmt.Errorf("vless: %w", err)
+	}
+	e.Transport = t
 	// Reality if reality-opts present; otherwise plain TLS when tls: true.
 	pbk := util.FirstNonEmpty(p["reality-opts.public-key"], p["reality-opts.publicKey"])
 	if pbk != "" {
@@ -639,19 +729,21 @@ func clashVLESS(p proxyMap, server string, port int, name string) (*model.Endpoi
 			Enabled:     true,
 			Type:        "reality",
 			SNI:         util.FirstNonEmpty(p["servername"], p["sni"]),
-			Fingerprint: util.FirstNonEmpty(p["client-fingerprint"], p["fingerprint"]),
+			Fingerprint: clashUTLS(p),
 			PublicKey:   pbk,
 			ShortID:     util.FirstNonEmpty(p["reality-opts.short-id"], p["reality-opts.shortId"]),
 			ALPN:        clashList(p["alpn"]),
+			ECH:         settleECH(clashECH(p), "reality"), // kept off: see settleECH
 		}
 	} else if clashTLSEnabled(p) {
 		e.TLS = &model.TLS{
 			Enabled:     true,
 			Type:        "tls",
 			SNI:         util.FirstNonEmpty(p["servername"], p["sni"], wsHost(p), server),
-			Fingerprint: util.FirstNonEmpty(p["client-fingerprint"], p["fingerprint"]),
+			Fingerprint: clashUTLS(p),
 			Insecure:    clashInsecure(p),
 			ALPN:        clashList(p["alpn"]),
+			ECH:         settleECH(clashECH(p), "tls"),
 		}
 	}
 	return e, nil
@@ -682,13 +774,14 @@ func clashHysteria2(p proxyMap, server string, port int, name string) (*model.En
 	if hp := util.FirstNonEmpty(p["ports"], p["mport"]); hp != "" {
 		e.Params["hop_ports"] = hp
 	}
-	// Optional bandwidth hints — clash spells them up/down (may carry " Mbps").
-	if up := mbps(p["up"]); up > 0 {
+	// Optional bandwidth hints — clash spells them up/down as mihomo rates ("50", "1 Gbps").
+	if up := clashRateMbps(p["up"]); up > 0 {
 		e.Params["up_mbps"] = up
 	}
-	if down := mbps(p["down"]); down > 0 {
+	if down := clashRateMbps(p["down"]); down > 0 {
 		e.Params["down_mbps"] = down
 	}
+	clashHysteria2Extras(p, e.Params)
 	// Hysteria2 always runs over QUIC+TLS.
 	e.TLS = &model.TLS{
 		Enabled:  true,
@@ -696,6 +789,7 @@ func clashHysteria2(p proxyMap, server string, port int, name string) (*model.En
 		SNI:      util.FirstNonEmpty(p["sni"], p["servername"], server),
 		Insecure: clashInsecure(p),
 		ALPN:     clashList(p["alpn"]),
+		ECH:      settleECH(clashECH(p), "tls"),
 	}
 	return e, nil
 }
@@ -722,12 +816,19 @@ func clashTUIC(p proxyMap, server string, port int, name string) (*model.Endpoin
 	if mode := util.FirstNonEmpty(p["udp-relay-mode"], p["udp_relay_mode"]); mode != "" {
 		e.Params["udp_relay_mode"] = mode
 	}
+	// mihomo's TUIC disable-mtu-discovery is quic-go's DisablePathMTUDiscovery, sing-box 1.14's
+	// disable_path_mtu_discovery (model.QUICTuningOf). mihomo has no initial packet size; its
+	// max-udp-relay-packet-size and Hysteria2 udp-mtu size relayed UDP datagrams, not QUIC packets.
+	if truthy(p["disable-mtu-discovery"]) {
+		e.Params[model.ParamQUICDisablePMTUD] = true
+	}
 	e.TLS = &model.TLS{
 		Enabled:  true,
 		Type:     "tls",
 		SNI:      util.FirstNonEmpty(p["sni"], p["servername"], server),
 		Insecure: clashInsecure(p),
 		ALPN:     clashList(p["alpn"]),
+		ECH:      settleECH(clashECH(p), "tls"),
 	}
 	return e, nil
 }
@@ -781,20 +882,26 @@ func clashWireGuard(p proxyMap, server string, port int, name string) (*model.En
 
 // clashTransport maps clash `network` + *-opts to a model.Transport, matching the
 // keys importer.go's transportFromQuery produces (ws/grpc/http/httpupgrade).
-func clashTransport(p proxyMap) *model.Transport {
-	switch strings.ToLower(strings.TrimSpace(p["network"])) {
+func clashTransport(p proxyMap) (*model.Transport, error) {
+	switch network := strings.ToLower(strings.TrimSpace(p["network"])); network {
 	case "ws":
 		t := &model.Transport{
 			Type: "ws",
 			Path: util.FirstNonEmpty(p["ws-opts.path"], p["ws-path"]),
 			Host: wsHost(p),
 		}
-		return t
+		// mihomo has no httpupgrade network: it spells HTTPUpgrade as network: ws with
+		// ws-opts.v2ray-http-upgrade: true. Read as plain ws, the client sent a WebSocket handshake
+		// to an HTTPUpgrade server, which refuses it on every connection.
+		if truthy(p["ws-opts.v2ray-http-upgrade"]) {
+			t.Type = "httpupgrade"
+		}
+		return t, nil
 	case "grpc":
 		return &model.Transport{
 			Type:        "grpc",
 			ServiceName: util.FirstNonEmpty(p["grpc-opts.grpc-service-name"], p["grpc-service-name"], p["grpc-opts.serviceName"]),
-		}
+		}, nil
 	case "http", "h2":
 		// h2-opts.host / http-opts.headers.Host may be given as a YAML list
 		// (`host: [a.com, b.com]`) — a multi-host is the intended domain-fronting rotation feature.
@@ -805,15 +912,19 @@ func clashTransport(p proxyMap) *model.Transport {
 			Type: "http",
 			Path: util.FirstNonEmpty(p["http-opts.path"], p["h2-opts.path"], p["ws-opts.path"]),
 			Host: joinListElems(util.FirstNonEmpty(p["h2-opts.host"], p["http-opts.headers.Host"], wsHost(p))),
-		}
+		}, nil
 	case "httpupgrade":
 		return &model.Transport{
 			Type: "httpupgrade",
 			Path: p["ws-opts.path"],
 			Host: wsHost(p),
-		}
+		}, nil
+	case "", "tcp", "raw":
+		return nil, nil
 	default:
-		return nil // tcp / raw / unset
+		// xhttp (mihomo xhttp-opts), kcp (mkcp-opts) and the like: importing them as raw TCP made an
+		// endpoint the server cannot accept.
+		return nil, unsupportedTransport(network)
 	}
 }
 
@@ -1058,6 +1169,53 @@ func yamlUnescapeDouble(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// clashRateRe is mihomo's rate grammar (common/utils/mbps.go, StringToBps): a count, an optional K, M,
+// G or T, then bps for bits or Bps for bytes. The prefix is also taken in lower case here ("50mbps"),
+// which mihomo reads as no rate at all.
+var clashRateRe = regexp.MustCompile(`^(\d+)\s*([KMGTkmgt]?)([Bb])ps$`)
+
+// clashRate reads a mihomo rate into megabits per second, the unit sing-box takes: a bare number is
+// Mbps (as in mihomo), "1 Gbps" is 1000 and "10 MBps" (bytes) 80. A positive rate is at least 1, and
+// one past what an int holds on a 32-bit router is capped. ok is false when s is not a rate.
+func clashRate(s string) (mbps int, ok bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
+	}
+	if n, err := strconv.Atoi(s); err == nil {
+		s = strconv.Itoa(n) + " Mbps"
+	}
+	m := clashRateRe.FindStringSubmatch(s)
+	if m == nil {
+		return 0, false
+	}
+	v, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		return 0, false
+	}
+	bits := v * map[string]float64{"": 1, "k": 1e3, "m": 1e6, "g": 1e9, "t": 1e12}[strings.ToLower(m[2])]
+	if m[3] == "B" {
+		bits *= 8
+	}
+	r := math.Round(bits / 1e6)
+	switch {
+	case r > math.MaxInt32:
+		return math.MaxInt32, true
+	case r < 1 && bits > 0:
+		return 1, true
+	}
+	return int(r), true
+}
+
+// clashRateMbps is clashRate for a value WayHop read before it had the grammar (hysteria2 up/down):
+// what the grammar does not take keeps the old reading, its leading digits as Mbps.
+func clashRateMbps(s string) int {
+	if n, ok := clashRate(s); ok {
+		return n
+	}
+	return mbps(s)
 }
 
 // mbps parses a bandwidth value like "100", "100 Mbps", "50mbps" into an int of

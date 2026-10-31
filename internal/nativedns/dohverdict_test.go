@@ -71,8 +71,12 @@ func TestLeakVerdict_ResolverSetOn443ClosesTheLastHatch(t *testing.T) {
 	if ep.LeakRisk {
 		t.Errorf("LeakRisk = true, want false when all three routes are constrained; notes=%q", ep.Notes)
 	}
-	if len(ep.Notes) != 1 || !strings.Contains(ep.Notes[0], "all three") {
-		t.Errorf("note = %q, want the all-three-constrained wording", ep.Notes)
+	// The verdict clears, but the note says what the :443 rule can and cannot do: it refuses the
+	// listed resolvers, and DoH to any other is ordinary HTTPS. "All three bypass routes are
+	// constrained" claimed more than that (QA-107).
+	if len(ep.Notes) != 1 || !strings.Contains(ep.Notes[0], "well-known resolver addresses") ||
+		!strings.Contains(ep.Notes[0], "outside that list") {
+		t.Errorf("note = %q, want the listed-resolvers wording with its limit", ep.Notes)
 	}
 }
 

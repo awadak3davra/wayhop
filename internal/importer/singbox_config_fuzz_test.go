@@ -17,6 +17,12 @@ func FuzzParseSingbox(f *testing.F) {
 		`{"outbounds":[{"type":"hysteria2","server":"a","server_port":443,"password":"p","obfs":{"type":"salamander","password":"o"},"server_ports":"443:8443"}]}`,
 		`{"outbounds":[{"type":"tuic","server":"a","server_port":8446,"uuid":"u","password":"p","congestion_control":"bbr"}],"endpoints":[{"type":"wireguard","address":["10.0.0.2/32"],"private_key":"k","mtu":1280,"peers":[{"address":"1.2.3.4","port":51820,"public_key":"P","persistent_keepalive_interval":25}]}]}`,
 		`{"outbounds":[{"type":"direct"},{"type":"block"},{"type":"selector","outbounds":["a"]},{"type":"urltest"}],"route":{"rules":[]}}`,
+		// the sing-box 1.14 types read back since QA-019, well-formed and with wrong shapes
+		`{"outbounds":[{"type":"snell","server":"a","server_port":1,"version":6,"psk":"abcdefghijkl","mode":"unshaped"},{"type":"hysteria2","server":"b","server_port":2,"password":"p","obfs":{"type":"gecko","password":"o","min_packet_size":600},"hop_interval":"10s","hop_interval_max":"30s","disable_chrome_parrot":true}],"endpoints":[{"type":"openvpn-client","server":"c","server_port":1194,"tls":{"certificate":["A","B"],"control_wrap":{"type":"tls_crypt","key":"K"}},"servers":[{"server":"c","server_port":1},{"server":"d"}]},{"type":"openconnect","server":"https://e:8443","token":{"mode":"totp","secret":"S"},"tls":{"peer_fingerprint":["x"]}}]}`,
+		`{"endpoints":[{"type":"openvpn-client","mode":"static_key","address":"not-an-ip","servers":[null,7,{"server":5}]},{"type":"openconnect","server":"://"},{"type":"openconnect","token":"notamap","tls":{"peer_fingerprint":[3]}}],"outbounds":[{"type":"snell","version":"x"}]}`,
+		// multiplex, well-formed and with wrong shapes
+		`{"outbounds":[{"type":"trojan","server":"a","server_port":1,"password":"p","multiplex":{"enabled":true,"protocol":"smux","max_connections":4,"max_streams":-1,"brutal":{"enabled":true,"up_mbps":1e30,"down_mbps":"x"}}},{"type":"tuic","server":"b","server_port":2,"uuid":"u","multiplex":{"enabled":true}}]}`,
+		`{"outbounds":[{"type":"vless","server":"a","server_port":1,"multiplex":"on"},{"type":"shadowsocks","server":"b","server_port":2,"method":"m","password":"p","multiplex":{"brutal":[1]}}]}`,
 		// adversarial shapes: wrong types where a map/array is expected
 		`{"outbounds":[{"type":"vmess","transport":"notamap","tls":42}]}`,
 		`{"outbounds":[{"type":"wireguard","peers":"notanarray"}]}`,

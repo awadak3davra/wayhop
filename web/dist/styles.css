@@ -93,6 +93,9 @@ button { color:inherit; font-family:inherit; }
   padding:0 24px; border-bottom:1px solid var(--divider); background:var(--topbar-bg); }
 .topbar .title { font-size:var(--fs-lg); font-weight:650; letter-spacing:var(--ls-tight); }
 .topbar .spacer { flex:1; }
+/* The routing switch: a label and a .toggle; amber while routing is off, like its banner. */
+.routing-switch { display:flex; align-items:center; gap:8px; font-size:var(--fs-control); font-weight:600; }
+.routing-switch.off .rs-label { color:var(--warn); }
 .content { padding:var(--content-pad); width:100%; }
 /* Fail-safe / apply banners sit above .content and align to its horizontal padding. Kept in CSS (not
    inline) so the mobile rule below (max-width:760px) can narrow it — an inline padding would outrank it. */

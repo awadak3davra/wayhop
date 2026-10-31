@@ -238,6 +238,9 @@ func main() {
 	go srv.CIDRRefreshLoop(ctx)         // updates the saved routing-list caches only; activation is Apply
 	srv.StartTelegram(ctx)              // the Telegram bot, when enabled in Settings (off by default)
 	go srv.AutoUpdateLoop(ctx)          // opt-in binary update, serialized with Apply
+	// The Telegram bridge (tg-ws-proxy) on the LAN, when enabled (off by default); the shutdown below
+	// waits for its loop before StopAll.
+	bridgeDone := srv.StartTelegramBridge(ctx)
 	// Crash-restart supervision for sing-box (+ best-effort engine plugins).
 	wdDone := make(chan struct{})
 	go func() { srv.Watchdog().Run(ctx); close(wdDone) }()
@@ -278,6 +281,10 @@ func main() {
 	// running handler's context, and there is no WriteTimeout, so this is the only
 	// backstop for that apply-vs-shutdown race.
 	_ = sb.Shutdown()
+	// The bridge's loop too, for the same reason as the watchdog: a sync in flight could start a
+	// bridge after StopAll below. StopAll also closes the manager, so a handler that outlived the
+	// HTTP shutdown and syncs the bridge later starts nothing.
+	<-bridgeDone
 	// Retire only plugin processes tracked by WayHop so none survives the daemon and keeps an
 	// interface or listener behind. Externally owned/adopted tunnels are not in this manager.
 	srv.Plugins().StopAll()

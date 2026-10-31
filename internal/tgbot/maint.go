@@ -4,8 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base32"
-	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -33,7 +31,14 @@ const (
 	actApply   = "apply"
 	actRestart = "restart"
 	actBackup  = "backup"
+	// The routing switch: off takes WayHop's routing off the router, on restores the last applied
+	// configuration. Both ask first.
+	actRoutingOff = "routeoff"
+	actRoutingOn  = "routeon"
 )
+
+// routingWait bounds a switch: switching on re-executes the committed configuration.
+const routingWait = 2 * time.Minute
 
 // confirmation is an action waiting for its "yes". The nonce in the button is single-use, expires,
 // and only counts in the chat it was issued to: a forwarded or stale button does nothing.
@@ -130,11 +135,15 @@ func (v view) Maintenance(s Status) (string, *Keyboard) {
 	default:
 		b.WriteString(v.t("mt.pending.none") + "\n")
 	}
+	if s.Routing.Off {
+		b.WriteString(v.t("st.routingoff") + "\n")
+	}
 	b.WriteString("\n<i>" + v.t("mt.hint") + "</i>")
 	var rows [][]InlineButton
-	if s.Changes.Pending {
+	if s.Changes.Pending && !s.Routing.Off {
 		rows = append(rows, []InlineButton{btn(v.t("b.apply"), cbAsk+actApply)})
 	}
+	rows = append(rows, []InlineButton{v.routingButton(s)})
 	rows = append(rows,
 		[]InlineButton{btn(v.t("b.lists"), cbDo+actLists), btn(v.t("b.sub"), cbDo+actSub)},
 		[]InlineButton{btn(v.t("b.backup"), cbAsk+actBackup), btn(v.t("b.updates"), cbDo+actUpdate)},
@@ -142,6 +151,32 @@ func (v view) Maintenance(s Status) (string, *Keyboard) {
 		[]InlineButton{btn(v.t("b.back"), cbMore), btn(v.t("b.status"), cbStatus)},
 	)
 	return b.String(), &Keyboard{Rows: rows}
+}
+
+// routingButton is the routing switch's button: the way to the other state.
+func (v view) routingButton(s Status) InlineButton {
+	if s.Routing.Off {
+		return btn(v.t("b.routing.on"), cbAsk+actRoutingOn)
+	}
+	return btn(v.t("b.routing.off"), cbAsk+actRoutingOff)
+}
+
+// Routing renders the routing switch on its own: what it is now, and the button to change it.
+func (v view) Routing(s Status) (string, *Keyboard) {
+	var b strings.Builder
+	if s.Routing.Off {
+		b.WriteString(v.t("rt.off") + "\n")
+		if !s.Routing.Since.IsZero() {
+			b.WriteString(v.t("rt.since", v.clock(s.Routing.Since)) + "\n")
+		}
+		if s.Routing.Err != "" {
+			b.WriteString("\n⚠️ " + esc(truncate(s.Routing.Err, 400)) + "\n")
+		}
+	} else {
+		b.WriteString(v.t("rt.on") + "\n")
+	}
+	b.WriteString("\n<i>" + v.t("rt.hint") + "</i>")
+	return b.String(), &Keyboard{Rows: [][]InlineButton{{v.routingButton(s)}, {btn(v.t("b.maint.back"), cbMaint)}}}
 }
 
 // maintBack is the one-button way back to the menu under a result.
@@ -159,6 +194,8 @@ func (b *Bot) maintCommand(ctx context.Context, v view, rec config.TelegramChat,
 		render = func() (string, *Keyboard) { return v.Maintenance(b.status(ctx)) }
 	case "speed", "speedtest":
 		render = func() (string, *Keyboard) { return b.speedAsk(ctx, v, rec.ID, "") }
+	case "routing":
+		render = func() (string, *Keyboard) { return v.Routing(b.status(ctx)) }
 	default:
 		return false
 	}
@@ -204,17 +241,25 @@ func (b *Bot) maintCallback(ctx context.Context, v view, q *CallbackQuery, rec c
 		b.show(ctx, m, text, kb)
 	case strings.HasPrefix(data, cbDo):
 		b.answer(ctx, q, "", false)
+		// A refresh runs for up to a minute and an update check reaches GitHub: off the handler
+		// slots, like the confirmed actions below, so that four of them cannot hold every slot while
+		// an owner's Keep waits behind them.
 		switch strings.TrimPrefix(data, cbDo) {
 		case actLists:
-			b.refreshLists(ctx, v, m)
+			b.detach(func() { b.refreshLists(ctx, v, m) })
 		case actSub:
-			b.refreshSub(ctx, v, m)
+			b.detach(func() { b.refreshSub(ctx, v, m) })
 		case actUpdate:
-			b.updateCheck(ctx, v, m)
+			b.detach(func() { b.updateCheck(ctx, v, m) })
 		}
 	case strings.HasPrefix(data, cbAsk):
 		b.answer(ctx, q, "", false)
 		action, ref, _ := strings.Cut(strings.TrimPrefix(data, cbAsk), ":")
+		if action == actInstall {
+			// The question follows a fresh update check, which may take its 45 seconds.
+			b.detach(func() { b.ask(ctx, v, m, action, ref) })
+			return true
+		}
 		b.ask(ctx, v, m, action, ref)
 	case strings.HasPrefix(data, cbCancel):
 		cf, _, ended := b.confirms.redeem(strings.TrimPrefix(data, cbCancel), m.Chat.ID, b.now(), true)
@@ -257,7 +302,7 @@ func (b *Bot) ask(ctx context.Context, v view, m *Message, action, ref string) {
 		cancel()
 		switch {
 		case err != nil:
-			b.show(ctx, m, v.t("mt.apply.fail", esc(err.Error())), v.maintBack())
+			b.show(ctx, m, v.t("mt.apply.fail", esc(errorText(v, err))), v.maintBack())
 			return
 		case !p.Pending:
 			b.show(ctx, m, v.t("mt.apply.nothing"), v.maintBack())
@@ -288,6 +333,22 @@ func (b *Bot) ask(ctx context.Context, v view, m *Message, action, ref string) {
 	case actBackup:
 		q.WriteString(v.t("mt.backup.ask"))
 		ok = v.t("mt.backup.ok")
+	case actRoutingOff, actRoutingOn:
+		// Asked against the state as it is now: a stale button for the state the router already has
+		// shows that state instead of a question with only one answer.
+		st := b.status(ctx)
+		if st.Routing.Off == (action == actRoutingOff) {
+			text, kb := v.Routing(st)
+			b.show(ctx, m, text, kb)
+			return
+		}
+		if action == actRoutingOff {
+			q.WriteString(v.t("rt.off.ask"))
+			ok = v.t("rt.off.ok")
+		} else {
+			q.WriteString(v.t("rt.on.ask"))
+			ok = v.t("rt.on.ok")
+		}
 	case actInstall:
 		b.askInstall(ctx, v, m)
 		return
@@ -323,20 +384,13 @@ func firstN(ss []string, n int) []string {
 	return ss
 }
 
-// run performs a confirmed action and leaves its outcome in the message.
+// run performs a confirmed action and leaves its outcome in the message. What takes long (an Apply,
+// a backup upload, a routing switch, an install, a speed test) runs outside the handler slots: an
+// Apply that holds a slot for its minutes is exactly when an owner's Keep must not queue behind it.
 func (b *Bot) run(ctx context.Context, v view, m *Message, cf confirmation, who string) {
 	switch cf.action {
 	case actApply:
-		b.show(ctx, m, v.t("mt.apply.run"), nil)
-		cctx, cancel := context.WithTimeout(ctx, applyWait)
-		err := b.be.ApplyTest(cctx, cf.arg)
-		cancel()
-		if err != nil {
-			b.show(ctx, m, v.t("mt.apply.fail", esc(err.Error())), v.maintBack())
-			return
-		}
-		// The watcher sees the window open and sends Keep / Roll back to every owner.
-		b.show(ctx, m, v.t("mt.apply.done", esc(who)), v.maintBack())
+		b.detach(func() { b.applyTest(ctx, v, m, cf.arg, who) })
 	case actRestart:
 		// Said first: the restart takes this process down with it.
 		b.show(ctx, m, v.t("mt.restart.run"), nil)
@@ -347,26 +401,67 @@ func (b *Bot) run(ctx context.Context, v view, m *Message, cf confirmation, who 
 			b.show(ctx, m, v.t("mt.restart.fail", esc(errorText(v, err))), v.maintBack())
 		}
 	case actBackup:
-		cctx, cancel := context.WithTimeout(ctx, backendWait)
-		name, data, err := b.be.Backup(cctx)
-		cancel()
-		if err == nil {
-			sctx, scancel := context.WithTimeout(ctx, time.Minute)
-			_, err = b.api.SendDocument(sctx, m.Chat.ID, name, data, v.t("mt.backup.caption", v.clock(b.now())))
-			scancel()
-		}
-		if err != nil {
-			b.show(ctx, m, v.t("mt.backup.fail", esc(err.Error())), v.maintBack())
-			return
-		}
-		b.show(ctx, m, v.t("mt.backup.sent"), v.maintBack())
+		b.detach(func() { b.backup(ctx, v, m) })
+	case actRoutingOff, actRoutingOn:
+		// Up to two minutes of tearing routes down or putting them back, so like an Apply it runs
+		// outside the handler slots.
+		b.detach(func() { b.switchRouting(ctx, v, m, cf.action == actRoutingOn, who) })
 	case actInstall:
-		b.install(ctx, v, m, cf.arg)
+		b.detach(func() { b.install(ctx, v, m, cf.arg) })
 	case actSpeed:
 		// Up to a minute of measuring must not hold one of the handler slots other chats' presses
 		// wait for; the speed-test lock already keeps tests one at a time.
 		b.detach(func() { b.speed(ctx, v, m, cf.arg) })
 	}
+}
+
+// applyTest is the confirmed Apply, as a test: the watcher sees the window open and sends Keep /
+// Roll back to every owner.
+func (b *Bot) applyTest(ctx context.Context, v view, m *Message, rev, who string) {
+	b.show(ctx, m, v.t("mt.apply.run"), nil)
+	cctx, cancel := context.WithTimeout(ctx, applyWait)
+	err := b.be.ApplyTest(cctx, rev)
+	cancel()
+	if err != nil {
+		b.show(ctx, m, v.t("mt.apply.fail", esc(errorText(v, err))), v.maintBack())
+		return
+	}
+	b.show(ctx, m, v.t("mt.apply.done", esc(who)), v.maintBack())
+}
+
+// switchRouting is the confirmed routing switch: off, or back on, without touching the configuration.
+func (b *Bot) switchRouting(ctx context.Context, v view, m *Message, on bool, who string) {
+	running, done := "rt.off.run", "rt.off.done"
+	if on {
+		running, done = "rt.on.run", "rt.on.done"
+	}
+	b.show(ctx, m, v.t(running), nil)
+	cctx, cancel := context.WithTimeout(ctx, routingWait)
+	err := b.be.SetRouting(cctx, on)
+	cancel()
+	back := &Keyboard{Rows: [][]InlineButton{{btn(v.t("b.maint.back"), cbMaint), btn(v.t("b.status"), cbStatus)}}}
+	if err != nil {
+		b.show(ctx, m, v.t("rt.fail", esc(truncate(errorText(v, err), 600))), back)
+		return
+	}
+	b.show(ctx, m, v.t(done, esc(who)), back)
+}
+
+// backup sends the full backup to the chat as a file.
+func (b *Bot) backup(ctx context.Context, v view, m *Message) {
+	cctx, cancel := context.WithTimeout(ctx, backendWait)
+	name, data, err := b.be.Backup(cctx)
+	cancel()
+	if err == nil {
+		sctx, scancel := context.WithTimeout(ctx, time.Minute)
+		_, err = b.api.SendDocument(sctx, m.Chat.ID, name, data, v.t("mt.backup.caption", v.clock(b.now())))
+		scancel()
+	}
+	if err != nil {
+		b.show(ctx, m, v.t("mt.backup.fail", esc(errorText(v, err))), v.maintBack())
+		return
+	}
+	b.show(ctx, m, v.t("mt.backup.sent"), v.maintBack())
 }
 
 func (b *Bot) refreshLists(ctx context.Context, v view, m *Message) {
@@ -375,7 +470,7 @@ func (b *Bot) refreshLists(ctx context.Context, v view, m *Message) {
 	r, err := b.be.RefreshLists(cctx)
 	cancel()
 	if err != nil {
-		b.show(ctx, m, v.t("mt.lists.fail", esc(err.Error())), v.maintBack())
+		b.show(ctx, m, v.t("mt.lists.fail", esc(errorText(v, err))), v.maintBack())
 		return
 	}
 	var text strings.Builder
@@ -410,7 +505,7 @@ func (b *Bot) refreshSub(ctx context.Context, v view, m *Message) {
 	added, err := b.be.RefreshSubscription(cctx)
 	cancel()
 	if err != nil {
-		b.show(ctx, m, v.t("mt.sub.fail", esc(err.Error())), v.maintBack())
+		b.show(ctx, m, v.t("mt.sub.fail", esc(errorText(v, err))), v.maintBack())
 		return
 	}
 	var extra []InlineButton
@@ -418,12 +513,4 @@ func (b *Bot) refreshSub(ctx context.Context, v view, m *Message) {
 		extra = append(extra, btn(v.t("b.apply"), cbAsk+actApply))
 	}
 	b.show(ctx, m, v.t("mt.sub.done", added), v.maintBack(extra...))
-}
-
-// errorText is an error for the chat; ErrUnavailable reads as what it is.
-func errorText(v view, err error) string {
-	if errors.Is(err, ErrUnavailable) {
-		return v.t("mt.unavailable")
-	}
-	return fmt.Sprint(err)
 }

@@ -15,6 +15,7 @@ import (
 	"wayhop/internal/nativeplan"
 	"wayhop/internal/platform"
 	"wayhop/internal/plugin"
+	"wayhop/internal/updater"
 )
 
 // The executor installs one materialization in make-before-break order, calling the platform
@@ -41,6 +42,15 @@ type applyExecOps struct {
 	kernelPostcheck func(context.Context, executionKernelArtifactV1) error
 	// plugins syncs the engine plugins to specs and reports the ones that are not running.
 	plugins func(context.Context, []executionPluginSpecV1) []map[string]any
+
+	// The routing switch's own ops (routingswitch.go); no Apply calls them. nativeRoutingOff removes
+	// what a native target routes with and keeps its interfaces; nativeRoutingSave makes the native
+	// state the router's startup configuration; resolverReload restarts the router's resolver after
+	// a kernel plane that fed it directives (Keenetic's dnsmasq ipset= file) was removed, so it stops
+	// filling sets that no longer exist.
+	nativeRoutingOff  func(context.Context, nativeplan.Plan) (changed bool, err error)
+	nativeRoutingSave func(context.Context, nativeplan.Plan) error
+	resolverReload    func(context.Context, executionKernelArtifactV1) error
 }
 
 // applyExecResult says what an execution did.
@@ -58,6 +68,16 @@ type applyExecError struct {
 
 func (e *applyExecError) Error() string { return e.Step + ": " + e.Err.Error() }
 func (e *applyExecError) Unwrap() error { return e.Err }
+
+// applyStepUntouchedError marks a step that refused before it changed anything on the router. The
+// executor then does not count that step as a mutation: a refusal that left everything as it was
+// needs no rollback, and a rollback would run into the same refusal (re-executing the previous
+// plan meets the same live state) and tell the operator the router was not fully restored when
+// nothing on it had been touched.
+type applyStepUntouchedError struct{ err error }
+
+func (e *applyStepUntouchedError) Error() string { return e.err.Error() }
+func (e *applyStepUntouchedError) Unwrap() error { return e.err }
 
 const (
 	stepNativePrepare = "native_prepare"
@@ -112,8 +132,13 @@ func executeMaterialization(
 			return &applyExecError{Step: name, Err: err}
 		}
 		progress(name)
+		mutatedBefore := result.Mutated
 		result.Mutated = true
 		if err := run(); err != nil {
+			var untouched *applyStepUntouchedError
+			if errors.As(err, &untouched) {
+				result.Mutated = mutatedBefore
+			}
 			return &applyExecError{Step: name, Err: err}
 		}
 		result.Steps = append(result.Steps, name)
@@ -238,7 +263,7 @@ func teardownMaterialization(ctx context.Context, ops applyExecOps, m *execution
 	}
 	if target := m.nativeTarget(); target != nil && ops.abortNative != nil {
 		if err := ops.abortNative(ctx, *target); err != nil {
-			errs = append(errs, fmt.Errorf("native abort: %w", err))
+			errs = append(errs, &nativeLeftoverError{err})
 		}
 	}
 	if ops.plugins != nil {
@@ -286,6 +311,12 @@ func (s *Server) productionExecOps() applyExecOps {
 	if keeneticAdapter != nil && s.keeneticConfigReader != nil {
 		keeneticAdapter.readConfig = s.keeneticConfigReader
 	}
+	if keeneticAdapter != nil {
+		keeneticAdapter.reportLeft = s.noteKeeneticLeftAsIs
+		if s.keeneticInterfacesReader != nil {
+			keeneticAdapter.readInterfaces = s.keeneticInterfacesReader
+		}
+	}
 	native, _ := newExactNativePlatformAdapter(openwrt, keeneticAdapter)
 	ops := applyExecOps{
 		core:        s.coreStep,
@@ -296,6 +327,7 @@ func (s *Server) productionExecOps() applyExecOps {
 			return s.kernelTeardown(ctx, artifact)
 		},
 		kernelPostcheck: s.kernelPostcheck,
+		resolverReload:  reloadResolverAfterTeardown,
 		plugins: func(_ context.Context, specs []executionPluginSpecV1) []map[string]any {
 			if s.plugins == nil {
 				return []map[string]any{}
@@ -310,8 +342,25 @@ func (s *Server) productionExecOps() applyExecOps {
 		ops.abortNative = native.abort
 		ops.persistNative = native.persist
 		ops.postcheckNative = native.postcheck
+		ops.nativeRoutingOff = native.routingOff
+		ops.nativeRoutingSave = native.routingSave
 	}
 	return ops
+}
+
+// reloadResolverAfterTeardown restarts Keenetic's dnsmasq once the plane that wrote its ipset=
+// directives is gone (kernelTeardown deletes the file but the resolver keeps what it read). Nothing
+// to do for a plane that fed the resolver nothing, or for the nft plane, whose sets dnsmasq never
+// learned about.
+func reloadResolverAfterTeardown(ctx context.Context, artifact executionKernelArtifactV1) error {
+	if artifact.Ipset == nil || len(artifact.Ipset.DnsmasqConf) == 0 {
+		return nil
+	}
+	adapter, err := newExactKeeneticKernelAdapter(*artifact.Ipset)
+	if err != nil {
+		return fmt.Errorf("%w: adapter: %v", errExactProductionKernelApply, err)
+	}
+	return reloadKeeneticDnsmasq(ctx, adapter.runner)
 }
 
 // singboxSettleWindow is how long an Apply waits after a (re)start to confirm the core STAYED up.
@@ -376,10 +425,11 @@ func (s *Server) coreStep(ctx context.Context, artifact executionCoreArtifactV1)
 	if !s.singbox.Available() {
 		return fmt.Errorf("sing-box binary not found (%s) — the config was not written because nothing would run it", artifact.BinaryPath)
 	}
-	if err := os.MkdirAll(filepath.Dir(artifact.ConfigPath), 0o755); err != nil {
-		return fmt.Errorf("create config directory: %w", err)
-	}
-	if err := atomicfile.WriteSynced(artifact.ConfigPath, artifact.Config, 0o600); err != nil {
+	// Temp and rename, never the live file truncated in place: a kill or power cut before the fsync left
+	// a zero-length or torn config, and an ENOSPC partway destroyed the only on-disk copy while the old
+	// core ran on from memory, so the next scheduled restart read the broken file. The temp's name
+	// (singbox.json.*.tmp) does not end in .json, so sing-box's directory mode never loads it.
+	if err := atomicfile.Write(artifact.ConfigPath, artifact.Config, 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", artifact.ConfigPath, err)
 	}
 	if err := context.Cause(ctx); err != nil {
@@ -411,6 +461,9 @@ func (s *Server) checkCoreConfig(ctx context.Context, config []byte) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create config directory: %w", err)
 	}
+	if err := coreConfigSpaceError(dir, len(config), coreDirAvail); err != nil {
+		return err
+	}
 	staged, cleanup, err := stageExactCoreConfig(dir, config)
 	if err != nil {
 		return fmt.Errorf("stage config for check: %w", err)
@@ -419,6 +472,35 @@ func (s *Server) checkCoreConfig(ctx context.Context, config []byte) error {
 	checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	return s.singbox.CheckConfig(checkCtx, staged)
+}
+
+// coreDirAvail reads the free space under the core's config directory; a var so tests decide it.
+var coreDirAvail = updater.AvailBytes
+
+// coreConfigSpaceReserve is left free on top of what an Apply writes: the overlay also holds UCI,
+// the store and the logs, and a filesystem run to zero fails the next of those writes instead.
+const coreConfigSpaceReserve = 1 << 20
+
+// coreConfigSpaceError refuses an Apply whose core config would not fit where it is written. An Apply
+// holds about three copies at its peak - the staged check copy here, the temp the live file is swapped
+// in from, and the Apply record, which keeps the config base64-encoded for the committed and the
+// tested revision - and since downloaded feeds reach the core (QA-066) a refilter-sized list sent to
+// a proxy makes a config of megabytes, against 6.1 MB free on the test router's overlay. An unknown free
+// space (off Linux, or statfs failing) skips the guard rather than blocking on it.
+func coreConfigSpaceError(dir string, size int, avail func(string) (uint64, bool)) error {
+	free, ok := avail(dir)
+	if !ok {
+		return nil
+	}
+	need := 3*uint64(size) + coreConfigSpaceReserve
+	if free >= need {
+		return nil
+	}
+	mb := func(n uint64) string { return fmt.Sprintf("%.1f MB", float64(n)/(1<<20)) }
+	return fmt.Errorf("not enough free space in %s for the proxy core's config: an Apply needs about %s there "+
+		"(the %s config, its check copy and the Apply record) and %s is free - make large routing lists "+
+		"smaller or send them to a WireGuard/AmneziaWG connection in hybrid or fast mode, or free space on the router",
+		dir, mb(need), mb(uint64(size)), mb(free))
 }
 
 // kernelStep installs the target kernel plane (nft/ip on OpenWrt, ipset/iptables + the netfilter.d
@@ -445,8 +527,9 @@ func (s *Server) kernelStep(ctx context.Context, target executionKernelArtifactV
 	if target.Ipset != nil {
 		if previous != nil && previous.Ipset != nil && string(previous.Ipset.Script) != string(target.Ipset.Script) {
 			// A replaced plane: remove the old sets and marks first so nothing the new plan no longer
-			// names lingers; the new program is installed right after.
-			if err := s.kernelTeardown(ctx, *previous); err != nil {
+			// names lingers; the new program is installed right after. The DNS redirect and refusals
+			// the new program keeps stay in place across the swap.
+			if err := s.kernelTeardownSparing(ctx, *previous, target.Ipset.Script); err != nil {
 				log.Printf("apply: previous Keenetic plane teardown: %v", err)
 			}
 		}
@@ -492,6 +575,12 @@ func (s *Server) kernelStep(ctx context.Context, target executionKernelArtifactV
 
 // kernelTeardown removes an installed plane.
 func (s *Server) kernelTeardown(ctx context.Context, artifact executionKernelArtifactV1) error {
+	return s.kernelTeardownSparing(ctx, artifact, nil)
+}
+
+// kernelTeardownSparing is kernelTeardown that leaves in place the Keenetic DNS rules the program
+// spare also installs; nil spares nothing.
+func (s *Server) kernelTeardownSparing(ctx context.Context, artifact executionKernelArtifactV1, spare []byte) error {
 	if artifact.Action != ExecutionEnsurePresent {
 		return nil
 	}
@@ -501,7 +590,7 @@ func (s *Server) kernelTeardown(ctx context.Context, artifact executionKernelArt
 			return fmt.Errorf("%w: adapter: %v", errExactProductionKernelApply, err)
 		}
 		hookErr := removeKeeneticPBRHook()
-		if err := adapter.teardown(ctx, *artifact.Ipset); err != nil {
+		if err := adapter.teardownSparing(ctx, *artifact.Ipset, spare); err != nil {
 			return err
 		}
 		return hookErr

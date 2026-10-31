@@ -98,28 +98,40 @@ func TestListFailoverWriteFailureIsReportedOnceAndOnRecovery(t *testing.T) {
 
 	s := &Server{}
 	boom := errors.New("RTNETLINK answers: operation not permitted")
-	s.noteListFailoverWrite(151, boom)
-	s.noteListFailoverWrite(151, boom)
-	s.noteListFailoverWrite(151, boom)
+	s.noteListFailoverWrite(false, 151, boom)
+	s.noteListFailoverWrite(false, 151, boom)
+	s.noteListFailoverWrite(false, 151, boom)
 	if n := strings.Count(buf.String(), "cannot repoint table 151"); n != 1 {
 		t.Fatalf("the same refusal was logged %d times, want 1:\n%s", n, buf.String())
 	}
 
 	// A DIFFERENT refusal is news again: the reason changed, and the first one no longer explains it.
-	s.noteListFailoverWrite(151, errors.New("Cannot find device \"nwg5\""))
+	s.noteListFailoverWrite(false, 151, errors.New("Cannot find device \"nwg5\""))
 	if n := strings.Count(buf.String(), "cannot repoint table 151"); n != 2 {
 		t.Fatalf("a changed refusal was not reported: %s", buf.String())
 	}
 
 	// And the recovery, because "it stopped failing" is the half an operator waits for.
-	s.noteListFailoverWrite(151, nil)
+	s.noteListFailoverWrite(false, 151, nil)
 	if !strings.Contains(buf.String(), "table 151 is writable again") {
 		t.Fatalf("recovery was not reported: %s", buf.String())
 	}
 	before := buf.Len()
-	s.noteListFailoverWrite(151, nil)
+	s.noteListFailoverWrite(false, 151, nil)
 	if buf.Len() != before {
 		t.Fatalf("a healthy write logged again: %s", buf.String()[before:])
+	}
+
+	// The same table's v6 default is its own entry: refused while v4 is written, one shared key would
+	// log the pair as a refusal and a recovery on every tick.
+	s.noteListFailoverWrite(true, 151, boom)
+	s.noteListFailoverWrite(false, 151, nil)
+	s.noteListFailoverWrite(true, 151, boom)
+	if n := strings.Count(buf.String()[before:], "cannot repoint table 151 (IPv6)"); n != 1 {
+		t.Fatalf("a steady v6 refusal beside a working v4 table was logged %d times:\n%s", n, buf.String()[before:])
+	}
+	if strings.Contains(buf.String()[before:], "writable again (IPv4)") {
+		t.Fatalf("the v6 refusal flapped the v4 entry:\n%s", buf.String()[before:])
 	}
 }
 

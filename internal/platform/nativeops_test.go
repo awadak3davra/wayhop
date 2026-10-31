@@ -106,11 +106,3 @@ func TestNativeOperationsUnknownPlatformFailClosed(t *testing.T) {
 		}
 	}
 }
-
-func TestOlcRTCIsUnavailableUntilStrictExecutorExists(t *testing.T) {
-	set := Evaluate(Capabilities{Platform: string(OpenWrt)}, RuntimeFacts{})
-	got := set.Get(CapEngineOlcRTC)
-	if got.State.Usable() || got.WayHopSupport != VerdictNo || got.Reason != ReasonBackendNotWired {
-		t.Fatalf("olcRTC capability = %+v, want explicit build-level unavailability", got)
-	}
-}

@@ -168,3 +168,34 @@ func TestInterceptReadFromAppliedNotSaved(t *testing.T) {
 		t.Errorf("warned with no domain list to protect: %q", sum2)
 	}
 }
+
+// The intercept flag is not the redirect. On KeeneticOS only the kernel plane renders it, and that
+// plane exists in hybrid and fast; off KeeneticOS WayHop renders none and only the firewall's own
+// :53 redirect shuts the door. The flag alone passed this check in every one of those cases (QA-068).
+func TestInterceptEnforcedOnlyWhereSomethingInstallsIt(t *testing.T) {
+	on := model.Profile{DNS: &model.DNSSettings{Enabled: true, Intercept: true}}
+	withRedirect := executionKernelArtifactV1{Ipset: &executionKernelIpsetArtifactV1{
+		Script: []byte("iptables -t nat -A PREROUTING -i br0 -p udp --dport 53 -j REDIRECT --to-ports 53\n")}}
+	noRedirect := executionKernelArtifactV1{Ipset: &executionKernelIpsetArtifactV1{Script: []byte("iptables -t mangle -N WR_PREROUTING\n")}}
+	yes, no := func() bool { return true }, func() bool { return false }
+	cases := []struct {
+		name     string
+		p        model.Profile
+		k        executionKernelArtifactV1
+		keenetic bool
+		fw       func() bool
+		want     bool
+	}{
+		{"keenetic plane with the redirect", on, withRedirect, true, no, true},
+		{"keenetic plane without it", on, noRedirect, true, yes, false},
+		{"keenetic mixed: no plane at all", on, executionKernelArtifactV1{}, true, yes, false},
+		{"openwrt, firewall redirects :53", on, executionKernelArtifactV1{}, false, yes, true},
+		{"openwrt, nothing redirects", on, executionKernelArtifactV1{}, false, no, false},
+		{"flag off", model.Profile{}, withRedirect, true, yes, false},
+	}
+	for _, c := range cases {
+		if got := interceptEnforced(c.p, c.k, c.keenetic, c.fw); got != c.want {
+			t.Errorf("%s: enforced = %v, want %v", c.name, got, c.want)
+		}
+	}
+}

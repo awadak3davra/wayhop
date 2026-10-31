@@ -150,6 +150,15 @@ want_root packaging/S99wayhop 'init: an unnamed caller stays unnamed'      'CALL
 want_root packaging/S99wayhop 'init: the agent is appended only when known' 'FROM=${CALLER:+ from $CALLER}'
 want_root packaging/S99wayhop 'init: the start line carries that suffix'    'Started $DESC$FROM'
 
+# --- both init scripts raise the open-files limit the daemon and its core inherit ----------------
+# Routers start services at 1024 soft / 4096 hard, and a busy one then fails every new connection
+# with "too many open files". The limit lives in the init scripts, so it reaches a router only with an
+# install or a package upgrade, and an edit made by hand is lost on the next one: the shipped files
+# have to carry it. procd's form is the only one procd reads; a "limits { ... }" block is not procd
+# syntax and stops the OpenWrt script from parsing.
+want_root packaging/S99wayhop           'init: raises the open-files limit before starting'  'ulimit -n 16384'
+want_root packaging/openwrt/wayhop.init 'procd init: raises the open-files limit'           'procd_set_param limits nofile="16384 16384"'
+
 # --- every install path repairs historical world-readable state without sweeping operator files --
 want_root packaging/harden-state.sh 'state migration: state/data roots become 0700' 'chmod 0700 "\$_path"'
 want_root packaging/harden-state.sh 'state migration: known secret files become 0600' 'chmod 0600 "\$_path"'
@@ -206,6 +215,15 @@ if grep -q "wayhop.keep is missing from the package" "$ROOT/packaging/openwrt/in
   ok_ "openwrt tarball: it refuses to install without the keep file"
 else
   bad_ "the manual OpenWrt installer proceeds without the keep file instead of refusing"
+fi
+# One space/leftover/rollback block, in both tarball installers: the OpenWrt one is tested on a full
+# overlay (packaging/test/openwrt_upgrade_harness.sh) and the Entware one must not drift from it.
+space_block() { sed -n '/^# >>> space + leftovers/,/^# <<< space + leftovers/p' "$1"; }
+if [ -n "$(space_block "$ROOT/packaging/openwrt/install.sh")" ] &&
+   [ "$(space_block "$ROOT/packaging/openwrt/install.sh")" = "$(space_block "$ROOT/packaging/install.sh")" ]; then
+  ok_ "tar installers: the space and rollback block is the same in the OpenWrt and the Entware installer"
+else
+  bad_ "the Entware installer's space and rollback block differs from the OpenWrt one (or is missing)"
 fi
 if [ -f "$ROOT/.github/workflows/build.yml" ]; then
   if [ "$(grep -c "packaging/openwrt/wayhop.keep" "$ROOT/.github/workflows/build.yml")" -ge 2 ]; then

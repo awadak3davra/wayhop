@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"wayhop/internal/model"
 )
@@ -79,6 +80,11 @@ func TestProfileCoWDeepReadStress(t *testing.T) {
 					}
 				}
 				_ = sink
+				// Yield the core between passes (QA-119): eight readers that never block held
+				// several cores at 100% for as long as the writers' durable saves took, which on a
+				// loaded machine starved every other test binary into its 10-minute timeout. A
+				// pause this short still interleaves thousands of reads with the writes.
+				time.Sleep(50 * time.Microsecond)
 			}
 		}()
 	}

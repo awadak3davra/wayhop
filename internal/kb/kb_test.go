@@ -19,6 +19,10 @@ func TestMatchRealLines(t *testing.T) {
 		{`read tcp 10.0.0.2->1.2.3.4: i/o timeout`, "gen-io-timeout"},
 		{`x509: certificate has expired or is not yet valid`, "gen-clock"},
 		{`tun: operation not permitted`, "gen-permission"},
+		// sing-box's ssh outbound and golang.org/x/crypto/ssh, worded as their sources format them.
+		{`ERROR[0042] outbound/ssh[vps]: host key mismatch, server send ssh-ed25519 AAAAC3NzaC1lZDI1NTE5`, "ssh-host-key-mismatch"},
+		{`connect to ssh server: ssh: handshake failed: ssh: unable to authenticate, attempted methods [none password], no supported methods remain`, "ssh-auth"},
+		{`outbound/ssh[vps]: ssh: rejected: administratively prohibited (open failed)`, "ssh-forward-refused"},
 	}
 	for _, c := range cases {
 		matched := false

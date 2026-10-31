@@ -5,7 +5,7 @@
 **A router web panel for modern VPN and proxy protocols, with failover, selective routing and an Apply that undoes itself.**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-22a06b?style=flat-square)](LICENSE)
-[![Release](https://img.shields.io/badge/release-v0.5.8-0097dc?style=flat-square)](../../releases/latest)
+[![Release](https://img.shields.io/badge/release-v0.5.9-0097dc?style=flat-square)](../../releases/latest)
 [![Go](https://img.shields.io/badge/go-1.22+-00ADD8?style=flat-square&logo=go&logoColor=white)](go.mod)
 [![Platforms](https://img.shields.io/badge/router-OpenWrt%20%C2%B7%20Keenetic%20%C2%B7%20Entware-151c28?style=flat-square)](#supported-platforms-and-cpus)
 [![Arches](https://img.shields.io/badge/arch-mipsle%20%C2%B7%20mips%20%C2%B7%20arm%20%C2%B7%20arm64%20%C2%B7%20amd64-555?style=flat-square)](#supported-platforms-and-cpus)
@@ -89,22 +89,33 @@ installer takes a backup before it swaps the binary.
 | **VMess** | same transports | sing-box |
 | **Trojan** | TLS, with the same transports | sing-box |
 | **Shadowsocks** | AEAD and SS-2022 ciphers; `obfs-local` / `v2ray-plugin` passed through | sing-box |
-| **Hysteria2** | QUIC, Salamander obfuscation, port hopping | sing-box |
+| **Hysteria2** | QUIC, Salamander obfuscation, port hopping; a server with no public address through a Hysteria realm (sing-box 1.14+) | sing-box |
 | **TUIC v5** | QUIC, selectable congestion control, `native`/`quic` UDP relay | sing-box |
 | **AnyTLS** | TLS with SNI and uTLS fingerprint options | sing-box |
+| **Snell** | v4 (optional HTTP obfuscation) and v6 (traffic shaping); v5 from a Clash or Surge config runs as v4 | sing-box 1.14+ |
 | **WireGuard** | kernel interface where available, otherwise a sing-box endpoint | kernel / sing-box |
 | **AmneziaWG** | WireGuard plus junk-packet obfuscation (1.x, 2.0 and 3.x parameters) | kernel / `amneziawg-go` |
-| **olcRTC** | tunnel over a WebRTC conferencing service — **import and store only in this build**: the engine is installable from Components, but WayHop has no executor for it, so such a connection cannot be enabled | `olcrtc` |
+| **ByeDPI** | not a tunnel: a local proxy on the router that reshapes the start of each connection so DPI cannot read the site name; send a routing list to it like to any exit (not yet on KeeneticOS) | `ciadpi` (Components) |
+| **OpenConnect** | Cisco AnyConnect / ocserv, GlobalProtect, Fortinet, F5, Pulse and NC: user + password, group, TOTP, a server certificate pin; entered in the form (there is no profile format) | sing-box 1.14+ |
+| **SSH** | any server that takes an SSH login, with nothing installed on it: user + password or a private key (and its passphrase), the server's host keys pinned - without them any server is accepted, and the Apply review says so. TCP only: no UDP, so calls, games and DNS over UDP do not pass through it | sing-box |
+| **OpenVPN** | client profiles (`.ovpn`) with inline certificates: UDP or TCP, several servers, `tls-auth` / `tls-crypt` / `tls-crypt-v2`, user + password or a client certificate, static key | sing-box 1.14+ |
 
-Import from: `vless://`, `vmess://`, `trojan://`, `ss://`, `hysteria2://`, `hy2://`, `tuic://`,
-`anytls://`, `wireguard://`; a WireGuard or AmneziaWG `.conf`; a Clash / Clash-Meta YAML; a sing-box
-config; an olcRTC YAML; or a subscription URL. Subscriptions detect base64 vs. plain text, import
+Import from: `vless://`, `vmess://`, `trojan://`, `ss://`, `hysteria2://`, `hy2://`, `hysteria2+realm://`, `tuic://`,
+`anytls://`, `wireguard://`, `ssh://` (user and password; the key and host keys go in the form); a WireGuard or AmneziaWG `.conf`; a Clash / Clash-Meta YAML; a sing-box
+config; an OpenVPN `.ovpn` profile; Surge `[Proxy]` lines or a Surge profile; or a subscription URL. Subscriptions detect base64 vs. plain text, import
 each link independently so one bad entry does not sink the batch, and de-duplicate by content — same protocol, server, port and credentials — never by display name.
 
 The panel can also stand up a server for you: **Set up Server** generates and (over SSH) runs an
 idempotent installer on a fresh Debian/Ubuntu VPS for AmneziaWG, WireGuard, VLESS-Reality, VMess,
-Trojan, Shadowsocks, Hysteria2 or TUIC, then imports the client config it prints. Credentials are
+Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS or Snell, then imports the client config it prints; it can also
+add an MTProto proxy (telemt) and hand back its `tg://proxy` link for phones. Credentials are
 not stored or logged.
+
+The router itself can carry Telegram without a tunnel: the **Telegram bridge** runs
+[tg-ws-proxy-rs](https://github.com/valnesfjord/tg-ws-proxy-rs) (Components) as a local MTProto
+proxy on the LAN address, which takes each client's connection to Telegram's own web domains over
+WebSocket and TLS, or through a Cloudflare domain or Worker. It listens on the LAN only, runs
+without root, and hands back a `tg://proxy` link with a QR code (Settings → Telegram bridge).
 
 ## Supported platforms and CPUs
 
@@ -224,8 +235,8 @@ The exit code reflects the real outcome: a UI that did not come up exits non-zer
 2. **sing-box** is what carries the proxy protocols, and the installer already offered to install
    it - piped from `curl` it installs it without asking, except on an OpenWrt overlay too small to
    hold it. If you declined or the router had no package for it, add it later with `opkg install
-   sing-box`, or from the **Components** page, which can install and update sing-box,
-   `amneziawg-go` and `olcrtc` on the router. WayHop detects the core and enables Apply. (WireGuard
+   sing-box`, or from the **Components** page, which can install and update sing-box and
+   `amneziawg-go` on the router. WayHop detects the core and enables Apply. (WireGuard
    and AmneziaWG route natively in the kernel and need none of this, except an AmneziaWG 3
    connection the router's own AmneziaWG cannot carry: that one runs on `amneziawg-go`.)
 
@@ -241,9 +252,9 @@ The exit code reflects the real outcome: a UI that did not come up exits non-zer
 5. Apply is live until reboot. **Save** commits it. If connectivity drops in between, the previous
    config comes back on its own.
 
-The panel is in English plus nine translations (Russian, Ukrainian, Belarusian, Persian, Turkish,
-Spanish, French, German, Portuguese); only the selected language is sent to the browser, and Persian
-renders right-to-left.
+The panel is in English plus ten translations (Russian, Ukrainian, Belarusian, Persian, Turkish,
+Spanish, French, German, Portuguese, Simplified Chinese); only the selected language is sent to the
+browser, and Persian renders right-to-left.
 
 ## Update
 
@@ -336,10 +347,15 @@ Lists match by domain, IP/CIDR, GeoSite/GeoIP, source IP, source port, source MA
 interface. MAC and ingress-interface matching exist only on the kernel plane; domain and geo
 matching need the proxy core.
 
-About thirty curated rule-set presets ship with the panel, drawn from public censorship-list and
+About forty-five curated rule-set presets ship with the panel, drawn from public censorship-list and
 service-IP feeds. Presets built on plain IP/CIDR or plain domain feeds need no proxy core at all;
 compiled `.srs` rule-sets do. IP carve-outs can refresh themselves from an HTTPS prefix feed or from
 RIPEstat announced-prefixes for a list of ASNs.
+
+Lists you already keep come over with **Routing → Import**: the Keenetic's own `object-group fqdn`
+lists, or a pasted HydraRoute Neo `domain.conf` / `ip.list`. Each chosen group becomes an ordinary
+routing list on the exit you pick; what cannot be carried is counted with the reason, including
+prefixes no list should hold (the default route, private and CGNAT ranges, loopback, multicast).
 
 Four routing modes trade throughput against how finely traffic can be matched:
 
@@ -373,12 +389,15 @@ the proxy core.
 Failover groups are built on sing-box `urltest` and watched by a supervisor that starts the core and
 restarts it after a crash with exponential backoff. Health tracking records latency, success rate and
 switch history per exit, and the failover view reads top to bottom as *expected → falls to → then →
-if all fail*.
+if all fail*. A core that keeps running but degrades can also be restarted on a schedule (Settings →
+Reliability: a daily time or every N hours; off by default, since a restart drops live connections).
 
 Diagnostics runs a battery on the router itself: ping, traceroute, DNS resolution and leak checks,
 IPv6 leak (the tunnels are IPv4-only, so working global IPv6 can bypass them silently), clock skew
 read from a remote HTTP `Date` header (NTP is often blocked), endpoint reachability, kernel-plane and
-offload state, and config validation via `sing-box check`. A check that could not measure anything
+offload state, and config validation via `sing-box check`. A row *Services through each exit* asks
+through the WAN and every tunnel and group which country the internet places it in and whether
+ChatGPT, Claude and YouTube Premium work there. A check that could not measure anything
 reports `n/a` and is not counted as a pass. There is also a redacted support bundle and a Prometheus
 scrape at `GET /metrics`.
 
@@ -491,7 +510,7 @@ One arch by hand:
 
 ```sh
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
-  -ldflags "-s -w -X wayhop/internal/version.Version=0.5.8" \
+  -ldflags "-s -w -X wayhop/internal/version.Version=0.5.9" \
   -o wayhop-arm64 ./cmd/wayhop
 ```
 
@@ -523,4 +542,4 @@ tunnel, anything touching the keys the panel stores — open a
 before it is described.
 
 Licensed under the [MIT License](LICENSE). Built on the MIT/Apache-licensed cores it orchestrates:
-sing-box, amneziawg-go and olcRTC. See the [changelog](CHANGELOG.md) for release history.
+sing-box and amneziawg-go. See the [changelog](CHANGELOG.md) for release history.

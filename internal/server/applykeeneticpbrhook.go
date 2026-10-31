@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"wayhop/internal/atomicfile"
+	"wayhop/internal/pbr"
 )
 
 // applykeeneticpbrhook.go keeps the policy plane installed across NDM's own firewall rebuilds.
@@ -34,10 +35,15 @@ const (
 // The guard matters as much as the body: NDM invokes this for every table and both address
 // families, and re-running the whole program on `raw:ip6tables` would multiply a rebuild into four
 // redundant executions. Only the tables the plane actually writes are answered.
+//
+// The filter table is answered only for a program that refuses encrypted DNS, whose FORWARD rules
+// a filter rebuild drops (QA-115). Such a program starts with its filter section and stops at
+// pbr.FilterSectionEnd on that event, so a filter rebuild never re-runs the mangle flush.
 func renderKeeneticPBRHook(script []byte) (string, error) {
 	if len(script) == 0 {
 		return "", errExactKernelArtifact
 	}
+	filter := strings.Contains(string(script), pbr.FilterSectionEnd)
 	var b strings.Builder
 	b.WriteString("#!/opt/bin/sh\n")
 	b.WriteString("# WayHop policy plane — re-asserted after an NDM firewall rebuild.\n")
@@ -46,8 +52,15 @@ func renderKeeneticPBRHook(script []byte) (string, error) {
 	b.WriteString("#\n")
 	b.WriteString("# NDM exports $table and $type to every script in this directory after a rebuild.\n")
 	b.WriteString("# Kernel ipsets survive that rebuild, so only the rules are re-installed here.\n")
+	if filter {
+		b.WriteString("# A filter rebuild runs only the filter section at the top of the program.\n")
+	}
 	b.WriteString("case \"$table:$type\" in\n")
-	b.WriteString("\tmangle:iptables|nat:iptables|mangle:ip6tables) ;;\n")
+	if filter {
+		b.WriteString("\tmangle:iptables|nat:iptables|mangle:ip6tables|filter:iptables) ;;\n")
+	} else {
+		b.WriteString("\tmangle:iptables|nat:iptables|mangle:ip6tables) ;;\n")
+	}
 	b.WriteString("\t*) exit 0 ;;\n")
 	b.WriteString("esac\n\n")
 	b.Write(script)
@@ -128,13 +141,26 @@ func removeKeeneticPBRHook() error {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) && firstErr == nil {
 			firstErr = err
 		}
+		// A temp a killed write left in the staging place. The only other sweep runs before the next
+		// write, and with the plane gone there may never be one. Callers hold applyMu.
+		atomicfile.RemoveStale(path)
 	}
 	return firstErr
 }
 
 // replaceFilePreservingPrevious writes content and returns the function that puts the previous state
 // back — the previous bytes, or removal when the file did not exist.
+//
+// Both directions swap a new file in by rename (atomicfile.WriteOutsideDir) rather than truncating and
+// rewriting the live one. NDM can run the hook at any moment, and nativePrepare triggers exactly such
+// a rebuild during Apply: sh had read the first chunk of the old script and read the rest from the new
+// bytes, and a power cut between the truncate and the fsync left an empty or cut-off hook, or a
+// dnsmasq line cut mid-keyword that keeps the resolver from starting. The temp is staged outside the
+// directory because NDM and dnsmasq read every file in it.
 func replaceFilePreservingPrevious(path string, content []byte, perm os.FileMode) (func() error, error) {
+	// A temp a killed Apply left in the staging place. Every write of these paths runs under applyMu, so
+	// none is in flight here.
+	atomicfile.RemoveStale(path)
 	previous, readErr := os.ReadFile(path)
 	existed := readErr == nil
 	if readErr != nil && !os.IsNotExist(readErr) {
@@ -146,7 +172,7 @@ func replaceFilePreservingPrevious(path string, content []byte, perm os.FileMode
 			previousPerm = info.Mode().Perm()
 		}
 	}
-	if err := atomicfile.WriteSynced(path, content, perm); err != nil {
+	if err := atomicfile.WriteOutsideDir(path, content, perm); err != nil {
 		return nil, err
 	}
 	return func() error {
@@ -156,6 +182,6 @@ func replaceFilePreservingPrevious(path string, content []byte, perm os.FileMode
 			}
 			return nil
 		}
-		return atomicfile.WriteSynced(path, previous, previousPerm)
+		return atomicfile.WriteOutsideDir(path, previous, previousPerm)
 	}, nil
 }

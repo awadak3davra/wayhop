@@ -47,6 +47,12 @@ func unsupportedSingboxEndpoints(p *model.Profile, tags map[string]bool) []strin
 			if !tags["with_wireguard"] {
 				bad = append(bad, fmt.Sprintf("%q (wireguard) needs with_wireguard", e.Name))
 			}
+		case model.ProtoOpenVPN, model.ProtoOpenConnect:
+			// sing-box 1.14's endpoints are build options too; OpenWrt's package turns them on by
+			// default (SINGBOX_WITH_OPENVPN / _OPENCONNECT) but a custom image can leave them out.
+			if tag := "with_" + string(e.Protocol); !tags[tag] {
+				bad = append(bad, fmt.Sprintf("%q (%s) needs %s", e.Name, e.Protocol, tag))
+			}
 		}
 		if e.TLS != nil && e.TLS.Fingerprint != "" && !tags["with_utls"] {
 			bad = append(bad, fmt.Sprintf("%q uTLS fingerprint %q needs with_utls", e.Name, e.TLS.Fingerprint))

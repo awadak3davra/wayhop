@@ -50,6 +50,10 @@ var singboxRequiredProtos = map[model.Protocol]bool{
 	model.ProtoHysteria2:   true,
 	model.ProtoTUIC:        true,
 	model.ProtoAnyTLS:      true,
+	model.ProtoOpenVPN:     true,
+	model.ProtoSnell:       true,
+	model.ProtoOpenConnect: true,
+	model.ProtoSSH:         true,
 	model.ProtoSOCKS:       true,
 	model.ProtoHTTP:        true,
 }
@@ -211,7 +215,7 @@ func DatapathNativeOnly(p *model.Profile, routingMode string) bool {
 		if rl.Source != "" {
 			return false
 		}
-		if domains, _ := splitDomainsIPs(rl.Manual); len(domains) > 0 {
+		if domains, _ := listEntries(rl); len(domains) > 0 {
 			return false
 		}
 	}
