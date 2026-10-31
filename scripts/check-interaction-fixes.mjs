@@ -2971,7 +2971,7 @@ globalThis.pi = pluralIndex; globalThis.tn = tn;`, context);
   check(!/fText\("[^"]+", "[^"]+", P\./.test(form),
     'no multi-line field is given a raw param that String() would comma-join');
   const asList = new Function(functionSource(app, 'asList') + '; return asList;')();
-  const lines = ['-----BEGIN OPENSSH PRIVATE KEY-----', 'b3BlbnNzaC1rZXktdjEAAAAA', '-----END OPENSSH PRIVATE KEY-----'];
+  const lines = ['-----BEGIN OPENSSH PRIVATE KEY-----', '(demo key - not usable)', '-----END OPENSSH PRIVATE KEY-----'];
   check(asList(lines).join('\n') === lines.join('\n') && asList(lines.join('\n')).join('\n') === lines.join('\n'),
     'a list and a text key render as the same PEM text');
   check(/t\("TCP only, no UDP \(calls, games\)\./.test(form),

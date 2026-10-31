@@ -109,7 +109,7 @@ func pluginrun_buildStubFrom(t *testing.T, binDir, src string) {
 	out := filepath.Join(binDir, "nfqws2"+pluginrun_exeSuffix())
 	cmd := exec.Command(goBin, "build", "-o", out, ".")
 	cmd.Dir = srcDir
-	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local", "GO111MODULE=on")
+	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local", "GO111MODULE=on", "CGO_ENABLED=0")
 	if combined, err := cmd.CombinedOutput(); err != nil {
 		t.Skipf("could not build nfqws2 stub (skipping real-process tests): %v\n%s", err, combined)
 	}
