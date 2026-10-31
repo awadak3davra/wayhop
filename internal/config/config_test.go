@@ -184,6 +184,16 @@ func TestRedacted(t *testing.T) {
 	if r.Subscription.URL != RedactedMark {
 		t.Fatalf("Redacted leaked the token-bearing subscription URL: %q", r.Subscription.URL)
 	}
+	// The HWID is the device slot the provider counts (competitor gap 25): masked like the URL.
+	c.Subscription.HWID = "test-hwid-0123456789"
+	c.Subscription.GeneratedHWID = "0123456789abcdef"
+	if r := c.Redacted(); r.Subscription.HWID != RedactedMark || c.Subscription.HWID == RedactedMark {
+		t.Fatalf("Redacted hwid = %q (original %q)", r.Subscription.HWID, c.Subscription.HWID)
+	}
+	// The generated one is kept apart from it (so "off" and a custom ID cannot lose it): masked too.
+	if r := c.Redacted(); r.Subscription.GeneratedHWID != RedactedMark || c.Subscription.GeneratedHWID == RedactedMark {
+		t.Fatalf("Redacted generated hwid = %q (original %q)", r.Subscription.GeneratedHWID, c.Subscription.GeneratedHWID)
+	}
 	// Original must be untouched (value receiver — operates on a copy).
 	if c.Clash.Secret != "supersecret" || c.Subscription.URL != "https://provider.example/sub/secrettoken" {
 		t.Fatalf("Redacted mutated the original config")
@@ -192,5 +202,25 @@ func TestRedacted(t *testing.T) {
 	empty := Default().Redacted()
 	if empty.Clash.Secret != "" || empty.Subscription.URL != "" || empty.Watchdog.NotifyURL != "" {
 		t.Fatalf("Redacted masked an empty secret: %+v", empty)
+	}
+}
+
+// The same sweep for config.json: a crash mid-save left config.json.NNN.tmp (the panel credentials and
+// the bot token) beside it for good. Load removes it before anything saves the config again.
+func TestLoad_SweepsTempsACrashLeftBehind(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if _, err := Load(path); err != nil { // writes the defaults
+		t.Fatal(err)
+	}
+	orphan := path + ".123456.tmp"
+	if err := os.WriteFile(orphan, []byte(`{"listen":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("an orphaned config temp survived Load: %v", err)
 	}
 }

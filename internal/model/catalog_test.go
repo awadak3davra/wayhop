@@ -128,6 +128,84 @@ func TestRoutingPresets_Streaming(t *testing.T) {
 	}
 }
 
+// The hosting-network presets exist to reach sites that stall on a throttled WAN, which is exactly
+// the router that may run without a core, so they must stay plain CIDR feeds on the weekly cadence
+// of the ranges they carry. Telegram's ranges come from what Telegram's ASNs announce: every
+// file-based list checked missed or added a network.
+func TestRoutingPresets_HostingNetworksAndTelegramAreKernelFeeds(t *testing.T) {
+	byID := map[string]RoutingPreset{}
+	for _, p := range RoutingPresets() {
+		byID[p.ID] = p
+	}
+	for _, id := range []string{"cidr-cloudflare", "cidr-cloudfront", "cidr-hetzner", "cidr-digitalocean", "cidr-ovh", "cidr-telegram",
+		"cidr-roblox", "cidr-google-meet"} {
+		p, ok := byID[id]
+		if !ok {
+			t.Errorf("missing preset %q", id)
+			continue
+		}
+		if p.CIDRSource == "" || p.RequiresCore || p.Kind != "ip" {
+			t.Errorf("%s must be a coreless CIDR feed: %+v", id, p)
+		}
+		if p.RefreshHours != 168 {
+			t.Errorf("%s refresh_hours = %d, want the weekly cadence of service ranges", id, p.RefreshHours)
+		}
+	}
+	if got := byID["cidr-telegram"].CIDRSource; got != "asn:62041,59930,62014,44907,211157" {
+		t.Errorf("cidr-telegram source = %q, want Telegram's five ASNs", got)
+	}
+	// Same reason for Roblox: the file list missed three of its networks and kept one nobody announces.
+	if got := byID["cidr-roblox"].CIDRSource; got != "asn:22697" {
+		t.Errorf("cidr-roblox source = %q, want Roblox's own ASN", got)
+	}
+	for _, id := range []string{"antizapret", "rkn"} {
+		if _, ok := byID[id]; ok {
+			t.Errorf("preset %q points at a feed frozen since early 2026; the runetfreedom presets replace it", id)
+		}
+	}
+}
+
+// The 12-hour tier is for feeds that really regenerate daily. Re:filter, legiz's bundle and
+// itdoginfo's lists change every few weeks, so twice-daily fetches of them were downloads of
+// unchanged files; they take the daily default.
+func TestRoutingPresetsTwiceDailyOnlyForDailyRegistries(t *testing.T) {
+	want := map[string]bool{"cidr-antifilter": true, "ru-blocked": true, "ru-blocked-all": true}
+	daily := map[string]bool{"cidr-refilter": true, "refilter-domains": true, "refilter-ip": true, "ru-bundle": true, "ru-inside": true}
+	for _, p := range RoutingPresets() {
+		if (p.RefreshHours == 12) != want[p.ID] {
+			t.Errorf("preset %q: refresh_hours %d", p.ID, p.RefreshHours)
+		}
+		if daily[p.ID] && p.RefreshHours != 24 {
+			t.Errorf("preset %q: refresh_hours %d, want the daily default", p.ID, p.RefreshHours)
+		}
+		delete(daily, p.ID)
+	}
+	for id := range daily {
+		t.Errorf("preset %q is gone; update this test", id)
+	}
+}
+
+// The RU-direct presets keep RU services on the subscriber's own ISP: they suggest "direct", need no
+// proxy core, read the daily-rebuilt release branch (not the lagging release asset) and refresh daily.
+func TestRoutingPresetsRUDirect(t *testing.T) {
+	byID := map[string]RoutingPreset{}
+	for _, p := range RoutingPresets() {
+		byID[p.ID] = p
+	}
+	for id, kind := range map[string]string{"ru-direct": "domain", "ru-direct-standard": "domain", "cidr-ru-direct": "ip"} {
+		p, ok := byID[id]
+		if !ok {
+			t.Errorf("missing preset %q", id)
+			continue
+		}
+		src := p.DomainSource + p.CIDRSource
+		if p.Kind != kind || p.RequiresCore || p.Suggest != "direct" || p.RefreshHours != 24 ||
+			!strings.HasPrefix(src, "https://raw.githubusercontent.com/kyoresuas/ru-direct/release/") {
+			t.Errorf("%s: %+v", id, p)
+		}
+	}
+}
+
 // Every preset carries a cadence the refresh loop will accept as-is. A catalog entry that arrives
 // below the flash floor would be silently clamped — right result, wrong place to decide it — and one
 // above the ceiling would be clamped down to a number nobody chose.

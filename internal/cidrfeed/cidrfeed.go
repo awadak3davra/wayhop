@@ -48,7 +48,7 @@ func ParseList(text string) (cidrs []string, skipped int) {
 			continue
 		}
 		tok := strings.Fields(line)[0] // tolerate "CIDR  label"
-		norm, ok := normalize(tok)
+		norm, ok := NormalizeCIDR(tok)
 		if !ok {
 			skipped++
 			continue
@@ -78,7 +78,7 @@ func ParseRIPEstat(body []byte) (cidrs []string, skipped int, err error) {
 	}
 	seen := map[string]bool{}
 	for _, p := range r.Data.Prefixes {
-		norm, ok := normalize(strings.TrimSpace(p.Prefix))
+		norm, ok := NormalizeCIDR(strings.TrimSpace(p.Prefix))
 		if !ok {
 			skipped++
 			continue
@@ -200,9 +200,10 @@ func isDigits(s string) bool {
 	return true
 }
 
-// normalize parses a token as a CIDR (masked to its network) or a bare IP (→ /32 or /128),
-// returning the canonical string. ok=false for anything that is not a valid IP/CIDR.
-func normalize(s string) (string, bool) {
+// NormalizeCIDR parses a token as a CIDR (masked to its network) or a bare IP (→ /32 or /128),
+// returning the canonical string. ok=false for anything that is not a valid IP/CIDR. Exported for
+// the routing-list importers, so an imported prefix is spelled the way a fed one is.
+func NormalizeCIDR(s string) (string, bool) {
 	if strings.Contains(s, "/") {
 		p, err := netip.ParsePrefix(s)
 		if err != nil {
@@ -219,6 +220,62 @@ func normalize(s string) (string, bool) {
 		bits = 128
 	}
 	return netip.PrefixFrom(a, bits).String(), true
+}
+
+// The shortest prefixes a list may carry, per family. A shorter one is a large share of everything
+// the family routes: an IPv4 /3 is an eighth of the space, and the IPv6 internet is 2000::/3, so an
+// IPv6 /7 is a sixteenth of it. No feed of networks for one purpose means that, and one such line
+// (the default route, two /1 halves) turns the list into a full tunnel or, sent direct, a full
+// bypass. The lengths sit well short of real networks: the largest blocks a registry holds are an
+// IPv4 /8 and an IPv6 /12, and a country feed merges blocks into aggregates as short as /6 (ipdeny's
+// us-aggregated.zone carries six /6 and /7 prefixes, some 268M addresses), which a list for that
+// country has to keep. The limit leaves room above those (a /4 is a sixteenth of the space, about
+// what the US feed's aggregates add up to), while what it is for, the default route and its halves,
+// is far below it. The routing-list importer refuses the same lengths: a pasted ip.list is the same
+// kind of list.
+const (
+	MinPrefixBitsV4 = 4
+	MinPrefixBitsV6 = 8
+)
+
+// Unmap4In6 returns a v4-mapped prefix (::ffff:a.b.c.d/n with n >= 96) as the IPv4 prefix it stands
+// for, and any other prefix as it is. The kernel plane files a v4-mapped entry as IPv4 (see
+// pbr.classifyCIDRs), so that is the form its breadth has to be judged in: ::ffff:0.0.0.0/96 is an
+// IPv6 /96, and also 0.0.0.0/0.
+func Unmap4In6(p netip.Prefix) netip.Prefix {
+	if !p.Addr().Is4In6() || p.Bits() < 96 {
+		return p
+	}
+	return netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96).Masked()
+}
+
+// TooBroad reports whether a prefix is shorter than a list may carry (MinPrefixBitsV4/V6), judged
+// in the family the kernel plane files it under. The default route in any spelling is one.
+func TooBroad(p netip.Prefix) bool {
+	p = Unmap4In6(p)
+	if p.Addr().Is4() {
+		return p.Bits() < MinPrefixBitsV4
+	}
+	return p.Bits() < MinPrefixBitsV6
+}
+
+// Screen splits fetched entries into those a list may carry and those TooBroad refuses, both in
+// their original order (QA-111). A feed is fetched and staged with nobody reading its lines, and the
+// review shows only a count, so one "/0" in it (a typo, or a body rewritten on the way) sent every
+// destination through the list's exit and, on the ipset plane, which refuses a /0, failed every
+// Apply until the list was switched off. The caller keeps the rest of the feed and names what was
+// refused. An entry that is not a prefix at all is left in kept: its breadth is not this check's
+// question.
+func Screen(cidrs []string) (kept, refused []string) {
+	kept = make([]string, 0, len(cidrs))
+	for _, c := range cidrs {
+		if p, err := netip.ParsePrefix(c); err == nil && TooBroad(p.Masked()) {
+			refused = append(refused, c)
+			continue
+		}
+		kept = append(kept, c)
+	}
+	return kept, refused
 }
 
 // MaxDomains bounds a domain feed. The limit is not about bandwidth: every domain becomes a dnsmasq
@@ -248,7 +305,7 @@ func ParseDomains(text string) (domains []string, skipped int) {
 			continue
 		}
 		s = strings.ToLower(strings.TrimPrefix(strings.TrimSuffix(s, "."), "."))
-		if !validDomain(s) {
+		if !ValidDomain(s) {
 			skipped++
 			continue
 		}
@@ -261,9 +318,11 @@ func ParseDomains(text string) (domains []string, skipped int) {
 	return domains, skipped
 }
 
-// validDomain accepts what the resolver plane can actually use as a match: labels of letters, digits
-// and hyphens, at least two of them, no scheme, no path, no address.
-func validDomain(s string) bool {
+// ValidDomain accepts what the resolver plane can actually use as a match: labels of letters, digits
+// and hyphens, at least two of them, no scheme, no path, no address. The name must already be
+// lowercased. Exported for the routing-list importers, so a name read from another router's lists
+// passes the same test as one read from a feed.
+func ValidDomain(s string) bool {
 	if len(s) == 0 || len(s) > 253 || strings.ContainsAny(s, " \t/:@") {
 		return false
 	}

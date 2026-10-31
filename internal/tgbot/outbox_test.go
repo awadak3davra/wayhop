@@ -258,17 +258,42 @@ func TestBlockedChatDoesNotStopTheOthers(t *testing.T) {
 	}
 }
 
+// A provider's block page answers 403 too. It is not the chat refusing the bot: the alert stays
+// queued for the next try, and nobody is told the chat stopped accepting messages.
+func TestBlockPageIsNotABlockedChat(t *testing.T) {
+	for _, status := range []int{403, 404, 401} {
+		h := newHarness(t, viewerChat, owner)
+		h.api.on("sendMessage", func(map[string]any) (int, string) {
+			return status, "<html><body>Access to this resource is restricted</body></html>"
+		})
+		down, _ := downUp()
+		q := &queued{a: down, done: map[int64]bool{}}
+		err := h.bot.deliver(context.Background(), q)
+		if err == nil || !retryable(err) || len(q.done) != 0 {
+			t.Fatalf("%d: err %v, done %v: the alert must stay queued for every chat", status, err, q.done)
+		}
+		if h.bot.out.markReachable(600) || len(h.bot.out.q) != 0 {
+			t.Fatalf("%d: the chat was marked as refusing the bot", status)
+		}
+	}
+}
+
 func TestKeepAndRollBackFromTheChat(t *testing.T) {
 	h := newHarness(t, owner, viewerChat)
-	h.deliver(applyArmed(testNow, FailSafePulse{Pending: true, SecondsLeft: 300}))
-	h.press(600, cbKeep)
+	window := FailSafePulse{Pending: true, SecondsLeft: 300, Window: "w1"}
+	h.be.pulse.FailSafe = window
+	h.deliver(applyArmed(testNow, window))
+	if kb := toJSON(h.sendsTo(500)[0].Params["reply_markup"]); !strings.Contains(kb, `"ak:w1"`) || !strings.Contains(kb, `"ar:w1"`) {
+		t.Fatalf("the buttons do not name their test Apply: %s", kb)
+	}
+	h.press(600, cbKeep+"w1")
 	if h.be.kept != 0 {
 		t.Fatal("a viewer kept a test Apply")
 	}
 	if a := h.api.callsTo("answerCallbackQuery"); a[0].Params["show_alert"] != true {
 		t.Fatalf("viewer refusal %v", a[0].Params)
 	}
-	h.press(500, cbKeep)
+	h.press(500, cbKeep+"w1")
 	if h.be.kept != 1 {
 		t.Fatal("keep did not reach the router")
 	}
@@ -297,7 +322,7 @@ func TestKeepAndRollBackFromTheChat(t *testing.T) {
 	// A failure is a message in the chat: the press was acknowledged at once, before the slow work,
 	// and a toast would hold 200 characters for a moment.
 	h.be.decideErr = errContains("there is no unsaved configuration to keep")
-	h.press(500, cbRollback)
+	h.press(500, cbRollback+"w1")
 	a := h.api.callsTo("answerCallbackQuery")
 	if last := a[len(a)-1]; last.Params["text"] != "⏳" {
 		t.Fatalf("the press was not acknowledged first: %v", last.Params)
@@ -363,5 +388,253 @@ func TestManagerSendsTheBootAlertOnce(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if n := len(api.callsTo("sendMessage")); n != 1 {
 		t.Fatalf("a bot restart repeated the boot alert (%d)", n)
+	}
+}
+
+// drain delivers the queue the way deliverLoop does, without its pauses.
+func (h *harness) drain() {
+	h.t.Helper()
+	for q := h.bot.out.peek(); q != nil; q = h.bot.out.peek() {
+		if err := h.bot.deliver(context.Background(), q); err != nil {
+			h.t.Fatalf("deliver: %v", err)
+		}
+		h.bot.out.pop(q)
+	}
+}
+
+func silent(c apiCall) bool { return c.Params["disable_notification"] == true }
+
+// An outage that came through at night is followed by its all-clear, not by silence until the
+// morning: the end of an incident goes the way its beginning went. One whose beginning was held is
+// held with it.
+func TestRecoveryFollowsItsOutageThroughQuietHours(t *testing.T) {
+	down, up := downUp()
+	for _, tc := range []struct {
+		name        string
+		open, end   Alert
+		quietBefore bool // quiet hours already on when the outage is delivered
+		mute        bool // the chat is muted instead
+		wantSends   int  // messages sent at once
+		wantHeld    int  // alerts held for the summary
+	}{
+		{"uplink at night", uplinkLost(testNow), uplinkBack(testNow.Add(time.Minute), time.Minute), true, false, 2, 0},
+		{"core at night", coreDown(testNow, time.Minute, ""), coreUp(testNow.Add(time.Minute), 2*time.Minute), true, false, 2, 0},
+		{"uplink while muted", uplinkLost(testNow), uplinkBack(testNow.Add(time.Minute), time.Minute), false, true, 2, 0},
+		{"exit told before quiet hours began", down, up, false, false, 2, 0},
+		{"exit held at night, end held too", down, up, true, false, 0, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, owner)
+			quiet := func() {
+				_ = h.st.UpdateTelegram(func(tg *config.Telegram) error { tg.QuietFrom, tg.QuietTo = "14:00", "15:00"; return nil })
+			}
+			if tc.quietBefore {
+				quiet()
+			}
+			if tc.mute {
+				h.bot.out.mute(500, testNow.Add(time.Hour))
+			}
+			h.deliver(tc.open)
+			if !tc.quietBefore && !tc.mute {
+				quiet() // the night begins between the outage and its end
+			}
+			h.deliver(tc.end)
+			sent := h.sendsTo(500)
+			if len(sent) != tc.wantSends || len(h.bot.out.held[500]) != tc.wantHeld {
+				t.Fatalf("sent %d (want %d), held %d (want %d)", len(sent), tc.wantSends, len(h.bot.out.held[500]), tc.wantHeld)
+			}
+			if tc.wantSends == 2 {
+				if rp, _ := sent[1].Params["reply_parameters"].(map[string]any); rp == nil {
+					t.Fatal("the all-clear does not reply to its outage")
+				}
+				if !silent(sent[1]) {
+					t.Fatal("the all-clear must not ring at night")
+				}
+			}
+		})
+	}
+}
+
+// An outage that cut Telegram off and its end, both still queued when the link returns, are one
+// silent message with how long it lasted: a loud "no internet" arriving after the internet came
+// back was a false alarm with the all-clear right behind it.
+func TestOutageAndItsEndQueuedTogetherAreOneQuietMessage(t *testing.T) {
+	at := func(min int) time.Time { return testNow.Add(time.Duration(min) * time.Minute) }
+	evs := func(min int, kind string, ids ...string) []Event {
+		var out []Event
+		for _, id := range ids {
+			out = append(out, Event{At: at(min), Kind: kind, ID: id, Name: id})
+		}
+		return out
+	}
+	ups := func(min int, ids ...string) []upEvent {
+		var out []upEvent
+		for _, e := range evs(min, "up", ids...) {
+			out = append(out, upEvent{e, 5 * time.Minute})
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name   string
+		alerts []Alert
+		quiet  bool
+		sends  int    // messages sent
+		want   string // in the first one
+		loud   bool   // the first one rings
+		held   int
+	}{
+		{"uplink", []Alert{uplinkLost(at(-20)), uplinkBack(at(-5), 15*time.Minute)}, false, 1, "out 14:12–14:27", false, 0},
+		{"uplink at night comes through, quietly", []Alert{uplinkLost(at(-20)), uplinkBack(at(-5), 15*time.Minute)}, true, 1, "Internet is back", false, 0},
+		{"core", []Alert{coreDown(at(-20), time.Minute, ""), coreUp(at(-5), 15*time.Minute)}, false, 1, "out 14:12–14:27", false, 0},
+		{"a burst and its whole end", []Alert{manyDown(evs(-20, "down", "a", "b", "c"), Status{}), manyUp(ups(-5, "a", "b", "c"))}, false, 1, "3 exits are back", false, 0},
+		{"an exit at night waits for the summary", []Alert{exitDown(evs(-20, "down", "a")[0], Status{}), exitUp(evs(-5, "up", "a")[0], 15*time.Minute)}, true, 0, "", false, 1},
+		{"a partial end is its own news", []Alert{manyDown(evs(-20, "down", "a", "b", "c"), Status{}), exitUp(evs(-5, "up", "a")[0], 15*time.Minute)}, false, 2, "3 exits are down", true, 0},
+		{"a loud end is not merged", []Alert{applyArmed(at(-20), FailSafePulse{Pending: true}), applyClosed(at(-5), "al.apply.rolledback", SevCritical, false)}, false, 2, "", true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, owner)
+			if tc.quiet {
+				_ = h.st.UpdateTelegram(func(tg *config.Telegram) error { tg.QuietFrom, tg.QuietTo = "14:00", "15:00"; return nil })
+			}
+			for _, a := range tc.alerts {
+				h.bot.out.push(a)
+			}
+			h.drain()
+			sent := h.sendsTo(500)
+			if len(sent) != tc.sends || len(h.bot.out.held[500]) != tc.held {
+				t.Fatalf("sent %d (want %d), held %d (want %d): %v", len(sent), tc.sends, len(h.bot.out.held[500]), tc.held, h.sent())
+			}
+			if tc.sends == 0 {
+				return
+			}
+			if text := sent[0].Params["text"].(string); !strings.Contains(text, tc.want) {
+				t.Fatalf("first message lacks %q:\n%s", tc.want, text)
+			}
+			if silent(sent[0]) == tc.loud {
+				t.Fatalf("first message silent=%v", silent(sent[0]))
+			}
+			if tc.sends == 1 {
+				if _, open := h.bot.out.openMsg(500, tc.alerts[0].incidents()[0]); open {
+					t.Fatal("the merged message left its incident open")
+				}
+				if strings.Contains(sent[0].Params["text"].(string), "delivered late") {
+					t.Fatal("the merged message already says when; it needs no late stamp")
+				}
+			}
+		})
+	}
+}
+
+// An alert delivered more than a minute after it happened says when that was, on the router's
+// clock: a queue that waited out an outage must not read as news of now.
+func TestLateAlertSaysWhenItHappened(t *testing.T) {
+	msk := time.FixedZone("MSK", 3*3600)
+	for _, tc := range []struct {
+		name string
+		at   time.Time
+		want string // "" = no stamp
+	}{
+		{"on time", testNow.Add(-30 * time.Second), ""},
+		{"a minute is not late", testNow.Add(-time.Minute), ""},
+		{"five minutes late", testNow.Add(-5 * time.Minute), "🕒 at 17:27, delivered late"},
+		{"yesterday", testNow.Add(-20 * time.Hour), "🕒 at 22 Sep 21:32, delivered late"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, owner)
+			h.bot.now = func() time.Time { return testNow.In(msk) }
+			h.deliver(coreDown(tc.at, time.Minute, ""))
+			text := h.sendsTo(500)[0].Params["text"].(string)
+			if tc.want == "" && strings.Contains(text, "delivered late") || tc.want != "" && !strings.Contains(text, tc.want) {
+				t.Fatalf("want %q in:\n%s", tc.want, text)
+			}
+		})
+	}
+	h := newHarness(t, config.TelegramChat{ID: 600, Name: "Mom", Role: roleViewer, Lang: "ru"})
+	h.deliver(uplinkLost(testNow.Add(-5 * time.Minute)))
+	if text := h.sendsTo(600)[0].Params["text"].(string); !strings.Contains(text, "в 14:27, доставлено с опозданием") {
+		t.Fatalf("ru stamp:\n%s", text)
+	}
+}
+
+// A Keep or Roll back button decides only the test Apply it was offered for. One left from an
+// earlier window (an old message, a press queued during an outage, a build before the buttons named
+// their window) is refused with the present state, and the router is not touched.
+func TestKeepAndRollBackAreBoundToTheirTestApply(t *testing.T) {
+	testing2 := FailSafePulse{Pending: true, SecondsLeft: 200, Window: "w2"}
+	unsaved := FailSafePulse{Live: true, Window: "w2"}
+	for _, tc := range []struct {
+		name     string
+		now      FailSafePulse
+		data     string
+		kept     int
+		rolled   int
+		refused  bool
+		freshBtn bool // the status shown after a refusal offers the running window's buttons
+	}{
+		{"keep the running window", testing2, cbKeep + "w2", 1, 0, false, false},
+		{"roll back the running window", testing2, cbRollback + "w2", 0, 1, false, false},
+		{"keep the unsaved state after the window", unsaved, cbKeep + "w2", 1, 0, false, false},
+		{"a button of an earlier window", testing2, cbKeep + "w1", 0, 0, true, true},
+		{"roll back of an earlier window", testing2, cbRollback + "w1", 0, 0, true, true},
+		{"nothing is under test any more", FailSafePulse{}, cbKeep + "w2", 0, 0, true, false},
+		{"a button from before windows were named", testing2, cbKeepOld, 0, 0, true, true},
+		{"a roll back from before windows were named", testing2, cbRollbackOld, 0, 0, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, owner)
+			h.be.pulse.FailSafe = tc.now
+			if tc.now.Pending {
+				h.be.status.FailSafe = FailSafe{Armed: true, Remaining: 200 * time.Second, Window: tc.now.Window}
+			}
+			h.press(500, tc.data)
+			if h.be.kept != tc.kept || h.be.rolledBack != tc.rolled {
+				t.Fatalf("kept %d, rolled back %d", h.be.kept, h.be.rolledBack)
+			}
+			a := h.api.callsTo("answerCallbackQuery")
+			refused := len(a) > 0 && strings.Contains(a[0].Params["text"].(string), "test Apply that is over")
+			if refused != tc.refused {
+				t.Fatalf("answer %v", a)
+			}
+			if !tc.refused {
+				return
+			}
+			if a[0].Params["show_alert"] != true {
+				t.Fatal("the refusal of a decision must be seen, not a passing toast")
+			}
+			kb := toJSON(h.api.lastKeyboard(t, "editMessageText"))
+			if fresh := strings.Contains(kb, `"ak:w2"`); fresh != tc.freshBtn {
+				t.Fatalf("the present state's buttons: %s", kb)
+			}
+			if len(cbKeep+"w2") > 64 {
+				t.Fatal("callback data over Telegram's 64 bytes")
+			}
+		})
+	}
+}
+
+// A chat with many incidents open forgets the oldest first, and never the test Apply's: its message
+// holds the Keep / Roll back buttons the countdown edits.
+func TestOpenIncidentsForgetTheOldestButNeverTheApply(t *testing.T) {
+	o := newOutbox()
+	o.setOpen(1, "apply", 1)
+	for i := 2; i <= incidentsCap; i++ {
+		o.setOpen(1, "exit:"+strconv.Itoa(i), int64(i))
+	}
+	for i := 0; i < 3*incidentsCap; i++ {
+		o.setOpen(1, "exit:new"+strconv.Itoa(i), int64(1000+i))
+		if _, ok := o.openMsg(1, "apply"); !ok {
+			t.Fatalf("the test Apply's message was forgotten after %d new incidents", i+1)
+		}
+	}
+	if len(o.open[1]) != incidentsCap {
+		t.Fatalf("%d open, cap %d", len(o.open[1]), incidentsCap)
+	}
+	if _, ok := o.openMsg(1, "exit:2"); ok {
+		t.Fatal("the oldest incident outlived newer ones")
+	}
+	// Reopening a known incident forgets nothing.
+	o.setOpen(1, "apply", 5000)
+	if len(o.open[1]) != incidentsCap {
+		t.Fatalf("%d open after a reopen", len(o.open[1]))
 	}
 }

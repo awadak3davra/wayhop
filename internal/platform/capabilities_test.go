@@ -286,7 +286,7 @@ func assertSingboxRequired(t *testing.T, caps Capabilities) {
 	t.Helper()
 	got := append([]string(nil), caps.SingboxRequired...)
 	want := []string{
-		"anytls", "http", "hysteria2", "shadowsocks", "socks", "trojan", "tuic", "vless", "vmess",
+		"anytls", "http", "hysteria2", "openconnect", "openvpn", "shadowsocks", "snell", "socks", "ssh", "trojan", "tuic", "vless", "vmess",
 	}
 	sort.Strings(got)
 	if !reflect.DeepEqual(got, want) {

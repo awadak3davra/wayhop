@@ -63,3 +63,42 @@ func TestRouteKey(t *testing.T) {
 		}
 	}
 }
+
+// TestRouteTeardownCommandsKeepsInterfaces: turning routing off removes the routes a plan added and
+// never the interfaces, which stay up (unrouted) so turning routing back on is instant.
+func TestRouteTeardownCommandsKeepsInterfaces(t *testing.T) {
+	awg := awgEndpoint()
+	awg.ID, awg.Enabled = "awg-x", true
+	p := &model.Profile{
+		Endpoints: []model.Endpoint{awg},
+		RoutingLists: []model.RoutingList{
+			{ID: "banks", Manual: []string{"85.21.0.0/16"}, Outbound: "awg-x", Enabled: true},
+			{ID: "blk", Manual: []string{"192.0.2.0/24"}, Outbound: model.OutboundBlock, Enabled: true},
+		},
+	}
+	plan, err := Compile(p, CompileOptions{BaseIndex: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmds := RouteTeardownCommands(plan)
+	if len(cmds) != len(plan.Routes) || len(cmds) == 0 {
+		t.Fatalf("one removal per route: got %d for %d routes", len(cmds), len(plan.Routes))
+	}
+	joined := strings.Join(cmds, "\n")
+	for _, w := range []string{"no ip route 85.21.0.0 255.255.0.0 Wireguard10", "no ip route 192.0.2.0 255.255.255.0 reject"} {
+		if !strings.Contains(joined, w) {
+			t.Errorf("missing route removal %q\n--- got ---\n%s", w, joined)
+		}
+	}
+	if strings.Contains(joined, "interface") || strings.Contains(joined, "!") {
+		t.Errorf("route removals must name no interface block and carry no comment:\n%s", joined)
+	}
+	for i, r := range plan.Routes {
+		if "no "+RouteKey(r) != cmds[i] {
+			t.Errorf("RouteKey(%q) disagrees with the removal %q", r, cmds[i])
+		}
+	}
+	if RouteTeardownCommands(nil) != nil {
+		t.Error("a nil plan has nothing to remove")
+	}
+}

@@ -1,8 +1,10 @@
 package keenetic
 
 import (
+	"strings"
 	"testing"
 
+	"wayhop/internal/generator"
 	"wayhop/internal/model"
 )
 
@@ -63,6 +65,57 @@ func TestSingboxFallback(t *testing.T) {
 	}
 	if in := rules[0]["inbound"].([]string); len(in) != 2 || in[0] != "tun-vless-nl" || in[1] != "socks-vless-nl" {
 		t.Errorf("rule[0] inbound = %v", rules[0]["inbound"])
+	}
+}
+
+// The per-exit service check asks a fallback exit through the probe inbound. Without it every exit
+// read "Apply once" on KeeneticOS forever: the generator had one, this config never did.
+func TestSingboxFallbackCarriesTheProbeInbound(t *testing.T) {
+	vless := &model.Endpoint{ID: "vless-nl", Engine: model.EngineSingBox, Protocol: model.ProtoVLESS, Server: "1.1.1.1", Port: 443, Enabled: true, Params: map[string]any{"uuid": "u"}}
+	hy2 := &model.Endpoint{ID: "hy2-nl", Engine: model.EngineSingBox, Protocol: model.ProtoHysteria2, Server: "2.2.2.2", Port: 8444, Enabled: true, Params: map[string]any{"password": "pw"}}
+
+	plan, err := SingboxFallback([]*model.Endpoint{vless, hy2}, FallbackOptions{ProbePort: 17890, ClashSecret: "s3cret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := findByTag(plan.Config["inbounds"].([]map[string]any), generator.ProbeInboundTag)
+	if probe == nil || probe["type"] != "mixed" || probe["listen"] != "127.0.0.1" || probe["listen_port"] != 17890 {
+		t.Fatalf("probe inbound = %v", probe)
+	}
+	users := map[string]string{}
+	for _, u := range probe["users"].([]map[string]any) {
+		users[u["username"].(string)] = u["password"].(string)
+	}
+	pw := generator.ProbePassword("s3cret")
+	for _, tag := range []string{model.OutboundDirect, "vless-nl", "hy2-nl"} {
+		if users[generator.ProbeUser(tag)] != pw {
+			t.Errorf("no probe user for %s with the Clash-derived password: %v", tag, users)
+		}
+	}
+	// Each probe user goes to its own exit, ahead of the TUN/SOCKS rules.
+	rules := plan.Config["route"].(map[string]any)["rules"].([]map[string]any)
+	if len(rules) != 5 {
+		t.Fatalf("want 3 probe + 2 endpoint rules, got %v", rules)
+	}
+	for i, tag := range []string{model.OutboundDirect, "vless-nl", "hy2-nl"} {
+		r := rules[i]
+		if in := r["inbound"].([]string); len(in) != 1 || in[0] != generator.ProbeInboundTag ||
+			r["auth_user"].([]string)[0] != generator.ProbeUser(tag) || r["outbound"] != tag {
+			t.Errorf("rule %d = %v, want probe user %s to %s", i, r, generator.ProbeUser(tag), tag)
+		}
+	}
+
+	// A port inside the SOCKS block would be a second listener on it: no probe inbound then.
+	plan, err = SingboxFallback([]*model.Endpoint{vless, hy2}, FallbackOptions{ProbePort: 11801})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findByTag(plan.Config["inbounds"].([]map[string]any), generator.ProbeInboundTag) != nil {
+		t.Error("probe inbound on a SOCKS port")
+	}
+	// ...and said: silently dropped, every exit read "Apply once" however often it was Applied.
+	if len(plan.Warnings) != 1 || !strings.Contains(plan.Warnings[0], "probe port 11801") {
+		t.Errorf("warnings = %q, want the dropped probe named", plan.Warnings)
 	}
 }
 

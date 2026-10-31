@@ -97,7 +97,8 @@ jobs:
           docker run --rm --network none --read-only -v "$PWD:/repo:ro" -w /repo "$SHELLCHECK_IMAGE" \
             -S warning packaging/*.sh packaging/openwrt/*.sh \
             packaging/S99wayhop packaging/openwrt/wayhop.init \
-            packaging/test/bootstrap_harness.sh packaging/test/s99wayhop_harness.sh
+            packaging/test/bootstrap_harness.sh packaging/test/s99wayhop_harness.sh \
+            packaging/test/openwrt_upgrade_harness.sh internal/updatetx/verify.sh
           # AmneziaWG 3.1: the installer (root on routers), its tests, the netifd protocol handler the
           # amneziawg-tools package installs, the build/test scripts and the gates that drive them.
           # Globs, so a script added to these directories is linted without editing this list.
@@ -137,6 +138,8 @@ jobs:
         run: sh scripts/check-package-install.sh
       - name: package lifecycle on a real apk (OpenWrt 25.x, the apk-only release)
         run: sh scripts/check-package-install-apk.sh
+      - name: tarball upgrades on a nearly full flash, --cleanup and the rollback supervisor (OpenWrt 25.12, 24.10, Entware /opt)
+        run: sh packaging/test/openwrt_upgrade_harness.sh
       - name: bootstrap trust and pre-install refusal matrix
         run: sh packaging/test/bootstrap_harness.sh
       - name: Keenetic init lifecycle and native log sink
@@ -329,3 +332,4 @@ jobs:
           go test -run=^$ -fuzz=^FuzzParseSingbox$      -fuzztime=25s ./internal/importer/
           go test -run=^$ -fuzz=^FuzzExportRoundTrip$   -fuzztime=25s ./internal/exporter/
           go test -run=^$ -fuzz=^FuzzExportOddParams$   -fuzztime=25s ./internal/exporter/
+          go test -run=^$ -fuzz=^FuzzECHRoundTrip$      -fuzztime=25s ./internal/exporter/

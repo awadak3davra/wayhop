@@ -4,10 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"regexp"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,9 +24,11 @@ import (
 const (
 	pollTimeout = 50 // seconds Telegram holds a getUpdates open
 	watchEvery  = 5 * time.Second
-	// staleCommand: a text command older than this when it arrives is dropped. Telegram keeps
-	// unconfirmed updates for a day, so a router coming back from a power cut would otherwise answer
-	// hours-old commands.
+	// staleCommand: a text command older than this when it arrives is not run, and its sender is
+	// told so. Telegram keeps unconfirmed updates for a day, so a router coming back from a power cut
+	// or an outage would otherwise answer, and act on, hours-old commands. Its age is measured when
+	// the update arrives, on Telegram's clock (see pollUpdates), not against when the bot started:
+	// that let every command queued during an outage after the start through.
 	staleCommand = 2 * time.Minute
 	maxInflight  = 4 // updates handled at once
 	backendWait  = 10 * time.Second
@@ -78,6 +83,9 @@ type Bot struct {
 	confirms confirms
 	menus    menus      // touched only by menuLoop
 	diagMu   sync.Mutex // one Diagnostics run at a time
+	// lateTold is when each chat was last told a message came too late (see late).
+	lateMu   sync.Mutex
+	lateTold map[int64]time.Time
 	upd      updates
 	// updateFirst and updateEvery pace the daily update check (tests shorten them).
 	updateFirst, updateEvery time.Duration
@@ -86,6 +94,9 @@ type Bot struct {
 	digestMu   sync.Mutex
 	counters   counters
 	digestSent string
+	// deciding holds the test Apply windows a Keep or Roll back is under way for (see decideApply).
+	decideMu sync.Mutex
+	deciding map[string]bool
 
 	mu   sync.Mutex
 	me   User
@@ -226,7 +237,7 @@ func (b *Bot) Run(ctx context.Context) {
 	bo = backoff{max: time.Minute}
 	for ctx.Err() == nil {
 		cctx, cancel := context.WithTimeout(ctx, (pollTimeout+20)*time.Second)
-		ups, err := b.api.GetUpdates(cctx, offset, pollTimeout)
+		ups, at, err := b.api.pollUpdates(cctx, offset, pollTimeout)
 		cancel()
 		if err != nil {
 			if ctx.Err() != nil {
@@ -256,6 +267,11 @@ func (b *Bot) Run(ctx context.Context) {
 		for _, u := range ups {
 			if u.UpdateID >= offset {
 				offset = u.UpdateID + 1
+			}
+			for _, m := range []*Message{u.Message, u.ChannelPost} {
+				if m != nil {
+					m.recv = at
+				}
 			}
 			b.dispatch(ctx, u)
 		}
@@ -409,6 +425,47 @@ func (b *Bot) chatRecord(id int64) (config.TelegramChat, bool) {
 	return config.TelegramChat{}, false
 }
 
+// pairedChat finds the paired chat an update came from, in the role it may act with there. A channel
+// is alerts-only whatever its record says: a callback is authorised by the chat, not by who pressed,
+// and anyone who can see a channel (a public one: anyone at all) can press the buttons on its posts.
+// A channel the panel had made a viewer let any subscriber mute it, switch its alerts off in
+// config.json and post the LAN's device list into it (QA-102). Telegram's word on the type is read,
+// not only the record's, which chats paired before the type was recorded lack.
+func (b *Bot) pairedChat(chat Chat) (config.TelegramChat, bool) {
+	rec, ok := b.chatRecord(chat.ID)
+	if ok && (chat.Type == "channel" || rec.Type == "channel") {
+		if rec.Type != "channel" || rec.Role != roleAlerts {
+			b.recordChannel(rec)
+		}
+		rec.Type, rec.Role = "channel", roleAlerts
+	}
+	return rec, ok
+}
+
+// recordChannel saves what Telegram said of a chat paired before the type was recorded: a channel,
+// alerts-only. Overriding the role per update covered what the chat could press, but the outbox
+// renders alerts by the stored role, so such a channel made a viewer still got Status and Mute on
+// every alert, for any subscriber to press. Saved once: afterwards the record says channel. The
+// menu goes back as the panel's role change takes it (StaleMenus).
+func (b *Bot) recordChannel(rec config.TelegramChat) {
+	err := b.st.UpdateTelegram(func(t *config.Telegram) error {
+		for i := range t.Chats {
+			c := &t.Chats[i]
+			if c.ID != rec.ID {
+				continue
+			}
+			if (c.Role == roleOwner || c.Role == roleViewer) && !slices.Contains(t.StaleMenus, c.ID) {
+				t.StaleMenus = append(t.StaleMenus, c.ID)
+			}
+			c.Type, c.Role = "channel", roleAlerts
+		}
+		return nil
+	})
+	if err != nil {
+		b.logf("telegram: recording chat %d as a channel: %v", rec.ID, err)
+	}
+}
+
 func (b *Bot) langOf(rec config.TelegramChat, from *User) string {
 	if rec.Lang != "" {
 		return rec.Lang
@@ -459,15 +516,22 @@ func (b *Bot) onMessage(ctx context.Context, m *Message) {
 	if m.Text == "" {
 		return
 	}
-	if m.Date > 0 && b.started.Sub(time.Unix(m.Date, 0)) > staleCommand {
-		return
+	if m.Date > 0 {
+		ref := m.recv
+		if ref.IsZero() {
+			ref = b.now()
+		}
+		if ref.Sub(time.Unix(m.Date, 0)) > staleCommand {
+			b.late(ctx, m)
+			return
+		}
 	}
 	cmd, arg, addressed := parseCommand(m.Text, b.Me().Username)
 	if !addressed {
 		return
 	}
 	private := m.Chat.Type == "private"
-	rec, paired := b.chatRecord(m.Chat.ID)
+	rec, paired := b.pairedChat(m.Chat)
 	if !paired {
 		code := ""
 		switch {
@@ -483,7 +547,7 @@ func (b *Bot) onMessage(ctx context.Context, m *Message) {
 		// Group chatter is not addressed to the bot; everything else gets one polite refusal
 		// per interval and lands in the panel's list of chats that asked.
 		if (private || cmd != "") && b.gate.Seen(m.Chat, m.From) {
-			b.reply(ctx, m.Chat.ID, T(LangFor(fromLang(m.From)), "stranger"), nil)
+			b.replyStranger(ctx, m.Chat.ID, T(LangFor(fromLang(m.From)), "stranger"))
 		}
 		return
 	}
@@ -500,13 +564,21 @@ func (b *Bot) onMessage(ctx context.Context, m *Message) {
 	if cmd == "" && !private {
 		return // group chatter is not for the bot
 	}
+	// An alerts-only group's members are nobody the bot answers to, and any of them can send commands
+	// as fast as they like: each answer that waited out Telegram's flood control sat in one of the
+	// handler slots the poll loop blocks on, as a stranger's did (QA-099), delaying an owner's Keep.
+	// Their answers are tried once.
+	say := func(text string) { b.reply(ctx, m.Chat.ID, text, nil) }
+	if rec.Role == roleAlerts {
+		say = func(text string) { b.replyOnce(ctx, m.Chat.ID, text) }
+	}
 	if cmd == "start" && arg != "" {
-		b.reply(ctx, m.Chat.ID, T(lang, "pair.already", T(lang, "role."+rec.Role)), nil)
+		say(T(lang, "pair.already", T(lang, "role."+rec.Role)))
 		return
 	}
 	if rec.Role == roleAlerts {
 		if cmd != "" {
-			b.reply(ctx, m.Chat.ID, T(lang, "alerts.only"), nil)
+			say(T(lang, "alerts.only"))
 		}
 		return
 	}
@@ -541,23 +613,54 @@ func fromLang(u *User) string {
 	return u.LanguageCode
 }
 
+// late tells a paired chat that a message of its arrived too late to act on, once per chat while
+// a backlog drains: an outage can queue a dozen. Strangers and group chatter get nothing, as they
+// would have on time.
+func (b *Bot) late(ctx context.Context, m *Message) {
+	cmd, _, addressed := parseCommand(m.Text, b.Me().Username)
+	rec, paired := b.pairedChat(m.Chat)
+	if m.Text == "" || !addressed || !paired || rec.Role == roleAlerts || (cmd == "" && m.Chat.Type != "private") {
+		return
+	}
+	now := b.now()
+	b.lateMu.Lock()
+	if b.lateTold == nil {
+		b.lateTold = map[int64]time.Time{}
+	}
+	if now.Sub(b.lateTold[m.Chat.ID]) < staleCommand {
+		b.lateMu.Unlock()
+		return
+	}
+	b.lateTold[m.Chat.ID] = now
+	b.lateMu.Unlock()
+	lang := b.langOf(rec, m.From)
+	b.reply(ctx, m.Chat.ID, T(lang, "late", esc(truncate(m.Text, 40)), b.view(lang).clock(time.Unix(m.Date, 0))), nil)
+}
+
 // pair redeems a code for the chat that sent it and records the chat.
 func (b *Bot) pair(ctx context.Context, m *Message, code string) {
 	lang := LangFor(fromLang(m.From))
 	role, res := b.gate.Redeem(m.Chat, code)
 	switch res {
 	case RedeemLimited:
-		b.reply(ctx, m.Chat.ID, T(lang, "pair.limited"), nil)
+		// Told once per refusal interval: every further message used to be answered (QA-099).
+		if b.gate.tellLimited(m.Chat.ID) {
+			b.replyStranger(ctx, m.Chat.ID, T(lang, "pair.limited"))
+		}
 		return
 	case RedeemBad:
-		b.reply(ctx, m.Chat.ID, T(lang, "pair.bad"), nil)
+		// Answered each time: a person who mistyped must hear it, and the attempt limit bounds these to
+		// maxBadCodes an hour per chat.
+		b.replyStranger(ctx, m.Chat.ID, T(lang, "pair.bad"))
 		return
 	}
 	name := m.Chat.DisplayName()
 	if m.Chat.Type == "private" && m.From != nil {
 		name = m.From.DisplayName()
 	}
-	rec := config.TelegramChat{ID: m.Chat.ID, Name: name, Role: role, Lang: lang, PairedAt: b.now().Unix()}
+	// The type is recorded so the panel can tell a channel, which may only be alerts-only, from a group:
+	// both have negative ids (QA-102).
+	rec := config.TelegramChat{ID: m.Chat.ID, Name: name, Type: m.Chat.Type, Role: role, Lang: lang, PairedAt: b.now().Unix()}
 	err := b.st.UpdateTelegram(func(t *config.Telegram) error {
 		for i := range t.Chats {
 			if t.Chats[i].ID == rec.ID {
@@ -570,13 +673,14 @@ func (b *Bot) pair(ctx context.Context, m *Message, code string) {
 	})
 	if err != nil {
 		b.logf("telegram: saving paired chat %d: %v", rec.ID, err)
-		b.reply(ctx, m.Chat.ID, T(lang, "err.backend", esc(err.Error())), nil)
+		b.replyStranger(ctx, m.Chat.ID, T(lang, "err.backend", esc(err.Error())))
 		return
 	}
 	b.logf("telegram: paired chat %d (%s) as %s", rec.ID, rec.Name, rec.Role)
 	b.reply(ctx, m.Chat.ID, T(lang, "pair.ok", T(lang, "role."+role)), nil)
 	if role != roleAlerts {
-		v := b.view(lang)
+		// In the chat's own role: an owner's status carries Keep / Roll back while a test runs.
+		v := b.chatView(lang, rec)
 		b.reply(ctx, m.Chat.ID, "", func() (string, *Keyboard) { return v.Status(b.status(ctx)) })
 	}
 }
@@ -597,32 +701,94 @@ func (b *Bot) status(ctx context.Context) Status {
 	return s
 }
 
+// interactiveWait is the longest flood-control wait an answer somebody is looking at waits out
+// before it is tried again; beyond it the answer is dropped (and logged), as a reply minutes late
+// answers a question nobody is still asking.
+const interactiveWait = 30 * time.Second
+
+// interactive makes one call of an answer somebody is waiting for, under its own deadline, and once
+// more after Telegram's flood-control wait (429 retry_after) when that is short enough to wait.
+func (b *Bot) interactive(ctx context.Context, call func(context.Context) error) error {
+	cctx, cancel := context.WithTimeout(ctx, sendWait)
+	err := call(cctx)
+	cancel()
+	if d := retryAfter(err); d > 0 && d <= interactiveWait {
+		if !sleep(ctx, d) {
+			return ctx.Err()
+		}
+		cctx, cancel := context.WithTimeout(ctx, sendWait)
+		err = call(cctx)
+		cancel()
+	}
+	return err
+}
+
 // reply sends text, or the output of render when text is empty.
 func (b *Bot) reply(ctx context.Context, chat int64, text string, render func() (string, *Keyboard)) {
 	var kb *Keyboard
 	if render != nil {
 		text, kb = render()
 	}
-	cctx, cancel := context.WithTimeout(ctx, sendWait)
-	defer cancel()
-	if _, err := b.api.SendMessage(cctx, chat, text, SendOptions{Keyboard: kb, NoPreview: true}); err != nil {
+	err := b.interactive(ctx, func(c context.Context) error {
+		_, err := b.api.SendMessage(c, chat, text, SendOptions{Keyboard: kb, NoPreview: true})
+		return err
+	})
+	if err != nil {
 		b.logf("telegram: send to %d: %v", chat, err)
 		return
 	}
 	b.delivered(chat) // an answer got through: a chat that had blocked the bot has let it back
 }
 
-// show replaces the message a button belongs to; if Telegram refuses the edit (too old, deleted),
-// the view is sent as a new message instead.
-func (b *Bot) show(ctx context.Context, m *Message, text string, kb *Keyboard) {
+// replyStranger answers a chat that is not paired: one try, and a flood-control refusal drops the
+// answer instead of waiting it out. Such a chat chooses how often it writes, and each wait of up to
+// interactiveWait sat in one of the maxInflight handler slots the poll loop blocks on, so a stranger
+// provoking 429s for its own chat queued an owner's Keep behind minutes of sleeps, long enough for
+// the test window to roll back (QA-099).
+func (b *Bot) replyStranger(ctx context.Context, chat int64, text string) {
+	if err := b.sendOnce(ctx, chat, text); err != nil {
+		b.logf("telegram: send to unpaired chat %d: %v", chat, err)
+	}
+}
+
+// replyOnce answers a paired chat whose members the bot does not answer to (an alerts-only group) the
+// way replyStranger answers an unpaired one.
+func (b *Bot) replyOnce(ctx context.Context, chat int64, text string) {
+	if err := b.sendOnce(ctx, chat, text); err != nil {
+		b.logf("telegram: send to %d: %v", chat, err)
+		return
+	}
+	b.delivered(chat)
+}
+
+func (b *Bot) sendOnce(ctx context.Context, chat int64, text string) error {
 	cctx, cancel := context.WithTimeout(ctx, sendWait)
 	defer cancel()
-	err := b.api.EditMessage(cctx, m.Chat.ID, m.MessageID, text, kb)
+	_, err := b.api.SendMessage(cctx, chat, text, SendOptions{NoPreview: true})
+	return err
+}
+
+// show replaces the message a button belongs to. Only when Telegram refuses that message for good
+// (too old to edit, deleted: a Bad Request) is the view sent as a new message instead. Flood control
+// is waited out and the edit tried again; a timeout, a dropped connection or a server error leaves
+// it there, since the edit may have landed, and a second copy of every view pressed during a bad
+// minute was worse than one that is late.
+func (b *Bot) show(ctx context.Context, m *Message, text string, kb *Keyboard) {
+	err := b.interactive(ctx, func(c context.Context) error {
+		return b.api.EditMessage(c, m.Chat.ID, m.MessageID, text, kb)
+	})
 	if err == nil {
 		return
 	}
 	b.logf("telegram: edit in %d: %v", m.Chat.ID, err)
-	if _, err := b.api.SendMessage(cctx, m.Chat.ID, text, SendOptions{Keyboard: kb, NoPreview: true}); err != nil {
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.Code != http.StatusBadRequest {
+		return
+	}
+	if err := b.interactive(ctx, func(c context.Context) error {
+		_, err := b.api.SendMessage(c, m.Chat.ID, text, SendOptions{Keyboard: kb, NoPreview: true})
+		return err
+	}); err != nil {
 		b.logf("telegram: send to %d: %v", m.Chat.ID, err)
 	}
 }
@@ -640,7 +806,7 @@ func (b *Bot) onCallback(ctx context.Context, q *CallbackQuery) {
 		b.answer(ctx, q, "", false)
 		return
 	}
-	rec, paired := b.chatRecord(q.Message.Chat.ID)
+	rec, paired := b.pairedChat(q.Message.Chat)
 	if !paired {
 		b.answer(ctx, q, T(LangFor(q.From.LanguageCode), "err.denied"), true)
 		return
@@ -693,8 +859,12 @@ func (b *Bot) onCallback(ctx context.Context, q *CallbackQuery) {
 		b.setLang(ctx, q, rec, strings.TrimPrefix(data, cbLang))
 	case strings.HasPrefix(data, cbMute):
 		b.setMute(ctx, rec, lang, strings.TrimPrefix(data, cbMute), q)
-	case data == cbKeep || data == cbRollback:
-		b.decideApply(ctx, q, rec, lang, data == cbKeep)
+	case strings.HasPrefix(data, cbKeep):
+		b.decideApply(ctx, q, v, rec, true, strings.TrimPrefix(data, cbKeep))
+	case strings.HasPrefix(data, cbRollback):
+		b.decideApply(ctx, q, v, rec, false, strings.TrimPrefix(data, cbRollback))
+	case data == cbKeepOld || data == cbRollbackOld:
+		b.staleApply(ctx, q, v, false)
 	case b.maintCallback(ctx, v, q, rec):
 	case b.toolCallback(ctx, v, q):
 	default:
@@ -730,7 +900,7 @@ func (b *Bot) testExit(ctx context.Context, v view, m *Message, ref string) {
 	e, err := b.be.TestExit(cctx, id)
 	cancel()
 	if err != nil {
-		b.exitCard(ctx, v, m, ref, v.t("ex.testfail", esc(err.Error())))
+		b.exitCard(ctx, v, m, ref, v.t("ex.testfail", esc(errorText(v, err))))
 		return
 	}
 	text, kb := v.Exit(e, v.t("ex.tested")+" · "+v.clock(b.now()))
@@ -759,8 +929,59 @@ func (b *Bot) setLang(ctx context.Context, q *CallbackQuery, rec config.Telegram
 		return
 	}
 	b.answer(ctx, q, T(lang, "lang.set"), false)
-	v := b.view(lang)
+	v := b.chatView(lang, rec) // the new language, the chat's own role and mute
 	text, kb := v.Status(b.status(ctx))
+	b.show(ctx, q.Message, text, kb)
+}
+
+// claimDecision reserves window for one Keep or Roll back; false while another is under way for it.
+func (b *Bot) claimDecision(window string) bool {
+	b.decideMu.Lock()
+	defer b.decideMu.Unlock()
+	if b.deciding[window] {
+		return false
+	}
+	if b.deciding == nil {
+		b.deciding = map[string]bool{}
+	}
+	b.deciding[window] = true
+	return true
+}
+
+func (b *Bot) releaseDecision(window string) {
+	b.decideMu.Lock()
+	defer b.decideMu.Unlock()
+	delete(b.deciding, window)
+}
+
+// windowOpen reports whether the test Apply named window is still undecided: under test, or running
+// unsaved after its window. Once decided nothing is live, so the name is gone.
+func (b *Bot) windowOpen(ctx context.Context, window string) bool {
+	return windowIs(b.failSafeNow(ctx), window)
+}
+
+func windowIs(f FailSafePulse, window string) bool {
+	return applyState(f) != applyNone && f.Window == window
+}
+
+func (b *Bot) failSafeNow(ctx context.Context) FailSafePulse {
+	pctx, cancel := context.WithTimeout(ctx, backendWait)
+	defer cancel()
+	return b.be.Pulse(pctx).FailSafe
+}
+
+// staleApply refuses a Keep or Roll back button whose test Apply is over, and shows the present:
+// the status, with the buttons of the test Apply running now, if one is. answered: the press was
+// already acknowledged (a decision under way), and Telegram takes one answer per press, so the
+// refusal heads the message instead of a toast nobody would see.
+func (b *Bot) staleApply(ctx context.Context, q *CallbackQuery, v view, answered bool) {
+	if !answered {
+		b.answer(ctx, q, v.t("apply.stale"), true)
+	}
+	text, kb := v.Status(b.status(ctx))
+	if answered {
+		text = "⚠️ " + v.t("apply.stale") + "\n\n" + text
+	}
 	b.show(ctx, q.Message, text, kb)
 }
 
@@ -836,29 +1057,68 @@ func (b *Bot) setMute(ctx context.Context, rec config.TelegramChat, lang, arg st
 }
 
 // decideApply is Keep or Roll back pressed on a test-Apply message. Owners only: it changes what
-// the router runs.
-func (b *Bot) decideApply(ctx context.Context, q *CallbackQuery, rec config.TelegramChat, lang string, keep bool) {
+// the router runs. The button names the test Apply it was offered for, window; one left from an
+// earlier window, delivered late or pressed on an old message, must not keep or roll back the one
+// running now, which nobody was asked about.
+func (b *Bot) decideApply(ctx context.Context, q *CallbackQuery, v view, rec config.TelegramChat, keep bool, window string) {
+	lang := v.lang
 	if rec.Role != roleOwner {
 		b.answer(ctx, q, T(lang, "err.denied"), true)
+		return
+	}
+	f := b.failSafeNow(ctx)
+	if !windowIs(f, window) {
+		b.staleApply(ctx, q, v, false)
+		return
+	}
+	if f.Pending && f.Phase == "rolled_back" {
+		// The fail-safe is rolling this Test back by itself (only its own rollback leaves the window
+		// pending on rolled_back). Roll back then read "Did not work: a rollback is already in progress"
+		// right before the critical alert, and Keep would race the rollback for a configuration that had
+		// just lost the connection. The watcher takes the buttons off at its next step.
+		b.answer(ctx, q, v.t("al.apply.rolling"), true)
 		return
 	}
 	// The press is acknowledged at once: a rollback can take longer than Telegram waits for the
 	// answer, and a late answer is refused, which left the owner with a spinner and no news.
 	b.answer(ctx, q, "⏳", false)
+	// One decision per window at a time. A double tap, or two owners pressing together, ran a second
+	// decision while the first was still under way (handlers run in parallel, and the window looks
+	// open until the first one's outcome is recorded): the daemon refused it, or the fail-safe did
+	// ("a rollback is already in progress"), and the chat read "Did not work" right under "Kept by
+	// Sam" (QA-103). The first press's outcome answers the second.
+	if !b.claimDecision(window) {
+		return
+	}
+	defer b.releaseDecision(window)
 	cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	var err error
 	if keep {
-		err = b.be.ConfirmApply(cctx)
+		err = b.be.ConfirmApply(cctx, window)
 	} else {
-		err = b.be.RollbackApply(cctx)
+		err = b.be.RollbackApply(cctx, window)
 	}
 	cancel()
 	who := q.From.DisplayName()
 	if err != nil {
 		b.logf("telegram: %s pressed %s: %v", who, map[bool]string{true: "keep", false: "roll back"}[keep], err)
+		// A newer Test replaced this one while the decision waited for the daemon's apply lock, which a
+		// Test Apply holds for its whole run: the check above passed before the newer one was recorded.
+		// Without the window the daemon kept (or rolled back) whatever it found, the newer Test that
+		// nobody had been asked about. Nothing was changed; the message shows the present.
+		if errors.Is(err, ErrWindowChanged) {
+			b.staleApply(ctx, q, v, true)
+			return
+		}
+		// Decided elsewhere meanwhile (the panel, a press just before this one's check): the daemon
+		// refuses a decision with nothing left to decide, which is not a failure. The window's own
+		// outcome reaches this chat as the watcher's closing edit (QA-103).
+		if !b.windowOpen(ctx, window) {
+			return
+		}
 		// In the chat, not in a toast: a toast holds 200 characters and is gone in a moment, and the
 		// countdown message keeps its buttons for another try.
-		b.reply(ctx, rec.ID, "⚠️ "+T(lang, "apply.failed", esc(err.Error())), nil)
+		b.reply(ctx, rec.ID, "⚠️ "+T(lang, "apply.failed", esc(errorText(v, err))), nil)
 		return
 	}
 	b.logf("telegram: %s (chat %d) pressed %s", who, rec.ID, map[bool]string{true: "keep", false: "roll back"}[keep])

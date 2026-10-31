@@ -34,15 +34,17 @@ import (
 // seed has been the only writer since the day it was installed. This is that owner, in the daemon,
 // where the health it needs already lives.
 //
-// Scope, deliberately narrow. It writes ONE command shape, `ip route replace default dev <iface>
-// table <N>`, and only when all of the following hold: the table belongs to an egress the CURRENT
-// compiled plan owns, the egress is a GROUP, and the interface is one of that group's own members.
+// Scope, deliberately narrow. It writes ONE command shape, `ip [-6] route replace default dev <iface>
+// table <N>`, and only when all of the following hold: the table belongs to an egress the APPLIED
+// kernel plan owns, the egress is a GROUP, and the interface is one of that group's own members.
 // It never touches the main table, never the WAN, never a table the plan does not name. Anything
 // wider belongs to Apply.
 
 const (
 	listFailoverInterval = 20 * time.Second
 	listFailoverTimeout  = 6 * time.Second
+	// listFailoverLockedPass bounds the pass that holds applyMu; it must stay well under applyLockWait.
+	listFailoverLockedPass = 10 * time.Second
 )
 
 // listFailoverLoop re-points each group-backed list table at a healthy member.
@@ -61,7 +63,13 @@ func (s *Server) listFailoverLoop(ctx context.Context) {
 
 // listFailoverTick is one pass. Silent when nothing needs to move, which is the normal case.
 func (s *Server) listFailoverTick(ctx context.Context) {
-	if s == nil || s.store == nil || s.monitor == nil {
+	// The demo runs nothing on the host.
+	if s == nil || s.store == nil || s.monitor == nil || s.config().Demo {
+		return
+	}
+	// Routing switched off: the tables this loop points are consulted by nothing, and a default
+	// written into one now would be waiting there, chosen by nobody, when routing comes back.
+	if s.routingIsOff() {
 		return
 	}
 	// The one precondition that is really about this loop: it writes with iproute2, so iproute2 has to
@@ -75,27 +83,65 @@ func (s *Server) listFailoverTick(ctx context.Context) {
 	// platform only.
 	//
 	// "Two owners for one decision" is still guarded, structurally rather than by platform:
-	// listFailoverTargets only yields a table that the CURRENT compiled plan owns for a GROUP egress
-	// of kind EgressInterface. A group the core carries produces no such egress, so there is nothing
+	// listFailoverTables only yields a table that the APPLIED kernel plan owns for a GROUP egress of
+	// kind EgressInterface. A group the core carries produces no such egress, so there is nothing
 	// here to fight the core over.
 	if s.routeTables == nil && !iprouteAvailable() {
 		return
 	}
+	// The whole pass stands aside while an Apply runs and holds applyMu like the reconcile loop: Apply
+	// renumbers the tables, and a pass that read the plan before it and wrote after it would put a
+	// member's route into a table the new plan gave another egress, or a route back into a table
+	// Apply is retiring, where it would outlive the plan.
+	if s.applyInProgress.Load() || !s.applyMu.TryLock() {
+		return
+	}
+	defer s.applyMu.Unlock()
+	// One deadline for the whole locked pass, well under applyLockWait: each ip read or write may take
+	// several seconds on a wedged router, and two v6 group tables kept the lock long enough for an Apply
+	// from the panel or the bot to give up with "another Apply is still running".
+	ctx, cancel := context.WithTimeout(ctx, listFailoverLockedPass)
+	defer cancel()
+	// Re-read under the lock: the routing switch holds applyMu while it turns routing off, so a pass
+	// that passed the check above just before it may only now get the lock.
+	if s.routingIsOff() {
+		return
+	}
+	// The tables the router holds are numbered by the APPLIED plan, not the saved profile. Recompiling
+	// the saved profile here elected by the wrong numbers whenever an edit was pending: an unapplied
+	// list through an endpoint that sorts before the group renumbered the group into another egress's
+	// table, the pass wrote the group's member into it, and the group's real table went unwatched, so
+	// its list fell through to the provider when the member died.
+	plan, profile := s.supervisedKernelPlan()
+	if plan == nil {
+		return
+	}
 	io := s.tableIO()
-	// One read serves both halves below, and a table that could not be read is not an empty one.
-	// Treated as empty, every group's table looked unpointed and was written on every tick, and every
-	// endpoint's table would look like it had lost its route.
-	live, ok := s.liveTableDefaults(ctx, false)
+	// One read per family serves both halves below, and a table that could not be read is not an
+	// empty one. Treated as empty, every group's table looked unpointed and was written on every tick,
+	// and every endpoint's table would look like it had lost its route. v4 is the pass's footing; v6 is
+	// read only where the plane seeds `ip -6 route … table N` next to each v4 one, and a v6 family that
+	// cannot be read is left alone.
+	live4, ok := s.liveTableDefaults(ctx, false)
 	if !ok {
 		return
 	}
-	for _, target := range s.listFailoverTargetsFrom(live) {
-		want := target.Elected
-		if want == "" || want == target.Current {
-			continue
+	live := map[bool]map[int]string{false: live4}
+	if plan.HasV6() {
+		if live6, ok := s.liveTableDefaults(ctx, true); ok {
+			live[true] = live6
 		}
-		err := io.write(ctx, false, want, target.Table)
-		if err != nil {
+	}
+	for _, target := range s.listFailoverTargetsFrom(plan, profile, live4) {
+		// Both families follow one election. Moving only v4 left marked v6 on the dead member: into
+		// the dead tunnel while its device was up, out the WAN once the kernel flushed the route, and
+		// still out the WAN after the member came back, because nothing re-seeded a group's v6 table.
+		for _, v6 := range []bool{false, true} {
+			tables, read := live[v6]
+			if !read || tables[target.Table] == target.Elected {
+				continue
+			}
+			err := io.write(ctx, v6, target.Elected, target.Table)
 			// A refusal is not a switch: the table still holds what it held, and claiming otherwise in
 			// the log would make the page report a move that did not happen.
 			//
@@ -103,13 +149,32 @@ func (s *Server) listFailoverTick(ctx context.Context) {
 			// was a cron that did not exist and nothing ever said so; an owner that runs and cannot
 			// write would be the same silence with a process attached. Logged on the first failure for
 			// a table and again when it recovers, never every 20 seconds.
-			s.noteListFailoverWrite(target.Table, err)
-			continue
+			s.noteListFailoverWrite(v6, target.Table, err)
+			if err == nil && !v6 {
+				// One switch per election: the v6 write follows the same decision, and recording it
+				// as well would show every move twice in the failover log.
+				s.monitor.RecordSwitch(target.Group, target.Name, orNone(target.Current), target.Elected)
+			}
 		}
-		s.noteListFailoverWrite(target.Table, nil)
-		s.monitor.RecordSwitch(target.Group, target.Name, orNone(target.Current), want)
 	}
-	s.restoreLostTableRoutes(ctx, live)
+	s.restoreLostTableRoutes(ctx, plan, profile, live)
+}
+
+// supervisedKernelPlan is the kernel plan the router holds, with the profile it was compiled from:
+// the supervised baseline's, which the reconcile loop keeps installed. After a rollback that failed
+// part way that is the committed one, and acting on the Test's tables would route by the plan the
+// rollback was undoing. nil when no kernel plane is installed or the record cannot say what it was
+// compiled from. Callers that act on it hold applyMu, as the reconcile loop does.
+func (s *Server) supervisedKernelPlan() (*pbr.Plan, *model.Profile) {
+	base := s.supervisedBaseline()
+	if base == nil || base.Desired == nil || !base.Materialization.known() {
+		return nil, nil
+	}
+	plan := base.Materialization.kernelPlan()
+	if plan == nil {
+		return nil, nil
+	}
+	return plan, &base.Desired.Profile
 }
 
 // A single-endpoint egress has nothing to elect between, so the loop above leaves it alone - and for
@@ -126,38 +191,18 @@ func (s *Server) listFailoverTick(ctx context.Context) {
 // to an interface egress of the APPLIED kernel plan - not the saved profile: its table numbers are
 // the ones the router holds, and a pending edit can number them differently. It must have lost its
 // device route outright; a route to another device was put there by someone and is left alone. The
-// device must exist and be up again. And it steps aside while an Apply runs, like the reconcile loop:
-// Apply may be retiring that very table, and a route put back into it would outlive the plan.
-func (s *Server) restoreLostTableRoutes(ctx context.Context, live4 map[int]string) {
-	if s.config().Demo || s.applyInProgress.Load() {
-		return
-	}
-	base := s.appliedBaseline()
-	if base == nil || base.Desired == nil || !base.Materialization.known() {
-		return
-	}
-	kernel := base.Materialization.Kernel
-	if kernel.Action != ExecutionEnsurePresent || kernel.Plan == nil {
-		return
-	}
-	if !s.applyMu.TryLock() {
-		return
-	}
-	defer s.applyMu.Unlock()
+// device must exist and be up again. It runs inside listFailoverTick's pass, which holds applyMu and
+// stands aside while an Apply runs: Apply may be retiring that very table, and a route put back into
+// it would outlive the plan. live holds each family the pass read; one it could not read is skipped,
+// because unread is not empty and restoring on an unknown would re-seed routes that are there.
+func (s *Server) restoreLostTableRoutes(ctx context.Context, plan *pbr.Plan, profile *model.Profile, live map[bool]map[int]string) {
 	io := s.tableIO()
-	families := []bool{false}
-	if kernel.Plan.HasV6() {
-		families = append(families, true) // the plane seeds `ip -6 route … table N` next to each v4 one
-	}
-	for _, v6 := range families {
-		live, ok := live4, true
-		if v6 {
-			live, ok = s.liveTableDefaults(ctx, true)
+	for _, v6 := range []bool{false, true} {
+		tables, read := live[v6]
+		if !read {
+			continue
 		}
-		if !ok {
-			continue // unread is not empty: restoring on an unknown would re-seed routes that are there
-		}
-		for _, lost := range lostTableRoutes(kernel.Plan, &base.Desired.Profile, live, io.up) {
+		for _, lost := range lostTableRoutes(plan, profile, tables, io.up) {
 			err := io.write(ctx, v6, lost.Iface, lost.Table)
 			s.noteTableRestore(v6, lost, err)
 		}
@@ -252,7 +297,11 @@ func familyArgs(v6 bool, args ...string) []string {
 	if v6 {
 		return append([]string{"-6"}, args...)
 	}
-	return args
+	// The IPv4 side names its family too. BusyBox's `ip route show table all` lists the IPv6 routes
+	// as well, and parseTableDefaults keeps the last line per table: on a Keenetic the v6 default
+	// still on the group's first member overwrote the v4 one an outage had moved to the second, so
+	// the loop read the table as already fine and never moved it back (QA-048, QA-094).
+	return append([]string{"-4"}, args...)
 }
 
 // linkIsUp reports a device that exists and is administratively up - what a `dev` route needs.
@@ -317,24 +366,31 @@ func (s *Server) kernelElectableMembers() map[string][]string {
 }
 
 // noteListFailoverWrite logs a table's write outcome only when it CHANGES, so a persistent refusal is
-// visible without filling the router's bounded log with one line every tick.
-func (s *Server) noteListFailoverWrite(table int, err error) {
+// visible without filling the router's bounded log with one line every tick. Kept per family: a
+// table's v6 default can be refused while its v4 one is written, and one key for both would log that
+// pair as a refusal and a recovery on every tick.
+func (s *Server) noteListFailoverWrite(v6 bool, table int, err error) {
+	family := "IPv4"
+	if v6 {
+		family = "IPv6"
+	}
+	key := fmt.Sprintf("%s/%d", family, table)
 	s.listFailoverErrMu.Lock()
 	defer s.listFailoverErrMu.Unlock()
 	if s.listFailoverErr == nil {
-		s.listFailoverErr = map[int]string{}
+		s.listFailoverErr = map[string]string{}
 	}
-	prev, had := s.listFailoverErr[table]
+	prev, had := s.listFailoverErr[key]
 	if err == nil {
 		if had {
-			delete(s.listFailoverErr, table)
-			log.Printf("list failover: table %d is writable again", table)
+			delete(s.listFailoverErr, key)
+			log.Printf("list failover: table %d is writable again (%s)", table, family)
 		}
 		return
 	}
 	if msg := err.Error(); !had || msg != prev {
-		s.listFailoverErr[table] = msg
-		log.Printf("list failover: cannot repoint table %d, so its list keeps the exit it has: %v", table, err)
+		s.listFailoverErr[key] = msg
+		log.Printf("list failover: cannot repoint table %d (%s), so its list keeps the exit it has: %v", table, family, err)
 	}
 }
 
@@ -363,34 +419,49 @@ type listFailoverTarget struct {
 	Elected string
 }
 
-// listFailoverTargets is listFailoverTargetsFrom over a fresh read of the tables, for callers outside
-// the loop. The health report asks which groups this loop owns, and a read that failed does not
-// change that, so an unread table is passed on as holding nothing - the report never writes.
-func (s *Server) listFailoverTargets() []listFailoverTarget {
-	live, _ := s.liveTableDefaults(context.Background(), false)
-	return s.listFailoverTargetsFrom(live)
-}
-
-// listFailoverTargetsFrom pairs the compiled plan with live health.
+// listFailoverTargetsFrom pairs the applied kernel plan, and the profile it was compiled from, with
+// live health.
 //
 // The election is the operator's ORDER, first healthy member wins — the same fallback semantics the
 // Failover page states for a native group, and the same rule Compile uses when it pins the table at
 // Apply. A group whose members are all down elects nothing and the table is left exactly as it is:
 // moving to a member that is also dead would be churn, and the fail-closed question (drop vs leak)
 // is Apply's to answer, not this loop's.
-func (s *Server) listFailoverTargetsFrom(live map[int]string) []listFailoverTarget {
-	profile := s.store.Profile()
-	plan, _, err := pbr.Compile(&profile, s.pbrCompileOptions(s.config()))
-	if err != nil || plan == nil {
-		return nil
-	}
+func (s *Server) listFailoverTargetsFrom(plan *pbr.Plan, profile *model.Profile, live map[int]string) []listFailoverTarget {
 	// endpoint id → kernel link, through the COMPILER's own resolver. Reading it off the plan's
 	// egresses was the first cut and it elected nothing: a plan carries an egress per outbound tag it
 	// actually uses, and a list routed through a group uses the GROUP tag — so the members, which are
 	// exactly what this loop chooses between, had no entry at all. Measured on the router with the
 	// elected tunnel down: the table stayed empty for 72 seconds while every other member was alive.
-	ifaceOf := kernelIfaceByEndpoint(&profile)
+	ifaceOf := kernelIfaceByEndpoint(profile)
 	var out []listFailoverTarget
+	for _, owned := range listFailoverTables(plan, profile, ifaceOf) {
+		elected, ok := s.electHealthyMember(owned.Group, ifaceOf)
+		if !ok {
+			continue
+		}
+		out = append(out, listFailoverTarget{
+			Group: owned.Group.ID, Name: owned.Group.Name, Table: owned.Table,
+			Current: live[owned.Table], Elected: elected,
+		})
+	}
+	return out
+}
+
+// listFailoverTable is a routing table this loop owns: a group egress's table, with the group.
+type listFailoverTable struct {
+	Group model.Group
+	Table int
+}
+
+// listFailoverTables is what this loop CAN re-point, whatever health says: each interface egress of
+// plan that is a GROUP with at least one member the kernel can route to. The loop elects among these
+// on every tick, and the Failover page's "switches by itself" (selfSwitchingGroups) is this same list.
+// Built from the election instead, that answer dropped a group exactly while all its members were
+// down or not yet measured, telling the operator the group does not switch by itself while the loop
+// stood ready to re-point it the moment a member came back.
+func listFailoverTables(plan *pbr.Plan, profile *model.Profile, ifaceOf map[string]string) []listFailoverTable {
+	var out []listFailoverTable
 	for _, egress := range plan.Egresses {
 		if egress.Kind != pbr.EgressInterface || egress.Table == 0 {
 			continue
@@ -399,14 +470,12 @@ func (s *Server) listFailoverTargetsFrom(live map[int]string) []listFailoverTarg
 		if group == nil {
 			continue // an endpoint egress has one interface and nothing to elect between
 		}
-		elected, ok := s.electHealthyMember(*group, ifaceOf)
-		if !ok {
-			continue
+		for _, id := range group.Members {
+			if ifaceOf[id] != "" {
+				out = append(out, listFailoverTable{Group: *group, Table: egress.Table})
+				break
+			}
 		}
-		out = append(out, listFailoverTarget{
-			Group: group.ID, Name: group.Name, Table: egress.Table,
-			Current: live[egress.Table], Elected: elected,
-		})
 	}
 	return out
 }
@@ -417,8 +486,10 @@ func (s *Server) electHealthyMember(group model.Group, ifaceOf map[string]string
 		return "", false
 	}
 	alive := make(map[string]bool, len(group.Members))
-	for _, h := range s.monitor.MemberHealth(group.Members) {
-		alive[h.ID] = h.Alive
+	if s.monitor != nil { // no monitor, nothing known alive
+		for _, h := range s.monitor.MemberHealth(group.Members) {
+			alive[h.ID] = h.Alive
+		}
 	}
 	return electMember(group, ifaceOf, alive)
 }

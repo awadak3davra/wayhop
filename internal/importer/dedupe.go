@@ -1,6 +1,8 @@
 package importer
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -26,7 +28,24 @@ func ContentKey(e model.Endpoint) string {
 	// host:port — whichever the protocol uses. Missing ones contribute "".
 	for _, k := range []string{"uuid", "password", "peer_public_key", "private_key", "method", "interface", "username"} {
 		b.WriteByte('|')
+		// An SSH exit's private key is typed in the form; no ssh:// link carries one. Counted, adding a
+		// key made the next import of the same link a different connection, added beside the first.
+		if k == "private_key" && e.Protocol == model.ProtoSSH {
+			continue
+		}
 		b.WriteString(paramStr(e.Params, k))
+	}
+	// A realm connection has no host or port: its rendezvous and realm name are what it dials. Only
+	// when present, so every other key stays as it was.
+	if r := paramStr(e.Params, "realm"); r != "" {
+		b.WriteString("|realm=")
+		b.WriteString(r)
+	}
+	// An SSH exit's login is "user", not "username": two accounts on one server that sign in with a
+	// key (no password in the key above until one is pasted) are two exits. Only when present, as above.
+	if u := paramStr(e.Params, "user"); u != "" && e.Protocol == model.ProtoSSH {
+		b.WriteString("|user=")
+		b.WriteString(u)
 	}
 	// Dial-distinguishing transport + TLS fields. Two endpoints with the same
 	// host:port:credential but a different stream transport (ws vs grpc) or TLS
@@ -94,19 +113,23 @@ func paramStr(p map[string]any, k string) string {
 // update, not a new duplicate) or when its content is genuinely new, and DROPS it
 // when its content matches an already-present endpoint (existing or earlier in the
 // same batch) under a new ID. Order is preserved; the original slice is untouched.
+// An in-place update is returned as Reimport makes it: the link's connection with what
+// the user owns carried over, never the bare parse that would revert the user's edits.
 // Returns the kept endpoints and the count dropped as content-duplicates.
 func DedupeNew(existing, incoming []model.Endpoint) (unique []model.Endpoint, dupes int) {
-	ids := make(map[string]string, len(existing)) // ID -> its ContentKey
+	ids := make(map[string]int, len(existing)) // ID -> its index in existing
+	cks := make([]string, len(existing))       // existing[i]'s ContentKey
 	keys := make(map[string]bool, len(existing))
 	// seenIDs is every ID that will exist after this merge — existing endpoints plus ones kept so far
 	// this pass — so a freshly-minted ID can't collide with any of them.
 	seenIDs := make(map[string]bool, len(existing)+len(incoming))
 	for i := range existing {
-		ck := ContentKey(existing[i])
-		ids[existing[i].ID] = ck
-		keys[ck] = true
+		cks[i] = ContentKey(existing[i])
+		ids[existing[i].ID] = i
+		keys[cks[i]] = true
 		seenIDs[existing[i].ID] = true
 	}
+	updated := make(map[string]bool)
 	unique = make([]model.Endpoint, 0, len(incoming))
 	for i := range incoming {
 		e := incoming[i]
@@ -118,8 +141,13 @@ func DedupeNew(existing, incoming []model.Endpoint) (unique []model.Endpoint, du
 			// colliding with a DIFFERENT user-created endpoint; do NOT overwrite it
 			// — fall through to content-dedup so it is treated as a new endpoint or
 			// dropped as a content-duplicate.
-			if existCK, ok := ids[e.ID]; ok && existCK == ck {
-				unique = append(unique, e)
+			if at, ok := ids[e.ID]; ok && cks[at] == ck {
+				if updated[e.ID] {
+					dupes++ // the same link twice in one batch updates it once
+					continue
+				}
+				updated[e.ID] = true
+				unique = append(unique, Reimport(existing[at], e))
 				continue
 			}
 		}
@@ -143,4 +171,92 @@ func DedupeNew(existing, incoming []model.Endpoint) (unique []model.Endpoint, du
 		unique = append(unique, e)
 	}
 	return unique, dupes
+}
+
+// userPins returns the pins in t that the user added rather than an import brought.
+//
+// Whole-certificate pins can be told apart: an importer marks the ones it brings (PinCertMayBeCA for
+// Xray's pcs= and mihomo's fingerprint, PinCertBesideChain for Hysteria's pinSHA256, each naming its
+// pins in the ...Of list when they are not all of them), and a pin typed in the form has neither mark.
+// The one importer that does not mark its pins is a sing-box JSON config, so a pin from one reads as
+// typed and is kept when the config drops it.
+//
+// Public-key pins carry no mark, and no share link carries one: they come from Set up Server, the form,
+// or a sing-box JSON config. They are all kept, with the same exception.
+func userPins(t *model.TLS) (cert, pub []string) {
+	if t == nil {
+		return nil, nil
+	}
+	imported := map[string]bool{}
+	mark := func(on bool, of []string) {
+		if !on {
+			return
+		}
+		if len(of) == 0 {
+			of = t.PinCertSHA256
+		}
+		for _, p := range of {
+			imported[p] = true
+		}
+	}
+	mark(t.PinCertMayBeCA, t.PinCertMayBeCAOf)
+	mark(t.PinCertBesideChain, t.PinCertBesideChainOf)
+	for _, p := range t.PinCertSHA256 {
+		if !imported[p] {
+			cert = append(cert, p)
+		}
+	}
+	return cert, append([]string(nil), t.PinPubKeySHA256...)
+}
+
+// withUserPins is a TLS block holding the link's pins with the user's pins from have added. A link
+// with no TLS has nothing to pin, so they go with it. The link's marks said "all of the certificate
+// pins" by leaving their ...Of list empty; with a typed pin beside them they name the link's own.
+func withUserPins(link, have *model.TLS) *model.TLS {
+	cert, pub := userPins(have)
+	if link == nil || len(cert)+len(pub) == 0 {
+		return link
+	}
+	t := *link
+	own := t.PinCertSHA256
+	t.PinCertSHA256 = append([]string(nil), own...)
+	t.PinPubKeySHA256 = append([]string(nil), t.PinPubKeySHA256...)
+	added := false
+	for _, p := range cert {
+		if !containsPin(t.PinCertSHA256, p) {
+			t.PinCertSHA256 = append(t.PinCertSHA256, p)
+			added = true
+		}
+	}
+	if added && len(own) > 0 {
+		if t.PinCertMayBeCA && len(t.PinCertMayBeCAOf) == 0 {
+			t.PinCertMayBeCAOf = append([]string(nil), own...)
+		}
+		if t.PinCertBesideChain && len(t.PinCertBesideChainOf) == 0 {
+			t.PinCertBesideChainOf = append([]string(nil), own...)
+		}
+	}
+	for _, p := range pub {
+		if !containsPin(t.PinPubKeySHA256, p) {
+			t.PinPubKeySHA256 = append(t.PinPubKeySHA256, p)
+		}
+	}
+	return &t
+}
+
+func containsPin(pins []string, p string) bool {
+	for _, q := range pins {
+		if q == p {
+			return true
+		}
+	}
+	return false
+}
+
+// SameEndpoint reports whether two endpoints store the same thing: equal once encoded, which is how
+// the profile keeps them, so a number that went through JSON compares equal to its decoded self.
+func SameEndpoint(a, b model.Endpoint) bool {
+	ab, err1 := json.Marshal(a)
+	bb, err2 := json.Marshal(b)
+	return err1 == nil && err2 == nil && bytes.Equal(ab, bb)
 }

@@ -25,7 +25,7 @@ func TestPluginsup_SyncKeepsARunningPluginAlive(t *testing.T) {
 
 	specs := []Spec{
 		{ID: "awg1", Endpoint: pluginsup_awgEndpoint("awg1"), SOCKSPort: 0},
-		{ID: "olc1", Endpoint: pluginsup_olcEndpoint("olc1"), SOCKSPort: 17901},
+		{ID: "dsy1", Endpoint: pluginsup_dsyEndpoint("dsy1"), SOCKSPort: 17901},
 	}
 	m.Sync(specs)
 
@@ -48,13 +48,13 @@ func TestPluginsup_SyncKeepsARunningPluginAlive(t *testing.T) {
 
 	// A sentinel in the rendered config. Content equality cannot tell a kept file from an identically
 	// rewritten one; a byte the renderer would never produce can.
-	olcPath := filepath.Join(cfgDir, "olc1.yaml")
-	orig, err := os.ReadFile(olcPath)
+	dsyPath := filepath.Join(cfgDir, "dsy1.nfqws")
+	orig, err := os.ReadFile(dsyPath)
 	if err != nil {
-		t.Fatalf("read olc config: %v", err)
+		t.Fatalf("read nfqws2 config: %v", err)
 	}
 	const sentinel = "\n# sentinel: a rewrite would drop this line\n"
-	if err := os.WriteFile(olcPath, append(append([]byte(nil), orig...), []byte(sentinel)...), 0o600); err != nil {
+	if err := os.WriteFile(dsyPath, append(append([]byte(nil), orig...), []byte(sentinel)...), 0o600); err != nil {
 		t.Fatalf("write sentinel: %v", err)
 	}
 
@@ -85,9 +85,9 @@ func TestPluginsup_SyncKeepsARunningPluginAlive(t *testing.T) {
 		}
 	}
 
-	after, err := os.ReadFile(olcPath)
+	after, err := os.ReadFile(dsyPath)
 	if err != nil {
-		t.Fatalf("read olc config after: %v", err)
+		t.Fatalf("read nfqws2 config after: %v", err)
 	}
 	if string(after) != string(orig)+sentinel {
 		t.Errorf("the config of a RUNNING plugin was rewritten by an identical Sync — the secrets file " +

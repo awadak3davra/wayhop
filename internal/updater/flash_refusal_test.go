@@ -61,11 +61,33 @@ func TestFlashShortfallRoundsUp(t *testing.T) {
 // The self-update refusal names a directory the panel cannot move, so it must NOT repeat the engine
 // advice about the sing-box binary setting — but it owes the operator the same number.
 func TestSelfFlashRefusalNamesTheShortfallButNotTheEngineLever(t *testing.T) {
-	msg := selfFlashRefusal("/usr/bin", 23*1024*1024+900*1024, 40<<20).Error()
+	p := selfPlan{known: true, room: 23*1024*1024 + 900*1024, need: 40 << 20}
+	msg := selfRefusal("/usr/bin", p, 0).Error()
 	if !strings.Contains(msg, "17 MiB") {
 		t.Errorf("the self-update refusal does not say how much to free.\ngot: %s", msg)
 	}
 	if strings.Contains(msg, "sing-box binary") {
 		t.Errorf("the self-update refusal points at a setting that does not move the daemon's own directory.\ngot: %s", msg)
+	}
+}
+
+// Below "the new binary fits" the running daemon cannot do better in place: it holds its own inode
+// until it restarts. The installer can (it stops the daemon and keeps the old binary compressed), so
+// the refusal names it with the room it needs — but only when that room is actually there.
+func TestSelfRefusalNamesTheInstallerOnlyWhenItWouldFit(t *testing.T) {
+	const mib = 1 << 20
+	old := uint64(14 * mib)
+	// 10 MiB of room against a 14 MiB binary: in place no, compressed (~7.7 + 2 MiB) yes.
+	fits := selfRefusal("/usr/sbin", selfPlan{known: true, room: 10 * mib, need: 14*mib + selfMargin}, old).Error()
+	if !strings.Contains(fits, "re-run the installer") || !strings.Contains(fits, "keeps the old binary compressed") {
+		t.Errorf("the refusal does not name the installer that would fit.\ngot: %s", fits)
+	}
+	// 5 MiB: not even the compressed copy fits, so the installer must not be offered as the way out.
+	none := selfRefusal("/usr/sbin", selfPlan{known: true, room: 5 * mib, need: 14*mib + selfMargin}, old).Error()
+	if strings.Contains(none, "installer") {
+		t.Errorf("the refusal offers an installer run that would refuse too.\ngot: %s", none)
+	}
+	if !strings.Contains(none, "11 MiB") {
+		t.Errorf("the refusal does not say how much to free (16 needed, 5 there).\ngot: %s", none)
 	}
 }

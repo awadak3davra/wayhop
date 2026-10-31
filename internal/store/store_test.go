@@ -222,3 +222,47 @@ func TestMutatorSaveFailureLeavesMemoryMatchingDisk(t *testing.T) {
 		t.Fatalf("failed Delete leaked into group members: %+v", after.Groups)
 	}
 }
+
+// A kill between atomicfile.Write's temp creation and its rename leaves a full copy of the profile,
+// endpoint keys included, beside profile.json, and nothing ever removed it: keys the operator rotated
+// stayed on disk and repeated crashes filled the overlay. Open sweeps them before any writer starts.
+func TestOpen_SweepsTempsACrashLeftBehind(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "profile.json")
+	if err := os.WriteFile(path, []byte(`{"endpoints":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	orphan := path + ".123456.tmp"
+	other := filepath.Join(dir, "servers.json.123456.tmp") // another store's temp is not ours to judge
+	for _, p := range []string{orphan, other} {
+		if err := os.WriteFile(p, []byte(`{"endpoints":[{"id":"e1"`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := Open(path); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("an orphaned profile temp survived Open: %v", err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatalf("Open removed a temp that is not its own: %v", err)
+	}
+}
+
+// The working copy owns its DNS plane. It shared the published one, so a delete or disable that
+// repointed a DNS server's detour wrote into the profile readers were using - before validation,
+// and even when the write was then refused.
+func TestCloneProfileDoesNotShareTheDNSPlane(t *testing.T) {
+	src := &model.Profile{DNS: &model.DNSSettings{
+		Servers: []model.DNSServer{{Tag: "d", Type: "https", Server: "198.51.100.53", Detour: "a"}},
+		Rules:   []model.DNSRule{{ID: "r", Server: "d"}},
+	}}
+	p := cloneProfile(src)
+	p.DNS.Servers[0].Detour = "b"
+	p.DNS.Rules[0].Server = "x"
+	p.DNS.Final = "x"
+	if src.DNS.Servers[0].Detour != "a" || src.DNS.Rules[0].Server != "d" || src.DNS.Final != "" {
+		t.Fatalf("the published DNS plane changed through the working copy: %+v", *src.DNS)
+	}
+}

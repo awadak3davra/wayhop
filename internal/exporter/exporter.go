@@ -37,6 +37,10 @@ func Export(e model.Endpoint) (Result, bool) {
 	if e.Engine == model.EngineExternal {
 		return Result{}, false
 	}
+	// A link weaker than the connection it shares is not given (Refusal says why).
+	if Refusal(e) != "" {
+		return Result{}, false
+	}
 	switch e.Protocol {
 	case model.ProtoVLESS:
 		return Result{Kind: "link", Text: vlessLink(e)}, true
@@ -45,6 +49,11 @@ func Export(e model.Endpoint) (Result, bool) {
 	case model.ProtoAnyTLS:
 		return Result{Kind: "link", Text: anytlsLink(e)}, true
 	case model.ProtoHysteria2:
+		// A realm connection whose address does not parse (a disabled draft) has no server either,
+		// so there is no link to give.
+		if _, err := model.Hy2RealmOf(&e); err != nil {
+			return Result{}, false
+		}
 		return Result{Kind: "link", Text: hysteria2Link(e)}, true
 	case model.ProtoTUIC:
 		return Result{Kind: "link", Text: tuicLink(e)}, true
@@ -56,6 +65,16 @@ func Export(e model.Endpoint) (Result, bool) {
 		if conf, ok := wgConf(e); ok {
 			return Result{Kind: "conf", Text: conf, Filename: slug(util.FirstNonEmpty(e.Name, e.ID)) + ".conf"}, true
 		}
+	case model.ProtoOpenVPN:
+		if conf, ok := ovpnConf(e); ok {
+			return Result{Kind: "conf", Text: conf, Filename: slug(util.FirstNonEmpty(e.Name, e.ID)) + ".ovpn"}, true
+		}
+	case model.ProtoSSH:
+		// Deliberately none. No client reads an SSH share link, and an ssh:// URI holds a user and a
+		// password but never the private key or the pinned host keys: a link would hand over a
+		// connection that accepts any server, the pin silently gone. The importer still reads
+		// ssh://user[:password]@host[:port], because its form then asks for the rest.
+		return Result{}, false
 	}
 	return Result{}, false
 }
@@ -81,6 +100,7 @@ func vlessLink(e model.Endpoint) string {
 	}
 	setTransportQuery(q, e.Transport)
 	setTLSQuery(q, e.TLS)
+	setPinQuery(q, e)
 	return buildURI("vless", str(e.Params, "uuid"), "", e, q)
 }
 
@@ -88,6 +108,7 @@ func trojanLink(e model.Endpoint) string {
 	q := url.Values{}
 	setTransportQuery(q, e.Transport)
 	setTLSQuery(q, e.TLS)
+	setPinQuery(q, e)
 	return buildURI("trojan", str(e.Params, "password"), "", e, q)
 }
 
@@ -96,6 +117,7 @@ func trojanLink(e model.Endpoint) string {
 func anytlsLink(e model.Endpoint) string {
 	q := url.Values{}
 	setTLSQuery(q, e.TLS)
+	setPinQuery(q, e)
 	return buildURI("anytls", str(e.Params, "password"), "", e, q)
 }
 
@@ -111,6 +133,7 @@ func hysteria2Link(e model.Endpoint) string {
 		if len(e.TLS.ALPN) > 0 {
 			q.Set("alpn", strings.Join(e.TLS.ALPN, ","))
 		}
+		setECHQuery(q, e.TLS) // Hysteria's own ech= (app/v2.10.0)
 	}
 	if o := str(e.Params, "obfs"); o != "" {
 		q.Set("obfs", o)
@@ -118,10 +141,34 @@ func hysteria2Link(e model.Endpoint) string {
 			q.Set("obfs-password", op)
 		}
 	}
+	setHysteria2PinQuery(q, e)
+	if r, _ := model.Hy2RealmOf(&e); r != nil {
+		return hysteria2RealmLink(e, r, q)
+	}
 	if hp := str(e.Params, "hop_ports"); hp != "" {
 		q.Set("mport", hp) // round-trip the port-hopping range
 	}
 	return buildURI("hysteria2", str(e.Params, "password"), "", e, q)
+}
+
+// hysteria2RealmLink is Hysteria's realm-mode link: the realm address as the authority and path (the
+// userinfo is the rendezvous token), the password in auth=, one stun= per STUN server.
+func hysteria2RealmLink(e model.Endpoint, r *model.Hy2Realm, q url.Values) string {
+	setIf(q, "auth", str(e.Params, "password"))
+	for _, s := range r.STUN {
+		q.Add("stun", s)
+	}
+	scheme := "hysteria2+realm"
+	if r.HTTP {
+		scheme = "hysteria2+realm+http"
+	}
+	addr := r.Addr(scheme)
+	addr.RawQuery = encodeQuery(q, e)
+	s := addr.String()
+	if e.Name != "" {
+		s += "#" + fragmentEscape(e.Name)
+	}
+	return s
 }
 
 func tuicLink(e model.Endpoint) string {
@@ -151,7 +198,9 @@ func tuicLink(e model.Endpoint) string {
 		if len(e.TLS.ALPN) > 0 {
 			q.Set("alpn", strings.Join(e.TLS.ALPN, ","))
 		}
+		setECHQuery(q, e.TLS) // no official TUIC URI; v2rayN reads ech= on tuic:// too
 	}
+	setPinQuery(q, e) // v2rayN reads pcs= and vcn= on tuic:// too
 	return buildURI("tuic", str(e.Params, "uuid"), str(e.Params, "password"), e, q)
 }
 
@@ -172,7 +221,7 @@ func ssLink(e model.Endpoint) string {
 			q.Set("plugin", pl)
 		}
 	}
-	if enc := q.Encode(); enc != "" {
+	if enc := encodeQuery(q, e); enc != "" { // fm= too, as 3x-ui writes it here
 		u += "?" + enc
 	}
 	if e.Name != "" {
@@ -214,7 +263,19 @@ func vmessLink(e model.Endpoint) string {
 		}
 		if e.TLS.Insecure {
 			m["allowInsecure"] = "true" // round-trip skip-cert-verify (parseVMess reads it)
+			m["insecure"] = "1"         // the spelling v2rayN reads and writes (VmessQRCode)
 		}
+		// v2rayN's VMess JSON carries Xray's pins and verify names as on its other links.
+		if pins := model.CertPinsOf(&e); len(pins) > 0 {
+			m["pcs"] = strings.Join(pins, ",")
+		}
+		if v := str(e.Params, model.ParamVerifyCertName); v != "" {
+			m["vcn"] = v
+		}
+	}
+	// Xray's finalmask, a string of JSON, as 3x-ui writes it into a VMess link.
+	if fm := str(e.Params, model.ParamFinalMask); fm != "" {
+		m["fm"] = fm
 	}
 	b, _ := json.Marshal(m)
 	return "vmess://" + base64.StdEncoding.EncodeToString(b)
@@ -424,6 +485,76 @@ func setTLSQuery(q url.Values, t *model.TLS) {
 			q.Set("alpn", strings.Join(t.ALPN, ","))
 		}
 	}
+	setECHQuery(q, t)
+}
+
+// Refusal returns why e cannot be shared as a link without the link being weaker than the router's
+// own connection, or "" when it can. A public-key pin has no share-link form (only sing-box carries
+// one): where it is the only pin and the connection's certificate checks are off, the router checks
+// the pin (from sing-box 1.13) while the link would carry "insecure" and no pin, and so accept any
+// certificate. A whole-certificate pin travels (pcs=, pinSHA256), so with one the link stays pinned;
+// Reality uses no pin; with certificate checks on the link checks certificates too.
+func Refusal(e model.Endpoint) string {
+	t := e.TLS
+	if t == nil || !t.Enabled || !t.Insecure || t.Type == "reality" {
+		return ""
+	}
+	switch e.Protocol {
+	case model.ProtoVLESS, model.ProtoVMess, model.ProtoTrojan, model.ProtoAnyTLS, model.ProtoHysteria2, model.ProtoTUIC:
+	default:
+		return ""
+	}
+	if len(model.PubKeyPinsOf(&e)) == 0 || len(model.CertPinsOf(&e)) > 0 {
+		return ""
+	}
+	return "this connection authenticates its server by a public-key pin, which a share link cannot carry, and its " +
+		"certificate checks are off (\"insecure\"), so the link would accept any certificate; add the server's " +
+		"whole-certificate pin, or turn \"insecure\" off, to share it"
+}
+
+// setPinQuery writes a TLS link's certificate pins as Xray and v2rayN carry them: pcs=, the
+// whole-certificate hashes in lowercase hex, comma-separated, and vcn=, the names to check the
+// certificate against, kept from the link it came from. Public-key pins have no share-link form
+// (only sing-box has them), so they stay with the connection.
+func setPinQuery(q url.Values, e model.Endpoint) {
+	if e.TLS == nil || !e.TLS.Enabled {
+		return
+	}
+	if pins := model.CertPinsOf(&e); len(pins) > 0 {
+		q.Set("pcs", strings.Join(pins, ","))
+	}
+	setIf(q, "vcn", str(e.Params, model.ParamVerifyCertName))
+}
+
+// setHysteria2PinQuery writes a Hysteria2 link's pins: pinSHA256, Hysteria's one pin, as Hysteria's
+// own share link writes it (lowercase hex), and, when there are more, all of them in pcs=, which
+// v2rayN reads before pinSHA256. The official client then checks the first, so the link is no
+// weaker than the connection. A pin an older WayHop kept as the link held it, and which is not a
+// SHA-256 hash, is given back as it came.
+func setHysteria2PinQuery(q url.Values, e model.Endpoint) {
+	pins := model.CertPinsOf(&e)
+	switch {
+	case len(pins) > 0:
+		q.Set("pinSHA256", pins[0])
+		if len(pins) > 1 {
+			q.Set("pcs", strings.Join(pins, ","))
+		}
+	default:
+		setIf(q, "pinSHA256", str(e.Params, model.ParamLegacyPin))
+	}
+	setIf(q, "vcn", str(e.Params, model.ParamVerifyCertName))
+}
+
+// setECHQuery writes ech= (Xray's standard, read by v2rayN and Hysteria too) with the connection's
+// ECH config as standard base64, which url.Values escapes. A config looked up in DNS is not
+// exported: the link form names a resolver URL, and the router looks the record up through its own
+// DNS instead, so there is none to give. A Reality link gives back the config it brought (kept
+// switched off, since sing-box cannot pair the two).
+func setECHQuery(q url.Values, t *model.TLS) {
+	if t == nil || t.ECH == nil || t.ECH.Config == "" || (!t.ECH.Enabled && t.Type != "reality") {
+		return
+	}
+	q.Set("ech", model.CanonicalECHConfig(t.ECH.Config))
 }
 
 // buildURI assembles scheme://user[:pass]@host:port?query#name. The userinfo is encoded by
@@ -431,7 +562,7 @@ func setTLSQuery(q url.Values, t *model.TLS) {
 // percent-escaped — a bare ':' in a password would otherwise be read by every client as the
 // user:pass separator and silently truncate the password.
 func buildURI(scheme, user, pass string, e model.Endpoint, q url.Values) string {
-	u := url.URL{Scheme: scheme, Host: hostPort(e), RawQuery: q.Encode()}
+	u := url.URL{Scheme: scheme, Host: hostPort(e), RawQuery: encodeQuery(q, e)}
 	if pass != "" {
 		u.User = url.UserPassword(user, pass)
 	} else {
@@ -442,6 +573,21 @@ func buildURI(scheme, user, pass string, e model.Endpoint, q url.Values) string 
 		s += "#" + fragmentEscape(e.Name)
 	}
 	return s
+}
+
+// encodeQuery encodes q, then a link's fm= (Xray's finalmask, model.ParamFinalMask) last, escaped as
+// v2rayN escapes it (Uri.EscapeDataString): a space is %20, never '+', which v2rayN and the importer
+// (linkQueryValue) read as '+'.
+func encodeQuery(q url.Values, e model.Endpoint) string {
+	s := q.Encode()
+	fm := str(e.Params, model.ParamFinalMask)
+	if fm == "" {
+		return s
+	}
+	if s != "" {
+		s += "&"
+	}
+	return s + "fm=" + strings.ReplaceAll(url.QueryEscape(fm), "+", "%20")
 }
 
 // fragmentEscape percent-encodes a #name fragment so it decodes IDENTICALLY whether a client

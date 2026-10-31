@@ -412,9 +412,9 @@ try {
           title: 'Routing mode cannot work as requested',
           detail: 'INJECTED: no kernel plane, so no traffic would be routed.',
           remedy: 'INJECTED: use "tun" on this router.' },
-        { id: 'endpoint.engine.olcrtc', code: 'ENGINE_UNAVAILABLE', severity: 'degraded', blocks: 'feature',
-          ack_required: true, acked: false, count: 2, items: ['olc-1', 'olc-2'],
-          title: 'olcRTC connections will not start',
+        { id: 'endpoint.engine.amneziawg', code: 'ENGINE_UNAVAILABLE', severity: 'degraded', blocks: 'feature',
+          ack_required: true, acked: false, count: 2, items: ['awg-1', 'awg-2'],
+          title: 'AmneziaWG connections will not start',
           detail: 'INJECTED: the engine binary is not installed.', remedy: 'INJECTED: install it in Updater.' },
         { id: 'kernel_plane.fallback', code: 'KERNEL_PLANE_FALLBACK', severity: 'info', blocks: 'optimisation',
           ack_required: false, acked: false, count: 1, items: [],
@@ -445,7 +445,7 @@ try {
       // The acknowledgement is a real checkbox, unticked (nothing acknowledged yet), and the affected
       // items are named.
       ackBox: !!box.querySelector('.cs-preflight-ack input[type=checkbox]:not(:checked)'),
-      namesItems: /olc-1/.test(txt) && /olc-2/.test(txt),
+      namesItems: /awg-1/.test(txt) && /awg-2/.test(txt),
       // The informational note folds: present, closed, and its row is not counted among the decisions.
       notesFolded: !!notes && !notes.open && /1 note/i.test(notes.querySelector('summary')?.textContent || ''),
       // Both actions are disabled while a hard blocker exists, and the panel says why.
@@ -808,7 +808,7 @@ try {
         claimsForced: !!stage && /redirected here/i.test(stage.textContent),
         claimsEscapable: !!stage && /own resolver/i.test(stage.textContent),
         footSaysUnknown: !!foot && /could not be read/i.test(foot.textContent),
-        footClaimsBlocked: !!foot && /cannot route around/i.test(foot.textContent),
+        footClaimsBlocked: !!foot && /cannot route around|are refused/i.test(foot.textContent),
       };
     })()`);
     fault = null;
@@ -1312,7 +1312,7 @@ try {
   //
   // The operational updater now contains only software WayHop can execute on this router: WayHop
   // itself and the optional compatibility core. Kernel-carried AmneziaWG belongs in Diagnostics;
-  // deferred olcRTC and unrelated standalone cores must not make this screen look broken by offering
+  // unrelated standalone cores must not make this screen look broken by offering
   // impossible actions. Keep them in the injected daemon payload and prove the UI excludes them.
   // A persisted failure on the visible compatibility core must still own the page verdict.
   const SRC_NOTE = 'No prebuilt releases; build from source on-device (the PPA is blocked in RU).';
@@ -1336,9 +1336,6 @@ try {
           repo: 'amnezia-vpn/amneziawg-go', bin_name: 'amneziawg-go',
           source_only: true, note: SRC_NOTE,
           installed: { present: false }, native_managed: false, ownership_unknown: false },
-        { id: 'olcrtc', name: 'olcRTC (WebRTC tunnel)', role: 'socks-plugin', repo: 'awadak3davra/olcrtc',
-          bin_name: 'olcrtc', installed: { present: false }, last_error: DISK_ERR,
-          native_managed: false, ownership_unknown: false },
         stray('mihomo'), stray('xray'), stray('hysteria'), stray('dnscrypt-proxy'),
       ] },
   };
@@ -1379,7 +1376,7 @@ try {
     v7n.drew && !v7n.ok && !/everything is current/i.test(v7n.text) && /install(s)? failed/i.test(v7n.text),
     `text=${JSON.stringify(v7n.text)} ok=${v7n.ok} rows=${rowsDrew}`);
   record('non-operational catalog engines stay off the native-first updater',
-    !(await c.eval(`!!document.querySelector('[data-upd="amneziawg-go"], [data-upd="olcrtc"], [data-upd="mihomo"]')`)),
+    !(await c.eval(`!!document.querySelector('[data-upd="amneziawg-go"], [data-upd="mihomo"]')`)),
     `rows=${rowsDrew}`);
 
   // A long persisted failure is actionable prose, not a status chip: it must wrap in full.
@@ -1442,8 +1439,6 @@ try {
         'native.operation.wireguard.remove': cap('native.operation.wireguard.remove', 'supported'),
         'native.operation.amneziawg.create': cap('native.operation.amneziawg.create', 'supported'),
         'native.operation.amneziawg.remove': cap('native.operation.amneziawg.remove', 'supported'),
-        'engine.olcrtc': cap('engine.olcrtc', 'unsupported_platform',
-          'The strict olcRTC executor is unavailable.'),
       },
     },
   };
@@ -1522,8 +1517,8 @@ try {
     JSON.stringify(preservedWrite));
 
   // Connection creation consumes the same matrix. Native tunnel creation needs BOTH create and
-  // rollback authority; proxy protocols need the optional compatibility core. olcRTC is not a new
-  // choice until its strict content-addressed executor exists.
+  // rollback authority; proxy protocols need the optional compatibility core. olcRTC was removed
+  // and is never a new choice.
   await c.eval(`location.hash = '#connections'`);
   const addConnectionReady = await waitUntil(c,
     `[...document.querySelectorAll('#view button')].some(n => /Add connection/.test(n.textContent || ''))`);
@@ -1568,10 +1563,11 @@ try {
   })()`);
   const retainedOlcReady = await waitUntil(c, `document.querySelector('#f-proto')?.dataset.capabilityReady === 'true'`);
   const retainedOlc = await c.eval(`(() => { const s=document.querySelector('#f-proto'); const o=s&&[...s.options].find(x=>x.value==='olcrtc');
-    return { value:s&&s.value, present:!!o, disabled:!!o?.disabled, hint:document.getElementById('f-proto-support')?.textContent||'' }; })()`);
-  record('an existing olcRTC connection is retained visibly but cannot be reactivated',
+    return { value:s&&s.value, present:!!o, disabled:!!o?.disabled, hint:document.getElementById('f-proto-support')?.textContent||'',
+      notice:/olcRTC is no longer supported/.test(document.querySelector('.modal')?.textContent||'') }; })()`);
+  record('an existing olcRTC connection is retained visibly, says olcRTC was removed, and cannot be reactivated',
     retainedOlcReady && retainedOlc.present && retainedOlc.disabled && retainedOlc.value === 'olcrtc' &&
-      /retained but cannot be activated/i.test(retainedOlc.hint), JSON.stringify(retainedOlc));
+      retainedOlc.notice && /retained but cannot be activated/i.test(retainedOlc.hint), JSON.stringify(retainedOlc));
 
   // With a verified compatibility core, AnyTLS becomes a real manual choice and renders its
   // password/TLS fields. Native types remain independent and are not inferred from core support.

@@ -47,6 +47,9 @@ func (s *Server) writeAutoBackup(now time.Time) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("marshal: %w", err)
 	}
+	// A backup a crash left half-written: pruneBackups counts only finished files, so without this the
+	// temp (a whole setup with its keys) outlived retention for good. BackupLoop is the only writer here.
+	atomicfile.RemoveStaleMatching(dir, "wayhop-backup-*.json.*.tmp")
 	// Sortable UTC name (human-friendly, chronological while the clock runs forward).
 	path := filepath.Join(dir, "wayhop-backup-"+now.UTC().Format("20060102T150405Z")+".json")
 	if err := atomicfile.Write(path, data, 0o600); err != nil {

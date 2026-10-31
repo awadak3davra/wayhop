@@ -64,7 +64,7 @@ func (b *Bot) speed(ctx context.Context, v view, m *Message, exit string) {
 	case errors.Is(err, ErrUnavailable):
 		b.show(ctx, m, v.t("sp.cannot"), again)
 	case err != nil:
-		b.show(ctx, m, v.t("err.backend", esc(err.Error())), again)
+		b.show(ctx, m, v.t("err.backend", esc(errorText(v, err))), again)
 	default:
 		b.show(ctx, m, v.Speed(rep), again)
 	}

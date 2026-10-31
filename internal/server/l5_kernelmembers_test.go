@@ -64,7 +64,7 @@ func TestKernelElectableMembers(t *testing.T) {
 }
 
 // TestKernelElectableMembersIgnoresHealth (L5): the same answer whether members are up or down.
-// listFailoverTargets already drops a group with no HEALTHY kernel member, which is why the card
+// listFailoverTargetsFrom already drops a group with no HEALTHY kernel member, which is why the card
 // cannot be built on it: the moment awg1 died the group would vanish from the report and the caveat
 // with it, exactly when the operator needs to read it.
 func TestKernelElectableMembersIgnoresHealth(t *testing.T) {

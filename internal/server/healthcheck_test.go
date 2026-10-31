@@ -38,6 +38,23 @@ func TestPBRKernelCheckReportsAppliedPlaneOnKeenetic(t *testing.T) {
 	}
 }
 
+// QA-029: mixed mode has no TUN, so the row must not call it one; TUN mode still passes as before.
+func TestPBRKernelCheckDoesNotCallMixedTUN(t *testing.T) {
+	for _, tc := range []struct{ mode, status, summary string }{
+		{"mixed", "na", "Local proxy only, no gateway (mixed)"},
+		{"tun", "pass", "TUN mode — no kernel PBR needed"},
+	} {
+		cfg := config.Default()
+		cfg.RoutingMode = tc.mode
+		dir := t.TempDir()
+		cfg.SingBox.Config = dir + "/singbox.json"
+		s := &Server{cfg: cfg, applyStateDir: dir, platformOf: func() platform.Platform { return platform.OpenWrt }}
+		if row := s.pbrKernelCheck(context.Background()); row.Status != tc.status || row.Summary != tc.summary {
+			t.Errorf("%s mode produced %+v, want %s %q", tc.mode, row, tc.status, tc.summary)
+		}
+	}
+}
+
 func TestSkewVerdict(t *testing.T) {
 	cases := []struct {
 		skew time.Duration

@@ -150,7 +150,7 @@ func TestProbeAutoOffloadDevicesWithIO_ParsesAndDeduplicates(t *testing.T) {
 	host.runCommand = func(_ context.Context, name string, args ...string) (string, error) {
 		command := name + " " + strings.Join(args, " ")
 		switch command {
-		case "ip -o route show default":
+		case "ip -o -4 route show default":
 			return "default via 192.0.2.1 dev wan src 192.0.2.2\n", nil
 		case "ip -o link show type bridge":
 			return "3: br-lan: <UP> mtu 1500\n5: wan: <UP> mtu 1500\n7: br0@eth0: <UP>\n", nil
@@ -185,7 +185,7 @@ func TestProbeAutoOffloadDevicesWithIO_UsesSysfsFallback(t *testing.T) {
 	host.readDir = os.ReadDir
 	host.stat = os.Stat
 	host.runCommand = func(_ context.Context, _ string, args ...string) (string, error) {
-		if strings.Join(args, " ") == "-o route show default" {
+		if strings.Join(args, " ") == "-o -4 route show default" {
 			return "default dev eth0 scope link\n", nil
 		}
 		return "", errors.New("ip bridge enumeration unsupported: secret host detail")
@@ -221,7 +221,7 @@ func TestProbeAutoOffloadDevicesWithIO_ReturnsOnlyFixedErrors(t *testing.T) {
 func TestProbeAutoOffloadDevicesWithIO_FailsClosedWithoutDefaultRoute(t *testing.T) {
 	host := inertApplyHostIO()
 	host.runCommand = func(_ context.Context, _ string, args ...string) (string, error) {
-		if strings.Join(args, " ") == "-o route show default" {
+		if strings.Join(args, " ") == "-o -4 route show default" {
 			return "", nil
 		}
 		return "", nil

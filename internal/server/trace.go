@@ -283,13 +283,17 @@ func (s *Server) handleTrace(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.traceDomain(r.Context(), domain))
 }
 
+// traceLookupHost resolves a traced domain with the router's resolver. A variable so the speed
+// test's route (speedRoute traces its site) can be tested without a live lookup.
+var traceLookupHost = net.DefaultResolver.LookupHost
+
 // traceDomain is the trace itself, shared by the Diagnostics page and the Telegram bot's /route.
 // The caller has validated domain.
 func (s *Server) traceDomain(parent context.Context, domain string) traceResult {
 	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 	res := traceResult{Domain: domain, Exits: map[string]int{}}
-	ips, err := net.DefaultResolver.LookupHost(ctx, domain)
+	ips, err := traceLookupHost(ctx, domain)
 	switch {
 	case err != nil:
 		res.ResolveError = err.Error()

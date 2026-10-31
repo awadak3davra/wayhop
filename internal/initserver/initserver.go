@@ -63,6 +63,9 @@ const (
 	ProtoShadowsocks = "shadowsocks"
 	ProtoHysteria2   = "hysteria2"
 	ProtoTUIC        = "tuic"
+	ProtoAnyTLS      = "anytls"
+	ProtoSnell       = "snell"
+	ProtoMTProto     = "mtproto"
 )
 
 const scriptHeader = `#!/bin/sh
@@ -219,6 +222,13 @@ echo "WR_PROTO=wireguard"
 echo "WR_CLIENT_CONFIG_B64=$(printf '%s' "$WG_CONF" | base64 -w0 2>/dev/null || printf '%s' "$WG_CONF" | base64 | tr -d '\n')"
 `
 
+// The VLESS, VMess, Trojan and Shadowsocks inbounds below accept multiplex ("multiplex":
+// {"enabled":true}), so a client with it switched on (model.Multiplex) reaches them: an inbound
+// without it rejects every multiplexed connection ("global multiplex is deprecated since sing-box
+// v1.7.0"). With it on, the inbound still serves clients without multiplex (measured on 1.12.17 to
+// 1.15.0-alpha.13; generator.TestMultiplexSingBoxRuntime pins both). Padding and TCP Brutal stay
+// off: padding would refuse every client without it, and Brutal needs a kernel module the server
+// may not have.
 const scriptReality = `
 # ---- sing-box VLESS-Reality ----
 log "installing sing-box (VLESS-Reality)..."
@@ -251,13 +261,18 @@ PUB=$(awk '/PublicKey/{print $2}' "$SBD/wr-reality.key")
 SID=$(cat "$SBD/wr-reality-sid")
 SNI=www.microsoft.com
 cat > /etc/sing-box/config.json <<EOF
-{"inbounds":[{"type":"vless","listen":"::","listen_port":443,"users":[{"uuid":"$UUID","flow":"xtls-rprx-vision"}],"tls":{"enabled":true,"server_name":"$SNI","reality":{"enabled":true,"handshake":{"server":"$SNI","server_port":443},"private_key":"$PRIV","short_id":["$SID"]}}}],"outbounds":[{"type":"direct"}]}
+{"inbounds":[{"type":"vless","listen":"::","listen_port":443,"users":[{"uuid":"$UUID","flow":"xtls-rprx-vision"}],"multiplex":{"enabled":true},"tls":{"enabled":true,"server_name":"$SNI","reality":{"enabled":true,"handshake":{"server":"$SNI","server_port":443},"private_key":"$PRIV","short_id":["$SID"]}}}],"outbounds":[{"type":"direct"}]}
 EOF
 # conf.d-aware unit (mirrors singboxServiceUnit): -C keeps any other protocols' conf.d drop-ins
 # loaded ALONGSIDE this Reality config.json, so provisioning Reality does not clobber a prior
 # VMess/Trojan/… inbound (whichever fragment runs last installs this same superset unit). restart
 # (not just enable --now) so a re-provision actually reloads the new inbound.
 mkdir -p /etc/sing-box/conf.d
+# sing-box with no log block logs at trace, and its info lines alone name every client's destination
+# - on a server that is a journal of where each user went. WayHop's servers log warnings only.
+cat > /etc/sing-box/conf.d/wr-log.json <<'WRLOG'
+{"log":{"level":"warn","timestamp":true}}
+WRLOG
 cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=sing-box
@@ -299,16 +314,21 @@ fi
 mkdir -p /etc/sing-box
 `
 
-// scriptSelfSignedTLS generates (once, then reuses) a self-signed certificate for
-// the TLS-bearing sing-box inbounds (VMess-WS-TLS, Trojan, Hysteria2, TUIC). The
-// SNI baked into the cert is wayhop.local; because it is self-signed the client
-// share-links emitted below carry insecure=1 (skip-cert-verify), which the importer
-// honours (insecure / allowInsecure / allow_insecure). openssl is installed if
-// absent. The key/cert are persisted so a re-run reuses them (no client churn).
+// scriptSelfSignedTLS generates (once, then reuses) a self-signed certificate for the TLS-bearing
+// sing-box inbounds (VMess-WS-TLS, Trojan, Hysteria2, TUIC, AnyTLS) and reads its pins
+// (scriptTLSPins). The SNI baked into the cert is wayhop.local. No CA signs it, so the client links
+// emitted below carry insecure=1 (skip-cert-verify) for clients that cannot pin, and beside it the
+// certificate's pin, which WayHop's importer reads and the router's own connection checks instead
+// (QA-138). openssl is installed if absent. The key/cert are persisted so a re-run reuses them (no
+// client churn).
 const scriptSelfSignedTLS = `
 command -v openssl >/dev/null 2>&1 || apt-get install -y openssl >/dev/null 2>&1 || true
 SBD=/etc/sing-box
-WR_TLS_SNI=wayhop.local
+` + scriptTLSCert + scriptTLSPins
+
+// scriptTLSCert writes $SBD/wr-tls.{crt,key} unless both exist. It is apart from scriptSelfSignedTLS
+// only so a test can run it in a directory of its own (SBD set) with scriptTLSPins after it.
+const scriptTLSCert = `WR_TLS_SNI=wayhop.local
 if [ ! -f "$SBD/wr-tls.crt" ] || [ ! -f "$SBD/wr-tls.key" ]; then
   openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
     -keyout "$SBD/wr-tls.key" -out "$SBD/wr-tls.crt" \
@@ -318,6 +338,62 @@ if [ ! -f "$SBD/wr-tls.crt" ] || [ ! -f "$SBD/wr-tls.key" ]; then
   || { log "openssl TLS certificate generation failed; install openssl and re-run"; exit 1; }
   chmod 600 "$SBD/wr-tls.key" 2>/dev/null || true
 fi
+`
+
+// scriptTLSPins reads the two pins of $SBD/wr-tls.crt (model/pin.go) into shell variables the
+// fragments put into what they print:
+//
+//   - WR_PIN_CERT, the SHA-256 of the whole certificate (its DER) as 64 lowercase hex digits: Hysteria's
+//     pinSHA256 and Xray's pcs=, which WayHop's importer reads too. WR_PCS_Q and WR_PINSHA_Q are it as
+//     a link's query parameter ("" when there is none). sing-box checks it from 1.15.
+//   - WR_PIN_KEY, the SHA-256 of the certificate's SubjectPublicKeyInfo (DER) as standard base64:
+//     sing-box's certificate_public_key_sha256, checked from 1.13. No share link has a place for it,
+//     so wr_pubkey_line prints it on a line of its own (PubKeyPinMarker) after the WR_PROTO marker
+//     and before the config it belongs to.
+//
+// The pins are read from the certificate on disk every run and never stored, so a reused certificate
+// keeps its pins and a regenerated one gets new ones. POSIX sh with openssl, tr, grep and head, which
+// busybox also has. The certificate is read once, into a shell variable (PEM is text), and every
+// later step pipes from that copy: nothing here writes a file, so two runs against one server at once
+// (a double start, two routers set up against one VPS) cannot overwrite each other's input, and both
+// pins describe the same certificate even if another run replaces it meanwhile (QA-138 review).
+// dgst's text output differs between openssl releases ("(stdin)= h", "SHA2-256(stdin)= h",
+// "h *stdin", a bare h), so the hash is taken as the one word of exactly 64 hex digits. The public key
+// is converted by `openssl pkey` (openssl 1.0.0 on) or, where that cannot read it, by `openssl rsa`,
+// which writes the same SubjectPublicKeyInfo for this RSA key; which one is decided by a dry run, since
+// a pipeline reports only its last command. A step that fails upstream of dgst still feeds it empty
+// input, so the SHA-256 of nothing, a well-formed pin of no certificate, is refused by value. A pin
+// that cannot be computed exactly is left empty and not printed, and the link then carries insecure=1
+// alone, as it did before pins.
+const scriptTLSPins = `
+wr_tls_pins() {
+  WR_PIN_CERT=""; WR_PIN_KEY=""; WR_PCS_Q=""; WR_PINSHA_Q=""; __wrp_conv=""; __wrp_pub=""
+  __wrp_pem=$(openssl x509 -in "$SBD/wr-tls.crt" 2>/dev/null) || __wrp_pem=""
+  if [ -n "$__wrp_pem" ]; then
+    WR_PIN_CERT=$(printf '%s\n' "$__wrp_pem" | openssl x509 -outform der 2>/dev/null | openssl dgst -sha256 2>/dev/null | tr ' \t\r=' '\n\n\n\n' | grep -x '[0-9A-Fa-f]\{64\}' | head -n 1 | tr 'A-F' 'a-f') || WR_PIN_CERT=""
+    __wrp_pub=$(printf '%s\n' "$__wrp_pem" | openssl x509 -pubkey -noout 2>/dev/null) || __wrp_pub=""
+  fi
+  if [ -z "$__wrp_pub" ]; then :
+  elif printf '%s\n' "$__wrp_pub" | openssl pkey -pubin -noout >/dev/null 2>&1; then __wrp_conv="pkey -pubin"
+  elif printf '%s\n' "$__wrp_pub" | openssl rsa -pubin -noout >/dev/null 2>&1; then __wrp_conv="rsa -pubin -pubout"
+  fi
+  if [ -n "$__wrp_conv" ]; then
+    WR_PIN_KEY=$(printf '%s\n' "$__wrp_pub" | openssl $__wrp_conv -outform der 2>/dev/null | openssl dgst -sha256 -binary 2>/dev/null | openssl enc -base64 2>/dev/null | tr -d ' \t\r\n') || WR_PIN_KEY=""
+  fi
+  case "$WR_PIN_CERT" in "` + emptySHA256Hex + `") WR_PIN_CERT="";; esac
+  case "$WR_PIN_KEY" in "` + emptySHA256B64 + `") WR_PIN_KEY="";; esac
+  __wrp_k=${WR_PIN_KEY%=}
+  case "$__wrp_k" in ""|*[!A-Za-z0-9+/]*) WR_PIN_KEY="";; esac
+  [ "${#__wrp_k}" -eq 43 ] || WR_PIN_KEY=""
+  if [ -n "$WR_PIN_CERT" ]; then WR_PCS_Q="&pcs=$WR_PIN_CERT"; WR_PINSHA_Q="&pinSHA256=$WR_PIN_CERT"; fi
+  if [ -z "$WR_PIN_CERT" ] || [ -z "$WR_PIN_KEY" ]; then
+    log "could not compute every pin of $SBD/wr-tls.crt; a client without one accepts any certificate (insecure=1)"
+  fi
+}
+wr_pubkey_line() {
+  if [ -n "$WR_PIN_KEY" ]; then echo "` + PubKeyPinMarker + `$WR_PIN_KEY"; fi
+}
+wr_tls_pins
 `
 
 // singboxServiceUnit installs/refreshes the sing-box systemd unit and (re)starts it.
@@ -330,6 +406,11 @@ fi
 // scriptReality's unit, generalised to the conf.d directory.
 const singboxServiceUnit = `
 mkdir -p /etc/sing-box/conf.d
+# sing-box with no log block logs at trace, and its info lines alone name every client's destination
+# - on a server that is a journal of where each user went. WayHop's servers log warnings only.
+cat > /etc/sing-box/conf.d/wr-log.json <<'WRLOG'
+{"log":{"level":"warn","timestamp":true}}
+WRLOG
 if [ -f /etc/sing-box/config.json ]; then
   SB_EXEC="/usr/local/bin/sing-box run -c /etc/sing-box/config.json -C /etc/sing-box/conf.d"
 else
@@ -353,7 +434,7 @@ systemctl restart sing-box 2>/dev/null || true
 // scriptVMess provisions a sing-box VMess inbound over WebSocket+TLS (self-signed).
 // VMess identity (uuid) is generated once and persisted. The client link is the
 // standard vmess://base64(json) form the importer's parseVMess reads (add/port/id/
-// net=ws/path/tls=tls/sni/allowInsecure).
+// net=ws/path/tls=tls/sni/allowInsecure/pcs).
 const scriptVMess = `
 # ---- sing-box VMess (WebSocket + TLS) ----
 log "installing sing-box (VMess)..."
@@ -364,19 +445,23 @@ VMUUID=$(cat "$SBD/wr-vmess-uuid")
 VMPATH=/wayhop
 mkdir -p /etc/sing-box/conf.d
 cat > /etc/sing-box/conf.d/wr-vmess.json <<EOF
-{"inbounds":[{"type":"vmess","tag":"wr-vmess-in","listen":"::","listen_port":8443,"users":[{"uuid":"$VMUUID","alterId":0}],"transport":{"type":"ws","path":"$VMPATH"},"tls":{"enabled":true,"server_name":"$WR_TLS_SNI","certificate_path":"$SBD/wr-tls.crt","key_path":"$SBD/wr-tls.key"}}],"outbounds":[{"type":"direct","tag":"wr-vmess-direct"}]}
+{"inbounds":[{"type":"vmess","tag":"wr-vmess-in","listen":"::","listen_port":8443,"users":[{"uuid":"$VMUUID","alterId":0}],"multiplex":{"enabled":true},"transport":{"type":"ws","path":"$VMPATH"},"tls":{"enabled":true,"server_name":"$WR_TLS_SNI","certificate_path":"$SBD/wr-tls.crt","key_path":"$SBD/wr-tls.key"}}],"outbounds":[{"type":"direct","tag":"wr-vmess-direct"}]}
 EOF
 ` + singboxServiceUnit + `
-# vmess client config = base64(json). add/port/id/net/path/tls/sni/allowInsecure
-# are exactly the keys parseVMess reads. allowInsecure=1 because the cert is self-signed.
-VMJSON=$(printf '{"v":"2","ps":"wayhop-vmess","add":"%s","port":"8443","id":"%s","aid":"0","scy":"auto","net":"ws","type":"none","host":"%s","path":"%s","tls":"tls","sni":"%s","allowInsecure":"1"}' "$PUBLIC_IP" "$VMUUID" "$WR_TLS_SNI" "$VMPATH" "$WR_TLS_SNI")
+# vmess client config = base64(json). add/port/id/net/path/tls/sni/allowInsecure/pcs
+# are exactly the keys parseVMess reads. allowInsecure=1 because the cert is self-signed;
+# pcs is its whole-certificate pin (v2rayN's VMess JSON key), which WayHop checks instead.
+VMPCS=""
+if [ -n "$WR_PIN_CERT" ]; then VMPCS=",\"pcs\":\"$WR_PIN_CERT\""; fi
+VMJSON=$(printf '{"v":"2","ps":"wayhop-vmess","add":"%s","port":"8443","id":"%s","aid":"0","scy":"auto","net":"ws","type":"none","host":"%s","path":"%s","tls":"tls","sni":"%s","allowInsecure":"1"%s}' "$PUBLIC_IP" "$VMUUID" "$WR_TLS_SNI" "$VMPATH" "$WR_TLS_SNI" "$VMPCS")
 echo "WR_PROTO=vmess"
+wr_pubkey_line
 echo "WR_CLIENT_CONFIG=vmess://$(printf '%s' "$VMJSON" | base64 -w0 2>/dev/null || printf '%s' "$VMJSON" | base64 | tr -d '\n')"
 `
 
 // scriptTrojan provisions a sing-box Trojan inbound over TLS (self-signed). The
 // password is generated once and persisted. The client link is the standard
-// trojan://password@host:port?sni=...&insecure=1#name form parseTrojan reads.
+// trojan://password@host:port?sni=...&insecure=1&pcs=...#name form parseTrojan reads.
 const scriptTrojan = `
 # ---- sing-box Trojan (TLS) ----
 log "installing sing-box (Trojan)..."
@@ -386,14 +471,15 @@ chmod 600 "$SBD/wr-trojan-pass" 2>/dev/null || true
 TJPASS=$(cat "$SBD/wr-trojan-pass")
 mkdir -p /etc/sing-box/conf.d
 cat > /etc/sing-box/conf.d/wr-trojan.json <<EOF
-{"inbounds":[{"type":"trojan","tag":"wr-trojan-in","listen":"::","listen_port":8444,"users":[{"password":"$TJPASS"}],"tls":{"enabled":true,"server_name":"$WR_TLS_SNI","certificate_path":"$SBD/wr-tls.crt","key_path":"$SBD/wr-tls.key"}}],"outbounds":[{"type":"direct","tag":"wr-trojan-direct"}]}
+{"inbounds":[{"type":"trojan","tag":"wr-trojan-in","listen":"::","listen_port":8444,"users":[{"password":"$TJPASS"}],"multiplex":{"enabled":true},"tls":{"enabled":true,"server_name":"$WR_TLS_SNI","certificate_path":"$SBD/wr-tls.crt","key_path":"$SBD/wr-tls.key"}}],"outbounds":[{"type":"direct","tag":"wr-trojan-direct"}]}
 EOF
 ` + singboxServiceUnit + `
-# trojan://<urlencoded-password>@host:port?security=tls&sni=...&insecure=1#name.
-# insecure=1 (skip-cert-verify) because the cert is self-signed; parseTrojan reads it.
+# trojan://<urlencoded-password>@host:port?security=tls&sni=...&insecure=1&pcs=...#name.
+# insecure=1 (skip-cert-verify) because the cert is self-signed, pcs= its pin; parseTrojan reads both.
 TJENC=$(printf '%s' "$TJPASS" | sed 's/+/%2B/g;s/\//%2F/g;s/=/%3D/g')
 echo "WR_PROTO=trojan"
-echo "WR_CLIENT_CONFIG=trojan://$TJENC@$PUBLIC_IP:8444?security=tls&sni=$WR_TLS_SNI&insecure=1&type=tcp#wayhop-trojan"
+wr_pubkey_line
+echo "WR_CLIENT_CONFIG=trojan://$TJENC@$PUBLIC_IP:8444?security=tls&sni=$WR_TLS_SNI&insecure=1${WR_PCS_Q}&type=tcp#wayhop-trojan"
 `
 
 // scriptShadowsocks provisions a sing-box Shadowsocks inbound (2022-blake3-
@@ -412,7 +498,7 @@ chmod 600 "$SBD/wr-ss-psk" 2>/dev/null || true
 SSPSK=$(cat "$SBD/wr-ss-psk")
 mkdir -p /etc/sing-box/conf.d
 cat > /etc/sing-box/conf.d/wr-shadowsocks.json <<EOF
-{"inbounds":[{"type":"shadowsocks","tag":"wr-ss-in","listen":"::","listen_port":8388,"method":"$SSMETHOD","password":"$SSPSK"}],"outbounds":[{"type":"direct","tag":"wr-ss-direct"}]}
+{"inbounds":[{"type":"shadowsocks","tag":"wr-ss-in","listen":"::","listen_port":8388,"method":"$SSMETHOD","password":"$SSPSK","multiplex":{"enabled":true}}],"outbounds":[{"type":"direct","tag":"wr-ss-direct"}]}
 EOF
 ` + singboxServiceUnit + `
 # SIP002: ss://base64(method:password)@host:port#name. parseShadowsocks splits on the
@@ -427,7 +513,7 @@ echo "WR_CLIENT_CONFIG=ss://$SSUI@$PUBLIC_IP:8388#wayhop-ss"
 // Salamander obfuscation ON by default — the QUIC handshake is camouflaged as random UDP so
 // DPI can't fingerprint Hysteria2, the camouflage that matters in a censored region. The
 // password and the obfs password are each generated once and persisted. The client link is
-// hysteria2://password@host:port?sni=...&insecure=1&obfs=salamander&obfs-password=...#name,
+// hysteria2://password@host:port?sni=...&insecure=1&pinSHA256=...&obfs=salamander&obfs-password=...#name,
 // which parseHysteria2 + the generator already round-trip (model obfs / obfs_password).
 const scriptHysteria2 = `
 # ---- sing-box Hysteria2 (QUIC + TLS) ----
@@ -447,16 +533,17 @@ EOF
 # Hysteria2 is UDP/QUIC — open the port if a firewall is active (best-effort).
 iptables -C INPUT -p udp --dport 8445 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 8445 -j ACCEPT 2>/dev/null || true
 ` + singboxServiceUnit + `
-# hysteria2://<urlencoded-password>@host:port?sni=...&insecure=1#name (parseHysteria2).
+# hysteria2://<urlencoded-password>@host:port?sni=...&insecure=1&pinSHA256=...#name (parseHysteria2).
 HY2ENC=$(printf '%s' "$HY2PASS" | sed 's/+/%2B/g;s/\//%2F/g;s/=/%3D/g')
 HY2OBFSENC=$(printf '%s' "$HY2OBFS" | sed 's/+/%2B/g;s/\//%2F/g;s/=/%3D/g')
 echo "WR_PROTO=hysteria2"
-echo "WR_CLIENT_CONFIG=hysteria2://$HY2ENC@$PUBLIC_IP:8445?sni=$WR_TLS_SNI&insecure=1&obfs=salamander&obfs-password=$HY2OBFSENC#wayhop-hy2"
+wr_pubkey_line
+echo "WR_CLIENT_CONFIG=hysteria2://$HY2ENC@$PUBLIC_IP:8445?sni=$WR_TLS_SNI&insecure=1${WR_PINSHA_Q}&obfs=salamander&obfs-password=$HY2OBFSENC#wayhop-hy2"
 `
 
 // scriptTUIC provisions a sing-box TUIC v5 inbound (QUIC + TLS, self-signed). A uuid
 // and password are generated once and persisted. The client link is the standard
-// tuic://uuid:password@host:port?sni=...&insecure=1&congestion_control=bbr#name form
+// tuic://uuid:password@host:port?sni=...&insecure=1&pcs=...&congestion_control=bbr#name form
 // parseTUIC reads.
 const scriptTUIC = `
 # ---- sing-box TUIC v5 (QUIC + TLS) ----
@@ -474,10 +561,69 @@ EOF
 # TUIC is UDP/QUIC — open the port if a firewall is active (best-effort).
 iptables -C INPUT -p udp --dport 8446 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 8446 -j ACCEPT 2>/dev/null || true
 ` + singboxServiceUnit + `
-# tuic://uuid:<urlencoded-password>@host:port?sni=...&insecure=1&congestion_control=bbr#name (parseTUIC).
+# tuic://uuid:<urlencoded-password>@host:port?sni=...&insecure=1&pcs=...&congestion_control=bbr#name (parseTUIC).
 TUENC=$(printf '%s' "$TUPASS" | sed 's/+/%2B/g;s/\//%2F/g;s/=/%3D/g')
 echo "WR_PROTO=tuic"
-echo "WR_CLIENT_CONFIG=tuic://$TUUUID:$TUENC@$PUBLIC_IP:8446?sni=$WR_TLS_SNI&insecure=1&congestion_control=bbr&alpn=h3#wayhop-tuic"
+wr_pubkey_line
+echo "WR_CLIENT_CONFIG=tuic://$TUUUID:$TUENC@$PUBLIC_IP:8446?sni=$WR_TLS_SNI&insecure=1${WR_PCS_Q}&congestion_control=bbr&alpn=h3#wayhop-tuic"
+`
+
+// scriptAnyTLS provisions a sing-box AnyTLS inbound (TLS, self-signed) on TCP :8447. AnyTLS pads the
+// TLS-in-TLS record pattern a proxy inside TLS otherwise shows; the inbound exists since sing-box 1.12.
+// scriptSingboxInstall leaves an already-installed sing-box alone, so an older one is refused here,
+// before its config is written: one unknown inbound type stops the whole sing-box service, and with
+// it every other protocol on this server. The client link is anytls://password@host:port?sni=...&
+// insecure=1&pcs=...#name, which parseAnyTLS reads.
+const scriptAnyTLS = `
+# ---- sing-box AnyTLS (TLS) ----
+log "installing sing-box (AnyTLS)..."
+` + scriptSingboxInstall + scriptSelfSignedTLS + `
+SBMIN=$(sing-box version 2>/dev/null | head -n1 | awk '{split($3, v, "."); print v[1] * 1000 + v[2]}')
+if [ "${SBMIN:-0}" -lt 1012 ]; then
+  log "sing-box on this server is older than 1.12, which AnyTLS needs; update it under Versions and run Set up again"
+  exit 1
+fi
+[ -f "$SBD/wr-anytls-pass" ] || sing-box generate rand --base64 18 > "$SBD/wr-anytls-pass"
+chmod 600 "$SBD/wr-anytls-pass" 2>/dev/null || true
+ATPASS=$(cat "$SBD/wr-anytls-pass")
+mkdir -p /etc/sing-box/conf.d
+cat > /etc/sing-box/conf.d/wr-anytls.json <<EOF
+{"inbounds":[{"type":"anytls","tag":"wr-anytls-in","listen":"::","listen_port":8447,"users":[{"name":"wayhop","password":"$ATPASS"}],"tls":{"enabled":true,"server_name":"$WR_TLS_SNI","certificate_path":"$SBD/wr-tls.crt","key_path":"$SBD/wr-tls.key"}}],"outbounds":[{"type":"direct","tag":"wr-anytls-direct"}]}
+EOF
+` + singboxServiceUnit + `
+# anytls://<urlencoded-password>@host:port?sni=...&insecure=1&pcs=...#name (parseAnyTLS).
+ATENC=$(printf '%s' "$ATPASS" | sed 's/+/%2B/g;s/\//%2F/g;s/=/%3D/g')
+echo "WR_PROTO=anytls"
+wr_pubkey_line
+echo "WR_CLIENT_CONFIG=anytls://$ATENC@$PUBLIC_IP:8447?sni=$WR_TLS_SNI&insecure=1${WR_PCS_Q}#wayhop-anytls"
+`
+
+// scriptSnell provisions a sing-box Snell v6 inbound on TCP :8448 (UDP rides over TCP). v6 derives
+// its traffic shaping from the PSK, so there is no obfuscation to configure and no certificate; the
+// PSK must be 12-255 bytes (24 random bytes, base64). The inbound is new in sing-box 1.14, refused
+// below that for the same reason as AnyTLS. Snell has no URI scheme: the client config is a Surge
+// [Proxy] line, the form Snell is handed out in and the one the importer reads (importer/surge.go).
+const scriptSnell = `
+# ---- sing-box Snell v6 ----
+log "installing sing-box (Snell)..."
+` + scriptSingboxInstall + `
+SBD=/etc/sing-box
+SBMIN=$(sing-box version 2>/dev/null | head -n1 | awk '{split($3, v, "."); print v[1] * 1000 + v[2]}')
+if [ "${SBMIN:-0}" -lt 1014 ]; then
+  log "sing-box on this server is older than 1.14, which the Snell inbound needs; update it under Versions and run Set up again"
+  exit 1
+fi
+[ -f "$SBD/wr-snell-psk" ] || sing-box generate rand --base64 24 > "$SBD/wr-snell-psk"
+chmod 600 "$SBD/wr-snell-psk" 2>/dev/null || true
+SNPSK=$(cat "$SBD/wr-snell-psk")
+mkdir -p /etc/sing-box/conf.d
+cat > /etc/sing-box/conf.d/wr-snell.json <<EOF
+{"inbounds":[{"type":"snell","tag":"wr-snell-in","listen":"::","listen_port":8448,"version":6,"psk":"$SNPSK"}],"outbounds":[{"type":"direct","tag":"wr-snell-direct"}]}
+EOF
+` + singboxServiceUnit + `
+# Surge [Proxy] line: name = snell, host, port, psk=..., version=6 (importer/surge.go).
+echo "WR_PROTO=snell"
+echo "WR_CLIENT_CONFIG=wayhop-snell = snell, $PUBLIC_IP, 8448, psk=$SNPSK, version=6"
 `
 
 // BuildScript assembles the installer for the chosen protocols. publicHost (the
@@ -752,33 +898,49 @@ func ExtractConfigs(output string) []string {
 type TaggedConfig struct {
 	Proto  string
 	Config string
+	// PubKeyPin is the public-key pin the installer printed for this config (PubKeyPinMarker), as
+	// standard base64; "" when none came or the one that came is not a SHA-256 hash. ApplyPins puts
+	// it on the connection imported from Config.
+	PubKeyPin string
+	// Dropped says, for the job console, which pin the installer printed for this config was not a
+	// SHA-256 hash and was left out, of Config or of PubKeyPin (pins.go).
+	Dropped []string
 }
 
 // ExtractTagged pulls every client config the installer printed, each attributed
 // to its protocol via the WR_PROTO marker the script prints just above it. If a
 // marker is missing it falls back to detecting the protocol from the payload.
+// A PubKeyPinMarker line between the marker and the config is that config's
+// public-key pin; a new WR_PROTO marker discards one no config took.
 func ExtractTagged(output string) []TaggedConfig {
 	var out []TaggedConfig
-	proto := ""
+	proto, pubKey := "", ""
 	add := func(cfg string) {
 		p := proto
 		if p == "" {
 			p = DetectProto(cfg)
 		}
-		out = append(out, TaggedConfig{Proto: p, Config: cfg})
-		proto = "" // consume the marker
+		tc := TaggedConfig{Proto: p}
+		tc.Config, tc.Dropped = dropMalformedCertPins(cfg)
+		tc.PubKeyPin, tc.Dropped = checkPubKeyPin(pubKey, tc.Dropped)
+		out = append(out, tc)
+		proto, pubKey = "", "" // consume the markers
 	}
 	for _, ln := range strings.Split(output, "\n") {
 		ln = strings.TrimSpace(ln)
 		if v, ok := strings.CutPrefix(ln, "WR_PROTO="); ok {
-			proto = strings.TrimSpace(v)
+			proto, pubKey = strings.TrimSpace(v), ""
+			continue
+		}
+		if v, ok := strings.CutPrefix(ln, PubKeyPinMarker); ok {
+			pubKey = strings.TrimSpace(v)
 			continue
 		}
 		if v, ok := strings.CutPrefix(ln, "WR_CLIENT_CONFIG_B64="); ok {
 			if b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(v)); err == nil {
 				add(string(b))
 			} else {
-				proto = "" // discard the preceding WR_PROTO so it can't mis-tag the next config
+				proto, pubKey = "", "" // discard the preceding markers so they can't mis-tag the next config
 			}
 			continue
 		}

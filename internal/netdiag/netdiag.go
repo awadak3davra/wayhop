@@ -340,6 +340,12 @@ func ReachViaIface(ctx context.Context, iface, target string, timeoutMS int) Rea
 			port = "80"
 		}
 	}
+	if iface != "" && !ifaceExists(iface) {
+		// Checked before the dial, not only after a failure: off Linux the binding is a no-op, so a
+		// missing interface would otherwise "succeed" through the WAN and report its answer.
+		r.Err = "interface " + iface + " is not present"
+		return r
+	}
 	vip, verr := resolvePublic(ctx, host)
 	if verr != nil {
 		r.Err = verr.Error()

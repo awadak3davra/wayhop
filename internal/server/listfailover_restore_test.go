@@ -75,7 +75,13 @@ func (f *fakeTables) io() *routeTableIO {
 
 func restoreServer(t *testing.T, plan *pbr.Plan, tables *fakeTables) *Server {
 	t.Helper()
-	s := &Server{cfg: config.Default(), routeTables: tables.io()}
+	st, err := store.Open(filepath.Join(t.TempDir(), "profile.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The restore runs inside the list failover tick, which needs a store and a monitor; this one has
+	// measured nothing, so no group elects and only the restore can write.
+	s := &Server{cfg: config.Default(), routeTables: tables.io(), store: st, monitor: health.NewMonitor(nil, st, nil, false)}
 	profile := restoreProfile()
 	s.applyState.rec = applyStateRecord{Committed: &appliedRevision{
 		Rev: "r1", Desired: &appliedDesired{Profile: profile},
@@ -131,8 +137,7 @@ func TestRestoreLostTableRoutes(t *testing.T) {
 		if setup != nil {
 			setup(s)
 		}
-		live, _ := s.liveTableDefaults(context.Background(), false)
-		s.restoreLostTableRoutes(context.Background(), live)
+		s.listFailoverTick(context.Background())
 		return tables.writes
 	}
 	fresh := func() *fakeTables { return &fakeTables{up: map[string]bool{"wr_u": true}} }

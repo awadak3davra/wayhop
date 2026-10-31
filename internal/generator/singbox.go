@@ -51,6 +51,11 @@ func kernelEgress(p *model.Profile, tag string) bool {
 	case model.OutboundDirect, model.OutboundBlock, "":
 		return false
 	}
+	// A KeeneticOS access policy is a kernel destination by nature: pbr.Compile marks the list with
+	// the policy's own mark and NDM routes it.
+	if _, ok := model.NDMPolicyName(tag); ok {
+		return true
+	}
 	if e := p.EndpointByID(tag); e != nil {
 		return pbr.KernelIface(e) != ""
 	}
@@ -123,7 +128,7 @@ func hybridReachable(p *model.Profile) map[string]bool {
 		// A pure-IP manual list (no remote Source, no domains) to a kernel egress is
 		// dropped (pbr routes it); any other list stays and keeps its outbound referenced.
 		if kernelEgress(p, rl.Outbound) && rl.Source == "" {
-			if domains, ips := splitDomainsIPs(rl.Manual); len(domains) == 0 && len(ips) > 0 {
+			if domains, ips := listEntries(rl); len(domains) == 0 && len(ips) > 0 {
 				continue
 			}
 		}
@@ -142,7 +147,9 @@ func hybridReachable(p *model.Profile) map[string]bool {
 	if p.DNS != nil {
 		for i := range p.DNS.Servers {
 			s := &p.DNS.Servers[i]
-			if s.Enabled && s.Detour != "" && s.Type != "local" && s.Type != "fakeip" {
+			// A VPN's pushed resolvers carry no detour (dnsFrom emits none), so a stale one left from
+			// the server's previous type keeps nothing alive.
+			if s.Enabled && s.Detour != "" && s.Type != "local" && s.Type != "fakeip" && !model.IsVPNDNSType(s.Type) {
 				addRoot(s.Detour)
 			}
 		}
@@ -169,6 +176,7 @@ func hybridReachable(p *model.Profile) map[string]bool {
 // Options carries generation knobs that originate from the daemon config.
 type Options struct {
 	MixedPort   int    // local mixed (socks+http) inbound port
+	ProbePort   int    // loopback probe inbound (probe.go); 0 = none
 	ClashAddr   string // experimental.clash_api external_controller, e.g. 127.0.0.1:9090
 	ClashSecret string
 	TunEnabled  bool
@@ -196,6 +204,21 @@ type Options struct {
 	Hybrid          bool
 	KernelExcludeV4 []string
 	KernelExcludeV6 []string
+
+	// NDMPolicies is KeeneticOS's access policies by name → mark, read from the router for this
+	// generation. A routing list sent to "ndm-policy:<name>" needs its policy here (see
+	// ndmPolicyOutbounds); empty off KeeneticOS.
+	NDMPolicies map[string]uint32
+
+	// CoreVersion is the sing-box the config is for: a bare version ("1.14.3") or the raw
+	// `sing-box version` output. "" (unknown) keeps the 1.12.x schema, which 1.12-1.14 all accept.
+	// 1.14 or newer switches to the replacements of the fields 1.15 refuses to start with (see
+	// coreversion.go); those replacements are unknown fields to 1.12/1.13, hence the gate.
+	CoreVersion string
+
+	// CoreOverride is the operator's override of the finished config (config.Config.CoreOverride;
+	// see override.go), applied after everything above. "" leaves the generated config as it is.
+	CoreOverride string
 }
 
 // Plugin is an endpoint a non-sing-box engine must realize, plus the local
@@ -285,7 +308,7 @@ func Generate(p *model.Profile, opts Options) (*Result, error) {
 			continue
 		}
 		if e.Engine != model.EngineSingBox {
-			// Other external engines (olcRTC): sing-box reaches them through a local
+			// Any other engine is a chained-SOCKS plugin: sing-box reaches it through a local
 			// SOCKS the plugin exposes. The daemon brings up the engine on this port.
 			port := basePluginPort + len(res.Plugins)
 			res.Plugins = append(res.Plugins, Plugin{Endpoint: *e, SOCKSPort: port})
@@ -293,6 +316,19 @@ func Generate(p *model.Profile, opts Options) (*Result, error) {
 				"type": "socks", "tag": e.ID, "server": "127.0.0.1",
 				"server_port": port, "version": "5",
 			})
+			continue
+		}
+		if e.Protocol == model.ProtoOpenVPN || e.Protocol == model.ProtoOpenConnect {
+			// sing-box 1.14's OpenVPN and OpenConnect clients are top-level endpoints too.
+			render := openvpnEndpointFor
+			if e.Protocol == model.ProtoOpenConnect {
+				render = openconnectEndpointFor
+			}
+			ep, err := render(e, opts.CoreVersion)
+			if err != nil {
+				return nil, fmt.Errorf("endpoint %s: %w", e.ID, err)
+			}
+			endpoints = append(endpoints, ep)
 			continue
 		}
 		if e.Protocol == model.ProtoWireGuard {
@@ -304,10 +340,25 @@ func Generate(p *model.Profile, opts Options) (*Result, error) {
 			endpoints = append(endpoints, ep)
 			continue
 		}
+		if e.Protocol == model.ProtoSnell && opts.CoreVersion != "" && coreMinor(opts.CoreVersion) < snellMinMinor {
+			return nil, fmt.Errorf("endpoint %s: Snell needs sing-box 1.%d or newer; this core is %s", e.ID, snellMinMinor,
+				strings.TrimSpace(strings.SplitN(opts.CoreVersion, "\n", 2)[0]))
+		}
 		ob, err := outboundFor(e)
 		if err != nil {
 			return nil, fmt.Errorf("endpoint %s: %w", e.ID, err)
 		}
+		if e.Protocol == model.ProtoHysteria2 {
+			if err := hysteria2Extras(e, ob, opts.CoreVersion); err != nil {
+				return nil, fmt.Errorf("endpoint %s: %w", e.ID, err)
+			}
+		}
+		if e.Protocol == model.ProtoSSH {
+			sshCoreExtras(e, ob, opts.CoreVersion)
+		}
+		echCoreExtras(e, ob, opts.CoreVersion)
+		quicTuning(e, ob, opts.CoreVersion)
+		pinCoreExtras(e, ob, opts.CoreVersion)
 		outbounds = append(outbounds, ob)
 	}
 
@@ -326,6 +377,11 @@ func Generate(p *model.Profile, opts Options) (*Result, error) {
 		outbounds = append(outbounds, groupOutbound(g))
 		groupsEmitted = true
 	}
+	policyOutbounds, err := ndmPolicyOutbounds(p, opts.NDMPolicies)
+	if err != nil {
+		return nil, err
+	}
+	outbounds = append(outbounds, policyOutbounds...)
 
 	res.Config["outbounds"] = outbounds
 	if len(endpoints) > 0 {
@@ -380,7 +436,24 @@ func Generate(p *model.Profile, opts Options) (*Result, error) {
 				tun["route_exclude_address"] = ex
 			}
 		}
+		for _, pl := range res.Plugins {
+			if pl.Endpoint.Engine == model.EngineByeDPI {
+				// ciadpi's own connections must leave by the WAN, not come back through the TUN
+				// into sing-box (and, for a list sent to ByeDPI, into ciadpi): it runs as its own
+				// uid (plugin.runAs), which the TUN skips. Matched by auto_route's uid rules and by
+				// auto_redirect's nft output chain alike (sing-tun).
+				tun["exclude_uid"] = []int{model.ByeDPIUID}
+				break
+			}
+		}
 		inbounds = append(inbounds, tun)
+	}
+	probeTags := probeExitTags(outbounds, endpoints)
+	if opts.ProbePort >= basePluginPort && opts.ProbePort < basePluginPort+len(res.Plugins) {
+		probeTags = nil // an engine plugin listens there; two listeners on one port stop the core
+	}
+	if in := probeInbound(opts, probeTags); in != nil {
+		inbounds = append(inbounds, in)
 	}
 	res.Config["inbounds"] = inbounds
 
@@ -412,18 +485,23 @@ func Generate(p *model.Profile, opts Options) (*Result, error) {
 		route["rule_set"] = sets
 	}
 	rules, _ := route["rules"].([]map[string]any)
-	if bp := endpointBypass(p); len(bp) > 0 {
-		// A tunnel's own endpoint must never route through a tunnel (a geoip/ip
-		// rule can match it → recursion). Bypass to direct, ahead of everything.
-		rules = append([]map[string]any{{"ip_cidr": bp, "action": "route", "outbound": "direct"}}, rules...)
-	}
+	// WayHop's guard rules lead, in this order, and a core override's prepended route rules go right
+	// after them (override.go): the probe users' rules, then the sniff, then the endpoint bypass.
+	guards := probeRules(opts, probeTags)
 	if opts.TunEnabled {
 		// TUN captures raw IP packets, so the destination domain is unknown — sniff
 		// TLS-SNI/HTTP-Host/QUIC first, or the domain-based rule_sets can't match
 		// (in mixed mode the domain comes from the proxy CONNECT, so it isn't needed
-		// there). Must be the very first rule: sniff, then fall through to routing.
-		rules = append([]map[string]any{{"action": "sniff"}}, rules...)
+		// there). First after the probe rules: sniff, then fall through to routing.
+		guards = append(guards, map[string]any{"action": "sniff"})
 	}
+	if bp := endpointBypass(p); len(bp) > 0 {
+		// A tunnel's own endpoint must never route through a tunnel (a geoip/ip
+		// rule can match it → recursion). Bypass to direct, ahead of every routing rule.
+		guards = append(guards, map[string]any{"ip_cidr": bp, "action": "route", "outbound": "direct"})
+	}
+	routeGuards := len(guards)
+	rules = append(guards, rules...)
 	rules = append(rules, listRules...)
 	if blockDefault {
 		rules = append(rules, blockAllRule())
@@ -486,6 +564,15 @@ func Generate(p *model.Profile, opts Options) (*Result, error) {
 	if len(exp) > 0 {
 		res.Config["experimental"] = exp
 	}
+	if modernCore(opts.CoreVersion) {
+		applyModernCoreSchema(res.Config)
+	}
+	FitTUNToCore(res.Config, opts.CoreVersion)
+	// Last, so the operator's word is final: even a TUN `stack` the fit above removed comes back if the
+	// override's own `inbounds` carry one. Its prepended route rules go after the guards above.
+	if err := ApplyCoreOverride(res.Config, opts.CoreOverride, routeGuards); err != nil {
+		return nil, err
+	}
 	return res, nil
 }
 
@@ -544,7 +631,7 @@ func routingFrom(p *model.Profile, hybrid bool, ruleSetDetour string) (sets []ma
 		// or domains (Phase 2), so a list carrying either STAYS in sing-box (and keeps
 		// the kernel outbound it references alive, see hybridKeptKernelRefs).
 		if hybrid && kernelEgress(p, rl.Outbound) && rl.Source == "" {
-			if domains, ips := splitDomainsIPs(rl.Manual); len(domains) == 0 && len(ips) > 0 {
+			if domains, ips := listEntries(rl); len(domains) == 0 && len(ips) > 0 {
 				continue
 			}
 		}
@@ -579,7 +666,16 @@ func routingFrom(p *model.Profile, hybrid bool, ruleSetDetour string) (sets []ma
 			sets = append(sets, set)
 			tags = append(tags, tag)
 		}
-		if domains, ips := splitDomainsIPs(rl.Manual); len(domains) > 0 || len(ips) > 0 {
+		domains, ips := listEntries(rl)
+		if hybrid && kernelEgress(p, rl.Outbound) && rl.Source == "" && len(rl.CIDRCache) > 0 &&
+			(rl.ScopeMode == "" || rl.ScopeMode == "all") {
+			// The list stays here for its names, but pbr routes its fetched IP feed and the TUN excludes
+			// those prefixes, so no packet to them reaches this set: a refilter-sized feed would only
+			// cost the core memory and check time (QA-066 review). Typed IPs stay, as before the feed
+			// joined. Scoped lists keep everything: their zones are not excluded from the TUN.
+			domains, ips = splitDomainsIPs(append(append(make([]string, 0, len(rl.Manual)+len(rl.DomainCache)), rl.Manual...), rl.DomainCache...))
+		}
+		if len(domains) > 0 || len(ips) > 0 {
 			// "rsm-" (not "rs-"+id+"-manual"): a manual tag can never collide with a
 			// remote tag "rs-"+id, since "rs-…" and "rsm-…" differ at the 3rd char.
 			// The old scheme collided when one list's id was "X-manual" and another's
@@ -613,6 +709,16 @@ func routingFrom(p *model.Profile, hybrid bool, ruleSetDetour string) (sets []ma
 		} else {
 			rule["action"] = "route"
 			rule["outbound"] = canonicalOutbound(rl.Outbound)
+			// The route action carries sing-box's route-options; fragmenting the ClientHello only means
+			// something on a connection made from the router itself, not inside a tunnel.
+			if rule["outbound"] == model.OutboundDirect {
+				switch rl.TLSFragment {
+				case model.TLSFragmentRecord:
+					rule["tls_record_fragment"] = true
+				case model.TLSFragmentHandshake:
+					rule["tls_fragment"] = true
+				}
+			}
 			routes = append(routes, rule)
 		}
 	}
@@ -650,10 +756,28 @@ func dnsFrom(p *model.Profile, opts Options, seen map[string]bool) (map[string]a
 			dropped[s.Tag] = true
 			continue
 		}
+		if model.IsVPNDNSType(s.Type) && !VPNDNSCarried(opts.CoreVersion) {
+			// A known core before 1.14 has no such type and refuses the whole config over it ("unknown
+			// transport type"), so the server and its rules are left out like a fakeip server without
+			// TUN. A guard only: the connection it needs is refused on those cores first.
+			dropped[s.Tag] = true
+			continue
+		}
 		sv := map[string]any{"tag": s.Tag, "type": s.Type}
 		switch s.Type {
 		case "local":
 			// device resolver (127.0.0.1 https-dns-proxy behind the existing :53 hijack); no address
+		case "openvpn", "openconnect":
+			// The connection's pushed resolvers, asked through its tunnel. No server, port or detour:
+			// sing-box's options for these types are the endpoint and the two switches, and an unknown
+			// field is a decode error.
+			sv["endpoint"] = strings.TrimSpace(s.Endpoint)
+			if s.AcceptDefaultResolvers {
+				sv["accept_default_resolvers"] = true
+			}
+			if s.AcceptSearchDomain {
+				sv["accept_search_domain"] = true
+			}
 		case "fakeip":
 			fakeipUsed = true
 			if r := strings.TrimSpace(s.Inet4Range); r != "" {
@@ -714,6 +838,12 @@ func dnsFrom(p *model.Profile, opts Options, seen map[string]bool) (map[string]a
 		for _, listID := range r.RuleSets {
 			listTags = append(listTags, dnsListTags(p, listID, opts.Hybrid)...)
 		}
+		if len(r.RuleSets) > 0 && len(listTags) == 0 {
+			// Every list the rule names emits no set here (switched off, kernel-routed in hybrid, gone).
+			// Its other matchers would then stand alone and widen it: {lists, query_type: A} became
+			// "every A query" to that server. A rule whose list matcher can never match is dropped.
+			continue
+		}
 		for _, g := range r.GeoSite {
 			if g = strings.TrimSpace(g); g != "" {
 				tag := "geosite-" + g
@@ -765,6 +895,19 @@ func dnsFrom(p *model.Profile, opts Options, seen map[string]bool) (map[string]a
 	if d.Final != "" && !dropped[d.Final] {
 		block["final"] = d.Final
 	}
+	// With no final, sing-box makes the first server it creates the default for every unmatched name
+	// (1.14.4 dns/transport_manager.go). A VPN's pushed resolvers answer NXDOMAIN to all of those, and
+	// to everything while the VPN is down, so one left first is never handed that role: the first
+	// server that is not one becomes the final. Validation refuses the profiles that get here; this keeps
+	// the core from inheriting the mistake if one does. Nothing changes when no VPN server leads.
+	if _, set := block["final"]; !set && len(servers) > 0 && model.IsVPNDNSType(fmt.Sprint(servers[0]["type"])) {
+		for _, s := range servers {
+			if !model.IsVPNDNSType(fmt.Sprint(s["type"])) {
+				block["final"] = s["tag"]
+				break
+			}
+		}
+	}
 	if d.Strategy != "" {
 		block["strategy"] = d.Strategy
 	}
@@ -793,6 +936,11 @@ func dnsDefaultResolverTag(block map[string]any) string {
 	}
 	tagOf := func(m map[string]any) string { t, _ := m["tag"].(string); return t }
 	typeOf := func(m map[string]any) string { t, _ := m["type"].(string); return t }
+	// resolves: a server that answers an arbitrary hostname. Not fakeip (it synthesizes), and not a
+	// VPN's pushed resolvers: they answer only the VPN's names and only while it is up, and they have
+	// no detour key, so step 2 would otherwise take them for a direct resolver - and then an OpenVPN or
+	// OpenConnect server's own hostname would be resolved through the tunnel it is needed to build.
+	resolves := func(m map[string]any) bool { return typeOf(m) != "fakeip" && !model.IsVPNDNSType(typeOf(m)) }
 	// 1: a local (device) resolver — direct, always reachable.
 	for _, s := range servers {
 		if typeOf(s) == "local" && tagOf(s) != "" {
@@ -801,7 +949,7 @@ func dnsDefaultResolverTag(block map[string]any) string {
 	}
 	// 2: a detour-less network resolver (dials direct).
 	for _, s := range servers {
-		if _, hasDetour := s["detour"]; !hasDetour && typeOf(s) != "fakeip" && tagOf(s) != "" {
+		if _, hasDetour := s["detour"]; !hasDetour && resolves(s) && tagOf(s) != "" {
 			return tagOf(s)
 		}
 	}
@@ -810,18 +958,24 @@ func dnsDefaultResolverTag(block map[string]any) string {
 	// hostname (the very thing this tag is for), so fall through to a real server instead.
 	if f, _ := block["final"].(string); f != "" {
 		for _, s := range servers {
-			if tagOf(s) == f && typeOf(s) != "fakeip" {
+			if tagOf(s) == f && resolves(s) {
 				return f
 			}
 		}
 	}
-	// 4: first real (non-fakeip) server, else the very first.
+	// 4: first real (non-fakeip) server, else the first that is not a VPN's pushed resolvers (a fakeip
+	// one, as before), else none: an outbound's hostname must never wait on a tunnel being up.
 	for _, s := range servers {
-		if typeOf(s) != "fakeip" && tagOf(s) != "" {
+		if resolves(s) && tagOf(s) != "" {
 			return tagOf(s)
 		}
 	}
-	return tagOf(servers[0])
+	for _, s := range servers {
+		if !model.IsVPNDNSType(typeOf(s)) {
+			return tagOf(s)
+		}
+	}
+	return ""
 }
 
 // dnsListTags returns the route.rule_set tags an ENABLED RoutingList produces — "rs-<id>" for a
@@ -841,10 +995,12 @@ func dnsListTags(p *model.Profile, listID string, hybrid bool) []string {
 			return nil
 		}
 		var tags []string
-		if rl.Source != "" {
+		// Mirror routingFrom: a plain-text Source emits no remote set there, so naming it here left the
+		// DNS rule pointing at a rule_set that does not exist and `sing-box check` refused the config.
+		if rl.Source != "" && singboxConsumableSource(rl) {
 			tags = append(tags, "rs-"+rl.ID)
 		}
-		if dom, ips := splitDomainsIPs(rl.Manual); len(dom) > 0 || len(ips) > 0 {
+		if dom, ips := listEntries(rl); len(dom) > 0 || len(ips) > 0 {
 			// Mirror routingFrom's hybrid skip: a PURE-IP manual list at a kernel egress is
 			// kernel-routed by pbr and emits NO rsm-<id> set into sing-box, so a DNS rule
 			// referencing it must not emit the tag either — that would be a dangling rule_set
@@ -906,6 +1062,39 @@ func refreshInterval(hours int) string {
 	return strconv.Itoa(hours) + "h"
 }
 
+// listEntries is what a routing list matches on the sing-box plane: its typed entries plus the
+// last-good fetch of its feeds, the same union pbr.Compile routes. Reading Manual alone left a list
+// fed by a CIDRSource or DomainSource with no rule here at all, so on OpenWrt every domain-feed preset
+// and every IP feed sent to a proxy (or routed in tun mode) applied cleanly and matched nothing
+// (QA-066). Every caller that decides a list's presence here goes through this, or the hybrid split,
+// the DNS tags and the native-only verdict would disagree about which sets exist.
+func listEntries(rl *model.RoutingList) (domains, ips []string) {
+	entries := rl.Manual
+	if len(rl.CIDRCache) > 0 || len(rl.DomainCache) > 0 {
+		entries = make([]string, 0, len(rl.Manual)+len(rl.CIDRCache)+len(rl.DomainCache))
+		entries = append(append(append(entries, rl.Manual...), rl.CIDRCache...), rl.DomainCache...)
+	}
+	return splitDomainsIPs(entries)
+}
+
+// CoreInlineEntries counts the names and prefixes the core's inline list sets hold for this profile,
+// exactly as routingFrom emits them: the measure of what fetched feeds add to the core's memory, its
+// check time and the config's size on flash.
+func CoreInlineEntries(p *model.Profile, hybrid bool) int {
+	sets, _ := routingFrom(p, hybrid, "")
+	n := 0
+	for _, s := range sets {
+		rules, _ := s["rules"].([]map[string]any)
+		for _, r := range rules {
+			for _, key := range []string{"domain_suffix", "ip_cidr"} {
+				v, _ := r[key].([]string)
+				n += len(v)
+			}
+		}
+	}
+	return n
+}
+
 // splitDomainsIPs partitions manual entries into domain_suffix vs ip_cidr,
 // skipping blanks/comments and normalising a bare IP to a /32 or /128 CIDR.
 func splitDomainsIPs(entries []string) (domains, ips []string) {
@@ -960,7 +1149,7 @@ func endpointBypass(p *model.Profile) []string {
 		if !e.Enabled {
 			continue
 		}
-		add(e.Server)
+		add(e.ServerAddress()) // none for a Realm connection: a stale Server is not where it goes
 		if eip, ok := e.Params["endpoint_ip"].(string); ok {
 			add(eip)
 		}
@@ -1171,6 +1360,14 @@ func outboundFor(e *model.Endpoint) (map[string]any, error) {
 	case model.ProtoTrojan:
 		ob["type"] = "trojan"
 		ob["password"] = str(e.Params, "password")
+	case model.ProtoSnell:
+		if err := snellOutbound(e, ob); err != nil {
+			return nil, err
+		}
+	case model.ProtoSSH:
+		if err := sshOutbound(e, ob); err != nil {
+			return nil, err
+		}
 	case model.ProtoAnyTLS:
 		// AnyTLS (sing-box 1.12+): a TLS-session-multiplexing anti-traffic-analysis protocol. Like
 		// Trojan it is just password + TLS (the tls block comes from tlsCapable below); the optional
@@ -1196,6 +1393,16 @@ func outboundFor(e *model.Endpoint) (map[string]any, error) {
 	case model.ProtoHysteria2:
 		ob["type"] = "hysteria2"
 		ob["password"] = str(e.Params, "password")
+		// A realm stands in for the server (model/hysteria2_realm.go), and sing-box refuses it beside
+		// server, server_port or server_ports. hysteria2Extras adds the realm on a 1.14+ core; an
+		// older core has none, and there this outbound stays without a server: it loads, and each
+		// connection through it fails ("invalid address", measured on 1.13.21), so this one exit is
+		// down and the rest of the shared config runs.
+		realm := e.UsesRealm()
+		if realm {
+			delete(ob, "server")
+			delete(ob, "server_port")
+		}
 		// Salamander obfs needs a password — sing-box rejects an obfs block without
 		// one ("missing obfs password"), which fails the WHOLE config load (every
 		// endpoint shares one singbox.json), so a partial/garbled obfs import would
@@ -1207,7 +1414,7 @@ func outboundFor(e *model.Endpoint) (map[string]any, error) {
 		// Port hopping: convert the imported hop range ("20000-50000" / a comma list)
 		// to sing-box server_ports ("20000:50000"). Skip any malformed range — sing-box
 		// rejects a bad one ("bad port range") and would brick the whole config.
-		if hp := str(e.Params, "hop_ports"); hp != "" {
+		if hp := str(e.Params, "hop_ports"); hp != "" && !realm {
 			var ports []string
 			for _, r := range strings.Split(hp, ",") {
 				if sp := singBoxPortRange(r); sp != "" {
@@ -1297,6 +1504,7 @@ func outboundFor(e *model.Endpoint) (map[string]any, error) {
 	// tls (degrade to a valid plain outbound) rather than brick.
 	if tl := tlsJSON(e.TLS); tl != nil && tlsCapable(e.Protocol) {
 		ob["tls"] = tl
+		fitECHToProtocol(e.Protocol, tl, e.TLS)
 		// TUIC runs over QUIC, so only the h3 ALPN family is valid. sing-box does
 		// NOT override tuic's alpn (unlike hysteria2, which forces h3 internally), so
 		// a non-h3 alpn — e.g. a subscription that blanket-applies alpn=h2,http/1.1
@@ -1386,7 +1594,56 @@ func outboundFor(e *model.Endpoint) (map[string]any, error) {
 			}
 		}
 	}
+	// sing-mux (model.Multiplex), after tls like the outbound fields it sits beside. multiplexJSON
+	// never emits what the core refuses at load: on another outbound the field itself is unknown, so
+	// it would fail the whole shared config as a stray tls or transport would.
+	if mx := multiplexJSON(e); mx != nil {
+		ob["multiplex"] = mx
+	}
 	return ob, nil
+}
+
+// knownMuxProtocols are the multiplex protocols sing-box accepts (model.MuxProtocols); "" is h2mux.
+var knownMuxProtocols = model.MuxProtocols
+
+// multiplexCapable reports whether a protocol's sing-box outbound takes a `multiplex` block: VLESS,
+// VMess, Trojan and Shadowsocks. Every other one fails `sing-box check` with `json: unknown field
+// "multiplex"` (measured on 1.12.17 to 1.15.0-alpha.13), next to transportCapable and tlsCapable.
+func multiplexCapable(p model.Protocol) bool { return model.MultiplexCapable(p) }
+
+// multiplexJSON renders an endpoint's multiplex block, or nil when there is none to emit. Stored data
+// can carry what the save refuses (model.muxProblem), so each refusal degrades here instead of failing
+// the config: a protocol that cannot carry it or an unknown mux protocol (most likely an Xray server's
+// mux.cool: h2mux in its place would only fail every connection) drops the block; out-of-range Brutal
+// rates drop Brutal and keep the rest; Shadowsocks with UDP over TCP, where sing-box never builds the
+// client, emits nothing. Of the pool it emits what sing-mux acts on: max_connections with min_streams,
+// else max_streams, and none with Brutal, which holds one connection.
+func multiplexJSON(e *model.Endpoint) map[string]any {
+	m := e.Multiplex
+	if m == nil || !m.Enabled || !multiplexCapable(e.Protocol) || model.MuxUoTIgnored(e) {
+		return nil
+	}
+	if m.Protocol != "" && safeEnum(m.Protocol, knownMuxProtocols) == "" {
+		return nil
+	}
+	out := map[string]any{"enabled": true}
+	if m.Protocol != "" {
+		out["protocol"] = m.Protocol
+	}
+	if b := m.Brutal; b != nil && b.Enabled && model.BrutalRateOK(b.UpMbps) && model.BrutalRateOK(b.DownMbps) {
+		out["brutal"] = map[string]any{"enabled": true, "up_mbps": b.UpMbps, "down_mbps": b.DownMbps}
+	} else if m.MaxConnections > 0 {
+		out["max_connections"] = m.MaxConnections
+		if m.MinStreams > 0 {
+			out["min_streams"] = m.MinStreams
+		}
+	} else if m.MaxStreams > 0 {
+		out["max_streams"] = m.MaxStreams
+	}
+	if m.Padding {
+		out["padding"] = true
+	}
+	return out
 }
 
 // validWGKey reports whether s is a valid WireGuard base64 key (32 bytes,
@@ -1790,6 +2047,14 @@ func tlsJSON(t *model.TLS) map[string]any {
 		if t.RecordFragment {
 			out["record_fragment"] = true
 		}
+		// Encrypted Client Hello (ech.go). Never beside a reality block: sing-box refuses the pair on
+		// every core. It takes ECH with fragmentation, but of the uTLS fingerprints only chrome and
+		// firefox build a ClientHello that can carry it: the others fail every handshake, so they are
+		// rendered as chrome (echFitFingerprint).
+		if ech := echJSON(t); ech != nil {
+			out["ech"] = ech
+			echFitFingerprint(out)
+		}
 	}
 	return out
 }
@@ -2029,13 +2294,6 @@ func intp(m map[string]any, k string) int {
 }
 
 // boolp reads a boolean param, tolerating the bool / "true" / "1" shapes a value
-// can take after import or a JSON store round-trip.
-func boolp(m map[string]any, k string) bool {
-	switch t := m[k].(type) {
-	case bool:
-		return t
-	case string:
-		return t == "true" || t == "1" || t == "yes"
-	}
-	return false
-}
+// can take after import or a JSON store round-trip. It is model.ParamBool, so the model's own
+// questions about a switch (model.MuxUoTIgnored) read it exactly as the config is written.
+func boolp(m map[string]any, k string) bool { return model.ParamBool(m, k) }

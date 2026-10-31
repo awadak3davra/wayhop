@@ -48,7 +48,10 @@ tar_repro() {
 tar_repro "$work/data" "$work/data.tar.gz"
 
 mkdir -p "$work/control"
-install -m0755 "$HERE/preinst"  "$work/control/preinst"
+# The pre-install guards the flash with the new binary's own size (see preinst).
+bin_kib=$(( ($(wc -c < "$BIN") + 1023) / 1024 ))
+sed "s/@WAYHOP_BINARY_KIB@/$bin_kib/" "$HERE/preinst" > "$work/control/preinst"
+chmod 0755 "$work/control/preinst"
 install -m0755 "$HERE/postinst" "$work/control/postinst"
 install -m0755 "$HERE/prerm"    "$work/control/prerm"
 printf '2.0\n' > "$work/debian-binary"

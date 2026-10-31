@@ -48,11 +48,10 @@ func hasDomain(entries []string) bool {
 }
 
 // InlineCIDRSources fetches each list's CIDRSource feed and inlines the CIDRs into Manual,
-// clearing CIDRSource. The generator routes by Source (a domain rule_set) and Manual only — a
-// CIDRSource feed ALONE produces no sing-box rule, so an IP-feed list (telegram/discord_ips)
-// would leak its IP-literal traffic past sing-box. Inlining turns it into a Manual ip_cidr
-// rule_set that routes (with failover) to its group. fetch is injected (the daemon fetches the
-// feed THROUGH a tunnel at pre-flight). Must run before AssembleSingboxConfig.
+// clearing CIDRSource and the cached copy. The generator reads Manual plus the cached feeds
+// (generator.listEntries, QA-066), so a feed fetched here must not also stay in CIDRCache or every
+// prefix is emitted twice. fetch is injected (the daemon fetches the feed THROUGH a tunnel at
+// pre-flight). Must run before AssembleSingboxConfig.
 func InlineCIDRSources(p *model.Profile, fetch func(url string) ([]string, error)) error {
 	for i := range p.RoutingLists {
 		rl := &p.RoutingLists[i]
@@ -65,6 +64,7 @@ func InlineCIDRSources(p *model.Profile, fetch func(url string) ([]string, error
 		}
 		rl.Manual = append(rl.Manual, cidrs...)
 		rl.CIDRSource = ""
+		rl.CIDRCache = nil
 	}
 	return nil
 }

@@ -15,8 +15,18 @@
 // CHECKS maps an id to its client-side thunk. time/ipv6/dns/offload/pbr_kernel are NOT
 // here — they fold in from the backend /api/healthcheck call (see HC_BACKEND). This
 // single map drives BOTH the full battery run and a single-row re-check.
-const CHECKS = { core: chkCore, internet: chkInternet, tunnels: chkTunnels, censored: chkCensored, exit: chkExit, system: chkSystem, log: chkLog };
+const CHECKS = { core: chkCore, internet: chkInternet, tunnels: chkTunnels, censored: chkCensored, exit: chkExit, services: chkServices, system: chkSystem, log: chkLog };
 const HC_BACKEND = ["time", "ipv6", "dns", "offload", "pbr_kernel", "endpoint_reach"];
+// Rows this chunk adds beyond app.js's fixed HC_ORDER. They are named here (HC_LABEL is app.js's
+// object; extending it from the chunk keeps the eager payload as it was) and batteryIds counts and
+// lists them from the start, so a row that is still running shows as checking, not as nothing, and
+// "Checking… n/m" cannot reach m while one is still out (QA-040).
+HC_LABEL.services = L("Services through each exit");
+function batteryIds(res) {
+  const ids = hcIds(res);
+  for (const id of Object.keys(CHECKS)) if (!ids.includes(id)) ids.push(id);
+  return ids;
+}
 
 // nativeSupportCard — read-only "what can this router carry natively?" card for
 // the Diagnostics page. Fetches GET /api/native/capabilities and renders one pill
@@ -126,6 +136,34 @@ async function chkExit() {
   if (x.isp && x.isp !== x.asn) detail += "\n" + t("ISP: {0}", x.isp);
   if ("hosting" in x) detail += "\n" + t("Type: {0}", x.hosting ? t("Datacenter / hosting (expected for a VPN exit)") : t("Residential"));
   return { status: "pass", summary, detail, geo: { ip: x.ip, cc: x.cc, country: x.country, asn: x.asn, isp: x.isp } };
+}
+// chkServices asks, through every exit, who the internet sees and whether ChatGPT, Claude and YouTube
+// Premium work there (POST /api/netdiag/services, competitor gap 3). A service counts as reached
+// where it said so or answered without saying; "blocked" is only ever the service's own refusal. The
+// row's label travels with the result: it is not one of the fixed rows app.js names.
+async function chkServices() {
+  const label = t("Services through each exit");
+  const r = await api.post("/api/netdiag/services", {});
+  const rows = r.results || [], ids = r.services || [];
+  const names = { chatgpt: "ChatGPT", claude: "Claude", youtube_premium: "YouTube Premium" };
+  const mark = { available: "✓", blocked: "✗", reachable: "?", unreachable: "–" };
+  const why = { apply_needed: t("Apply once to check through this exit"), core_not_running: t("the proxy core is not running"),
+    interface_missing: t("its interface is not up on the router"), not_checkable: t("this exit cannot be checked") };
+  const checked = rows.filter(x => !x.err);
+  const lines = rows.map(x => {
+    const head = x.name || x.egress;
+    if (x.err) return "· " + head + " · " + (why[x.err] || x.err);
+    const id = x.identity || {};
+    const where = id.country ? ccFlag(id.country) + " " + id.country + (id.colo ? " / " + id.colo : "") + (id.warp ? " · WARP" : "") : t("unknown");
+    const svc = (x.services || []).map(v => (mark[v.state] || "?") + " " + (names[v.service] || v.service) + (v.region ? " (" + v.region + ")" : "")).join("   ");
+    return head + " · " + where + "\n    " + svc;
+  });
+  const detail = lines.join("\n") + "\n\n" + t("✓ works · ✗ refused in this region · ? answered, cannot tell · – no answer");
+  if (!checked.length) return { status: "na", label, summary: t("no exit could be checked"), detail };
+  const nowhere = ids.filter(sid => !checked.some(x => (x.services || []).some(v => v.service === sid && (v.state === "available" || v.state === "reachable"))));
+  if (nowhere.length) return { status: "warn", label, summary: t("{0}: no exit gets it to work", nowhere.map(sid => names[sid] || sid).join(", ")),
+    detail, fix: t("Route the service through an exit where it shows ✓, or add an exit in a country it serves."), deep: "routing" };
+  return { status: "pass", label, summary: t("every service works through at least one exit"), detail };
 }
 async function chkSystem() {
   const s = await api.get("/api/system");
@@ -385,8 +423,8 @@ async function renderDiagnostics(view) {
     stBtn.addEventListener("click", () => runSpeedtest(stBtn, stResult));
     tools.appendChild(el("div", { class: "card" },
       el("div", { class: "row-between", style: "align-items:center" },
-        // The path is stated by the RESULT, which prints the server's own `via` — "direct" or
-        // "proxy" — and the server derives it from what actually happened (singbox.Running()), not
+        // The path is stated by the RESULT, which prints the server's own `via` — "direct", "proxy",
+        // or a kernel tunnel's exit name — derived from where the rules send the test's site (QA-112), not
         // from the request. The title used to promise "through active proxy" unconditionally, so on
         // a router with no core running it claimed one path while its own numbers, on the same line,
         // were annotated "(direct)". Measured on the demo: "Throughput (through active proxy)
@@ -821,7 +859,7 @@ async function runHealthBattery() {
   } catch (e) {
     // A programming error must be terminal too. Fill only missing standard rows so completed
     // evidence is preserved and the operator can see that the remaining checks were not verified.
-    HC_ORDER.forEach(id => {
+    batteryIds(state.hbat ? state.hbat.results : {}).forEach(id => {
       if (mine() && !state.hbat.results[id]) set(id, { status: "warn", summary: t("check failed"), detail: e.message });
     });
   } finally {
@@ -842,7 +880,7 @@ function paintBattery() {
   const vb = document.getElementById("hbat-verdict");
   if (vb) {
     vb.innerHTML = "";
-    if (h.running) vb.appendChild(el("div", { class: "hero-pill hero-warn" }, el("span", { class: "spin" }), t("Checking… {0}/{1}", HC_ORDER.filter(id => res[id]).length, HC_ORDER.length)));
+    if (h.running) { const ids = batteryIds(res); vb.appendChild(el("div", { class: "hero-pill hero-warn" }, el("span", { class: "spin" }), t("Checking… {0}/{1}", ids.filter(id => res[id]).length, ids.length))); }
     else if (done.length) {
       const fails = ran.filter(r => r.status === "fail").length, warns = ran.filter(r => r.status === "warn").length;
       const cls = worst === "fail" ? "hero-err" : worst === "warn" ? "hero-warn" : "hero-ok";
@@ -865,7 +903,7 @@ function paintBattery() {
   if (wrap) {
     wrap.innerHTML = "";
     h.open = h.open || {};
-    hcIds(res).forEach(id => wrap.appendChild(healthRowEl(id, res[id], h.running, (h.busy || {})[id], h.open)));
+    batteryIds(res).forEach(id => wrap.appendChild(healthRowEl(id, res[id], h.running, (h.busy || {})[id], h.open)));
   }
 }
 
@@ -1184,13 +1222,18 @@ function diagNowCard() {
         pbrSt.installed && !pbrSt.stale ? t("active · {0} zones", pbrSt.zones) : (pbrSt.installed ? t("stale") : t("not applied")),
         pbrSt.verified ? t("verified against the live kernel") : t("not verified since the last apply")));
     }
+    // Per list, the kernel's packets where it matched some, else the core's connections, each under
+    // its own unit (QA-113). Decided once for the page, a hybrid router's idle kernel lists hid a
+    // rule-set list's 500 connections behind "none yet". Ranked by bytes, the one figure both share.
     const lists = (traffic && traffic.lists) || {};
-    const hit = Object.keys(lists).map(id => ({ id: id, n: lists[id].conns || 0 }))
-      .filter(x => x.n > 0).sort((a, b) => b.n - a.n).slice(0, 3);
+    const hit = Object.keys(lists).map(id => {
+      const s = lists[id], k = s.kernel && s.kernel.packets ? s.kernel : null;
+      return { id: id, k: k, n: k ? k.packets : s.conns || 0, b: (k || s).bytes || 0 };
+    }).filter(x => x.n > 0).sort((a, b) => b.b - a.b || b.n - a.n).slice(0, 3);
     if (Object.keys(lists).length) {
       rows.appendChild(row(t("Lists matching traffic"),
-        hit.length ? hit.map(x => (nameOf(x.id) || x.id) + " (" + x.n + ")").join(", ") : t("none yet"),
-        t("packets since the rules were installed")));
+        hit.length ? hit.map(x => (nameOf(x.id) || x.id) + " (" + (x.k ? x.n + " " + t("pkts") : t("{0} conns", x.n)) + ")").join(", ") : t("none yet"),
+        hit.some(x => x.k) ? t("packets since the rules were installed") : ""));
     }
 
     // 4. Who answers the clients. The bypass this router could not see until interception existed.

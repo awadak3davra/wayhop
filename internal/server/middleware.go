@@ -2,6 +2,7 @@ package server
 
 import (
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -355,6 +356,18 @@ func limitBody(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// writeBodyTooLarge answers 413 when err is limitBody's cap tripping, and reports whether it did. A
+// backup with large feed caches can outgrow the cap, and "invalid JSON" would then call the router's
+// own file corrupt (QA-134).
+func writeBodyTooLarge(w http.ResponseWriter, err error, what string) bool {
+	var tooBig *http.MaxBytesError
+	if !errors.As(err, &tooBig) {
+		return false
+	}
+	writeErr(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("%s is larger than the %d MiB upload limit", what, tooBig.Limit>>20))
+	return true
 }
 
 // ---- Host allow-list (DNS-rebinding guard) ----

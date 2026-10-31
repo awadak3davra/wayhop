@@ -77,7 +77,17 @@ func (u *Updater) SelfPackageStatus(ctx context.Context, exePath string) Package
 	if u == nil || !u.pm.Available() {
 		return PackageStatus{State: PackageStateUnmanaged, OwnershipKnown: true, Path: exePath}
 	}
-	return u.packageStatusForPath(ctx, exePath)
+	// The apk package owns the file it ships, not the path it publishes it at (selfPackagePaths): an
+	// unowned running binary is a package's when that file is, and its status is the package's.
+	st := u.packageStatusForPath(ctx, exePath)
+	if st.OwnershipKnown && !st.Managed {
+		for _, p := range selfPackagePaths(exePath)[1:] {
+			if alt := u.packageStatusForPath(ctx, p); !alt.OwnershipKnown || alt.Managed {
+				return alt
+			}
+		}
+	}
+	return st
 }
 
 func (u *Updater) packageStatusForPath(ctx context.Context, path string) PackageStatus {

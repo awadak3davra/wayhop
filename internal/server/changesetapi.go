@@ -3,9 +3,11 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"reflect"
 
 	"wayhop/internal/changeset"
 	"wayhop/internal/config"
+	"wayhop/internal/model"
 )
 
 // The change set is the diff between the applied baseline (the apply-state record's live or
@@ -43,26 +45,46 @@ func (s *Server) handleChangeSetUndo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	curCfg, curProfile := s.config(), s.store.Profile()
-	newProfile, newCfg, err := changeset.Undo(base.Desired.Profile, curProfile, base.Desired.Config, curCfg, body.UndoRequest)
-	if err != nil {
-		writeErrNoStore(w, http.StatusBadRequest, err.Error())
+	// applyMu does not stop the other writers: a Settings save takes only cfgMu, and a feed refresh or
+	// a native-tunnel reconcile only the store's lock. So neither write below may start from a copy
+	// read before it waited. The profile undo is computed INSIDE the store's write lock from the
+	// profile as it is then; replacing it with a copy read earlier published that copy over a refresh
+	// that landed meanwhile. The settings write then touches only what the undo changed (see
+	// setUndoneSettings).
+	curCfg := s.config()
+	var newCfg config.Config
+	var undoErr, invalid error
+	err := s.store.Reconcile(func(p *model.Profile) bool {
+		np, nc, err := changeset.Undo(base.Desired.Profile, *p, base.Desired.Config, curCfg, body.UndoRequest)
+		if err != nil {
+			undoErr = err
+			return false
+		}
+		newCfg = nc
+		if reflect.DeepEqual(np, *p) {
+			return false // a settings-only undo: no profile write, no flash wear
+		}
+		// The full gate Replace applies; the store's own publish check refuses less.
+		if err := np.Validate(); err != nil {
+			invalid = err
+			return false
+		}
+		*p = np
+		return true
+	})
+	if undoErr != nil {
+		writeErrNoStore(w, http.StatusBadRequest, undoErr.Error())
 		return
 	}
-	if err := s.store.Replace(newProfile); err != nil {
+	if err == nil {
+		err = invalid
+	}
+	if err != nil {
 		writeErrNoStore(w, http.StatusBadRequest, "undo failed: "+err.Error())
 		return
 	}
 	if !changesetSettingsEqual(curCfg, newCfg) {
-		// Write back the CURRENT config with only the reviewable settings replaced — never the whole
-		// baseline snapshot, which would silently revert unrelated settings (ports, allowed hosts,
-		// secrets) that the review never showed and that a concurrent PUT /api/config may have changed.
-		merged := curCfg
-		merged.RoutingMode = newCfg.RoutingMode
-		merged.Offload = newCfg.Offload
-		merged.RuleSetDetour = newCfg.RuleSetDetour
-		newCfg = merged
-		if err := s.persistConfig(&newCfg); err != nil {
+		if err := s.setUndoneSettings(curCfg, newCfg); err != nil {
 			writeErrNoStore(w, http.StatusInternalServerError, "undo saved the profile but the settings write failed: "+err.Error())
 			return
 		}
@@ -87,7 +109,36 @@ func (s *Server) handleChangeSetUndo(w http.ResponseWriter, r *http.Request) {
 // changesetSettingsEqual reports whether the reviewable settings are unchanged, so an undo that only
 // touched the profile does not rewrite config.json needlessly.
 func changesetSettingsEqual(a, b config.Config) bool {
-	return a.RoutingMode == b.RoutingMode && a.Offload == b.Offload && a.RuleSetDetour == b.RuleSetDetour
+	return a.RoutingMode == b.RoutingMode && a.Offload == b.Offload && a.RuleSetDetour == b.RuleSetDetour &&
+		a.CoreOverride == b.CoreOverride
+}
+
+// setUndoneSettings writes the reviewable settings an undo changed (from -> to) onto the LIVE config,
+// read under cfgMu at write time, and saves it. Writing a whole config copied before the undo
+// waited for the store reverted every Settings save that answered 200 meanwhile (allowed hosts,
+// ports, fail-safe), and a reviewable setting the undo did not touch keeps whatever is live now.
+// Like persistConfig, a failed Save rolls memory back so it never diverges from config.json.
+func (s *Server) setUndoneSettings(from, to config.Config) error {
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+	snap := cloneConfig(s.cfg)
+	if from.RoutingMode != to.RoutingMode {
+		s.cfg.RoutingMode = to.RoutingMode
+	}
+	if from.Offload != to.Offload {
+		s.cfg.Offload = to.Offload
+	}
+	if from.RuleSetDetour != to.RuleSetDetour {
+		s.cfg.RuleSetDetour = to.RuleSetDetour
+	}
+	if from.CoreOverride != to.CoreOverride {
+		s.cfg.CoreOverride = to.CoreOverride
+	}
+	if err := s.cfg.Save(); err != nil {
+		*s.cfg = snap
+		return err
+	}
+	return nil
 }
 
 // handleChangeSet (GET /api/changeset) returns the canonical, structured list of everything an Apply

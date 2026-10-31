@@ -25,10 +25,56 @@ is_running() {
 	pidof "$NAME" >/dev/null 2>&1
 }
 
+# recover_binary: the binary is missing only when the power failed inside an upgrade's
+# compressed-copy swap (install.sh removes the old binary once a verified wayhop.bak.gz exists,
+# then writes the new one). Put the rollback copy back rather than start nothing.
+recover_binary() {
+	[ -x "$PROG" ] && return 0
+	rm -f "$PROG.new" "$PROG.rb"    # an unfinished copy is never a source
+	if [ -f "$PROG.bak" ]; then
+		ln "$PROG.bak" "$PROG.rb" 2>/dev/null || cp "$PROG.bak" "$PROG.rb" || { rm -f "$PROG.rb"; return 1; }
+	elif [ -f "$PROG.bak.gz" ] && gzip -t "$PROG.bak.gz" 2>/dev/null; then
+		gzip -dc "$PROG.bak.gz" > "$PROG.rb" || { rm -f "$PROG.rb"; return 1; }
+	else
+		return 1
+	fi
+	chmod 0755 "$PROG.rb" && sync && mv "$PROG.rb" "$PROG" &&
+		logger -t "$NAME" "$PROG was missing; restored it from the rollback copy"
+}
+
 start() {
 	[ "$ENABLED" = yes ] || return 8
 	[ "$CALLER" != cron ] || return 7
 
+	# Open files: Keenetic starts services at 1024 soft / 4096 hard, which runs the core out of
+	# descriptors on a busy router, and every new connection then fails with "too many open files".
+	# Raised here, in the shell that starts the daemon, so the daemon and the core it starts inherit
+	# it. A limit already at 16384 or above is left as it is. ulimit -n is not POSIX, but the shells
+	# this runs under (BusyBox ash in the firmware and in Entware) have it.
+	# shellcheck disable=SC3045
+	_nofile=$(ulimit -n 2>/dev/null)
+	case $_nofile in
+		''|unlimited) ;;
+		*)
+			# shellcheck disable=SC3045
+			[ "$_nofile" -ge 16384 ] 2>/dev/null || ulimit -n 16384 2>/dev/null ||
+				logger -t "$NAME" "Could not raise the open-files limit from $_nofile to 16384." 2>/dev/null
+			;;
+	esac
+
+	# An update whose new build had not yet proved itself when the router went down is judged again by
+	# the update supervisor beside the config (written by the daemon and the installers): it rolls the
+	# update back if the new build does not answer, or at once on a second start inside the window. Not
+	# when the supervisor is alive -- then this start is the restart it performs itself.
+	_etc=$(dirname "$CONFIG")
+	if [ -f "$_etc/update.pending" ] && [ -f "$_etc/update-verify.sh" ]; then
+		_vp=$(cat /tmp/wayhop-update-verify.pid 2>/dev/null)
+		if [ -z "$_vp" ] || ! kill -0 "$_vp" 2>/dev/null; then
+			sh "$_etc/update-verify.sh" boot </dev/null >>/tmp/wayhop-update.log 2>&1 &
+		fi
+	fi
+
+	recover_binary
 	printf 'Starting %s... ' "$DESC"
 	if is_running; then
 		echo 'already running.'

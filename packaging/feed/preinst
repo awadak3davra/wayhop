@@ -1,7 +1,45 @@
 #!/bin/sh
-# opkg pre-install. Nothing to refuse: an upgrade over any older installation is safe because the
-# daemon imports whatever applied state it finds on first start (a previous-generation apply ledger,
-# or the pre-ledger applied snapshot) and, failing that, simply owns nothing until the next Apply.
-# The script is kept so the packaged control set does not change shape between releases.
+# opkg pre-install. An upgrade over any older installation is safe for the state: the daemon imports
+# whatever applied state it finds on first start (a previous-generation apply ledger, or the pre-ledger
+# applied snapshot) and, failing that, simply owns nothing until the next Apply.
+#
+# What it does guard is the flash of the file system /usr/sbin is on. On a stock overlay opkg checks
+# that itself and refuses below the whole package's size (measured on 24.10.4: "Only have 10239kb
+# available on filesystem /overlay, pkg wayhop needs 15102"). But that check measures the install
+# root, not where the binary lands: with /usr on a smaller file system than /, or under
+# --force-space, opkg wrote a truncated /usr/sbin/wayhop while the running daemon still held the old
+# one, exited 0, and the new binary segfaulted (reproduced on 24.10 with /usr on a 10 MiB-free
+# overlay), so the next restart had no working WayHop. So the room is measured here, on /usr/sbin:
+# when the new binary fits only in the old one's place, the daemon is stopped first so its room is
+# given back (post-install starts it again); when it does not fit at all, the install is refused
+# before opkg touches anything.
+#
+# The .apk wires this same script as pre-install/pre-upgrade; apk writes its payload beside the live
+# binary and fails cleanly on a full flash by itself, so the guard is opkg's alone.
 [ -n "${IPKG_INSTROOT:-}" ] && exit 0
-exit 0
+if command -v apk >/dev/null 2>&1 && [ -d /etc/apk ]; then exit 0; fi
+need_kib="@WAYHOP_BINARY_KIB@"   # the new binary's size, stamped by pack-ipk.sh
+case "$need_kib" in ''|*[!0-9]*) exit 0 ;; esac
+need=$((need_kib + 2048))         # + the installer's head-room
+avail="$(df -Pk /usr/sbin 2>/dev/null | awk 'NR == 2 { print $4 }')"
+case "$avail" in ''|*[!0-9]*) exit 0 ;; esac
+[ "$avail" -ge "$need" ] && exit 0
+old=0
+[ -f /usr/sbin/wayhop ] && old="$(du -k /usr/sbin/wayhop 2>/dev/null | cut -f1)"
+case "$old" in ''|*[!0-9]*) old=0 ;; esac
+if [ $((avail + old)) -ge "$need" ]; then
+  if pidof wayhop >/dev/null 2>&1 && [ -x /etc/init.d/wayhop ]; then
+    echo "wayhop: the new binary fits only in the room the running one holds: stopping WayHop for the upgrade (it starts again when the upgrade finishes)" >&2
+    /etc/init.d/wayhop stop 2>/dev/null
+    i=0
+    while pidof wayhop >/dev/null 2>&1 && [ "$i" -lt 10 ]; do sleep 1; i=$((i + 1)); done
+    if pidof wayhop >/dev/null 2>&1; then
+      echo "wayhop: the running WayHop did not stop; refusing the upgrade -- nothing was changed" >&2
+      /etc/init.d/wayhop start 2>/dev/null
+      exit 1
+    fi
+  fi
+  exit 0
+fi
+echo "wayhop: not enough free space on the overlay for the new binary: $((avail / 1024)) MiB free, $(( (need - old + 1023) / 1024 )) MiB needed even in the old binary's room -- free at least $(( (need - old - avail + 1023) / 1024 )) MiB more and retry. Nothing was changed." >&2
+exit 1

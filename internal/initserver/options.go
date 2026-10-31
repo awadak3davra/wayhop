@@ -24,6 +24,14 @@ type Option struct {
 	Detect func(config string) bool `json:"-"`
 }
 
+// selfSignedPinNote is what the connection Set up Server adds checks on a self-signed server, which
+// depends on the router's sing-box: the public-key pin comes on its own line beside the link (no link
+// carries one), and the whole-certificate pin in the link. A 1.12 core, which some routers run, has
+// neither and accepts any certificate (QA-138).
+const selfSignedPinNote = "The connection WayHop adds also gets the certificate's public-key pin, printed beside the link: " +
+	"on sing-box 1.13 and later the router checks the server by that key, on 1.15 by the whole certificate too, " +
+	"and on 1.12 it accepts any certificate, as the insecure flag says."
+
 // catalog is the registry of provisionable protocols.
 var catalog = []Option{
 	{
@@ -92,7 +100,8 @@ var catalog = []Option{
 		Summary: "Classic V2Ray protocol over WebSocket + TLS (self-signed).",
 		Details: []string{
 			"sing-box VMess inbound on TCP :8443, WebSocket transport (path /wayhop) wrapped in TLS.",
-			"TLS uses a self-signed certificate (SNI wayhop.local); the generated client link carries allowInsecure=1 so it connects without a CA-signed cert or your own domain.",
+			"TLS uses a self-signed certificate (SNI wayhop.local); the client link carries allowInsecure=1 and the certificate's pin (pcs, a hash of the whole certificate).",
+			selfSignedPinNote,
 			"Per-server uuid is generated once and persisted — re-running the installer never rotates it.",
 		},
 		Port:      8443,
@@ -106,7 +115,8 @@ var catalog = []Option{
 		Summary: "TLS proxy that mimics plain HTTPS, authenticated by a password.",
 		Details: []string{
 			"sing-box Trojan inbound on TCP :8444 behind TLS (self-signed cert, SNI wayhop.local).",
-			"The client link carries insecure=1 (skip-cert-verify) so the self-signed cert is accepted; bring your own domain + real cert for active-probing resistance.",
+			"The client link carries insecure=1 (skip-cert-verify) and the self-signed cert's pin (pcs, a hash of the whole certificate); bring your own domain + real cert for active-probing resistance.",
+			selfSignedPinNote,
 			"Per-server password is generated once and persisted across re-runs.",
 		},
 		Port:      8444,
@@ -134,7 +144,8 @@ var catalog = []Option{
 		Summary: "High-throughput QUIC proxy that shrugs off lossy links.",
 		Details: []string{
 			"sing-box Hysteria2 inbound on UDP :8445 over QUIC + TLS (self-signed cert, SNI wayhop.local, ALPN h3).",
-			"Excellent on high-loss / high-latency networks; the client link carries insecure=1 for the self-signed cert.",
+			"Excellent on high-loss / high-latency networks; the client link carries insecure=1 and the self-signed cert's pin (pinSHA256, a hash of the whole certificate).",
+			selfSignedPinNote,
 			"Per-server password is generated once and persisted; the UDP port is opened in iptables best-effort.",
 		},
 		Port:      8445,
@@ -148,13 +159,57 @@ var catalog = []Option{
 		Summary: "QUIC-based proxy (TUIC v5) with BBR congestion control.",
 		Details: []string{
 			"sing-box TUIC v5 inbound on UDP :8446 over QUIC + TLS (self-signed cert, SNI wayhop.local, ALPN h3).",
-			"Low-latency UDP-native proxy; the client link carries insecure=1 for the self-signed cert and congestion_control=bbr.",
+			"Low-latency UDP-native proxy; the client link carries congestion_control=bbr, insecure=1 and the self-signed cert's pin (pcs, a hash of the whole certificate).",
+			selfSignedPinNote,
 			"Per-server uuid + password are generated once and persisted; the UDP port is opened in iptables best-effort.",
 		},
 		Port:      8446,
 		Transport: "udp",
 		Script:    scriptTUIC,
 		Detect:    func(c string) bool { return strings.HasPrefix(strings.TrimSpace(c), "tuic://") },
+	},
+	{
+		ID:      ProtoAnyTLS,
+		Name:    "AnyTLS",
+		Summary: "TLS proxy that pads away the TLS-in-TLS pattern DPI looks for.",
+		Details: []string{
+			"sing-box AnyTLS inbound on TCP :8447 behind TLS (self-signed cert, SNI wayhop.local); needs sing-box 1.12 or newer on the server.",
+			"Pads and splits records so the inner TLS handshake does not show through the outer one; the client link carries insecure=1 and the self-signed cert's pin (pcs, a hash of the whole certificate).",
+			selfSignedPinNote,
+			"Per-server password is generated once and persisted across re-runs.",
+		},
+		Port:      8447,
+		Transport: "tcp",
+		Script:    scriptAnyTLS,
+		Detect:    func(c string) bool { return strings.HasPrefix(strings.TrimSpace(c), "anytls://") },
+	},
+	{
+		ID:      ProtoSnell,
+		Name:    "Snell",
+		Summary: "Surge's lean proxy (Snell v6) with traffic shaping derived from its key.",
+		Details: []string{
+			"sing-box Snell v6 inbound on TCP :8448; UDP is carried over the same TCP connection. No certificate and no obfuscation settings.",
+			"Needs sing-box 1.14 or newer on the server and on this router; the client config is a Surge line, importable as-is.",
+			"The pre-shared key (24 random bytes) is generated once and persisted across re-runs.",
+		},
+		Port:      8448,
+		Transport: "tcp",
+		Script:    scriptSnell,
+		Detect:    func(c string) bool { return strings.Contains(c, "= snell,") },
+	},
+	{
+		ID:      ProtoMTProto,
+		Name:    "MTProto (Telegram proxy)",
+		Summary: "A Telegram proxy for phones: a tg://proxy link that works on mobile data, no VPN app.",
+		Details: []string{
+			"telemt " + TelemtVersion + " on TCP :" + mtprotoPort + ", fake-TLS imitating " + mtprotoCover + "; the static build is checked against its published sha256 before it is installed.",
+			"Not a connection for this router: the result is a link to open on the phone (Telegram -> Settings -> Data and Storage -> Proxy).",
+			"The secret is generated once and persisted, so re-running keeps the link working; runs as its own user under systemd.",
+		},
+		Port:      8449,
+		Transport: "tcp",
+		Script:    scriptMTProto,
+		Detect:    func(c string) bool { return strings.HasPrefix(strings.TrimSpace(c), "tg://proxy") },
 	},
 }
 

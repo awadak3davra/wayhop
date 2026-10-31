@@ -3,34 +3,83 @@ package nativedns
 import (
 	"errors"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 )
 
 // RenderUCI renders a NativeDNS into the uci command PLAN that reconfigures the OpenWrt DNS stack:
-// clear the existing https-dns-proxy instances, add one per DoH resolver (sequential loopback ports
-// from 5053), point dnsmasq at those proxies (+ any plain non-fallback upstreams), set noresolv, and
-// register the plaintext resolvers as doh_backup_server (the geo-fallback tier). It returns the plan
-// ONLY — applying it (see UCICommitCmds: uci commit + service restart) is a separate, user-gated,
-// device-mutating step. Pure; the inverse of ReadUCI.
+// one https-dns-proxy instance per DoH resolver, dnsmasq pointed at those proxies (+ any plain
+// non-fallback upstreams), noresolv and strictorder, and the plaintext resolvers registered as
+// doh_backup_server (the geo-fallback tier). It returns the plan ONLY — applying it (see
+// UCICommitCmds: uci commit + service restart) is a separate, user-gated, device-mutating step.
+// Pure; the inverse of ReadUCI.
+//
+// It changes what the plane names and leaves everything else in both configs as it is (QA-116). The
+// plan used to delete the whole dnsmasq server list and every https-dns-proxy section and rebuild
+// them from the plane. ReadUCI models neither split-DNS entries ("/domain/ip") nor any instance
+// option besides resolver_url and listen_port, so a user who ran the previewed commands lost their
+// split-DNS entries, every bootstrap_dns and every other per-instance option, and the preview did not
+// say so. Now:
+//   - A DoH resolver adopted from instance N (Source "https-dns-proxy[N]") updates instance N in
+//     place: its resolver_url, plus listen_port when the plane gives it no port and listen_addr when
+//     it has none either. dnsmasq is pointed at the address and port the instance listens on. Any
+//     other DoH resolver gets a new instance on 127.0.0.1 and a port no resolver in the plane uses.
+//   - List values are removed one by one with del_list, the way the https-dns-proxy package edits
+//     the same lists: the values the plane adopted from that list, and the values it is about to add
+//     (so they move into the plane's order rather than appear twice).
+//
+// A value or an instance the plane does not name stays where it is, which also means a resolver
+// dropped from an edited plane is not removed from the router.
 func RenderUCI(nd NativeDNS) []string {
 	var cmds []string
 
-	// 1) Rebuild https-dns-proxy from the DoH resolvers, in order.
-	cmds = append(cmds, "while uci -q delete https-dns-proxy.@https-dns-proxy[0]; do :; done")
-	port := 5053
+	// 1) https-dns-proxy: one instance per DoH resolver, in order. Ports any resolver in the plane
+	// already uses are never handed to a new instance.
+	avoid := map[int]bool{}
+	for _, r := range nd.Resolvers {
+		if validPort(r.Port) {
+			avoid[r.Port] = true
+		}
+	}
+	next := 5053
+	freePort := func() int {
+		for avoid[next] {
+			next++
+		}
+		avoid[next] = true
+		return next
+	}
+	claimed := map[int]bool{}
 	var proxyRefs []string
 	for _, r := range nd.Resolvers {
 		if r.Kind != KindDoH {
 			continue
 		}
-		cmds = append(cmds,
-			"uci add https-dns-proxy https-dns-proxy",
-			fmt.Sprintf("uci set https-dns-proxy.@https-dns-proxy[-1].resolver_url='%s'", r.Address),
-			"uci set https-dns-proxy.@https-dns-proxy[-1].listen_addr='127.0.0.1'",
-			fmt.Sprintf("uci set https-dns-proxy.@https-dns-proxy[-1].listen_port='%d'", port),
-		)
-		proxyRefs = append(proxyRefs, fmt.Sprintf("127.0.0.1#%d", port))
-		port++
+		sect := "https-dns-proxy.@https-dns-proxy[-1]"
+		port := 0
+		listenAddr, hasAddr := "", false
+		if idx, ok := proxyInstance(r.Source); ok && !claimed[idx] {
+			claimed[idx] = true
+			sect = fmt.Sprintf("https-dns-proxy.@https-dns-proxy[%d]", idx)
+			if validPort(r.Port) {
+				port = r.Port // it already listens there; its listen options are left alone
+			}
+			// An adopted instance keeps the address it listens on, and dnsmasq is pointed there.
+			listenAddr, hasAddr = r.ListenAddr, r.ListenAddr != ""
+		} else {
+			cmds = append(cmds, "uci add https-dns-proxy https-dns-proxy")
+		}
+		cmds = append(cmds, fmt.Sprintf("uci set %s.resolver_url='%s'", sect, r.Address))
+		if port == 0 {
+			port = freePort()
+			if !hasAddr {
+				listenAddr = "127.0.0.1"
+				cmds = append(cmds, fmt.Sprintf("uci set %s.listen_addr='%s'", sect, listenAddr))
+			}
+			cmds = append(cmds, fmt.Sprintf("uci set %s.listen_port='%d'", sect, port))
+		}
+		proxyRefs = append(proxyRefs, fmt.Sprintf("%s#%d", dohRefHost(listenAddr), port))
 	}
 
 	// 2) dnsmasq: noresolv + server list (proxy refs + plain non-fallback upstreams) + doh_backup_server
@@ -40,7 +89,6 @@ func RenderUCI(nd NativeDNS) []string {
 	// because dnsmasq queries every upstream at once and answers with whichever replies first - which
 	// can be the plaintext WAN one while an encrypted tunnel resolver is up.
 	cmds = append(cmds, uciSetBool("dhcp.@dnsmasq[0].strictorder", nd.StrictOrder))
-	cmds = append(cmds, "uci -q delete dhcp.@dnsmasq[0].server")
 	servers := append([]string{}, proxyRefs...)
 	var backups []string
 	for _, r := range nd.Resolvers {
@@ -68,15 +116,59 @@ func RenderUCI(nd NativeDNS) []string {
 			// dnsmasq IS the device resolver — nothing to add.
 		}
 	}
+	// Remove only what this plane manages: what it adopted from each list, and what it is about to
+	// add. Split-DNS entries, the https-dns-proxy package's own entries and anything else ReadUCI
+	// skipped stay in place.
+	seen := map[string]bool{}
+	delList := func(opt, v string) {
+		c := fmt.Sprintf("uci -q del_list dhcp.@dnsmasq[0].%s='%s'", opt, v)
+		if !seen[c] {
+			seen[c] = true
+			cmds = append(cmds, c)
+		}
+	}
+	for _, r := range nd.Resolvers {
+		switch r.Source {
+		case "dnsmasq.server":
+			delList("server", serverRef(r))
+		case "dnsmasq.doh_backup_server":
+			delList("doh_backup_server", r.Address)
+		}
+	}
+	for _, s := range servers {
+		delList("server", s)
+	}
+	for _, b := range backups {
+		delList("doh_backup_server", b)
+	}
 	for _, s := range servers {
 		cmds = append(cmds, fmt.Sprintf("uci add_list dhcp.@dnsmasq[0].server='%s'", s))
 	}
-	cmds = append(cmds, "uci -q delete dhcp.@dnsmasq[0].doh_backup_server")
 	for _, b := range backups {
 		cmds = append(cmds, fmt.Sprintf("uci add_list dhcp.@dnsmasq[0].doh_backup_server='%s'", b))
 	}
 	return cmds
 }
+
+// proxyInstance reads the https-dns-proxy section index out of a resolver's Source tag
+// ("https-dns-proxy[2]" → 2). The tag comes back from the client, so only the exact form ReadUCI
+// writes is accepted, and the index is re-formatted from the integer, never copied into a command.
+func proxyInstance(source string) (int, bool) {
+	digits, ok := strings.CutPrefix(source, "https-dns-proxy[")
+	if !ok {
+		return 0, false
+	}
+	if digits, ok = strings.CutSuffix(digits, "]"); !ok {
+		return 0, false
+	}
+	n, err := strconv.Atoi(digits)
+	if err != nil || n < 0 || strconv.Itoa(n) != digits {
+		return 0, false
+	}
+	return n, true
+}
+
+func validPort(p int) bool { return p > 0 && p <= 65535 }
 
 // UCICommitCmds are the final commit + service restarts — kept SEPARATE from RenderUCI so a caller can
 // preview the plan before running the device-mutating part. NOT run by the improvement loop.
@@ -119,6 +211,10 @@ func ValidateForWrite(nd NativeDNS) error {
 		if r.Kind == KindDoH && !strings.HasPrefix(r.Address, "https://") {
 			return fmt.Errorf("resolver %d: DoH address must be an https:// URL, got %q", i, r.Address)
 		}
+		// listen_addr comes back from the client too and RenderUCI writes it into dnsmasq's server list.
+		if r.ListenAddr != "" && net.ParseIP(r.ListenAddr) == nil {
+			return fmt.Errorf("resolver %d: listen_addr %q is not an IP address", i, r.ListenAddr)
+		}
 	}
 	return nil
 }
@@ -130,9 +226,15 @@ func uciSetBool(key string, v bool) string {
 	return fmt.Sprintf("uci -q delete %s", key)
 }
 
+// serverRef writes a resolver as a dnsmasq server entry. The port goes before a binding the address
+// carries ("IP@wan" with port 53 is "IP#53@wan"), the inverse of splitServerRef.
 func serverRef(r NativeResolver) string {
 	if r.Port > 0 {
-		return fmt.Sprintf("%s#%d", r.Address, r.Port)
+		addr, bind := r.Address, ""
+		if i := strings.IndexByte(addr, '@'); i >= 0 {
+			addr, bind = addr[:i], addr[i:]
+		}
+		return fmt.Sprintf("%s#%d%s", addr, r.Port, bind)
 	}
 	return r.Address
 }

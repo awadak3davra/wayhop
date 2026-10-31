@@ -59,7 +59,10 @@ MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" docker run --rm \
   # fails with the message apk itself gives, which is the more accurate report anyway.
   cp -r /src/packaging /w/packaging
   sh /w/packaging/feed/pack-apk.sh /w/wayhop-amd64 1.0.0 1 /w/out  x86_64
-  sh /w/packaging/feed/pack-apk.sh /w/wayhop-amd64 1.0.1 1 /w/out2 x86_64
+  # The upgrade carries different bytes (still a runnable ELF: trailing data is ignored), so the
+  # checks below can tell which build the live path holds.
+  cp /w/wayhop-amd64 /w/wayhop-amd64-next && printf "next" >> /w/wayhop-amd64-next
+  sh /w/packaging/feed/pack-apk.sh /w/wayhop-amd64-next 1.0.1 1 /w/out2 x86_64
 ' >/dev/null
 
 [ -n "$(find "$work/out" -name '*.apk' | head -n1)" ] || { echo "the packer produced no .apk" >&2; exit 1; }
@@ -102,6 +105,10 @@ out=$(MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" docker run --rm -v "$(hostpath 
   [ -x /usr/sbin/wayhop ]   && ok "the binary is installed executable at /usr/sbin/wayhop" || no "the binary is missing or not executable"
   [ -x /etc/init.d/wayhop ] && ok "the procd init is installed executable"                 || no "the procd init is missing or not executable"
   [ -f /etc/wayhop/config.json ] && ok "a config was seeded" || no "no config was seeded"
+  # The live path used to be a COPY of the package file: two ~14 MiB copies on a 60 MiB overlay.
+  [ /usr/sbin/wayhop -ef /usr/libexec/wayhop/wayhop ] \
+    && ok "the live binary is the package file, hard-linked: one copy on the flash, not two" \
+    || no "the live binary is a second copy of the package file"
   perms=$(ls -l /etc/wayhop/config.json | cut -c1-10)
   [ "$perms" = "-rw-------" ] && ok "the seeded config is owner-only ($perms)" || no "the seeded config is $perms"
   [ "$(ls -ld /etc/wayhop | cut -c1-10)" = "drwx------" ] && ok "the state root is owner-only" || no "the state root is listable"
@@ -130,9 +137,24 @@ out=$(MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" docker run --rm -v "$(hostpath 
     /var/lib/wayhop/backups/operator-note.txt
   before=$(cat /etc/wayhop/config.json)
 
+  # A daemon runs the old build through the live path while apk swaps the package under it: with the
+  # live path a hard link of the package file, apk must replace that file by rename, never in place.
+  mkdir -p /tmp/wh-run
+  echo "{\"listen\":\"127.0.0.1:18088\",\"data_dir\":\"/tmp/wh-run\",\"demo\":true}" > /tmp/wh-run/config.json
+  /usr/sbin/wayhop --config /tmp/wh-run/config.json >/dev/null 2>&1 &
+  daemon=$!
+  sleep 1
   upgrade_log=$(apk add --allow-untrusted /pkg/out2/apk/x86_64/*.apk 2>&1) || {
     echo "  FAIL  the upgrade was refused: $upgrade_log"; exit 1;
   }
+  kill -0 "$daemon" 2>/dev/null \
+    && ok "a daemon running the old build kept running through the package swap" \
+    || no "the package swap broke the running daemon"
+  kill "$daemon" 2>/dev/null || :
+  [ /usr/sbin/wayhop -ef /usr/libexec/wayhop/wayhop ] \
+    && ok "after the upgrade the live binary is the new package file, hard-linked" \
+    || no "after the upgrade the live binary is not the package file"
+  [ "$(tail -c 4 /usr/sbin/wayhop)" = next ] && ok "the live path holds the upgraded build" || no "the live path still holds the old build"
   [ "$(cat /etc/wayhop/config.json)" = "$before" ] && ok "the config survived the upgrade byte for byte" || no "the upgrade rewrote the config"
   grep -q MARKER-KEEP-ME /etc/wayhop/config.json && ok "an operator edit survived the upgrade" || no "an operator edit was lost in the upgrade"
   [ -f /etc/wayhop/profile.json ] && ok "the profile survived the upgrade" || no "the profile was lost in the upgrade"

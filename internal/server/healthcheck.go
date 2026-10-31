@@ -74,6 +74,7 @@ func (s *Server) healthBattery(parent context.Context) []healthRow {
 		func(ctx context.Context) healthRow { return s.pbrKernelCheck(ctx) },
 		func(ctx context.Context) healthRow { return s.listsInForceCheck(ctx) },
 		func(ctx context.Context) healthRow { return s.nativeOnlyCheck(ctx) },
+		func(ctx context.Context) healthRow { return s.keeneticLeftAsIsCheck(ctx) },
 		func(ctx context.Context) healthRow { return s.endpointReachCheck(ctx) },
 		func(ctx context.Context) healthRow { return s.groupDepthCheck(ctx) },
 		func(ctx context.Context) healthRow { return s.sourceRuleCheck(ctx) },
@@ -476,8 +477,8 @@ func (s *Server) endpointReachCheck(ctx context.Context) healthRow {
 		if !e.Enabled || demo {
 			continue
 		}
-		host, port := e.Server, e.Port
-		if host == "" { // an external/native tunnel may carry the peer in params instead
+		host, port := e.ServerAddress(), e.Port
+		if host == "" && !e.UsesRealm() { // an external/native tunnel may carry the peer in params instead
 			if ip, _ := e.Params["endpoint_ip"].(string); ip != "" {
 				host = ip
 			}
@@ -604,6 +605,12 @@ func (s *Server) pbrKernelCheck(ctx context.Context) healthRow {
 
 	c := s.config()
 	mode := s.routingMode(c)
+	// "mixed" is a local proxy and nothing else: no TUN and no kernel plane. This row used to answer
+	// "TUN mode" for it, beside the lists row saying (rightly) that no LAN traffic reaches the core.
+	if mode == "mixed" {
+		row.Status, row.Summary = "na", "Local proxy only, no gateway (mixed)"
+		return row
+	}
 	// The applied record says what the kernel plane should be; the reconcile loop's last postcheck
 	// says whether the router still carries it. On Keenetic the plane is ipset/iptables re-asserted
 	// from a netfilter.d hook, so report that observation instead of probing an nft table it never had.

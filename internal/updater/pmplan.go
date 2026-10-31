@@ -169,9 +169,8 @@ func (u *Updater) PlanPM(ctx context.Context, e Engine, action PlanAction, versi
 			return p
 		}
 		// The engine id is a GUESS at the package name, and it is wrong more often than it is right.
-		// Measured against the AX3000T's own feed: of the seven engines this panel knows, only
-		// sing-box and dnscrypt-proxy exist as packages — mihomo, xray, hysteria, amneziawg-go and
-		// olcrtc do not. Without this the plan reads as runnable, the operator confirms it, and apk
+		// Measured against the AX3000T's own feed: of the engines this panel knows, only sing-box
+		// and dnscrypt-proxy exist as packages — mihomo, xray, hysteria and amneziawg-go do not. Without this the plan reads as runnable, the operator confirms it, and apk
 		// fails on a package that was never there. The rollback branch below already refuses a version
 		// the feed does not carry; this is the same question asked one level up.
 		cands, cerr := u.pm.Candidates(ctx, pkg)

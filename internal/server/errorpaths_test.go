@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -254,6 +255,40 @@ func TestServererrorpaths_SubscriptionFetchUnreachableBadGateway(t *testing.T) {
 	}
 	if msg := servererrorpaths_errMsg(t, w); !strings.Contains(msg, "fetch failed") {
 		t.Errorf("error = %q, want 'fetch failed'", msg)
+	}
+}
+
+// Competitor gap 2: a provider panel can answer by User-Agent, so the import sends the one given, keeps
+// it with the URL for the scheduled refresh (which then asks the same way), and refuses one that
+// cannot go in a header.
+func TestServererrorpaths_SubscriptionUserAgent(t *testing.T) {
+	s := servererrorpaths_server(t)
+	s.allowInternalFetch = true
+	var seen []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("User-Agent"))
+		_, _ = w.Write([]byte("trojan://secretpass@example.com:443?security=tls&sni=example.com#T1\n"))
+	}))
+	defer upstream.Close()
+
+	body, _ := json.Marshal(map[string]string{"url": upstream.URL, "user_agent": " sing-box "})
+	if w := servererrorpaths_post(s.handleSubscription, "/api/subscription", string(body)); w.Code != http.StatusOK {
+		t.Fatalf("import: %d %s", w.Code, w.Body.String())
+	}
+	if got := s.config().Subscription.UserAgent; got != "sing-box" {
+		t.Errorf("stored user_agent = %q, want sing-box (trimmed)", got)
+	}
+	if _, err := s.refreshSubscriptionOnce(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if len(seen) != 2 || seen[0] != "sing-box" || seen[1] != "sing-box" {
+		t.Errorf("upstream saw %q, want the import and the refresh both as sing-box", seen)
+	}
+	for _, bad := range []string{"line\nbreak", strings.Repeat("a", 257), "ünïcode"} {
+		b, _ := json.Marshal(map[string]string{"url": upstream.URL, "user_agent": bad})
+		if w := servererrorpaths_post(s.handleSubscription, "/api/subscription", string(b)); w.Code != http.StatusBadRequest {
+			t.Errorf("user_agent %q: got %d, want 400", bad, w.Code)
+		}
 	}
 }
 

@@ -183,7 +183,7 @@ func (m *Manager) Welcome(ctx context.Context, rec config.TelegramChat) error {
 	if rec.Role == roleAlerts {
 		return nil
 	}
-	text, kb := b.view(lang).Status(b.status(ctx))
+	text, kb := b.chatView(lang, rec).Status(b.status(ctx))
 	_, err = api.SendMessage(ctx, rec.ID, text, SendOptions{Keyboard: kb, NoPreview: true})
 	return err
 }

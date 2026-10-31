@@ -27,6 +27,35 @@ func TestRollbackNowFailureSurfaces(t *testing.T) {
 	}
 }
 
+// QA-147: the ticks after a failed manual Roll back keep its verdict. Healthy, unknown and bad
+// observations used to relabel it "armed", "unverified" or "degraded", and the window closed at its
+// deadline as "live_unsaved" while the Test was still partly on the router.
+func TestFailedManualRollbackVerdictSurvivesTicks(t *testing.T) {
+	m := New(Durations{Grace: time.Hour, Interval: time.Hour, RollbackAfter: time.Hour, RebootAfter: 2 * time.Hour, KeepWindow: time.Hour})
+	m.Arm(func() bool { return true }, func() error { return errors.New("abort refused") }, func() {}, false)
+	defer m.Confirm()
+	if err := m.RollbackNow(); err == nil {
+		t.Fatal("RollbackNow should return the rollback error")
+	}
+	m.mu.Lock()
+	start, deadline := m.lastAt, m.deadline
+	m.mu.Unlock()
+	for i, h := range []Health{HealthUp, HealthUnknown, HealthDown, HealthUp} {
+		if act := m.tickHealth(start+int64(i+1), h); act != ActNone {
+			t.Fatalf("tick %d (%v): action %v, want none", i, h, act)
+		}
+		if p := m.Status().Phase; p != "rollback_failed" {
+			t.Fatalf("tick %d (%v): phase %q, want rollback_failed", i, h, p)
+		}
+	}
+	if act := m.tickHealth(deadline, HealthUp); act != ActDone {
+		t.Fatalf("deadline tick: action %v, want done", act)
+	}
+	if p := m.Status().Phase; p != "rollback_failed" {
+		t.Fatalf("closed window phase %q, want rollback_failed (not live_unsaved)", p)
+	}
+}
+
 // #7: an auto-rollback (run loop) whose rollback errors must also end in
 // "rollback_failed", not "rolled_back".
 func TestAutoRollbackFailureSurfaces(t *testing.T) {

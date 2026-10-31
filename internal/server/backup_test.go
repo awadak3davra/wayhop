@@ -113,7 +113,7 @@ func TestBackupExport(t *testing.T) {
 	if err := srv.servers.Upsert(serverstore.Server{ID: "s1", Name: "vps", Host: "1.2.3.4", Port: 22, User: "root"}); err != nil {
 		t.Fatalf("seed server: %v", err)
 	}
-	if err := srv.restoreConfig("hybrid", true); err != nil {
+	if err := srv.restoreConfig("hybrid", true, "", ""); err != nil {
 		t.Fatalf("seed config: %v", err)
 	}
 
@@ -167,7 +167,7 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	if err := srvA.servers.Upsert(serverstore.Server{ID: "s1", Name: "vps", Host: "1.2.3.4", Port: 22, User: "root"}); err != nil {
 		t.Fatalf("seed A server: %v", err)
 	}
-	if err := srvA.restoreConfig("fast", false); err != nil {
+	if err := srvA.restoreConfig("fast", false, "", ""); err != nil {
 		t.Fatalf("seed A config: %v", err)
 	}
 	_, bundle, _ := backup_get(t, tsA, "/api/backup")
@@ -250,6 +250,27 @@ func TestBackupRestoreRejectsWrongSchema(t *testing.T) {
 		t.Fatalf("wrong-schema restore: got %d, want 400 (%s)", code, out)
 	}
 	// Profile unchanged (still the seeded one, not wiped).
+	if p := srv.store.Profile(); len(p.Endpoints) != 1 {
+		t.Errorf("profile changed by a rejected restore: %+v", p.Endpoints)
+	}
+}
+
+// QA-134: a backup past the request cap is answered 413 with the limit, not "invalid JSON", on
+// both restore routes, and the profile is left as it was.
+func TestRestoreOverTheBodyCapSaysSo(t *testing.T) {
+	srv, h := backup_newServer(t)
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	if err := srv.store.Replace(sampleProfile()); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	big := []byte(`{"wayhop_backup":1,"pad":"` + strings.Repeat("a", maxRequestBody) + `"}`)
+	for _, path := range []string{"/api/backup/restore", "/api/profile"} {
+		code, out := backup_post(t, ts, path, big)
+		if code != http.StatusRequestEntityTooLarge || !strings.Contains(string(out), "16 MiB") {
+			t.Errorf("%s: got %d %q, want 413 naming the 16 MiB limit", path, code, out)
+		}
+	}
 	if p := srv.store.Profile(); len(p.Endpoints) != 1 {
 		t.Errorf("profile changed by a rejected restore: %+v", p.Endpoints)
 	}
@@ -351,7 +372,7 @@ func TestRestoreConfig_RollbackOnSaveFailure(t *testing.T) {
 	}
 	newGW := !beforeGW
 
-	if err := s.restoreConfig(newMode, newGW); err == nil {
+	if err := s.restoreConfig(newMode, newGW, "", ""); err == nil {
 		t.Fatal("restoreConfig should have returned the Save error")
 	}
 	if s.cfg.RoutingMode != beforeMode || s.cfg.Gateway != beforeGW {

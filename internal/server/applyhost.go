@@ -128,7 +128,7 @@ func (f hostSnapshotProviderFunc) ProbeHost(ctx context.Context, desired Desired
 
 // captureHostSnapshot is the production entry point for a previously captured DesiredSnapshot. The
 // provider performs fresh probes only: it deliberately does not call capabilitySet, accelKind,
-// accelHW or kernelPBRAvailable, whose sync.Once/TTL caches cannot prove one coherent observation.
+// accelHW or kernelPBRAvailable, whose TTL caches cannot prove one coherent observation.
 func (s *Server) captureHostSnapshot(ctx context.Context, desired DesiredSnapshot) (HostSnapshotV1, error) {
 	if s == nil {
 		return HostSnapshotV1{}, errors.New("host snapshot source is unavailable")
@@ -312,8 +312,51 @@ func (s *Server) probeHostSnapshot(ctx context.Context, desired DesiredSnapshot)
 	if kernelProbeErr != nil {
 		probe.ProbeErrors = append(probe.ProbeErrors, kernelProbeErr.Error())
 	}
-	probe.ProbeErrors = append(probe.ProbeErrors, deviceProbeErrors...)
-	return probe, nil
+	return foldOffloadDeviceProbe(probe, deviceProbeErrors), nil
+}
+
+// foldOffloadDeviceProbe scopes a failed offload-device observation to offload (QA-128). The devices
+// are only what a flowtable attaches to: a WAN that is down has no default route, and that says
+// nothing about the router's tunnels. Joined into ProbeErrors it made every capability unknown, which
+// on OpenWrt silently replaced the reviewed native plan with the generic path, the previous native
+// interfaces left behind under the names the engine plugins then wanted. So offload alone answers for
+// it: it is off for this Apply, with the reason, and the flowtable is not compiled (kernelOffloadForHost).
+// A canceled capture is no offload fact; it still poisons the set, as every other probe's does.
+func foldOffloadDeviceProbe(probe hostProbeV1, deviceProbeErrors []string) hostProbeV1 {
+	if len(deviceProbeErrors) == 0 {
+		return probe
+	}
+	var scoped []string
+	for _, e := range deviceProbeErrors {
+		if e == applyHostProbeCanceledError {
+			probe.ProbeErrors = append(probe.ProbeErrors, e)
+			continue
+		}
+		scoped = append(scoped, e)
+	}
+	probe.ResolvedOffload = "off"
+	probe.OffloadDevices = nil
+	probe.OffloadReason = "flow offload is off for this Apply: the devices it attaches to could not be observed (" +
+		strings.Join(uniqueApplyHostErrors(deviceProbeErrors), "; ") + ")"
+	probe.OffloadState.Reasons = uniqueApplyHostErrors(append(append([]string(nil), probe.OffloadState.Reasons...),
+		append(scoped, probe.OffloadReason)...))
+	return probe
+}
+
+// kernelOffloadForHost holds the kernel plan's flowtable to the offload this Apply's host capture
+// resolved: a capture that turned it off (foldOffloadDeviceProbe) compiles no flowtable, whatever
+// pbrCompileOptions resolved for the same mode. The reason comes back for the Apply's warnings, ""
+// when nothing was changed: whenever the capture resolved offload as pbrCompileOptions did.
+func kernelOffloadForHost(opts pbr.Options, host HostSnapshotV1) (pbr.Options, string) {
+	if (opts.Offload == "sw" || opts.Offload == "hw") && host.ResolvedOffload == "off" {
+		opts.Offload, opts.OffloadDevices = "", nil
+		reason := host.OffloadReason
+		if reason == "" {
+			reason = "flow offload is off for this Apply"
+		}
+		return opts, reason
+	}
+	return opts, ""
 }
 
 // demoHostProbe is a deterministic, explicitly synthetic observation used only after the caller has

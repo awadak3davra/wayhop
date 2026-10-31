@@ -83,6 +83,48 @@ func TestGateSubRefresh_UnknownAbortsRatherThanGuessing(t *testing.T) {
 	}
 }
 
+// QA-028 on the timer path: a feed entry the core cannot load (a sing-box openvpn-client with no
+// certificate) arrives disabled, so the next Apply is not refused for the whole profile.
+func TestGateSubRefresh_UnloadableArrivesDisabled(t *testing.T) {
+	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"endpoints":[{"type":"openvpn-client","tag":"noca","server":"198.51.100.56","server_port":1194}],` +
+			`"outbounds":[{"type":"trojan","tag":"ok","server":"198.51.100.57","server_port":443,"password":"p"}]}`))
+	}))
+	t.Cleanup(feed.Close)
+	s, _ := gateSubServer(t, platform.CapSupported, gateSubLink)
+	s.cfg.Subscription.URL = feed.URL
+	s.caps.mu.Lock()
+	s.caps.set.Items[platform.CapProtocolPrefix+"openvpn"] = platform.Capability{
+		ID: platform.CapProtocolPrefix + "openvpn", State: platform.CapSupported}
+	s.caps.mu.Unlock()
+
+	if _, err := s.refreshSubscriptionOnce(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	var sawOVPN, sawTrojan bool
+	for _, e := range s.store.Profile().Endpoints {
+		switch e.Name {
+		case "noca":
+			sawOVPN = true
+			if e.Enabled {
+				t.Error("the timer stored an OpenVPN client with no certificate ENABLED")
+			}
+		case "ok":
+			sawTrojan = true
+			if !e.Enabled {
+				t.Error("the loadable trojan entry was disabled")
+			}
+		}
+	}
+	if !sawOVPN || !sawTrojan {
+		t.Fatalf("refresh stored openvpn=%v trojan=%v, want both", sawOVPN, sawTrojan)
+	}
+	if p := s.store.Profile(); p.Validate() != nil {
+		t.Errorf("the profile no longer validates after the refresh: %v", p.Validate())
+	}
+}
+
 // A host that can carry it changes nothing: the refresh keeps doing its job.
 func TestGateSubRefresh_SupportedIsUntouched(t *testing.T) {
 	s, _ := gateSubServer(t, platform.CapSupported, gateSubLink)

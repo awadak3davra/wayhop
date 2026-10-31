@@ -24,9 +24,11 @@ const (
 	codeLen      = 8
 	// CodeTTL is how long a pairing code stays valid.
 	CodeTTL = 10 * time.Minute
-	// maxBadCodes wrong codes per chat per badCodeWindow lock that chat out of pairing.
+	// maxBadCodes wrong codes per chat per badCodeWindow lock that chat out of pairing. At most
+	// maxBadChats chats are remembered; the one whose last wrong code is oldest goes first.
 	maxBadCodes   = 5
 	badCodeWindow = time.Hour
+	maxBadChats   = 256
 	// strangerTTL is how long a chat that wrote to the bot unpaired stays listed in the panel.
 	strangerTTL  = 24 * time.Hour
 	maxStrangers = 20
@@ -43,6 +45,9 @@ type Gate struct {
 	codes     map[string]pending
 	bad       map[int64][]time.Time
 	strangers map[int64]*Stranger
+	// limitTold is when each chat locked out of pairing was last told so. Only chats in bad are kept,
+	// so it is bounded the same way.
+	limitTold map[int64]time.Time
 }
 
 type pending struct {
@@ -65,16 +70,19 @@ type Stranger struct {
 
 // NewGate returns an empty gate.
 func NewGate() *Gate {
-	return &Gate{now: time.Now, codes: map[string]pending{}, bad: map[int64][]time.Time{}, strangers: map[int64]*Stranger{}}
+	return &Gate{now: time.Now, codes: map[string]pending{}, bad: map[int64][]time.Time{}, strangers: map[int64]*Stranger{},
+		limitTold: map[int64]time.Time{}}
 }
 
 // NewCode issues a single-use pairing code for role. Codes for owner pair only private chats (see
-// Redeem); a group paired with an owner code becomes a viewer.
+// Redeem); a group paired with an owner code becomes a viewer. A role not named, or not known, gives
+// the least that can still talk to the bot: a viewer. It used to give an owner, the role that can
+// apply, restart and download every secret, to whoever redeemed a code issued without one.
 func (g *Gate) NewCode(role string) (string, time.Time) {
 	switch role {
 	case roleOwner, roleViewer, roleAlerts:
 	default:
-		role = roleOwner
+		role = roleViewer
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -164,6 +172,24 @@ func (g *Gate) Redeem(chat Chat, code string) (string, RedeemResult) {
 		}
 	}
 	g.bad[chat.ID] = append(g.bad[chat.ID], now)
+	if len(g.bad) > maxBadChats {
+		// A flood of wrong codes from ever new chats must not grow memory: the chat whose last
+		// wrong code is oldest is forgotten (it is the nearest to its window's end anyway).
+		// Never the chat just recorded: with equal timestamps (a coarse router clock during a flood)
+		// "oldest" was whichever entry the map yielded first, and evicting the sender reset its own
+		// count - wrong codes from one chat plus a flood from fresh ones defeated the limit (QA-057).
+		var oldest int64
+		var at time.Time
+		for id, ts := range g.bad {
+			if id == chat.ID {
+				continue
+			}
+			if last := ts[len(ts)-1]; at.IsZero() || last.Before(at) {
+				oldest, at = id, last
+			}
+		}
+		delete(g.bad, oldest)
+	}
 	return "", RedeemBad
 }
 
@@ -179,6 +205,31 @@ func (g *Gate) expireLocked() {
 			delete(g.strangers, id)
 		}
 	}
+	// Wrong codes count for badCodeWindow; a chat with none left inside it was kept for good.
+	for id, ts := range g.bad {
+		if len(ts) == 0 || now.Sub(ts[len(ts)-1]) >= badCodeWindow {
+			delete(g.bad, id)
+		}
+	}
+	for id := range g.limitTold {
+		if _, ok := g.bad[id]; !ok {
+			delete(g.limitTold, id)
+		}
+	}
+}
+
+// tellLimited reports whether a chat that Redeem found locked out should be told so now: once per
+// refuseEvery, like Seen's refusal, and silence in between. Every message during the lockout was
+// answered, and each answer could sit out Telegram's flood control in a handler slot (QA-099).
+func (g *Gate) tellLimited(chatID int64) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := g.now()
+	if at, ok := g.limitTold[chatID]; ok && now.Sub(at) < refuseEvery {
+		return false
+	}
+	g.limitTold[chatID] = now
+	return true
 }
 
 // Seen records an unpaired chat and reports whether it should get the refusal text now.

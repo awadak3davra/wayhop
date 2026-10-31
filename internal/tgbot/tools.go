@@ -280,9 +280,9 @@ func (v view) Diag(checks []Check, at time.Time) (string, *Keyboard) {
 		if c.Status == "fail" {
 			mark = "❌"
 		}
-		fmt.Fprintf(&b, "\n%s <b>%s</b>\n%s", mark, esc(v.checkLabel(c)), esc(c.Summary))
+		fmt.Fprintf(&b, "\n%s <b>%s</b>\n%s", mark, esc(v.checkLabel(c)), esc(daemonIn(v.lang, c.Summary)))
 		if c.Fix != "" {
-			b.WriteString("\n<i>" + v.t("ex.fix", esc(c.Fix)) + "</i>")
+			b.WriteString("\n<i>" + v.t("ex.fix", esc(daemonIn(v.lang, c.Fix))) + "</i>")
 		}
 		b.WriteString("\n")
 	}

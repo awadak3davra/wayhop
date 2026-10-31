@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -15,6 +14,7 @@ import (
 	"wayhop/internal/initserver"
 	"wayhop/internal/model"
 	"wayhop/internal/netdiag"
+	"wayhop/internal/qr"
 	"wayhop/internal/serverstore"
 	"wayhop/internal/updater"
 	"wayhop/internal/util"
@@ -261,7 +261,9 @@ func (s *Server) runProvision(job *initserver.Job, b provisionReq) {
 	// Each config is attributed to its protocol by the WR_PROTO marker the script
 	// prints — never paired by position (a failed protocol would shift the index).
 	configs := initserver.ExtractTagged(output)
-	if len(configs) == 0 {
+	// Links for people (a tg://proxy for Telegram) are handed back, never imported as connections.
+	links := initserver.ExtractShareLinks(output)
+	if len(configs) == 0 && len(links) == 0 {
 		job.Start("Read client configs")
 		job.Fail("the installer returned no client config", "Check the install step output above — a protocol may have failed to install.")
 		job.Finish(false, nil)
@@ -285,6 +287,9 @@ func (s *Server) runProvision(job *initserver.Job, b provisionReq) {
 			continue
 		}
 		ep.Name = name + " · " + label
+		// The installer's self-signed certificate is checked by the pins it printed beside the link,
+		// not accepted unchecked (QA-138); a pin that is not a SHA-256 hash was left out, and is said so.
+		pinNotes := tc.ApplyPins(ep)
 		// The remote end provisioned fine; the question here is whether THIS router can carry the
 		// client side. A protocol it cannot run would otherwise be created enabled and only fail at
 		// Apply, after a configuration has been built around it. Stored disabled rather than dropped:
@@ -300,6 +305,9 @@ func (s *Server) runProvision(job *initserver.Job, b provisionReq) {
 			continue
 		}
 		job.OK("added “" + ep.Name + "” to Connections (" + ep.Server + ":" + itoa(ep.Port) + ")")
+		for _, n := range pinNotes {
+			job.Logf("%s", n)
+		}
 		if gateWhy != "" {
 			job.Logf("kept disabled — %s", gateWhy)
 		}
@@ -315,6 +323,20 @@ func (s *Server) runProvision(job *initserver.Job, b provisionReq) {
 		}
 	}
 
+	shareLinks := []map[string]string{}
+	for _, l := range links {
+		label := initserver.OptionName(l.Proto)
+		job.Start("Link: " + label)
+		job.OK("ready — open it on the phone; it is in the result below, not in Connections")
+		sl := map[string]string{"proto": l.Proto, "name": label, "link": l.Link}
+		// The panel is usually on a computer and Telegram on a phone: the camera takes the link.
+		if q, err := qr.Encode(l.Link); err == nil {
+			sl["qr_svg"] = q.SVG()
+		}
+		shareLinks = append(shareLinks, sl)
+		addedProtos = append(addedProtos, l.Proto)
+	}
+
 	// Record/refresh the saved server for redundancy + future re-use. Mark only
 	// the protocols that ACTUALLY provisioned (not every requested one), so the
 	// servers list never claims a protocol whose install failed.
@@ -328,6 +350,7 @@ func (s *Server) runProvision(job *initserver.Job, b provisionReq) {
 		"added_endpoints":       added,
 		"requested_protocols":   b.Protocols,
 		"provisioned_protocols": addedProtos,
+		"share_links":           shareLinks,
 		"partial":               partial,
 	})
 }
@@ -400,6 +423,9 @@ func (s *Server) provisionDemo(job *initserver.Job, b provisionReq) string {
 			conf := "[Interface]\nPrivateKey = DEMOclientPrivateKey00000000000000000000000=\nAddress = 10.13.13.2/32\nDNS = 1.1.1.1\nJc = 4\nJmin = 40\nJmax = 70\nS1 = 0\nS2 = 0\nH1 = 1\nH2 = 2\nH3 = 3\nH4 = 4\n[Peer]\nPublicKey = DEMOserverPublicKey00000000000000000000000=\nEndpoint = " + host + ":51820\nAllowedIPs = 0.0.0.0/0"
 			sb.WriteString("WR_PROTO=amneziawg\n")
 			sb.WriteString("WR_CLIENT_CONFIG_B64=" + b64(conf) + "\n")
+		case initserver.ProtoMTProto:
+			sb.WriteString("WR_PROTO=mtproto\n")
+			sb.WriteString(initserver.ShareLinkMarker + "tg://proxy?server=" + host + "&port=8449&secret=ee0123456789abcdef0123456789abcdef7777772e62696e672e636f6d\n")
 		}
 	}
 	return sb.String()
@@ -412,30 +438,26 @@ func (s *Server) provisionDemo(job *initserver.Job, b provisionReq) string {
 // jobs provisioning different protocols on the same host both read the old list and the later
 // Upsert dropped the other one's protocol - the servers list then under-claimed what is installed.
 // Patch does the same read-modify-write INSIDE the store mutex, with the persist-then-commit and
-// deep-clone the store already implements.
+// deep-clone the store already implements. On a host the list does not know yet, Patch's miss and the
+// create were two lock acquisitions, and the create replaced the whole record - two first provisions
+// lost a protocol the same way. PatchOrCreate finds or creates under that one hold.
 //
 // And a discarded error was the job handing back a server_id for a record that does not exist:
 // the store persists before it commits, so a failed write leaves the server missing from disk AND
 // memory, while the panel offers to harden a server it cannot resolve. Say so instead.
 func (s *Server) saveProvisionedServer(job *initserver.Job, b provisionReq, installedProtos []string) {
 	id := serverIDFor(b)
-	name := util.FirstNonEmpty(b.Name, b.Host)
-	err := s.servers.Patch(id, func(sv *serverstore.Server) {
-		sv.Name = util.FirstNonEmpty(b.Name, sv.Name, b.Host)
-		sv.Host, sv.Port, sv.User = b.Host, b.Port, b.User
-		sv.Installed = mergeStrings(sv.Installed, installedProtos)
-		sv.LastJob = job.ID()
-		name = sv.Name
-	})
-	if errors.Is(err, serverstore.ErrNotFound) {
-		sv := serverstore.Server{
-			ID: id, Name: name, Host: b.Host, Port: b.Port, User: b.User,
-			Installed: mergeStrings(nil, installedProtos),
-			CreatedAt: time.Now().UTC().Format(time.RFC3339), LastJob: job.ID(),
-		}
-		if err = s.servers.Upsert(sv); err == nil {
-			job.Logf("saved “%s” to your servers list", sv.Name)
-		}
+	var name string
+	created, err := s.servers.PatchOrCreate(id, serverstore.Server{CreatedAt: time.Now().UTC().Format(time.RFC3339)},
+		func(sv *serverstore.Server) {
+			sv.Name = util.FirstNonEmpty(b.Name, sv.Name, b.Host)
+			sv.Host, sv.Port, sv.User = b.Host, b.Port, b.User
+			sv.Installed = mergeStrings(sv.Installed, installedProtos)
+			sv.LastJob = job.ID()
+			name = sv.Name
+		})
+	if err == nil && created {
+		job.Logf("saved “%s” to your servers list", name)
 	}
 	if err != nil {
 		job.Fail("could not save this server to your servers list",
@@ -871,7 +893,7 @@ func tail(s string, n int) string {
 func redactSecrets(out string) string {
 	lines := strings.Split(out, "\n")
 	for i, ln := range lines {
-		for _, m := range []string{"WR_CLIENT_CONFIG=", "WR_CLIENT_CONFIG_B64=", "WR_SSH_KEY_B64="} {
+		for _, m := range []string{"WR_CLIENT_CONFIG=", "WR_CLIENT_CONFIG_B64=", "WR_SSH_KEY_B64=", initserver.ShareLinkMarker} {
 			if strings.HasPrefix(strings.TrimSpace(ln), m) {
 				lines[i] = m + "<redacted>"
 				break

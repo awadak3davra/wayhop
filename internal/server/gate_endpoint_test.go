@@ -137,7 +137,7 @@ func TestGateEndpointUnsupportedPairFailsClosed(t *testing.T) {
 		{ID: "olc", Engine: model.EngineOlcRTC, Protocol: model.ProtoOlcRTC, Enabled: true},
 		{ID: "bad", Engine: model.EngineAmneziaWG, Protocol: model.ProtoVLESS, Enabled: true},
 	} {
-		s := gateSeed(t, gateCapability(platform.CapEngineOlcRTC, platform.CapUnsupportedPlatform))
+		s := gateSeed(t, gateCapability(platform.CapEngineAmneziaWG, platform.CapUnsupportedPlatform))
 		if code, _ := s.gateEndpoint(context.Background(), ep); code != http.StatusUnprocessableEntity {
 			t.Errorf("%s/%s code=%d, want 422", ep.Engine, ep.Protocol, code)
 		}

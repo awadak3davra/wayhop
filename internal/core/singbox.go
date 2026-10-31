@@ -361,6 +361,7 @@ func (s *SingBox) startLocked() error {
 		return fmt.Errorf("sing-box binary not found at %q", s.bin)
 	}
 	cmd := exec.Command(s.bin, "run", "-c", s.config)
+	dieWithDaemon(cmd) // Linux: the core does not outlive a daemon that dies uncleanly (QA-109)
 	// One writer value for both streams: os/exec then shares a single pipe and a
 	// single copier goroutine for stdout and stderr, so the strip state stays linear.
 	mw := &ansiStripWriter{w: io.MultiWriter(os.Stdout, s.log)}

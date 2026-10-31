@@ -12,7 +12,9 @@ const (
 	EngineOpenVPN   Engine = "openvpn"
 	EngineXray      Engine = "xray"
 	EngineMihomo    Engine = "mihomo"
-	EngineOlcRTC    Engine = "olcrtc"
+	// EngineOlcRTC is retired: WayHop no longer runs olcRTC (upstream ended in 2026-09). The value
+	// stays so a profile saved by an older build still loads; Apply refuses it while enabled.
+	EngineOlcRTC Engine = "olcrtc"
 	// EngineExternal routes through an existing OS interface that WayHop does
 	// NOT manage (e.g. a UCI/netifd-brought-up awg0/awg1). It becomes a sing-box
 	// `direct` outbound bound to params["interface"]; no tunnel is created.
@@ -23,6 +25,10 @@ const (
 	// the DIRECT path; the `desync` routing target installs the NFQUEUE divert
 	// separately. See docs/ARCHITECTURE_DESYNC.md in the development repository.
 	EngineNfqws Engine = "nfqws"
+	// EngineByeDPI runs ciadpi (hufrea/byedpi), a local SOCKS5 proxy that rewrites the start of each
+	// connection against DPI and sends it on from the router. A routing list reaches it as a sing-box
+	// SOCKS outbound; it has no server of its own (byedpi.go).
+	EngineByeDPI Engine = "byedpi"
 )
 
 // Protocol is the wire protocol of an endpoint.
@@ -38,9 +44,19 @@ const (
 	ProtoAnyTLS      Protocol = "anytls"
 	ProtoWireGuard   Protocol = "wireguard"
 	ProtoAmneziaWG   Protocol = "amneziawg"
-	ProtoOlcRTC      Protocol = "olcrtc"
-	ProtoSOCKS       Protocol = "socks"
-	ProtoHTTP        Protocol = "http"
+	// ProtoOpenVPN is an OpenVPN client, carried by sing-box's openvpn-client endpoint (1.14+).
+	ProtoOpenVPN Protocol = "openvpn"
+	// ProtoSnell is Surge's Snell (v4, or v6 with traffic shaping), a sing-box 1.14+ outbound.
+	ProtoSnell Protocol = "snell"
+	// ProtoOpenConnect is an OpenConnect client (AnyConnect/ocserv, GlobalProtect, Fortinet, F5, Pulse,
+	// NC), a sing-box 1.14+ endpoint.
+	ProtoOpenConnect Protocol = "openconnect"
+	// ProtoSSH is an SSH server used as an exit: sing-box's ssh outbound (1.12+) forwards each
+	// connection through it, so a VPS with only sshd needs nothing installed (ssh.go).
+	ProtoSSH    Protocol = "ssh"
+	ProtoOlcRTC Protocol = "olcrtc" // retired with EngineOlcRTC; kept so old profiles load
+	ProtoSOCKS  Protocol = "socks"
+	ProtoHTTP   Protocol = "http"
 )
 
 // TLS holds transport security settings (plain TLS, Reality, uTLS fingerprint).
@@ -60,6 +76,25 @@ type TLS struct {
 	// fragmented ClientHello would disturb its fingerprint mimicry).
 	Fragment       bool `json:"fragment,omitempty"`
 	RecordFragment bool `json:"record_fragment,omitempty"` // fragment into TLS records (sing-box: "performs better")
+	// Encrypted Client Hello (ech.go). Never with Reality: sing-box refuses the pair, so a Reality
+	// link's ech= is kept switched off, only to be exported again.
+	ECH *ECH `json:"ech,omitempty"`
+	// Certificate pins (pin.go): SHA-256 of the server's whole certificate (64 lowercase hex) and of
+	// its public key (standard base64). A pin replaces the chain-and-name check. Not used with
+	// Reality, which authenticates the server by its own key; a Reality link's pins are kept only
+	// to be exported again.
+	PinCertSHA256   []string `json:"pin_cert_sha256,omitempty"`
+	PinPubKeySHA256 []string `json:"pin_pubkey_sha256,omitempty"`
+	// Where the whole-certificate pins came from, for the Apply review (pin.go): PinCertMayBeCA when
+	// a format that also matches a CA certificate in the chain brought one (Xray's pcs=, mihomo's
+	// fingerprint), PinCertBesideChain when Hysteria's pinSHA256 did, which Hysteria checks beside the
+	// chain while certificate checks are on. Not rendered. A pin typed in the form has neither, so
+	// each flag holds while a pin it came with remains, and the ...Of list then names those pins (64
+	// lowercase hex) when they are not all of PinCertSHA256; empty means all of them.
+	PinCertMayBeCA       bool     `json:"pin_cert_may_be_ca,omitempty"`
+	PinCertBesideChain   bool     `json:"pin_cert_beside_chain,omitempty"`
+	PinCertMayBeCAOf     []string `json:"pin_cert_may_be_ca_of,omitempty"`
+	PinCertBesideChainOf []string `json:"pin_cert_beside_chain_of,omitempty"`
 }
 
 // Transport is the stream transport when not raw TCP (ws/grpc/http/httpupgrade).
@@ -69,6 +104,35 @@ type Transport struct {
 	Host        string            `json:"host,omitempty"`
 	ServiceName string            `json:"service_name,omitempty"` // grpc
 	Headers     map[string]string `json:"headers,omitempty"`
+}
+
+// Multiplex carries many connections over a few proxy connections (sing-box's outbound "multiplex",
+// the sing-mux protocol). Only the VLESS, VMess, Trojan and Shadowsocks outbounds take it, and the
+// server must accept it: a sing-box server only with multiplex enabled in that inbound (route.go
+// refuses the connection otherwise), a mihomo listener always; an Xray one (3x-ui, Marzban) drops
+// every connection. multiplex.go says what is refused and why; nil or Enabled false is off.
+type Multiplex struct {
+	Enabled bool `json:"enabled,omitempty"`
+	// Protocol is "" (h2mux, sing-box's default), "h2mux", "smux" or "yamux".
+	Protocol string `json:"protocol,omitempty"`
+	// The pool: MaxConnections with MinStreams, or MaxStreams alone (sing-box documents the two as
+	// conflicting, and sing-mux ignores MaxStreams once MaxConnections is set). With neither, only
+	// an idle connection is reused, so each concurrent stream opens its own.
+	MaxConnections int  `json:"max_connections,omitempty"`
+	MinStreams     int  `json:"min_streams,omitempty"`
+	MaxStreams     int  `json:"max_streams,omitempty"`
+	Padding        bool `json:"padding,omitempty"`
+	// Brutal is TCP Brutal congestion control: one connection at a fixed rate, the pool ignored, so
+	// the save refuses a pool beside it and the importers drop one. The server needs Linux, the
+	// tcp-brutal kernel module and brutal in its inbound's multiplex.
+	Brutal *Brutal `json:"brutal,omitempty"`
+}
+
+// Brutal is Multiplex's TCP Brutal block, rates in megabits per second.
+type Brutal struct {
+	Enabled  bool `json:"enabled,omitempty"`
+	UpMbps   int  `json:"up_mbps,omitempty"`
+	DownMbps int  `json:"down_mbps,omitempty"`
 }
 
 // Health configures an availability check (used by endpoints and groups).
@@ -86,8 +150,10 @@ type Health struct {
 //	vmess:       uuid, alter_id, security
 //	trojan:      password
 //	shadowsocks: method, password
-//	hysteria2:   password, obfs, obfs_password, up_mbps, down_mbps
+//	hysteria2:   password, obfs, obfs_password, up_mbps, down_mbps; realm, realm_stun in place of
+//	             server and port for a server reached through a Hysteria realm (hysteria2_realm.go)
 //	tuic:        uuid, password, congestion_control, udp_relay_mode
+//	hysteria2, tuic: initial_packet_size, disable_path_mtu_discovery (QUIC tuning, quic.go)
 //	wireguard:   private_key, peer_public_key, pre_shared_key, local_address, reserved
 //	amneziawg:   (wireguard keys) + jc, jmin, jmax, s1, s2, h1, h2, h3, h4
 //
@@ -174,8 +240,11 @@ type Endpoint struct {
 	Params    map[string]any `json:"params,omitempty"`
 	Transport *Transport     `json:"transport,omitempty"`
 	TLS       *TLS           `json:"tls,omitempty"`
-	Health    *Health        `json:"health,omitempty"`
-	Enabled   bool           `json:"enabled"`
+	// Multiplex is sing-mux on a VLESS, VMess, Trojan or Shadowsocks connection. nil is off and
+	// leaves an existing profile byte-identical.
+	Multiplex *Multiplex `json:"multiplex,omitempty"`
+	Health    *Health    `json:"health,omitempty"`
+	Enabled   bool       `json:"enabled"`
 	// MTU is the WireGuard/AmneziaWG link MTU. 0 = unset (omitted from output,
 	// engine default applies). Protocol-agnostic field; only meaningful for the
 	// WG-family engines, but harmless when unset for any protocol.
@@ -189,6 +258,12 @@ type Endpoint struct {
 	// can, amneziawg-go when the settings need a newer generation than it has. Only an AmneziaWG
 	// endpoint may set it (Validate); an adopted tunnel is the router's and has no such choice.
 	AWGUserspace bool `json:"awg_userspace,omitempty"`
+	// Import names the format an importer read this endpoint from ("link:vless", "clash", "singbox",
+	// "conf", "ovpn", "surge"; importer.Format*). It travels from a parse to the save that follows -
+	// the panel posts a parsed subscription back - so that importing a link again takes from it
+	// exactly what its format can express (importer.Reimport). It is never stored: the store clears
+	// it on every write, so a stored endpoint, a backup and a revision never carry it.
+	Import string `json:"import,omitempty"`
 }
 
 // GroupType selects how a group chooses among its members.
@@ -318,7 +393,19 @@ type RoutingList struct {
 	// SourceMAC member is same-L2 only. An empty/unset scope keeps today's all-clients behaviour.
 	ScopeMode   string   `json:"scope_mode,omitempty"`
 	ScopeGroups []string `json:"scope_groups,omitempty"`
+	// TLSFragment splits the TLS ClientHello of this list's DIRECT connections so a DPI box matching
+	// the server name in one packet misses it: "record" (several TLS records; sing-box's advice is to
+	// try this first) or "handshake" (several TCP segments, slower). sing-box 1.12+ route options
+	// tls_record_fragment / tls_fragment. Only a list whose outbound is direct uses it, and only for
+	// flows the core carries.
+	TLSFragment string `json:"tls_fragment,omitempty"`
 }
+
+// TLSFragment modes for RoutingList.TLSFragment.
+const (
+	TLSFragmentRecord    = "record"
+	TLSFragmentHandshake = "handshake"
+)
 
 // DeviceMember identifies one LAN device by MAC and/or IP; at least one must be set. MAC is the stable,
 // IP-independent matcher (nft `ether saddr`; same-L2 clients only), IP/CIDR is broader and survives

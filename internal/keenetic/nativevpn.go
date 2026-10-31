@@ -66,6 +66,9 @@ type WireguardOpts struct {
 	Metric      int    // `ip global N` routing priority (the failover tier; lower = preferred). 0 → 1000.
 	MTU         int    // `ip mtu`; 0 → use the endpoint's mtu param, else NDM default
 	PingProfile string // optional `ping-check profile <name>` (native health-check failover)
+	// AWGGeneration caps the AmneziaWG settings written to what this firmware release takes
+	// (CompileOptions.AWGGeneration); zero, or anything above AWGGeneration, is AWGGeneration.
+	AWGGeneration awg.Generation
 }
 
 // WireguardCommands renders the NDM command sequence that configures a native KeeneticOS
@@ -93,6 +96,14 @@ func WireguardCommands(e model.Endpoint, o WireguardOpts) ([]string, error) {
 			return nil, fmt.Errorf("endpoint %q uses AmneziaWG %s settings (%s), which `wireguard asc` has no arguments for",
 				e.ID, awg.Need(p), strings.Join(beyond, ", "))
 		}
+		// The arguments exist, but this firmware release does not take them (QA-127): KeeneticOS
+		// before 5.1 refuses the AmneziaWG 2 settings, and the whole Apply with them.
+		if o.AWGGeneration != awg.GenNone && o.AWGGeneration < AWGGeneration {
+			if beyond := awg.Beyond(p, o.AWGGeneration); len(beyond) != 0 {
+				return nil, fmt.Errorf("endpoint %q uses AmneziaWG %s settings (%s), which this KeeneticOS release's `wireguard asc` does not take",
+					e.ID, awg.Need(p), strings.Join(beyond, ", "))
+			}
+		}
 	}
 	if e.Server == "" || e.Port == 0 {
 		return nil, fmt.Errorf("endpoint %q: missing server/port", e.ID)
@@ -118,12 +129,21 @@ func WireguardCommands(e model.Endpoint, o WireguardOpts) ([]string, error) {
 	add("security-level public")
 
 	hasV6 := false
+	var v6Addrs []string
 	for _, a := range util.LocalAddrs(p) {
 		am, err := cidrToAddrMask(a)
 		if err != nil {
 			continue
 		}
-		add("ip address " + am)
+		// QA-123. An IPv6 address is not an `ip address`: KeeneticOS prints a WireGuard interface's
+		// as `ipv6 address <addr>/<len>` (read from a live KeeneticOS 5.1.8 router, `/128`, after `ip tcp
+		// adjust-mss pmtu`). `ip address <v6> 128` was sent instead; it is emitted where the router
+		// prints it, below, so the block reads back in the router's own order.
+		if addrIsV6(a) {
+			v6Addrs = append(v6Addrs, "ipv6 address "+v6Prefix(a))
+		} else {
+			add("ip address " + am)
+		}
 		// Detect v6 the SAME bare-IP-tolerant way cidrToAddrMask parses the address: a Clash
 		// import stores the ipv6 field as a bare literal (no /prefix), which ParsePrefix rejects.
 		// Using ParsePrefix alone left hasV6 false for a bare v6 address, so the `allow-ips :: 0`
@@ -132,13 +152,20 @@ func WireguardCommands(e model.Endpoint, o WireguardOpts) ([]string, error) {
 			hasV6 = true
 		}
 	}
+	// The panel's form writes the top-level fields and drops the params (one source of truth, as
+	// plugin.go reads them); reading only the params lost both on any edit (QA-038).
 	if o.MTU > 0 {
 		add("ip mtu " + strconv.Itoa(o.MTU))
+	} else if e.MTU > 0 {
+		add("ip mtu " + strconv.Itoa(e.MTU))
 	} else if m := numStr(p["mtu"]); m != "" { // mtu param may be int (JSON number) or string
 		add("ip mtu " + m)
 	}
 	add("ip global " + strconv.Itoa(metric))
 	add("ip tcp adjust-mss pmtu")
+	for _, line := range v6Addrs {
+		add(line)
+	}
 	if o.PingProfile != "" {
 		add("ping-check profile " + o.PingProfile)
 	}
@@ -151,7 +178,9 @@ func WireguardCommands(e model.Endpoint, o WireguardOpts) ([]string, error) {
 	// concatenation makes the port indistinguishable from the address, which KeeneticOS (and the
 	// module's own splitEndpoint, which uses net.SplitHostPort) mis-parses so the tunnel never dials.
 	add("    endpoint " + net.JoinHostPort(e.Server, strconv.Itoa(e.Port)))
-	if ka := numStr(p["persistent_keepalive"]); ka != "" {
+	if e.PersistentKeepalive > 0 {
+		add("    keepalive-interval " + strconv.Itoa(e.PersistentKeepalive))
+	} else if ka := numStr(p["persistent_keepalive"]); ka != "" {
 		add("    keepalive-interval " + ka)
 	}
 	if psk := str(p, "pre_shared_key"); psk != "" {
@@ -200,14 +229,26 @@ func ascArgs(p map[string]any) string {
 		}
 	}
 	if hasExt {
-		// Fill any EMPTY ext slot with "0" so the positional order survives strings.Join:
-		// a partial 2.0 set (e.g. I1-I5 present but S3/S4 absent) would otherwise leave empty
-		// tokens that collapse into the surrounding spaces when NDM whitespace-tokenizes the
-		// `wireguard asc` line, shifting every following value into the wrong slot (I1 binding
-		// to the S3 position). "0" is the AWG default for the junk-size params (S3/S4) and a
-		// safe alignment filler for an unspecified magic header.
-		for i := range ext {
-			if ext[i] == "" {
+		// Fill any EMPTY ext slot so the positional order survives strings.Join: a partial 2.0
+		// set (e.g. I1-I5 present but S3/S4 absent) would otherwise leave empty tokens that
+		// collapse into the surrounding spaces when NDM whitespace-tokenizes the `wireguard asc`
+		// line, shifting every following value into the wrong slot (I1 binding to the S3
+		// position). "0" is the AWG default for the junk-size params (S3/S4). An unset I1-I5 is an
+		// empty string, which KeeneticOS writes as `""` (QA-124: a live KeeneticOS 5.1.8 router prints
+		// its 2.0 interfaces as `wireguard asc <9 base> <s3> <s4> "" "" "" "" ""`); "0" there is a
+		// value the operator never set, and not what the router reads back for an unset one.
+		//
+		// A set I1-I5 is a packet description such as `<b 0x…>`, with spaces in it. Sent bare, NDM
+		// splits it into several arguments and every later value lands in the wrong slot (QA-125).
+		// It is quoted the way the router prints a value with spaces (`description "<name>"`; the
+		// same router quotes every such value in its configuration).
+		for i, key := range ascExt {
+			switch {
+			case ext[i] != "" && strings.HasPrefix(key, "i"):
+				ext[i] = ndmQuote(ext[i])
+			case ext[i] == "" && strings.HasPrefix(key, "i"):
+				ext[i] = `""`
+			case ext[i] == "":
 				ext[i] = "0"
 			}
 		}
@@ -238,6 +279,19 @@ func cidrToAddrMask(cidr string) (string, error) {
 		return pfx.Addr().String() + " " + net.IP(mask).String(), nil
 	}
 	return pfx.Addr().String() + " " + strconv.Itoa(pfx.Bits()), nil
+}
+
+// v6Prefix renders an IPv6 interface address the way `ipv6 address` takes it, `<addr>/<len>`; a bare
+// address (the Clash form, see addrIsV6) is a /128. The address is kept as given, not masked.
+func v6Prefix(s string) string {
+	s = strings.TrimSpace(s)
+	if pfx, err := netip.ParsePrefix(s); err == nil {
+		return pfx.String()
+	}
+	if a, err := netip.ParseAddr(s); err == nil {
+		return netip.PrefixFrom(a, 128).String()
+	}
+	return s
 }
 
 // addrIsV6 reports whether a WireGuard local address is IPv6, tolerating both the CIDR form

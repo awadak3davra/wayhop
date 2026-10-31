@@ -108,8 +108,30 @@ if (goFiles.length === 0) {
   process.exit(2);
 }
 
+// gofmt over that list in pieces. Windows refuses a command line over 32,767 characters, and the
+// list crossed it in October 2026 (991 files, 34.8 KB): the gate failed with ENAMETOOLONG before
+// gofmt ran. Each piece sees exactly the listed files, so the gate holds the same tree; the gate's
+// definition below stays one command, which is what check-gate-parity compares with CI.
+function gofmtInPieces(files) {
+  const out = [], errs = [];
+  let status = 0;
+  for (let i = 0; i < files.length;) {
+    const piece = [];
+    for (let len = 0; i < files.length && len + files[i].length + 1 < 24000; i++) {
+      len += files[i].length + 1;
+      piece.push(files[i]);
+    }
+    const r = spawnSync('gofmt', ['-l', ...piece], { encoding: 'utf8', env, shell: false });
+    if (r.error) return r;
+    if (r.status !== 0 && status === 0) status = r.status;
+    out.push(r.stdout || '');
+    errs.push(r.stderr || '');
+  }
+  return { status, stdout: out.join(''), stderr: errs.join('') };
+}
+
 const checks = [
-  { name: 'gofmt', cmd: 'gofmt', args: ['-l', ...goFiles],
+  { name: 'gofmt', cmd: 'gofmt', args: ['-l', ...goFiles], run: () => gofmtInPieces(goFiles),
     // gofmt exits 0 even when it lists unformatted files; the FILE LIST is the failure signal.
     ok: (r) => r.status === 0 && r.stdout.trim() === '',
     detail: (r) => (r.stdout.trim() ? `unformatted:\n${r.stdout.trim()}` : '') },
@@ -136,12 +158,13 @@ const checks = [
   // two can drift silently, and they did: a translation pass was merged, committed and deployed while
   // every language served stayed three days old, because regenerating was a step someone had to
   // remember. `--check` makes it a fact the suite asserts rather than a habit.
-  // One per shipped dictionary plus the meta file: 10 today, after the CJK/Indic/Arabic dictionaries
-  // were retired and the list was cut to the markets WayHop serves. Move it with web/i18n/langs.json,
+  // One per shipped dictionary plus the meta file: 11 today. The CJK/Indic/Arabic dictionaries were
+  // retired when the list was cut to the markets WayHop serves; Simplified Chinese (zh-CN) came back
+  // as a complete dictionary. Move it with web/i18n/langs.json,
   // never to make a red run green — the floor is here so a generator that quietly stops writing
   // dictionaries fails instead of reporting a smaller success.
   { name: 'i18n reproducible', cmd: 'node', args: ['scripts/i18n-generate.mjs', '--check'],
-    evidence: { re: /(\d+) generated file\(s\) match/, min: 10, what: 'generated dictionaries matched to source' } },
+    evidence: { re: /(\d+) generated file\(s\) match/, min: 11, what: 'generated dictionaries matched to source' } },
   { name: 'a11y', cmd: 'node', args: ['scripts/check-a11y.mjs'] },
   { name: 'interaction regressions', cmd: 'node', args: ['scripts/check-interaction-fixes.mjs'],
     evidence: { re: /interaction regressions OK: (\d+) assertions/, min: 20,
@@ -229,6 +252,11 @@ const checks = [
   // parsing plus capability-conditional signature refusal before install.sh can run.
   { name: 'bootstrap trust', cmd: 'sh', args: ['packaging/test/bootstrap_harness.sh'],
     evidence: { re: /(\d+) passed, 0 failed/, min: 19, what: 'bootstrap trust and handoff cases' } },
+  // Re-running the OpenWrt tarball installer is how a router upgrades, and the overlay it upgrades
+  // on is small: these cases fill it to either side of each threshold, seed what earlier installs
+  // left behind, and check the binary, the rollback copy and the daemon on the port after each.
+  { name: 'openwrt upgrade space', cmd: 'sh', args: ['packaging/test/openwrt_upgrade_harness.sh'],
+    evidence: { re: /case runs passed \((\d+) checks\)/, min: 100, what: 'tarball upgrade, cleanup and rollback-supervisor checks on OpenWrt 25.12, 24.10 and Entware' } },
   // Entware's stock rc.func discards daemon stdout/stderr. The shipped Keenetic init script owns
   // that lifecycle so startup recovery and native-adapter failures reach the native system log.
   { name: 'keenetic init logging', cmd: 'sh', args: ['packaging/test/s99wayhop_harness.sh'],
@@ -387,12 +415,13 @@ if (uiURL) {
   // One browser, language switched through localStorage exactly as the Settings selector does, with
   // English measured first so a control that already clips is the layout's fault and not counted
   // against fifteen languages.
-  // The floor is the shipped set minus the English baseline (web/i18n/langs.json): 9 today, after the
-  // CJK/Indic/Arabic dictionaries were retired and the list was cut to the markets WayHop serves. It
+  // The floor is the shipped set minus the English baseline (web/i18n/langs.json): 10 today. The
+  // CJK/Indic/Arabic dictionaries were retired when the list was cut to the markets WayHop serves, and
+  // Simplified Chinese (zh-CN) came back complete. It
   // is here so a gate that quietly stops measuring languages fails — move it with langs.json, never to
   // make a red run green.
   checks.push({ name: 'language fit', cmd: 'node', args: ['scripts/ui-lang-fit.mjs', uiURL],
-    evidence: { re: /(\d+) languages, \d+ routes/, min: 9, what: 'languages rendered and measured' } });
+    evidence: { re: /(\d+) languages, \d+ routes/, min: 10, what: 'languages rendered and measured' } });
   // The other end, and the bigger hole. The widths every gate above renders at were collected rather
   // than assumed: 1280 for all of them, plus 375-1040 in `narrow viewport`. NOTHING looked above
   // 1280, while the operator's viewport is 1883px and `.app` runs to 1720 — so the whole regime the
@@ -539,7 +568,7 @@ for (const c of checks) {
   if (!matches(c)) continue;
   process.stdout.write(`… ${c.name}`.padEnd(24));
   const started = process.hrtime.bigint();
-  let r = spawnSync(c.cmd, c.args, { encoding: 'utf8', env: { ...env, ...(c.env || {}) }, shell: false });
+  let r = c.run ? c.run() : spawnSync(c.cmd, c.args, { encoding: 'utf8', env: { ...env, ...(c.env || {}) }, shell: false });
   let secs = Number(process.hrtime.bigint() - started) / 1e9;
 
   // One retry, and ONLY for a gate that died before running anything.

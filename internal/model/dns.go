@@ -20,7 +20,7 @@ import (
 // documented in validate.go's group-member check.
 type DNSServer struct {
 	Tag            string `json:"tag"`
-	Type           string `json:"type"`                      // https|tls|quic|h3|udp|tcp|local|fakeip
+	Type           string `json:"type"`                      // https|tls|quic|h3|udp|tcp|local|fakeip|openvpn|openconnect
 	Server         string `json:"server,omitempty"`          // IP literal or hostname; empty for local/fakeip
 	ServerPort     int    `json:"server_port,omitempty"`     // 0 = protocol default (443 DoH/DoQ, 853 DoT, 53 plain)
 	Path           string `json:"path,omitempty"`            // DoH path; "" = /dns-query
@@ -29,7 +29,14 @@ type DNSServer struct {
 	DomainResolver string `json:"domain_resolver,omitempty"` // bootstrap server tag; REQUIRED when Server is a hostname
 	Inet4Range     string `json:"inet4_range,omitempty"`     // fakeip v4 pool (e.g. 198.18.0.0/15)
 	Inet6Range     string `json:"inet6_range,omitempty"`     // fakeip v6 pool
-	Enabled        bool   `json:"enabled"`
+	// The openvpn and openconnect types (sing-box 1.14+, dns/server/openvpn.md and openconnect.md) ask
+	// the resolvers a VPN connection's server pushes, through that connection's tunnel. Endpoint is the
+	// connection; the two switches are sing-box's own. Unset on every other type, so a resolver that is
+	// not one of these marshals exactly as before.
+	Endpoint               string `json:"endpoint,omitempty"`                 // id of the OpenVPN/OpenConnect connection
+	AcceptDefaultResolvers bool   `json:"accept_default_resolvers,omitempty"` // also answer names outside the pushed domains
+	AcceptSearchDomain     bool   `json:"accept_search_domain,omitempty"`     // retry a single-label name with each pushed search domain
+	Enabled                bool   `json:"enabled"`
 }
 
 // DNSRule steers matching queries to a specific DNSServer (or rejects them for DNS-level adblock). It
@@ -86,6 +93,7 @@ var (
 	validDNSServerTypes = map[string]bool{
 		"https": true, "tls": true, "quic": true, "h3": true,
 		"udp": true, "tcp": true, "local": true, "fakeip": true,
+		"openvpn": true, "openconnect": true,
 	}
 	encryptedDNSTypes  = map[string]bool{"https": true, "tls": true, "quic": true, "h3": true}
 	plaintextDNSTypes  = map[string]bool{"udp": true, "tcp": true}
@@ -93,10 +101,26 @@ var (
 	validDNSStrategies = map[string]bool{
 		"": true, "prefer_ipv4": true, "prefer_ipv6": true, "ipv4_only": true, "ipv6_only": true,
 	}
+	// vpnDNSTypes are the types that ask a VPN connection's pushed resolvers, keyed to the protocol of
+	// the connection each needs. They carry no address and no detour: the query goes through that
+	// connection's tunnel to whatever its server pushed (OpenVPN `dhcp-option DNS`/`dns server`,
+	// OpenConnect's DNS and split-DNS), so the WAN sees only the tunnel. That is not encryption to the
+	// resolver - past the VPN server it is usually plain DNS - which is why they are in neither set
+	// above: leak protection does not refuse them (nothing reaches the ISP's path in the clear), and
+	// nothing counts them as an encrypted default either.
+	vpnDNSTypes = map[string]Protocol{"openvpn": ProtoOpenVPN, "openconnect": ProtoOpenConnect}
 )
 
 // isEncryptedDNSType reports whether a server type keeps the query content encrypted end-to-end.
 func isEncryptedDNSType(t string) bool { return encryptedDNSTypes[t] }
+
+// IsVPNDNSType reports whether a DNS server type asks the resolvers a VPN connection pushes (openvpn,
+// openconnect). The generator, the DNS audit and the Keenetic backend all need to tell these apart
+// from a resolver with an address, and they ask here so the set has one home.
+func IsVPNDNSType(t string) bool {
+	_, ok := vpnDNSTypes[strings.ToLower(strings.TrimSpace(t))]
+	return ok
+}
 
 // IsEncryptedDNSType is the exported form. Two places outside this package must ask the SAME question
 // and had each written their own list: the Keenetic backend, deciding whether the DNS plane needs the
@@ -105,6 +129,36 @@ func isEncryptedDNSType(t string) bool { return encryptedDNSTypes[t] }
 // drift silently changes whether a router starts its core at all.
 func IsEncryptedDNSType(t string) bool {
 	return isEncryptedDNSType(strings.ToLower(strings.TrimSpace(t)))
+}
+
+// DefaultServer returns the server that answers a query no DNS rule matched, as the generated core
+// will run it, or nil when the plane emits no server at all. tun says whether the core is generated
+// with its TUN inbound, the only plane that keeps fakeip servers.
+//
+// That is Final when the generator emits it. Otherwise it is the first server the generator emits:
+// with no `final`, sing-box 1.12 makes the first DNS transport it creates the default
+// (dns/transport_manager.go), and the generator emits servers in order, dropping disabled ones and,
+// without TUN, fakeip ones (generator.dnsFrom). The leak checks used to read an empty Final as "no
+// default" and skip themselves, while sing-box sent every unmatched lookup to servers[0]: a plaintext
+// `local` resolver passed leak protection and the Apply gate that refuse it by name (QA-105).
+func (d *DNSSettings) DefaultServer(tun bool) *DNSServer {
+	if d == nil {
+		return nil
+	}
+	emitted := func(s *DNSServer) bool { return s.Enabled && (tun || s.Type != "fakeip") }
+	if d.Final != "" {
+		for i := range d.Servers {
+			if s := &d.Servers[i]; s.Tag == d.Final && emitted(s) {
+				return s
+			}
+		}
+	}
+	for i := range d.Servers {
+		if s := &d.Servers[i]; emitted(s) {
+			return s
+		}
+	}
+	return nil
 }
 
 // dnsNamespace builds the id→kind and id→enabled maps validateDNS resolves against — the same
@@ -149,7 +203,7 @@ func (p *Profile) ValidateDNS() error {
 		return nil
 	}
 	ids, enabled := p.dnsNamespace()
-	return validateDNS(p.DNS, ids, enabled)
+	return validateDNS(p.DNS, ids, enabled, p.Endpoints)
 }
 
 // validateDNS checks the DNS plane: unique server tags, known types/strategy, a server address for
@@ -159,7 +213,7 @@ func (p *Profile) ValidateDNS() error {
 // endpoint/group namespace, rule_sets against RoutingLists. Fail-safe: a bricking value is rejected
 // so Apply fails cleanly with a precise error rather than emitting a config sing-box would fatal.
 // DNS is greenfield (nil for every existing profile), so a strict check here can't brick legacy data.
-func validateDNS(dns *DNSSettings, ids map[string]string, enabled map[string]bool) error {
+func validateDNS(dns *DNSSettings, ids map[string]string, enabled map[string]bool, eps []Endpoint) error {
 	if !validDNSStrategies[dns.Strategy] {
 		return fmt.Errorf("dns: unknown strategy %q", dns.Strategy)
 	}
@@ -169,6 +223,7 @@ func validateDNS(dns *DNSSettings, ids map[string]string, enabled map[string]boo
 	tags := map[string]bool{}
 	serverEnabled := map[string]bool{}
 	serverType := map[string]string{}
+	vpnServerOf := map[string]string{} // connection id -> the enabled VPN DNS server already using it
 	for i := range dns.Servers {
 		s := &dns.Servers[i]
 		if strings.TrimSpace(s.Tag) == "" {
@@ -185,6 +240,11 @@ func validateDNS(dns *DNSSettings, ids map[string]string, enabled map[string]boo
 		}
 		if dns.LeakProof && plaintextDNSTypes[s.Type] {
 			return fmt.Errorf("dns server %q: plaintext %s is not allowed with leak protection (use https/tls/quic)", s.Tag, s.Type)
+		}
+		if proto, vpn := vpnDNSTypes[s.Type]; vpn && s.Enabled {
+			if err := validateVPNDNSServer(s, proto, eps, vpnServerOf); err != nil {
+				return err
+			}
 		}
 		if networkDNSTypes[s.Type] {
 			if strings.TrimSpace(s.Server) == "" {
@@ -258,7 +318,9 @@ func validateDNS(dns *DNSSettings, ids map[string]string, enabled map[string]boo
 		// A/AAAA lookup. Worse, a fakeip target is DROPPED by the generator in fast/mixed mode (no TUN),
 		// leaving a dangling domain_resolver reference `sing-box check` FATALs on, taking down all
 		// routing. Reject it here (mode-independent), mirroring dnsDefaultResolverTag's fakeip skip.
-		if t := serverType[dr]; t == "fakeip" || t == "local" {
+		// A VPN's pushed resolvers answer only while that connection is up, and by default only its own
+		// domains: a bootstrap through them leaves the upstream unreachable whenever the VPN is down.
+		if t := serverType[dr]; t == "fakeip" || t == "local" || IsVPNDNSType(t) {
 			return fmt.Errorf("dns server %q: domain_resolver %q targets a %s server, which cannot bootstrap a hostname (use an https/tls/quic/udp resolver)", s.Tag, s.DomainResolver, t)
 		}
 	}
@@ -274,11 +336,45 @@ func validateDNS(dns *DNSSettings, ids map[string]string, enabled map[string]boo
 	if dns.Final != "" && !tags[dns.Final] {
 		return fmt.Errorf("dns: final %q is not a defined server tag", dns.Final)
 	}
+	// A VPN's pushed resolvers cannot be the default: sing-box answers NXDOMAIN for every name they do
+	// not cover and for every name while the connection is down (measured on 1.14.4 and 1.15.0-alpha.13
+	// with the VPN unreachable), so as the default they would take all browsing down with the VPN. They
+	// are a rule target, for the VPN's own domains.
+	if IsVPNDNSType(serverType[dns.Final]) {
+		return fmt.Errorf("dns: the default resolver %q only answers names its VPN connection pushes, and nothing while it is down; choose another default and send the VPN's domains to %q with a DNS rule", dns.Final, dns.Final)
+	}
+	// Whatever Final says, the server that really answers unmatched names is held to the same rule, on
+	// both planes: with no final, or with one the generator leaves out (a FakeIP final in fast or mixed
+	// mode, a switched-off one), sing-box takes the first server emitted (DefaultServer; 1.14.4
+	// dns/transport_manager.go), and that can be a VPN's.
+	for _, tun := range []bool{false, true} {
+		def := dns.DefaultServer(tun)
+		if def == nil || !IsVPNDNSType(def.Type) {
+			continue
+		}
+		why := "no default resolver is chosen"
+		if dns.Final != "" {
+			why = fmt.Sprintf("the default resolver %q is switched off", dns.Final)
+			if serverType[dns.Final] == "fakeip" && serverEnabled[dns.Final] {
+				why = fmt.Sprintf("the default resolver %q is FakeIP, which is left out in fast and mixed mode", dns.Final)
+			}
+		}
+		return fmt.Errorf("dns: %s, so the first resolver %q would answer every name no rule matches, and it only answers names its VPN connection pushes; choose a default resolver that is always kept, or put another resolver first", why, def.Tag)
+	}
 	if dns.LeakProof && dns.Final != "" {
 		for i := range dns.Servers {
 			if dns.Servers[i].Tag == dns.Final && !isEncryptedDNSType(dns.Servers[i].Type) {
 				return fmt.Errorf("dns: leak protection requires an ENCRYPTED final resolver, but %q is %q", dns.Final, dns.Servers[i].Type)
 			}
+		}
+	}
+	// No final chosen: the first emitted server is the default (DefaultServer), and leak protection
+	// holds it to the same rule as a named final (QA-105). Judged as generated without TUN, where a
+	// leading fakeip server is dropped and the resolver behind it answers; with TUN a leading fakeip
+	// server answers instead and sends no query anywhere, so this is the case that can leak.
+	if dns.LeakProof && dns.Final == "" {
+		if def := dns.DefaultServer(false); def != nil && !isEncryptedDNSType(def.Type) {
+			return fmt.Errorf("dns: leak protection requires an ENCRYPTED default resolver, but none is chosen, so the first resolver %q (%s) answers every query no rule matches; choose an encrypted default resolver", def.Tag, def.Type)
 		}
 	}
 	// The `final` must name an ENABLED server. The generator DROPS a disabled server and, with it, a
@@ -330,4 +426,106 @@ func validateDNS(dns *DNSSettings, ids map[string]string, enabled map[string]boo
 func dnsRuleHasNoMatcher(r *DNSRule) bool {
 	return !hasNonBlank(r.RuleSets) && !hasNonBlank(r.DomainSuffix) && !hasNonBlank(r.Domain) &&
 		!hasNonBlank(r.GeoSite) && !hasNonBlank(r.QueryType)
+}
+
+// validateVPNDNSServer checks an ENABLED openvpn/openconnect DNS server against the connection it
+// names. Every refusal here is one `sing-box check` lets through and `sing-box run` then dies on at
+// startup, taking every connection down with it (measured on 1.14.4 and 1.15.0-alpha.13: check passes,
+// run fails "endpoint not found", "endpoint is not OpenConnect", "only one DNS server is allowed for
+// an endpoint"). A disabled server is emitted nowhere, so it is left alone: that is what lets a
+// connection be deleted or switched off with its resolver parked rather than lost.
+//
+// seen maps a connection to the server already using it; this function adds s to it.
+func validateVPNDNSServer(s *DNSServer, proto Protocol, eps []Endpoint, seen map[string]string) error {
+	id := strings.TrimSpace(s.Endpoint)
+	if id == "" {
+		return fmt.Errorf("dns server %q (%s): choose the %s connection whose pushed resolvers it asks", s.Tag, s.Type, proto)
+	}
+	e, fault := vpnResolverFault(proto, id, eps)
+	switch fault {
+	case vpnFaultMissing:
+		return unresolvedRef("DNS server", s.Tag, id, "dns server %q: connection %q does not exist", s.Tag, id)
+	case vpnFaultProtocol:
+		return fmt.Errorf("dns server %q (%s): connection %q is %s, not %s", s.Tag, s.Type, id, e.Protocol, proto)
+	case vpnFaultEngine:
+		return fmt.Errorf("dns server %q: connection %q is not run by the proxy core, so its pushed resolvers cannot be asked", s.Tag, id)
+	case vpnFaultOff:
+		return disabledRef("DNS server", s.Tag, id, "dns server %q: connection %q is switched off; switch it on, or switch this resolver off", s.Tag, id)
+	}
+	if other, taken := seen[id]; taken {
+		return fmt.Errorf("dns servers %q and %q both ask connection %q; the proxy core allows one DNS server per connection", other, s.Tag, id)
+	}
+	seen[id] = s.Tag
+	return nil
+}
+
+// Why a connection cannot serve a DNS server that asks its pushed resolvers.
+const (
+	vpnFaultNone     = iota
+	vpnFaultMissing  // no connection has that id
+	vpnFaultProtocol // it is another protocol than the server's type
+	vpnFaultEngine   // the proxy core does not run it, so there is no endpoint to name
+	vpnFaultOff      // it is switched off, so it is not emitted
+)
+
+// vpnResolverFault finds connection id and says whether it can serve a DNS server needing proto.
+func vpnResolverFault(proto Protocol, id string, eps []Endpoint) (*Endpoint, int) {
+	for i := range eps {
+		e := &eps[i]
+		if e.ID != id {
+			continue
+		}
+		switch {
+		case e.Protocol != proto:
+			return e, vpnFaultProtocol
+		case e.Engine != EngineSingBox:
+			return e, vpnFaultEngine
+		case !e.Enabled:
+			return e, vpnFaultOff
+		}
+		return e, vpnFaultNone
+	}
+	return nil, vpnFaultMissing
+}
+
+// StrandedVPNResolver is an ENABLED DNS server asking a VPN connection's pushed resolvers whose
+// connection can no longer serve it. Why completes "connection <Endpoint> ...".
+type StrandedVPNResolver struct {
+	Tag, Endpoint, Why string
+}
+
+// StrandedVPNResolvers lists them. The store asks before every write: an edit to a connection (its
+// protocol, its engine, switching it off, deleting it - by hand, by a bulk import or by a subscription
+// refresh) that leaves one stranded would make every later Apply fail, and the DNS page could then not
+// switch the resolver off in one step while a DNS rule still targets it. The same faults validation
+// refuses (validateVPNDNSServer), in one list rather than the first error.
+func StrandedVPNResolvers(p *Profile) []StrandedVPNResolver {
+	if p.DNS == nil {
+		return nil
+	}
+	var out []StrandedVPNResolver
+	for i := range p.DNS.Servers {
+		s := &p.DNS.Servers[i]
+		proto, vpn := vpnDNSTypes[s.Type]
+		id := strings.TrimSpace(s.Endpoint)
+		if !vpn || !s.Enabled || id == "" {
+			continue
+		}
+		e, fault := vpnResolverFault(proto, id, p.Endpoints)
+		why := ""
+		switch fault {
+		case vpnFaultMissing:
+			why = "would no longer exist"
+		case vpnFaultProtocol:
+			why = fmt.Sprintf("would be %s, not %s", e.Protocol, proto)
+		case vpnFaultEngine:
+			why = "would not be run by the proxy core"
+		case vpnFaultOff:
+			why = "would be switched off"
+		default:
+			continue
+		}
+		out = append(out, StrandedVPNResolver{Tag: s.Tag, Endpoint: id, Why: why})
+	}
+	return out
 }

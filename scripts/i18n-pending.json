@@ -22,7 +22,6 @@
     "Supported through the optional sing-box compatibility add-on.",
     "Router support is not verified yet. Retry the capability check.",
     "This connection type is unavailable on this router.",
-    "Supported: VLESS · VMess · Trojan · AnyTLS · Shadowsocks · Hysteria2 · TUIC · WireGuard · AmneziaWG",
     "Demo mode: this connection is saved for interface preview; no router connection is activated.",
     "{0} without an update channel",
     "the installed package is not offered by any configured repository",
@@ -43,7 +42,6 @@
     "This package was installed locally. WayHop will not overwrite a package-owned binary or pretend that a no-op is an update.",
     "The installed package is newer than the package catalog. No downgrade is offered.",
     "A package update is available.",
-    "WayHop cannot safely replace its own package from inside the running service yet. Use the package manager over SSH for this update.",
     "Automatic WayHop updates are controlled by the package manager for this installation.",
     "No configured repository offers this package.",
     "The installed binary is kept untouched because the package manager has no replacement for it.",
@@ -55,7 +53,7 @@
     "Repaired adoption metadata for {0}",
     "Text to copy",
     "No VPN connections added",
-    "No proxy engine is installed. sing-box is required for VLESS, VMess, Trojan and SOCKS exits; AmneziaWG and olcRTC run as plugins.",
+    "No proxy engine is installed. sing-box is required for VLESS, VMess, Trojan and SOCKS exits; AmneziaWG runs as a plugin.",
     "Import from the router →",
     "Install an engine →",
     "No changes",
@@ -351,6 +349,8 @@
     "Automatic: the router's own AmneziaWG when it can carry these settings",
     "amneziawg-go: the newest AmneziaWG, in userspace",
     "AmneziaWG engine",
-    "amneziawg-go must be installed on the Components page. It is slower than the router's own AmneziaWG and holds 60-120 MB of RAM under load; the Apply review says which one each connection runs on."
+    "amneziawg-go must be installed on the Components page. It is slower than the router's own AmneziaWG and holds 60-120 MB of RAM under load; the Apply review says which one each connection runs on.",
+    "Server public-key pin",
+    "sing-box 1.13 and later accept the server only if its public key matches, even with insecure TLS allowed. If the server's certificate changed, remove it and clear the certificate pin too, or run Set up Server again."
   ]
 }

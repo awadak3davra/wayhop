@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -205,6 +206,57 @@ func TestHandleRoutingRefresh(t *testing.T) {
 	}
 	if c := cacheOf(t, s, "ru"); !slices.Equal(c, []string{"1.1.1.0/24", "2.2.2.0/24"}) {
 		t.Errorf("cache not persisted: %v", c)
+	}
+}
+
+// QA-032: naming one list refreshes that list only, and its failure is the one reported - not a
+// failing neighbour's.
+func TestHandleRoutingRefresh_OneList(t *testing.T) {
+	s, _ := sharehandlers_server(t)
+	s.allowInternalFetch = true
+	good := feedServer(t, "1.1.1.0/24\n")
+	other := feedServer(t, "2.2.2.0/24\n")
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer bad.Close()
+	for _, rl := range []model.RoutingList{
+		{ID: "new", Name: "new", CIDRSource: good.URL, Outbound: "direct", Enabled: true},
+		{ID: "other", Name: "other", CIDRSource: other.URL, Outbound: "direct", Enabled: true},
+		{ID: "broken", Name: "broken", CIDRSource: bad.URL, Outbound: "direct", Enabled: true},
+	} {
+		if err := s.store.UpsertRoutingList(rl); err != nil {
+			t.Fatal(err)
+		}
+	}
+	post := func(body string) []string {
+		rec := httptest.NewRecorder()
+		s.handleRoutingRefresh(rec, httptest.NewRequest("POST", "/api/routing/refresh", strings.NewReader(body)))
+		var resp struct {
+			Errors []string `json:"errors"`
+		}
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &resp) != nil {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		return resp.Errors
+	}
+	if errs := post(`{"id":"new"}`); len(errs) != 0 {
+		t.Errorf("one good list: errors %v, want none (the broken neighbour is not this list's answer)", errs)
+	}
+	if c := cacheOf(t, s, "new"); !slices.Equal(c, []string{"1.1.1.0/24"}) {
+		t.Errorf("new cache = %v", c)
+	}
+	if c := cacheOf(t, s, "other"); len(c) != 0 {
+		t.Errorf("other list was refreshed too: %v", c)
+	}
+	if errs := post(`{"id":"broken"}`); len(errs) != 1 {
+		t.Errorf("broken list: errors %v, want its own failure", errs)
+	}
+	if errs := post(`{"id":"nope"}`); len(errs) != 1 || !strings.Contains(errs[0], "no such list") {
+		t.Errorf("unknown id: errors %v", errs)
+	}
+	if errs := post(`{}`); len(errs) != 1 || len(cacheOf(t, s, "other")) != 1 {
+		t.Errorf("empty body must still refresh all: errors %v, other cache %v", errs, cacheOf(t, s, "other"))
 	}
 }
 

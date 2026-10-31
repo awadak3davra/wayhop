@@ -158,7 +158,7 @@ func TestApplyState_CorruptRecordIsToleratedAndInFlightDiscardedOnBoot(t *testin
 	s.setInFlight(false, "abc")
 	applystate_apply(t, s, false)
 	again := &Server{cfg: s.cfg, store: s.store, applyStateDir: s.applyStateDir}
-	if !again.discardLiveOnBoot() {
+	if !again.discardLiveOnBoot(false) {
 		t.Fatal("boot must report the discarded live/in-flight state")
 	}
 	rec, _ := again.applyStateSnapshot()
@@ -166,7 +166,7 @@ func TestApplyState_CorruptRecordIsToleratedAndInFlightDiscardedOnBoot(t *testin
 		t.Fatalf("after boot: %+v", rec)
 	}
 	third := &Server{cfg: s.cfg, store: s.store, applyStateDir: s.applyStateDir}
-	if third.discardLiveOnBoot() {
+	if third.discardLiveOnBoot(false) {
 		t.Fatal("a second boot has nothing to discard")
 	}
 }
@@ -395,5 +395,20 @@ func TestDesiredProfileRequestsNoDatapathCoversEveryProfileField(t *testing.T) {
 		if desiredProfileRequestsNoDatapath(profile) {
 			t.Fatalf("a profile carrying one %s reported no datapath", name)
 		}
+	}
+}
+
+// A kill between the temp's creation and its rename leaves a full copy of the record beside it, and
+// nothing removed it: every crash in that window added another. Loading the record sweeps them; no
+// write of the record can be in flight then, because every write first loads it under the same lock.
+func TestApplyState_LoadSweepsTempsACrashLeftBehind(t *testing.T) {
+	s := applystate_server(t)
+	orphan := filepath.Join(s.applyStateDir, applyStateFileName+".123456.tmp")
+	if err := os.WriteFile(orphan, []byte(`{"schema":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.applyStateSnapshot()
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("an orphaned apply-state temp survived the load: %v", err)
 	}
 }

@@ -6,7 +6,7 @@ const miB = 1 << 20
 
 func TestEnoughMemForUpdate(t *testing.T) {
 	const gz = "sing-box-linux-arm64.tar.gz" // compressed -> 3x unpacked
-	const bare = "olcrtc-linux-arm64"        // bare binary -> 1x
+	const bare = "amneziawg-go-linux-arm64"  // bare binary -> 1x
 	cases := []struct {
 		name      string
 		avail     uint64
@@ -22,9 +22,9 @@ func TestEnoughMemForUpdate(t *testing.T) {
 		{"sing-box allowed (128 MiB avail)", 128 * miB, true, 25 * miB, gz, true},
 		// wayhop self-update .tar.gz: 6 MiB -> 18 unpacked + 16 = 34 MiB.
 		{"self-update allowed (38 MiB avail, ~34 need)", 38 * miB, true, 6 * miB, gz, true},
-		// bare binary is NOT tripled: 27 MiB olcrtc -> 27 + 16 = 43 MiB (not ~97).
-		{"bare olcrtc allowed (50 MiB avail, ~43 need)", 50 * miB, true, 27 * miB, bare, true},
-		{"bare olcrtc blocked (40 MiB avail, ~43 need)", 40 * miB, true, 27 * miB, bare, false},
+		// bare binary is NOT tripled: 27 MiB bare binary -> 27 + 16 = 43 MiB (not ~97).
+		{"bare binary allowed (50 MiB avail, ~43 need)", 50 * miB, true, 27 * miB, bare, true},
+		{"bare binary blocked (40 MiB avail, ~43 need)", 40 * miB, true, 27 * miB, bare, false},
 		{"exact boundary allowed", updateMemNeed(10*miB, gz), true, 10 * miB, gz, true},
 		{"one byte under blocks", updateMemNeed(10*miB, gz) - 1, true, 10 * miB, gz, false},
 	}
@@ -42,7 +42,7 @@ func TestUpdateMemNeed(t *testing.T) {
 		t.Errorf("updateMemNeed(10 MiB gz) = %d, want %d", got, want)
 	}
 	// bare: 1x + 16 MiB (matches the disk fix — a raw binary is already unpacked).
-	if got, want := updateMemNeed(10*miB, "olcrtc-linux-arm64"), uint64(10*miB)+(16*miB); got != want {
+	if got, want := updateMemNeed(10*miB, "amneziawg-go-linux-arm64"), uint64(10*miB)+(16*miB); got != want {
 		t.Errorf("updateMemNeed(10 MiB bare) = %d, want %d", got, want)
 	}
 }
@@ -58,7 +58,7 @@ func TestUpdateMemGate_DeviceReport(t *testing.T) {
 		asset string
 	}{
 		{"sing-box (~25 MiB .tar.gz)", 25 * miB, "sing-box-linux-arm64.tar.gz"},
-		{"olcRTC (~27 MiB bare)", 27 * miB, "olcrtc-linux-arm64"},
+		{"amneziawg-go (~27 MiB bare)", 27 * miB, "amneziawg-go-linux-arm64"},
 		{"wayhop self-update (~6 MiB .tar.gz)", 6 * miB, "wayhop-arm64.tar.gz"},
 	} {
 		allowed := enoughMemForUpdate(avail, ok, c.size, c.asset)

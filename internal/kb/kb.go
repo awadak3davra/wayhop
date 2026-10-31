@@ -33,7 +33,7 @@ var entries = []Entry{
 		ID: "sb-tun-invalid-arg", Engine: "sing-box", Pattern: `configure tun interface:.*invalid argument`,
 		Title:       "TUN interface rejected (invalid argument)",
 		Explanation: "The kernel rejected the TUN configuration — typically the tun module isn't loaded or an option is unsupported on this kernel/platform.",
-		Fix:         "Ensure `/dev/net/tun` exists and `modprobe tun` succeeds. On Entware routers where TUN may be limited, use TPROXY/redirect mode instead of TUN.",
+		Fix:         "Check that `/dev/net/tun` exists. On OpenWrt the driver is the kmod-tun package, loaded with `modprobe tun`; Keenetic has no modprobe, and its TUN driver comes with the firmware. If the device is there, the rest of the log line names the option the kernel refused.",
 		Sources:     []string{"https://github.com/SagerNet/sing-box/issues/3734"},
 	},
 	{
@@ -72,6 +72,20 @@ var entries = []Entry{
 		Explanation: "Trojan authenticates by a SHA-224 of the password sent inside the TLS tunnel; if it doesn't match a server password the server silently falls back to its fallback site, so the proxy never connects.",
 		Fix:         "Check the Trojan password matches the server exactly, and that the TLS server_name/SNI is the server's real domain (a wrong SNI also looks like an auth failure).",
 		Sources:     []string{"https://github.com/trojan-gfw/trojan/issues/393", "https://github.com/SagerNet/sing-box/issues/1056"},
+	},
+
+	// --- router clock (ahead of every certificate-trust entry) ---
+	// Order matters: the down-exit card, the Test button and the bot's exits view show only the FIRST
+	// entry that matches (health.Monitor.deriveCause). Go reports a clock-driven failure as
+	// "tls: failed to verify certificate: x509: certificate has expired or is not yet valid: current
+	// time ... is before ...", which the trust entries below also match, and their fix is to turn
+	// certificate checking off: wrong advice for a server whose certificate is fine.
+	{
+		ID: "gen-clock", Engine: "any", Pattern: `certificate has expired|not valid before|tls: failed to verify certificate because of clock`,
+		Title:       "System clock is wrong",
+		Explanation: "TLS and Reality handshakes fail when the router clock is off (common after a power loss on devices without an RTC): every certificate then looks 'expired' or 'not yet valid'. With the router clock right, the end of the message tells the two server-side cases apart: 'current time ... is after ...' means the server's certificate has expired; 'current time ... is before ...' means it is not valid yet, which usually means the server's own clock was wrong when the certificate was issued.",
+		Fix:         "Check the router clock (Diagnostics shows it in the 'Router clock is correct' row), turn on NTP or set the time, then test again. Do not turn on 'insecure' for this: it switches off certificate checking for a server that is fine. If the router clock is right: when the message says 'is after', the server's certificate has expired and must be renewed on the server; when it says 'is before', the certificate starts in the future, so check the server's clock, correct it and issue the certificate again.",
+		Sources:     []string{"https://github.com/XTLS/Xray-core/issues/2728", "https://github.com/golang/go/blob/master/src/crypto/x509/verify.go"},
 	},
 
 	// --- self-signed / insecure TLS (any TLS-based sing-box protocol) ---
@@ -178,6 +192,29 @@ var entries = []Entry{
 		Sources:     []string{"https://v2.hysteria.network/docs/advanced/Troubleshooting/", "https://github.com/SagerNet/sing-box/issues/1844"},
 	},
 
+	// --- ssh (sing-box's ssh outbound, golang.org/x/crypto/ssh) ---
+	{
+		ID: "ssh-host-key-mismatch", Engine: "ssh", Pattern: `host key mismatch, server send`,
+		Title:       "SSH server's host key is not the pinned one",
+		Explanation: "The server answered with a host key that is not among the connection's host keys, so the router refused it. Either the server's keys changed (a reinstall, a new VPS on the same address) or something on the way is posing as the server.",
+		Fix:         "Check the key on the server itself (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub) before changing anything. If it is the server's, paste its host key lines (ssh-keyscan) into the connection again.",
+		Sources:     []string{"https://github.com/SagerNet/sing-box/blob/v1.14.4/protocol/ssh/outbound.go"},
+	},
+	{
+		ID: "ssh-auth", Engine: "ssh", Pattern: `ssh: unable to authenticate`,
+		Title:       "SSH login refused",
+		Explanation: "The server accepted none of the credentials offered: a wrong user (root is used when none is set), password or key, or a server that does not allow that method (PasswordAuthentication no, or the key missing from authorized_keys).",
+		Fix:         "Log in with the same user and password or key from a computer to confirm them. For a key, add its public half to ~/.ssh/authorized_keys of that user on the server.",
+		Sources:     []string{"https://github.com/golang/crypto/blob/master/ssh/client_auth.go", "https://github.com/SagerNet/sing-box/blob/v1.14.4/protocol/ssh/outbound.go"},
+	},
+	{
+		ID: "ssh-forward-refused", Engine: "ssh", Pattern: `ssh: rejected: administratively prohibited`,
+		Title:       "SSH server refuses port forwarding",
+		Explanation: "The login worked, but the server refuses to open connections on the router's behalf, which is all an SSH exit does. sshd_config has AllowTcpForwarding no (or a PermitOpen / Match block limiting this user), common on hardened servers.",
+		Fix:         "On the server set AllowTcpForwarding yes (or local) for this user in /etc/ssh/sshd_config and reload sshd.",
+		Sources:     []string{"https://github.com/golang/crypto/blob/master/ssh/connection.go", "https://github.com/SagerNet/sing-box/blob/v1.14.4/protocol/ssh/outbound.go"},
+	},
+
 	// --- provisioned inbound: port conflicts (any inbound on 8443/8444/8388/8445/8446) ---
 	{
 		ID: "inbound-port-in-use", Engine: "sing-box", Pattern: `listen.*:(8443|8444|8388|8445|8446).*address already in use|bind.*:(8443|8444|8388|8445|8446).*address already in use|start inbound.*(8443|8444|8388|8445|8446).*address already in use`,
@@ -280,13 +317,6 @@ var entries = []Entry{
 		Sources:     []string{"https://github.com/XTLS/Xray-core/issues/5332"},
 	},
 	{
-		ID: "gen-clock", Engine: "any", Pattern: `certificate has expired|not valid before|tls: failed to verify certificate because of clock`,
-		Title:       "System clock is wrong",
-		Explanation: "TLS and Reality handshakes fail when the router clock is off (common after a power loss on devices without an RTC). Certificates look 'expired' or 'not yet valid'.",
-		Fix:         "Sync the clock via NTP. wayhop warns on large clock skew at startup.",
-		Sources:     []string{"https://github.com/XTLS/Xray-core/issues/2728"},
-	},
-	{
 		ID: "gen-permission", Engine: "any", Pattern: `permission denied|operation not permitted`,
 		Title:       "Permission denied",
 		Explanation: "The engine lacks privileges for the operation — creating a TUN device, binding a low port, or setting routes.",
@@ -332,14 +362,14 @@ var entries = []Entry{
 		ID: "awg-resolvconf-missing", Engine: "amneziawg", Pattern: `(resolvconf|resolvectl): (command )?not found|wg-quick:.*resolvconf`,
 		Title:       "awg-quick can't apply DNS (resolvconf missing)",
 		Explanation: "The AmneziaWG .conf has a 'DNS =' line, so awg-quick tries to set DNS via resolvconf/resolvectl, but that tool isn't installed on this router — so DNS handling fails or the bring-up aborts.",
-		Fix:         "Install resolvconf/openresolv (`opkg install resolvconf` on Entware), OR remove the 'DNS =' line from the AmneziaWG profile and let WayHop handle DNS, OR set 'Table = off' and point DNS manually via PostUp.",
+		Fix:         "awg-quick runs on a Linux host or server, not inside WayHop on the router (neither Entware nor OpenWrt packages resolvconf). On that machine install it (`apt install resolvconf` on Debian or Ubuntu), OR remove the 'DNS =' line from the .conf and let WayHop handle DNS, OR set 'Table = off' and point DNS manually via PostUp.",
 		Sources:     []string{"https://github.com/amnezia-vpn/amneziawg-tools"},
 	},
 	{
 		ID: "awg-route-exists", Engine: "amneziawg", Pattern: `RTNETLINK answers: (File exists|Address already in use)`,
 		Title:       "AmneziaWG route/address already exists",
-		Explanation: "awg-quick tried to add a route or IP the kernel already has — usually a previous tunnel instance wasn't torn down, two tunnels share the same AllowedIPs/subnet, or another VPN owns the same route table, so bring-up fails.",
-		Fix:         "Tear down the stale interface (`awg-quick down <iface>` / `ip link del <iface>`) and retry. If two tunnels overlap, give them distinct subnets or set 'Table = off' so awg-quick doesn't manage the route, then re-Apply.",
+		Explanation: "The kernel refused to add an interface, address or route it already has, so the tunnel did not come up. On the router this is usually an AmneziaWG interface left over from an earlier run, or another VPN on the router that already holds the same tunnel address.",
+		Fix:         "WayHop brings AmneziaWG up itself with `ip link` and `awg setconf`, not awg-quick, and names its interfaces wr_ followed by 8 hex digits. Find the leftover one with `ip link show`, remove it with `ip link del <iface>`, then re-Apply. If another VPN on the router uses the same tunnel address, give one of them a different Address. On a Linux server that runs the .conf with awg-quick, `awg-quick down <conf>` clears it there, and 'Table = off' stops awg-quick installing routes that overlap.",
 		Sources:     []string{"https://github.com/amnezia-vpn/amneziawg-tools"},
 	},
 
@@ -348,14 +378,14 @@ var entries = []Entry{
 		ID: "local-port-in-use", Engine: "sing-box", Pattern: `(inbound/mixed|clash.?api|external_controller).*address already in use|listen.*:(7890|9090)\b.*address already in use`,
 		Title:       "WayHop's local proxy / Clash-API port is already in use",
 		Explanation: "sing-box couldn't bind WayHop's own local mixed-proxy (default :7890) or Clash-API (default :9090) port — distinct from the provisioned server inbounds (8443/8444/…). Almost always a previous sing-box/WayHop instance that didn't exit cleanly still holds the socket, or another proxy is listening on the same port.",
-		Fix:         "Find the holder with `ss -tlnp | grep -E ':(7890|9090)'`. If it's a stale `sing-box`, `killall sing-box` and let WayHop's watchdog restart it cleanly; or change WayHop's mixed/Clash port in Settings if another app needs that port.",
+		Fix:         "Find the holder with `netstat -tlnp | grep -E ':(7890|9090) '` (routers ship BusyBox netstat, not ss). If it's a stale `sing-box`, `killall sing-box` and let WayHop's watchdog restart it cleanly; or change WayHop's mixed/Clash port in Settings if another app needs that port.",
 		Sources:     []string{"https://github.com/SagerNet/sing-box/issues/3411", "https://sing-box.sagernet.org/configuration/inbound/"},
 	},
 	{
 		ID: "gen-too-many-files", Engine: "any", Pattern: `too many open files`,
 		Title:       "Out of file descriptors (open-files limit)",
 		Explanation: "The engine hit the per-process open-files limit (`ulimit -n`) — common on routers with a low default (often 1024) under many concurrent connections. New connections then fail until descriptors free up, so traffic stalls intermittently.",
-		Fix:         "Raise the limit for the service and restart it — on OpenWrt add a procd `limits { nofile = '16384 16384'; }` block to the init script (or `ulimit -n 16384` before launch on Entware). If it keeps recurring, something is leaking connections — look for a flapping endpoint reconnecting in a loop.",
+		Fix:         "Raise the limit for the service and restart it. On OpenWrt it is the line `procd_set_param limits nofile=\"16384 16384\"` between procd_open_instance and procd_close_instance in start_service of /etc/init.d/wayhop; on Entware it is the line `ulimit -n 16384` at the top of start() in /opt/etc/init.d/S99wayhop. The init scripts of this release carry that line, but only installing or upgrading the package, or running install.sh, puts a new init script on the router: an update from the panel or the bot replaces only the binary. On a router updated that way, add the line by hand or run install.sh of this release again. If it keeps recurring, something is leaking connections — look for a flapping endpoint reconnecting in a loop.",
 		Sources:     []string{"https://openwrt.org/docs/guide-developer/procd-init-scripts"},
 	},
 }

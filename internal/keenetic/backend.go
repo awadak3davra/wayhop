@@ -3,10 +3,12 @@ package keenetic
 import (
 	"fmt"
 	"net/netip"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
+	"wayhop/internal/awg"
 	"wayhop/internal/model"
 )
 
@@ -22,6 +24,13 @@ type Plan struct {
 	Warnings   []string          // non-lossy informational notices only; never silently dropped semantics
 	IfaceFor   map[string]string // endpoint ID → assigned iface ("WireguardN" native, "wrtunN" fallback)
 	Singbox    map[string]any    // sing-box config for the non-native endpoints (nil if none) → /opt/etc/sing-box
+
+	// KeptInterfaces names the Interfaces blocks this plan keeps from the authenticated previous plan
+	// (CompileOptions.OwnedBlocks, QA-108): interfaces an earlier Apply created and this one leaves in
+	// place. They were live before this Apply began, so the exact adapter never re-sends one and a
+	// failed Apply's cleanup never removes one: that would delete a working tunnel, with whatever the
+	// operator attached to it in KeeneticOS, to undo an Apply that did not create it.
+	KeptInterfaces []string `json:",omitempty"`
 
 	// GlobalPriority is the `ip global` ladder this plan wants: NDM interface name → priority. It is
 	// how a default route is expressed natively — KeeneticOS routes everything through the highest
@@ -117,6 +126,24 @@ type CompileOptions struct {
 	// another service, or an adopted tunnel.
 	OccupiedInterfaces map[string]bool
 
+	// OwnedBlocks maps an endpoint WayHop created natively to the interface block the authenticated
+	// previous plan created for it (block[0] is `interface WireguardN`). It must come from that plan
+	// alone: a live block with a matching name is not evidence that WayHop made it.
+	//
+	// The running config lists WayHop's own interfaces too, so OccupiedInterfaces holds them, and
+	// allocating past every occupied slot moved each unchanged native tunnel to the next free
+	// WireguardN on every Apply while the reconcile removed the live one (QA-108): a re-handshake,
+	// dropped flows, and whatever the operator had attached to the interface in KeeneticOS went with
+	// the `no interface`. An endpoint whose block renders identically at its old slot now keeps that
+	// slot: the interface is already live, prepare finds it in place, and nothing removes it
+	// (Plan.KeptInterfaces).
+	//
+	// A changed block still takes a fresh slot, created beside the old one, which commit then
+	// removes. Writing the new block over the live interface would be an in-place update, which the
+	// Keenetic adapter does not implement (it holds no native update authority), and NDM keeps what a
+	// re-sent block does not mention, such as the old peer after a key change.
+	OwnedBlocks map[string][]string
+
 	// Userspace maps an AmneziaWG endpoint ID to the device WayHop's own AmneziaWG engine creates for
 	// it: an endpoint KeeneticOS's AmneziaWG cannot carry (a 3.x setting, or no native AmneziaWG on
 	// this router). NDM does not own that device and cannot name it - `ip route … <netdev>` is refused
@@ -125,6 +152,12 @@ type CompileOptions struct {
 	// policy plane and the compatibility core), and a routing object that would need NDM to reach it
 	// moves the policy into the compatibility core instead (see RoutePlanes).
 	Userspace map[string]string
+
+	// AWGGeneration is the newest AmneziaWG generation this firmware release takes on `wireguard asc`
+	// (nativeplan.KeeneticAWGGeneration): 1 on KeeneticOS 4.2 to 5.0, which has no arguments for the
+	// AmneziaWG 2 settings. Zero is the writer's own, AWGGeneration. The planner moves such an endpoint
+	// to Userspace first; the writer holds the same line.
+	AWGGeneration awg.Generation
 
 	// Foreign maps an adopted external endpoint ID to the kernel device of a tunnel the router runs
 	// OUTSIDE KeeneticOS: an Entware awg-quick/amneziawg-go link (measured: `awg1`, AmneziaWG 3.1,
@@ -184,6 +217,46 @@ func nativeIface(e *model.Endpoint) bool {
 		(e.Engine == model.EngineSingBox && e.Protocol == model.ProtoWireGuard)
 }
 
+// ownedSlots reads OwnedBlocks: keep is endpoint → the WireguardN index its previous block names,
+// held is every such slot, which no other endpoint is allocated into even while it is not live. A
+// block whose header is not a canonical `interface WireguardN` from BaseIndex up, a slot an adopted
+// tunnel holds, and a slot two endpoints claim are left out: those endpoints take a fresh slot, which
+// is what every endpoint did before slots were kept.
+func ownedSlots(opt CompileOptions) (keep map[string]int, held map[string]bool) {
+	adopted := make(map[string]bool, len(opt.AdoptInterfaces)+len(opt.AdoptNDMNames))
+	for _, iface := range opt.AdoptInterfaces {
+		if strings.HasPrefix(iface, "Wireguard") {
+			adopted[iface] = true
+		} else if strings.HasPrefix(iface, "nwg") {
+			adopted["Wireguard"+strings.TrimPrefix(iface, "nwg")] = true
+		}
+	}
+	for _, name := range opt.AdoptNDMNames {
+		adopted[name] = true
+	}
+	claims := make(map[string][]string, len(opt.OwnedBlocks))
+	for id, block := range opt.OwnedBlocks {
+		if len(block) == 0 {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimPrefix(block[0], "interface Wireguard"))
+		if err != nil || n < opt.BaseIndex || n >= 4096 || block[0] != fmt.Sprintf("interface Wireguard%d", n) {
+			continue
+		}
+		if slot := fmt.Sprintf("Wireguard%d", n); !adopted[slot] {
+			claims[slot] = append(claims[slot], id)
+		}
+	}
+	keep, held = make(map[string]int, len(claims)), make(map[string]bool, len(claims))
+	for slot, ids := range claims {
+		held[slot] = true
+		if len(ids) == 1 {
+			keep[ids[0]], _ = strconv.Atoi(strings.TrimPrefix(slot, "Wireguard"))
+		}
+	}
+	return keep, held
+}
+
 // Compile turns a WayHop profile into a Keenetic Plan. Enabled AmneziaWG/WireGuard
 // endpoints become native `interface WireguardN` (kernel + HW crypto); enabled non-native
 // endpoints (VLESS/Reality/Hysteria2/TUIC) become sing-box TUN devices (`wrtunN`) via the
@@ -215,6 +288,7 @@ func Compile(p *model.Profile, opt CompileOptions) (*Plan, error) {
 			occupied["Wireguard"+strings.TrimPrefix(iface, "nwg")] = true
 		}
 	}
+	keep, held := ownedSlots(opt)
 
 	// 1) Native VPN endpoints → interface command blocks; non-native ones are collected for
 	// the sing-box fallback below.
@@ -228,11 +302,12 @@ func Compile(p *model.Profile, opt CompileOptions) (*Plan, error) {
 	// route. An EMPTY server stays silent - an adopted external tunnel may have its peer
 	// managed entirely by NDM, where reachability is the router's own concern.
 	kernelBypassOrWarn := func(e *model.Endpoint) {
-		if ip, err := netip.ParseAddr(e.Server); err == nil {
+		server := e.ServerAddress() // "" for a connection that dials no server of its own
+		if ip, err := netip.ParseAddr(server); err == nil {
 			bypass = append(bypass, ip.String())
 			return
 		}
-		if e.Server != "" {
+		if server != "" {
 			plan.Warnings = append(plan.Warnings, fmt.Sprintf(
 				"endpoint %q: server %q is a hostname, so its anti-loop bypass route cannot be planned; make sure the peer stays reachable outside the tunnel",
 				e.ID, e.Server))
@@ -282,26 +357,41 @@ func Compile(p *model.Profile, opt CompileOptions) (*Plan, error) {
 			nonNative = append(nonNative, e)
 			continue
 		}
-		for idx < 4096 && occupied[fmt.Sprintf("Wireguard%d", idx)] {
+		// An unchanged endpoint keeps the slot the previous plan created for it (see OwnedBlocks).
+		var cmds []string
+		kept := false
+		if slot, ok := keep[e.ID]; ok {
+			if same, err := WireguardCommands(*e, WireguardOpts{Index: slot, Metric: metric, AWGGeneration: opt.AWGGeneration}); err == nil &&
+				slices.Equal(same, opt.OwnedBlocks[e.ID]) {
+				cmds, kept = same, true
+			}
+		}
+		if cmds == nil {
+			for idx < 4096 && (occupied[fmt.Sprintf("Wireguard%d", idx)] || held[fmt.Sprintf("Wireguard%d", idx)]) {
+				idx++
+			}
+			if idx >= 4096 {
+				return nil, fmt.Errorf("native endpoint %q: no free reviewed Wireguard slot", e.ID)
+			}
+			var err error
+			cmds, err = WireguardCommands(*e, WireguardOpts{Index: idx, Metric: metric, AWGGeneration: opt.AWGGeneration})
+			if err != nil {
+				return nil, fmt.Errorf("native endpoint %q: %w", e.ID, err)
+			}
 			idx++
-		}
-		if idx >= 4096 {
-			return nil, fmt.Errorf("native endpoint %q: no free reviewed Wireguard slot", e.ID)
-		}
-		cmds, err := WireguardCommands(*e, WireguardOpts{Index: idx, Metric: metric})
-		if err != nil {
-			return nil, fmt.Errorf("native endpoint %q: %w", e.ID, err)
 		}
 		if AWGObfuscationDropped(*e) {
 			plan.Warnings = append(plan.Warnings, fmt.Sprintf(
 				"endpoint %q: the AmneziaWG obfuscation set is incomplete (jc, jmin, jmax, s1, s2 and h1-h4 are all required), so this interface is configured as PLAIN WireGuard - an AmneziaWG peer will not answer it",
 				e.ID))
 		}
-		plan.IfaceFor[e.ID] = fmt.Sprintf("Wireguard%d", idx)
+		plan.IfaceFor[e.ID] = strings.TrimPrefix(cmds[0], "interface ")
+		if kept {
+			plan.KeptInterfaces = append(plan.KeptInterfaces, plan.IfaceFor[e.ID])
+		}
 		occupied[plan.IfaceFor[e.ID]] = true
 		plan.Interfaces = append(plan.Interfaces, cmds)
 		kernelBypassOrWarn(e) // anti-loop: peer endpoint IP → ISP, or a review warning for a hostname
-		idx++
 		metric += 25
 	}
 
@@ -333,7 +423,10 @@ func Compile(p *model.Profile, opt CompileOptions) (*Plan, error) {
 				return nil, fmt.Errorf("sing-box compatibility addon omitted active endpoint %q", e.ID)
 			}
 			plan.IfaceFor[e.ID] = iface
-			if ip, err := netip.ParseAddr(e.Server); err == nil {
+			// ServerAddress, not Server: a Server left beside a Hysteria2 realm is not where the
+			// connection goes, and an ISP route to it sent LAN traffic for that address out of the
+			// tunnel a list chose (QA-060; the generator's own bypass already read it this way).
+			if ip, err := netip.ParseAddr(e.ServerAddress()); err == nil {
 				bypass = append(bypass, ip.String())
 			}
 		}
@@ -400,6 +493,14 @@ func Compile(p *model.Profile, opt CompileOptions) (*Plan, error) {
 			continue
 		}
 		tgt, ok := targetFor(rl.Outbound, plan.IfaceFor, groupIface)
+		// An access policy has no interface to route to: the kernel plane marks the list with the
+		// policy's own mark and NDM's rule for that mark does the routing. It resolves only there.
+		if _, policy := model.NDMPolicyName(rl.Outbound); policy {
+			if !opt.ListsViaIpset {
+				return nil, fmt.Errorf("list %q: outbound %q is a KeeneticOS access policy, which only the kernel policy plane or the compatibility core can route to", rl.ID, rl.Outbound)
+			}
+			ok = true
+		}
 		if !ok {
 			if p.GroupByID(rl.Outbound) != nil {
 				return nil, fmt.Errorf("list %q: outbound %q is a failover group with no member this backend can route to", rl.ID, rl.Outbound)
@@ -533,6 +634,12 @@ func compatibilityReasons(p *model.Profile, planes RoutePlanes) []string {
 		}
 		if planes.Foreign[list.Outbound] != "" && !planes.ListsViaIpset {
 			reasons = append(reasons, fmt.Sprintf("routing list %q points at connection %q, a tunnel run outside KeeneticOS, and no kernel policy plane is wired", list.ID, list.Outbound))
+		}
+		// An access policy is reached by its firewall mark, and NDM has no static route that sets one:
+		// the ipset plane marks the list's destinations, and without it only the core can, on its own
+		// connections.
+		if name, ok := model.NDMPolicyName(list.Outbound); ok && !planes.ListsViaIpset {
+			reasons = append(reasons, fmt.Sprintf("routing list %q points at access policy %q, and no kernel policy plane is wired", list.ID, name))
 		}
 		// A fetched domain feed is carried by the resolver plane, exactly like a typed name — and it
 		// needs that plane present for the same reason. Without it the list would route nothing and
@@ -726,6 +833,13 @@ func dnsPlaneCoreReasons(p *model.Profile) []string {
 				"resolver %q is encrypted (%s) and dnsmasq speaks only plain UDP/TCP", tag, s.Type))
 			continue
 		}
+		// It has no detour and no address, which the switch below would read as "direct", but its
+		// resolvers are whatever the VPN server pushes, reached through the core's own tunnel.
+		if model.IsVPNDNSType(s.Type) {
+			reasons = append(reasons, fmt.Sprintf(
+				"resolver %q asks the resolvers connection %q pushes, which only the core can reach", tag, strings.TrimSpace(s.Endpoint)))
+			continue
+		}
 		switch strings.TrimSpace(s.Detour) {
 		case "", model.OutboundDirect:
 		default:
@@ -855,6 +969,21 @@ func StaleGlobalPriorityBlocks(previous, target *Plan) [][]string {
 				continue
 			}
 		}
+		// An interface the previous plan created itself. Its recorded Was is not a number the router
+		// chose: it is nothing at all (the interface did not exist when that ladder was compiled) or,
+		// once a slot is kept across Applies (QA-108), what an earlier Apply's ladder had raised it to,
+		// and restoring that leaves the tunnel on top of the ladder holding the default route. A kept
+		// interface goes back to the `ip global` its own block sets. One the target does not keep is
+		// removed by the same reconcile, and a restore read back from an interface that is gone could
+		// only fail the Apply.
+		if _, created, _ := blockGlobalPriority(previous.Interfaces, iface); created {
+			if target != nil {
+				if own, _, set := blockGlobalPriority(target.Interfaces, iface); set {
+					stale[iface] = own
+				}
+			}
+			continue
+		}
 		// Only what we actually observed before raising it. Without a recorded previous value there is
 		// no number to write, and inventing one would be a guessed default route — the same refusal
 		// defaultRouteLadder makes when it cannot see the router's own priorities.
@@ -863,6 +992,23 @@ func StaleGlobalPriorityBlocks(previous, target *Plan) [][]string {
 		}
 	}
 	return priorityBlocks(stale)
+}
+
+// blockGlobalPriority finds the Interfaces block for iface (found) and the `ip global` it sets (set).
+func blockGlobalPriority(blocks [][]string, iface string) (priority int, found, set bool) {
+	for _, block := range blocks {
+		if len(block) == 0 || block[0] != "interface "+iface {
+			continue
+		}
+		for _, line := range block[1:] {
+			if value, ok := strings.CutPrefix(line, "ip global "); ok {
+				n, err := strconv.Atoi(value)
+				return n, true, err == nil
+			}
+		}
+		return 0, true, false
+	}
+	return 0, false, false
 }
 
 func priorityBlocks(ladder map[string]int) [][]string {

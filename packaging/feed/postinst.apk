@@ -50,9 +50,15 @@ fi
 /usr/libexec/wayhop/harden-state.sh /etc/wayhop /var/lib/wayhop || exit 1
 
 # Publish the already-extracted private payload only after the state directory is hardened. Write a
-# sibling first so a copy failure leaves the previous live binary intact.
-cp /usr/libexec/wayhop/wayhop /usr/sbin/wayhop.new || exit 1
-chmod 0755 /usr/sbin/wayhop.new || exit 1
+# sibling first so a failure leaves the previous live binary intact. A hard link, not a copy: the
+# package's file and the live binary are then one inode, so the flash holds the binary once (the
+# copy cost a second ~14 MiB on a 60 MiB overlay) and an upgrade needs room for the new package file
+# alone. apk replaces its file by rename, so a running daemon keeps the old inode until the restart.
+# A file system without hard links gets the copy it always got.
+rm -f /usr/sbin/wayhop.new
+ln /usr/libexec/wayhop/wayhop /usr/sbin/wayhop.new 2>/dev/null || cp /usr/libexec/wayhop/wayhop /usr/sbin/wayhop.new ||
+  { rm -f /usr/sbin/wayhop.new; exit 1; }   # a partial copy must not keep the last free bytes
+chmod 0755 /usr/sbin/wayhop.new || { rm -f /usr/sbin/wayhop.new; exit 1; }
 mv -f /usr/sbin/wayhop.new /usr/sbin/wayhop || exit 1
 
 

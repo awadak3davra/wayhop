@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,6 +47,10 @@ type appliedRevision struct {
 	// imported previous-stack ledger); the change review then reports no baseline.
 	Desired         *appliedDesired            `json:"desired"`
 	Materialization executionMaterializationV1 `json:"materialization"`
+	// BootID is the kernel boot a Test (live) revision was applied in, empty when it could not be read.
+	// The next process compares it to its own to tell a daemon restart, which leaves the Test running,
+	// from a reboot, which on Keenetic leaves none of it (see liveNeedsRollbackOnBoot).
+	BootID string `json:"boot_id,omitempty"`
 }
 
 // applyInFlight marks an Apply that started mutating the router and has not recorded its result.
@@ -69,6 +75,62 @@ type applyStateRecord struct {
 	InFlight  *applyInFlight   `json:"in_flight"`
 	Acks      map[string]int64 `json:"acks"`
 	Last      applyLastResult  `json:"last"`
+	// RoutingOff is set while WayHop's routing is switched off (routingswitch.go). It lives here, not
+	// in config.json, because it is a fact about what is installed on the router — the same thing this
+	// record is about — and because config.json is rewritten wholesale by Settings, import, reset and
+	// backup restore, any of which would silently flip routing back on without running anything.
+	// omitempty keeps a record with routing on byte-identical to one written before the switch existed.
+	RoutingOff *routingOffRecord `json:"routing_off,omitempty"`
+	// RollbackOutstanding is set when a rollback of Live failed part way. Live stays recorded because
+	// it is what the retry must undo, but the router no longer runs it as tested: the rollback may
+	// already have installed the committed kernel plane before a later step (core stop, native commit,
+	// postcheck) failed. Without the mark the reconcile loop read Live as the baseline, found its plane
+	// missing and put it back: the plane that had broken connectivity, for good with auto-reboot off.
+	// It is persisted so a restart still knows, and omitempty keeps a record without it byte-identical
+	// to one written before it existed (an older record loads with it unset).
+	RollbackOutstanding *rollbackOutstanding `json:"rollback_outstanding,omitempty"`
+}
+
+// rollbackOutstanding names the live revision whose rollback failed (by Rev and At, which together
+// identify one Apply) and why. Naming it, rather than flagging the record, keeps a mark that some
+// writer forgot to clear from pinning a later Test to the committed revision.
+type rollbackOutstanding struct {
+	Rev   string `json:"rev"`
+	At    int64  `json:"at"`
+	Error string `json:"error,omitempty"`
+	// KernelPlane is how far the rollback got with the kernel plane (rollbackPlane*), which decides the
+	// plane the supervision loops keep installed (supervisedBaseline).
+	KernelPlane string `json:"kernel_plane,omitempty"`
+}
+
+// What a failed rollback left in the kernel plane. A rollback runs native prepare, plugins, core, then
+// the kernel plane; marking every failure as "the committed plane is in" made the reconcile loop install
+// the committed plane under the Test's core and native interfaces after a rollback that never got to
+// the kernel step (a core that would not restart, a native prepare refusal), breaking a router that
+// worked, with no window left to catch it after a Roll back past the window or a boot rollback.
+const (
+	// rollbackPlaneTested: the rollback stopped before its kernel step. The Test's plane, and the core
+	// and native interfaces it pairs with, are as the Test installed them; the zero value, so a mark
+	// that does not say keeps the plane the router has.
+	rollbackPlaneTested = ""
+	// rollbackPlaneCommitted: the kernel step completed: the committed revision's plane is installed,
+	// or the Test's removed when the committed revision has none (or there is no committed revision).
+	rollbackPlaneCommitted = "committed"
+	// rollbackPlaneUnknown: the kernel step ran and failed, so neither plane can be assumed, and either
+	// one put back could sit under a core it does not pair with.
+	rollbackPlaneUnknown = "unknown"
+)
+
+// kernelPlaneAfter is how far one execution that failed with err got with the kernel plane.
+func kernelPlaneAfter(res applyExecResult, err error) string {
+	if slices.Contains(res.Steps, stepKernel) {
+		return rollbackPlaneCommitted
+	}
+	var stepErr *applyExecError
+	if errors.As(err, &stepErr) && stepErr.Step == stepKernel {
+		return rollbackPlaneUnknown
+	}
+	return rollbackPlaneTested
 }
 
 // applyStateStore holds the record in memory and mirrors every change to disk. The pointers it hands
@@ -121,6 +183,9 @@ func (s *Server) stateLocked() *applyStateRecord {
 	}
 	st.loaded = true
 	st.path = s.applyStateFile()
+	// Temps a crash left between persistLocked's create and rename; every write loads the record first
+	// under st.mu, so none is in flight while it loads.
+	atomicfile.RemoveStale(st.path)
 	st.rec = applyStateRecord{Schema: applyStateSchema, Acks: map[string]int64{}}
 	raw, err := os.ReadFile(st.path)
 	switch {
@@ -172,6 +237,108 @@ func (s *Server) appliedBaseline() *appliedRevision {
 	return rec.Committed
 }
 
+// supervisedBaseline is the revision the supervision loops put back when the router drops part of it
+// (the kernel-plane reconcile, the routing-table re-seed, and what they report as installed): the
+// applied baseline, except while a rollback of Live is outstanding. Then it is the plane that rollback
+// left: the committed revision once its kernel step completed (Live is the configuration being undone,
+// and putting its plane back re-broke what the rollback had fixed), Live while the rollback never got
+// to the kernel plane (the committed plane under the Test's core and interfaces is neither
+// configuration), and nil — nothing put back — when the kernel step itself failed.
+func (s *Server) supervisedBaseline() *appliedRevision {
+	s.applyState.mu.Lock()
+	defer s.applyState.mu.Unlock()
+	rec := s.stateLocked()
+	if rec.Live == nil {
+		return rec.Committed
+	}
+	switch mark := rollbackOutstandingLocked(rec); {
+	case mark == nil || mark.KernelPlane == rollbackPlaneTested:
+		return rec.Live
+	case mark.KernelPlane == rollbackPlaneCommitted:
+		return rec.Committed
+	}
+	return nil
+}
+
+// rollbackOutstandingLocked is the record's mark when it names the current Live, nil otherwise.
+// Caller holds applyState.mu.
+func rollbackOutstandingLocked(rec *applyStateRecord) *rollbackOutstanding {
+	m := rec.RollbackOutstanding
+	if m == nil || rec.Live == nil || m.Rev != rec.Live.Rev || m.At != rec.Live.At {
+		return nil
+	}
+	return m
+}
+
+// liveRollbackFailed reports the failed rollback still outstanding for the live revision (a copy),
+// nil when there is none.
+func (s *Server) liveRollbackFailed() *rollbackOutstanding {
+	s.applyState.mu.Lock()
+	defer s.applyState.mu.Unlock()
+	m := rollbackOutstandingLocked(s.stateLocked())
+	if m == nil {
+		return nil
+	}
+	out := *m
+	return &out
+}
+
+// noteRollbackFailed marks live's rollback outstanding after it failed. Only while live is still the
+// record's Live: a Test, Keep or routing switch that replaced it since owns the record now. Matched by
+// Rev and At because the window's closure holds the revision runApply built, of which the record keeps
+// a copy. plane is how far this attempt got with the kernel plane (rollbackTo). Caller holds applyMu,
+// as every rollback does.
+func (s *Server) noteRollbackFailed(live *appliedRevision, plane string, err error) {
+	if live == nil {
+		return
+	}
+	s.applyState.mu.Lock()
+	defer s.applyState.mu.Unlock()
+	rec := s.stateLocked()
+	if rec.Live == nil || rec.Live.Rev != live.Rev || rec.Live.At != live.At {
+		return
+	}
+	// A retry that stopped before the kernel step did not touch the plane: it is still what the
+	// earlier attempt left. Recording "tested" over a plane that attempt had already rolled back put
+	// the reconcile loop back on the Test's plane.
+	if prev := rollbackOutstandingLocked(rec); prev != nil && plane == rollbackPlaneTested {
+		plane = prev.KernelPlane
+	}
+	msg := ""
+	if err != nil {
+		msg = outputTail(err.Error(), 512)
+	}
+	rec.RollbackOutstanding = &rollbackOutstanding{Rev: live.Rev, At: live.At, Error: msg, KernelPlane: plane}
+	s.persistLocked()
+}
+
+// noteLiveRollbackOutstanding records rev as the live state with its rollback outstanding when the
+// record has no live state to mark: an Apply whose execution and whose rollback both failed while no
+// Test was live, or the Test left from before routing was switched off whose tunnels switching on
+// could not remove. The router runs part of it, and the mark is what status, Roll back, the reconcile
+// loop and Keep already read for a rollback that failed part way. plane is as for noteRollbackFailed,
+// with rev as the tested revision. Caller holds applyMu.
+func (s *Server) noteLiveRollbackOutstanding(rev *appliedRevision, plane string, err error) {
+	s.applyState.mu.Lock()
+	defer s.applyState.mu.Unlock()
+	rec := s.stateLocked()
+	live := *rev
+	live.BootID = s.bootID()
+	rec.Live = &live
+	msg := ""
+	if err != nil {
+		msg = outputTail(err.Error(), 512)
+	}
+	rec.RollbackOutstanding = &rollbackOutstanding{Rev: live.Rev, At: live.At, Error: msg, KernelPlane: plane}
+	s.persistLocked()
+}
+
+// sameRevision reports whether a and b are the same Apply. Rev and At together identify one: the record
+// keeps a copy of the revision runApply built, so pointers do not compare.
+func sameRevision(a, b *appliedRevision) bool {
+	return a != nil && b != nil && a.Rev == b.Rev && a.At == b.At
+}
+
 // committedRevision is the rollback target of a Test window and what boot converges to.
 func (s *Server) committedRevision() *appliedRevision {
 	s.applyState.mu.Lock()
@@ -209,8 +376,11 @@ func (s *Server) recordApplied(save bool, rev *appliedRevision) {
 		rec.Committed = rev
 		rec.Live = nil
 	} else {
-		rec.Live = rev
+		live := *rev
+		live.BootID = s.bootID()
+		rec.Live = &live
 	}
+	rec.RollbackOutstanding = nil // whatever was left to undo, this Apply executed over it
 	rec.InFlight = nil
 	rec.Last = applyLastResult{At: time.Now().Unix(), OK: true, Rev: rev.Rev}
 	s.persistLocked()
@@ -225,6 +395,7 @@ func (s *Server) recordCommit() {
 		rec.Committed = rec.Live
 		rec.Live = nil
 	}
+	rec.RollbackOutstanding = nil
 	s.persistLocked()
 }
 
@@ -234,6 +405,7 @@ func (s *Server) recordRollback() {
 	defer s.applyState.mu.Unlock()
 	rec := s.stateLocked()
 	rec.Live = nil
+	rec.RollbackOutstanding = nil
 	rec.InFlight = nil
 	s.persistLocked()
 }
@@ -309,25 +481,44 @@ func (s *Server) ackedIDs() []string {
 	return out
 }
 
-// discardLiveOnBoot drops a live (Test) state left by a previous process: the router booted from its
-// saved configuration, so the unsaved state is gone. Returns whether there was one.
-func (s *Server) discardLiveOnBoot() bool {
+// discardLiveOnBoot drops what a previous process left half done: the in-flight marker always, and a
+// live (Test) state unless keepLive — a Test that is still on the router stays recorded until boot has
+// rolled it back, because the record is the only thing that says what to undo. Returns whether there
+// was anything.
+func (s *Server) discardLiveOnBoot(keepLive bool) bool {
 	s.applyState.mu.Lock()
 	defer s.applyState.mu.Unlock()
 	rec := s.stateLocked()
 	had := rec.Live != nil || rec.InFlight != nil
 	if rec.Live != nil {
-		log.Printf("apply-state: an unsaved (Test) state %s was left by the previous process — discarded, the router runs the saved configuration", rec.Live.Rev)
+		if keepLive {
+			log.Printf("apply-state: an unsaved (Test) state %s was left by the previous process and is still on the router — rolling it back to the committed configuration", rec.Live.Rev)
+		} else {
+			log.Printf("apply-state: an unsaved (Test) state %s was left by the previous process — discarded, the router runs the saved configuration", rec.Live.Rev)
+			rec.Live = nil
+			rec.RollbackOutstanding = nil
+		}
 	}
 	if rec.InFlight != nil {
 		log.Printf("apply-state: an Apply of %s (save=%v) did not finish before the previous process stopped — converging to the committed state", rec.InFlight.Rev, rec.InFlight.Save)
 	}
-	rec.Live = nil
 	rec.InFlight = nil
 	if had {
 		s.persistLocked()
 	}
 	return had
+}
+
+// bootID is the kernel's id for the current boot, "" where it cannot be read.
+func (s *Server) bootID() string {
+	if s.bootIDOf != nil {
+		return s.bootIDOf()
+	}
+	b, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
 
 // --- migration from the previous stacks -------------------------------------------------------
@@ -558,6 +749,10 @@ const (
 // exec of the core and no device probes.
 func (s *Server) effectiveState(base *appliedRevision) (verdict, reason string) {
 	switch {
+	case s.routingIsOff():
+		// Deliberately not "drift": nothing contradicts what the operator asked for. The applied
+		// revision is simply not in force, and the switch's own banner says why.
+		return effectiveUnknown, "WayHop's routing is switched off — the router routes on its own until it is switched back on"
 	case base == nil:
 		return effectiveUnknown, "nothing applied yet"
 	case s.config().Demo:
@@ -673,6 +868,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	if saveErr != "" {
 		resp["state_persistence_error"] = saveErr
 	}
+	resp["routing"] = s.routingSwitchView()
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, resp)
 }

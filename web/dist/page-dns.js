@@ -37,7 +37,10 @@ function dnsWriteFailed(e) {
 //   be measured on the device. Off a router, or when the firewall could not be read, it is UNKNOWN —
 //   and an unknown runtime must never be drawn as a clean path, which is the whole point of
 //   RulesUnknown existing in the detector.
-function dnsQueryPath(nat) {
+//
+// tun is GET /api/dns's reading of the core this plane is generated into: only with TUN does it keep
+// FakeIP servers.
+function dnsQueryPath(nat, tun) {
   const eff = (nat && nat.effective) || null;
   const measured = !!(nat && nat.available && eff);
   const wrap = el("div", { class: "card qp" });
@@ -72,7 +75,11 @@ function dnsQueryPath(nat) {
   } else {
     const who = (eff.listeners || []).map(l => l.process).filter(Boolean);
     port.appendChild(el("div", { class: "qp-stage-v" }, who.length ? who[0] : t("no listener seen")));
-    if (eff.hijack53) {
+    // QA-107: on a LAN with IPv6 an IPv4-only redirect is not the whole door.
+    if (eff.hijack53 && (eff.ipv6_gaps || []).includes("53")) {
+      port.classList.add("warn");
+      port.appendChild(el("div", { class: "qp-stage-s" }, t("LAN :53 is redirected here over IPv4 only; IPv6 is not")));
+    } else if (eff.hijack53) {
       port.classList.add("ok");
       port.appendChild(el("div", { class: "qp-stage-s" }, eff.hijack53_to
         ? t("LAN :53 is redirected here ({0})", eff.hijack53_to)
@@ -135,10 +142,14 @@ function dnsQueryPath(nat) {
         s.enabled === false ? el("span", { class: "pill muted" }, t("off")) : null));
       row.appendChild(el("span", { class: "qp-br-t" },
         el("span", { class: "badge proto" + (enc ? " enc" : "") }, s.type),
-        enc ? null : el("span", { class: "qp-plain", title: t("Unencrypted — whoever carries it can read it") }, t("plaintext"))));
-      // The detour IS the exit: an empty one means the query leaves over the raw WAN.
-      row.appendChild(el("span", { class: "qp-br-e" }, s.detour
-        ? (nameOf(s.detour) || s.detour)
+        // A VPN's pushed resolvers are asked inside its tunnel: the WAN sees only the tunnel.
+        enc ? null : DNS_VPN_TYPES[s.type] ? el("span", {}, t("via tunnel"))
+          : el("span", { class: "qp-plain", title: t("Unencrypted — whoever carries it can read it") }, t("plaintext"))));
+      // The detour IS the exit: an empty one means the query leaves over the raw WAN. A VPN's pushed
+      // resolvers have no detour; they are asked through that connection's tunnel.
+      const exit = DNS_VPN_TYPES[s.type] ? s.endpoint : s.detour;
+      row.appendChild(el("span", { class: "qp-br-e" }, exit
+        ? (nameOf(exit) || exit)
         : el("span", { class: "qp-wan" }, t("WAN (no tunnel)"))));
     }
     return row;
@@ -185,8 +196,7 @@ function dnsQueryPath(nat) {
   // The fold sits between the last visible rule and the catch-all, so the catch-all stays where it
   // belongs: visually last, because it is what runs when nothing above matched.
   if (qpMore) branches.appendChild(qpMore);
-  const finalTag = dnsState.final || (servers[0] && servers[0].tag) || "";
-  const finalRow = branchRow("★", t("everything else"), finalTag, true);
+  const finalRow = branchRow("★", t("everything else"), dnsAnswersAll(dnsState, tun), true);
   // The catch-all is not editable here: it is the "Default resolver" picker below, and giving it
   // move arrows would imply an order it does not have.
   finalRow.appendChild(el("span", { class: "qp-br-a" }));
@@ -210,15 +220,40 @@ function dnsQueryPath(nat) {
   // and told the user nobody could route around the rows above while any browser with its own DoH
   // resolver walked straight past them. The warning below is the honest answer whenever either hatch
   // is open; the daemon's own note says which one and why.
+  // IPv4 shut is not the LAN shut when the LAN has IPv6, and the DoH refusal names addresses: it
+  // never meant "clients cannot route around this" (QA-107).
+  } else if (eff.doh_bypass_blocked && eff.dot_bypass_blocked && (eff.ipv6_gaps || []).length) {
+    foot.appendChild(el("div", { class: "hint qp-warn" },
+      t("⚠ This LAN also has IPv6, but these routes are shut for IPv4 only: {0}. Over IPv6 they bypass every row above.",
+        dnsIPv6Routes(eff.ipv6_gaps))));
   } else if (eff.doh_bypass_blocked && eff.dot_bypass_blocked) {
     foot.appendChild(el("div", { class: "hint qp-ok" },
-      t("✓ Encrypted DNS to other providers (DoT :853) is blocked, so clients cannot route around this.")));
+      t("✓ DoT (:853) and the well-known DoH resolvers are refused, so most devices fall back to the router. DoH to any other resolver still gets through.")));
   } else {
     foot.appendChild(el("div", { class: "hint qp-warn" },
       t("⚠ A device with its own DoH or DoT resolver bypasses every row above. Nothing here blocks it.")));
   }
   wrap.appendChild(foot);
   return wrap;
+}
+
+// dnsAnswersAll names the resolver that answers what no rule matches, as the core will run it
+// (model.DNSSettings.DefaultServer): the chosen default while the core keeps it, else the first server
+// it keeps. A disabled server is never kept, and without TUN (fast or mixed mode) neither is a FakeIP
+// one: the page showed an enabled FakeIP server at the top as the catch-all there.
+function dnsAnswersAll(d, tun) {
+  const runs = s => s.enabled && (tun || s.type !== "fakeip");
+  const named = (d.servers || []).find(s => s.tag === d.final);
+  if (d.final && (!named || runs(named))) return d.final;
+  return ((d.servers || []).find(runs) || {}).tag || "";
+}
+
+// dnsIPv6Routes names the routes IPv6 leaves open (EffectivePath.IPv6Gaps). The warning said "the DNS
+// redirect and refusals" for any of them, DoT alone included. Port and protocol names read the same in
+// every language, so they are not translated.
+function dnsIPv6Routes(gaps) {
+  const name = { "53": ":53", dot: "DoT (:853)", doh: "DoH" };
+  return (gaps || []).map(g => name[g] || g).join(", ");
 }
 
 // dnsPathNote says what a resolver's detour MEANS: which exit its queries leave through, and — the
@@ -371,13 +406,19 @@ async function openNativePlan(nat) {
   } catch (e) { toast(e.message, "err"); }
 }
 
+// The DNS server types that ask the resolvers a VPN connection pushes (sing-box 1.14+), each named
+// after the protocol of the connection it needs. They have no address and no detour: the connection
+// is both, so a row names it where the address goes and reads its tunnel as the path.
+const DNS_VPN_TYPES = { openvpn: "OpenVPN (pushed resolvers)", openconnect: "OpenConnect (pushed resolvers)" };
+
 function dnsServerRow(s, i) {
   const net = DNS_NET_TYPES.includes(s.type);
   const enc = DNS_ENC_TYPES.includes(s.type);
-  const addr = net ? (s.server + (s.server_port ? ":" + s.server_port : "") + (s.path || "")) : (s.type === "fakeip" ? (s.inet4_range || "198.18.0.0/15") : t("device resolver"));
+  const vpn = !!DNS_VPN_TYPES[s.type];
+  const addr = net ? (s.server + (s.server_port ? ":" + s.server_port : "") + (s.path || "")) : vpn ? (nameOf(s.endpoint) || s.endpoint || "—") : (s.type === "fakeip" ? (s.inet4_range || "198.18.0.0/15") : t("device resolver"));
   const leakWarn = (net && !enc) ? el("span", { class: "pill err", title: t("plaintext DNS — the ISP can read your queries") }, t("⚠ plaintext")) : null;
   const via = net ? "via " + (nameOf(s.detour) || (s.detour ? s.detour : t("direct"))) : null;
-  const path = net ? dnsPathNote(s.detour) : null;
+  const path = net ? dnsPathNote(s.detour) : vpn ? dnsPathNote(s.endpoint) : null;
   return el("div", { class: "dns-row" },
     el("span", { class: "badge" }, DNS_TYPE_BADGE[s.type] || s.type),
     el("div", { class: "main" },
@@ -430,14 +471,15 @@ async function openDNSServer(idx) {
       ...items.map(([p, i]) => el("option", { value: String(i), title: p.note || "" }, p.name))));
   });
   const tagIn = el("input", { id: "dnsm-tag", type: "text", value: cur.tag || "", placeholder: "dns_secure" });
-  const typeSel = el("select", { id: "dnsm-type" }, ...Object.keys(DNS_TYPE_LABEL).map(x => el("option", { value: x }, DNS_TYPE_LABEL[x])));
+  const typeSel = el("select", { id: "dnsm-type" }, ...Object.entries(Object.assign({}, DNS_TYPE_LABEL, DNS_VPN_TYPES)).map(([x, l]) => el("option", { value: x }, l)));
   typeSel.value = cur.type || "https";
   const serverIn = el("input", { id: "dnsm-server", type: "text", value: cur.server || "", placeholder: "1.1.1.1" });
   const portIn = el("input", { id: "dnsm-port", type: "number", value: cur.server_port || "", placeholder: "443" });
   const pathIn = el("input", { id: "dnsm-path", type: "text", value: cur.path || "", placeholder: "/dns-query" });
   const detourSel = routingOutboundSelect(cur.detour || "direct", false); detourSel.id = "dnsm-detour";
   const bootSel = el("select", { id: "dnsm-boot" }, el("option", { value: "" }, t("(none — server is an IP)")),
-    ...dnsState.servers.filter((_, j) => j !== idx).map(x => el("option", { value: x.tag }, x.tag)));
+    // A VPN's pushed resolvers answer only its own names, only while it is up: never a bootstrap.
+    ...dnsState.servers.filter((x, j) => j !== idx && !DNS_VPN_TYPES[x.type]).map(x => el("option", { value: x.tag }, x.tag)));
   bootSel.value = cur.domain_resolver || "";
   const i4In = el("input", { id: "dnsm-i4", type: "text", value: cur.inet4_range || "198.18.0.0/15", placeholder: "198.18.0.0/15" });
   const i6In = el("input", { id: "dnsm-i6", type: "text", value: cur.inet6_range || "", placeholder: "fc00::/18" });
@@ -450,10 +492,20 @@ async function openDNSServer(idx) {
   const rowBoot = el("div", { class: "field" }, el("label", {}, t("Bootstrap resolver (hostname only)")), bootSel);
   const rowI4 = el("div", { class: "field" }, el("label", {}, t("FakeIP IPv4 range")), i4In);
   const rowI6 = el("div", { class: "field" }, el("label", {}, t("FakeIP IPv6 range (optional)")), i6In);
+  // A VPN type names the connection whose pushed resolvers it asks; only connections of that protocol
+  // are offered. The two switches are sing-box's accept_default_resolvers and accept_search_domain.
+  const vpnSel = el("select", { id: "dnsm-vpn" });
+  const defChk = el("input", { id: "dnsm-vdef", type: "checkbox" }); if (cur.accept_default_resolvers) defChk.setAttribute("checked", "true");
+  const sdChk = el("input", { id: "dnsm-vsd", type: "checkbox" }); if (cur.accept_search_domain) sdChk.setAttribute("checked", "true");
+  const rowVPN = el("div", {},
+    el("div", { class: "field" }, el("label", {}, t("Connection")), vpnSel),
+    el("label", { class: "check" }, defChk, el("span", {}, t("Also answer names outside the VPN's own domains"))),
+    el("label", { class: "check" }, sdChk, el("span", {}, t("Complete short names with the VPN's search domains"))),
+    el("div", { class: "hint" }, t("Asks the DNS servers this connection's VPN pushes, through its tunnel, only while it is up. Names outside the VPN's domains get no answer unless the first box is on; a VPN that pushes servers but no domains needs it. Needs sing-box 1.14+.")));
 
   const sync = () => {
     const ty = typeSel.value;
-    const net = DNS_NET_TYPES.includes(ty), enc = DNS_ENC_TYPES.includes(ty), fake = ty === "fakeip";
+    const net = DNS_NET_TYPES.includes(ty), enc = DNS_ENC_TYPES.includes(ty), fake = ty === "fakeip", vpn = !!DNS_VPN_TYPES[ty];
     rowServer.style.display = net ? "" : "none";
     rowPort.style.display = net ? "" : "none";
     rowPath.style.display = (ty === "https" || ty === "h3") ? "" : "none";
@@ -461,6 +513,19 @@ async function openDNSServer(idx) {
     rowBoot.style.display = enc ? "" : "none";
     rowI4.style.display = fake ? "" : "none";
     rowI6.style.display = fake ? "" : "none";
+    rowVPN.style.display = vpn ? "" : "none";
+    if (vpn) {
+      const eps = (state.profile.endpoints || []).filter(e => e.protocol === ty);
+      const want = [vpnSel.value, ty === cur.type ? cur.endpoint : ""].find(id => id && eps.some(e => e.id === id));
+      // The saved connection is gone (its resolver was parked when it was deleted): left visibly unset,
+      // so switching the resolver back on cannot point it at a different VPN without a word. A new
+      // resolver, or a type switch, starts on the first connection of that protocol.
+      const lost = !want && ty === cur.type && !!cur.endpoint;
+      vpnSel.textContent = "";
+      if (lost) vpnSel.appendChild(el("option", { value: "" }, "—"));
+      eps.forEach(e => vpnSel.appendChild(el("option", { value: e.id }, e.name || e.id)));
+      vpnSel.value = want || (lost || !eps.length ? "" : eps[0].id);
+    }
   };
   typeSel.onchange = sync;
   presetSel.onchange = () => {
@@ -479,7 +544,7 @@ async function openDNSServer(idx) {
     el("div", { class: "field" }, el("label", {}, t("Provider preset")), presetSel),
     el("div", { class: "field" }, el("label", {}, t("Tag")), tagIn),
     el("div", { class: "field" }, el("label", {}, t("Type")), typeSel),
-    rowServer, rowPort, rowPath, rowDetour, rowBoot, rowI4, rowI6,
+    rowServer, rowPort, rowPath, rowDetour, rowBoot, rowI4, rowI6, rowVPN,
     el("label", { class: "check" }, enChk, el("span", {}, t("Enabled"))));
 
   const saveBtn = el("button", { class: "btn btn-primary" }, t("Save"));
@@ -503,6 +568,13 @@ async function openDNSServer(idx) {
     if (ty === "fakeip") {
       o.inet4_range = i4In.value.trim() || "198.18.0.0/15";
       const i6 = i6In.value.trim(); if (i6) o.inet6_range = i6;
+    }
+    if (DNS_VPN_TYPES[ty]) {
+      // Left unset, a parked resolver keeps naming its old connection, which the daemon then names
+      // back if it is switched on.
+      o.endpoint = vpnSel.value || (ty === cur.type ? cur.endpoint || "" : "");
+      if (defChk.checked) o.accept_default_resolvers = true;
+      if (sdChk.checked) o.accept_search_domain = true;
     }
     saveBtn.disabled = true;
     // Serialize through dnsSaveChain like saveDNS() — a direct PUT + dnsState reassignment here
@@ -570,7 +642,10 @@ function openDNSRule(idx) {
       query_type: qtIn.value.split(",").map(x => x.trim()).filter(Boolean),
       server: srvSel.value,
     });
-    if (!o.rule_sets.length && !o.domain_suffix.length && !o.query_type.length) { toast(t("A rule needs at least one match condition"), "err"); return; }
+    // Every condition the daemon counts (model.dnsRuleHasNoMatcher), the ones this form does not show
+    // included: a rule matching by domain or geosite was refused here and accepted there (QA-155).
+    const matches = ["rule_sets", "domain_suffix", "domain", "geosite", "query_type"].some(k => asList(o[k]).some(v => String(v).trim()));
+    if (!matches) { toast(t("A rule needs at least one match condition"), "err"); return; }
     saveBtn.disabled = true;
     // Serialize through dnsSaveChain like saveDNS() so this PUT + dnsState reassignment can't race
     // a concurrent background saveDNS() and clobber dnsState (mutate inside → operates on latest state).

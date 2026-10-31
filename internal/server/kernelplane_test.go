@@ -37,7 +37,7 @@ func TestKernelPlaneFindings_SurfaceWhatTheKernelWillNotRoute(t *testing.T) {
 	cfg.RoutingMode = "hybrid"
 	prof := kernelPlaneProfile()
 
-	got := s.kernelPlaneFindings(cfg, &prof)
+	got := s.kernelPlaneFindings(cfg, &prof, nil)
 	if len(got) == 0 {
 		t.Skip("this build's compiler produced no warnings for the fixture; the invariants below still hold")
 	}
@@ -66,7 +66,7 @@ func TestKernelPlaneFindings_QuietWhenThereIsNothingToSay(t *testing.T) {
 	s := dnsSeed(t)
 	cfg := config.Default() // already a *Config
 	empty := model.Profile{}
-	if got := s.kernelPlaneFindings(cfg, &empty); len(got) != 0 {
+	if got := s.kernelPlaneFindings(cfg, &empty, nil); len(got) != 0 {
 		t.Errorf("an empty profile has nothing the kernel cannot route, got %+v", got)
 	}
 }
@@ -74,11 +74,11 @@ func TestKernelPlaneFindings_QuietWhenThereIsNothingToSay(t *testing.T) {
 // Nil inputs must not panic: buildPlan calls this on every review.
 func TestKernelPlaneFindings_NilSafe(t *testing.T) {
 	s := dnsSeed(t)
-	if got := s.kernelPlaneFindings(nil, nil); got != nil {
+	if got := s.kernelPlaneFindings(nil, nil, nil); got != nil {
 		t.Errorf("nil inputs should yield no findings, got %+v", got)
 	}
 	cfg := config.Default() // already a *Config
-	if got := s.kernelPlaneFindings(cfg, nil); got != nil {
+	if got := s.kernelPlaneFindings(cfg, nil, nil); got != nil {
 		t.Errorf("a nil profile should yield no findings, got %+v", got)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,10 @@ const (
 	sendGap        = 60 * time.Millisecond
 	deliverTick    = 15 * time.Second
 	maxDeliverWait = time.Minute
+	// lateAfter: an alert that reaches a chat later than this after it happened says when that was.
+	// The queue waits out the outage that cut Telegram off, and its news must not read as news of
+	// now.
+	lateAfter = time.Minute
 )
 
 // queued is an alert on its way, with the chats that already have it: a retry after an outage
@@ -83,6 +88,57 @@ func (o *outbox) pop(q *queued) {
 	}
 }
 
+// follower is the alert queued behind q that ends everything q opens, when the two are an outage
+// and its end: both still waiting (the outage cut Telegram off, as an uplink outage does), they are
+// told as one quiet message. A loud ending (a rollback) is news of its own and is not merged, nor
+// one that ends only part of what q opened.
+func (o *outbox) follower(q *queued) *queued {
+	open := q.a
+	switch {
+	case open.Resolves || open.Edit || len(open.incidents()) == 0:
+		return nil
+	case open.Kind != KindUplink && open.Kind != KindCore && open.Kind != KindExits:
+		return nil
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	behind := false
+	for _, r := range o.q {
+		if r == q {
+			behind = true
+			continue
+		}
+		end := r.a
+		if !behind || !end.Resolves || end.Edit || end.Sev != SevInfo || end.Kind != open.Kind {
+			continue
+		}
+		covered := true
+		for _, inc := range open.incidents() {
+			covered = covered && slices.Contains(end.incidents(), inc)
+		}
+		if covered {
+			return r
+		}
+	}
+	return nil
+}
+
+// outage is an opening alert and its end in one message: the end's news and how long it lasted
+// ("out 03:00–03:20"), silent. It is delivered at once when the opening alert would have been, and
+// held with the rest during quiet hours when it would have waited too.
+func (b *Bot) outage(open, end Alert) Alert {
+	now := b.now()
+	text := func(lang string) string {
+		v := view{lang: lang, now: now}
+		return firstLine(end.Line(lang)) + "\n" + T(lang, "al.out", v.clock(open.At), v.clock(end.At))
+	}
+	return Alert{Kind: end.Kind, Sev: SevInfo, At: end.At, Incidents: end.incidents(), Resolves: true,
+		Owners: open.Owners && end.Owners, prompt: open.Sev >= SevCritical, timed: true,
+		Render: func(lang, _ string) (string, *Keyboard) { return text(lang), alertKeyboard(lang, SevInfo) },
+		Line:   func(lang string) string { return firstLine(end.Line(lang)) },
+	}
+}
+
 func (o *outbox) openMsg(chat int64, incident string) (int64, bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -98,11 +154,17 @@ func (o *outbox) setOpen(chat int64, incident string, msg int64) {
 		m = map[string]int64{}
 		o.open[chat] = m
 	}
-	if len(m) >= incidentsCap {
-		for k := range m {
-			delete(m, k)
-			break
+	if _, has := m[incident]; !has && len(m) >= incidentsCap {
+		// The oldest incident goes (message ids grow in a chat), never the test Apply's: its message
+		// carries the Keep / Roll back buttons and the countdown edits it. A random one went before,
+		// which could be exactly that.
+		victim, first := "", int64(0)
+		for k, id := range m {
+			if k != "apply" && (victim == "" || id < first) {
+				victim, first = k, id
+			}
 		}
+		delete(m, victim)
 	}
 	m[incident] = msg
 }
@@ -217,6 +279,9 @@ func (b *Bot) deliverLoop(ctx context.Context) {
 	tick := time.NewTicker(deliverTick)
 	defer tick.Stop()
 	wait := time.Duration(0)
+	// fails counts the deliveries in a row that failed, for the backoff: 5s, 10s, 20s ... up to
+	// maxDeliverWait, so a dead path is not hammered and a live one is not waited on for long.
+	fails := 0
 	for {
 		if wait > 0 {
 			if !sleep(ctx, wait) {
@@ -232,15 +297,17 @@ func (b *Bot) deliverLoop(ctx context.Context) {
 				if ctx.Err() != nil {
 					return
 				}
+				fails++
 				wait = retryAfter(err)
 				if wait == 0 {
-					wait = 5 * time.Second
+					wait = 5 * time.Second << min(fails-1, 4)
 				}
 				if wait > maxDeliverWait {
 					wait = maxDeliverWait
 				}
 				break
 			}
+			fails = 0
 			b.out.pop(q)
 		}
 		if wait > 0 {
@@ -267,8 +334,9 @@ func (b *Bot) guard(what string, f func()) {
 	f()
 }
 
-// retryable is an error worth queueing for: the network, or Telegram asking to slow down. A
-// refusal (bad request, blocked by the user) is not going to change on retry.
+// retryable is an error worth queueing for: the network (an answer that is not the Bot API's
+// included), or Telegram asking to slow down. A refusal (bad request, blocked by the user) is not
+// going to change on retry.
 func retryable(err error) bool {
 	var ae *APIError
 	if errors.As(err, &ae) {
@@ -281,10 +349,16 @@ func retryable(err error) bool {
 func (b *Bot) deliver(ctx context.Context, q *queued) error {
 	t := b.st.Telegram()
 	now := b.now()
-	a := q.a
+	// An outage whose end is queued behind it is told with its end, to the chats that have neither.
+	end := b.out.follower(q)
 	for _, rec := range t.Chats {
+		a := q.a
 		if q.done[rec.ID] || !wants(t, rec, a.Kind) || (a.Owners && rec.Role != roleOwner) {
 			continue
+		}
+		merged := end != nil && !end.done[rec.ID] && wants(t, rec, end.a.Kind) && (!end.a.Owners || rec.Role == roleOwner)
+		if merged {
+			a = b.outage(q.a, end.a)
 		}
 		lang := b.langOf(rec, nil)
 		err := b.deliverTo(ctx, t, rec, lang, a, now)
@@ -299,6 +373,9 @@ func (b *Bot) deliver(ctx context.Context, q *queued) error {
 			b.refused(rec, err)
 		}
 		q.done[rec.ID] = true
+		if merged {
+			end.done[rec.ID] = true
+		}
 		if !sleep(ctx, sendGap) {
 			return ctx.Err()
 		}
@@ -330,12 +407,19 @@ func (b *Bot) deliverTo(ctx context.Context, t config.Telegram, rec config.Teleg
 			kb = nil
 		}
 		err := b.api.EditMessage(cctx, rec.ID, openID, text, kb)
-		if a.Resolves {
+		// The incident stays open while the edit can still land: a retryable failure keeps the alert
+		// queued, and the retry needs the message to edit. Closing it anyway made the retry find nothing
+		// and drop the outcome, so the phone kept "rolls back by itself" with Keep / Roll back (QA-101).
+		if a.Resolves && (err == nil || !retryable(err)) {
 			closeAll()
 		}
 		return err
 	}
-	if !a.Scheduled && (a.Sev == SevInfo || a.Sev == SevWarning) && (inQuietHours(t, now) || !b.out.mutedUntil(rec.ID, now).IsZero()) {
+	// What can wait is held through quiet hours and mutes, except an end whose outage reached this
+	// chat: it follows the way the outage went. An outage loud enough to come through at night was
+	// followed by silence until the morning's summary, its all-clear held as mere information.
+	canWait := !a.Scheduled && !a.prompt && (a.Sev == SevInfo || a.Sev == SevWarning) && !(a.Resolves && hasOpen)
+	if canWait && (inQuietHours(t, now) || !b.out.mutedUntil(rec.ID, now).IsZero()) {
 		b.out.hold(rec.ID, a)
 		if a.Resolves {
 			closeAll()
@@ -345,6 +429,9 @@ func (b *Bot) deliverTo(ctx context.Context, t config.Telegram, rec config.Teleg
 	text, kb := a.Render(lang, rec.Role)
 	if rec.Role == roleAlerts {
 		kb = nil // an alerts-only chat has no buttons to press
+	}
+	if !a.timed && !a.At.IsZero() && now.Sub(a.At) > lateAfter {
+		text += "\n" + T(lang, "al.at", b.view(lang).clock(a.At))
 	}
 	opts := SendOptions{Keyboard: kb, Silent: a.Sev == SevInfo || a.Scheduled, NoPreview: true}
 	// News about one incident replies to its opening message. A burst of new failures is its own

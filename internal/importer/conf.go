@@ -39,6 +39,63 @@ var awgBools3 = []struct{ conf, param, name string }{
 	{"disablecookies", "disable_cookies", "DisableCookies"},
 }
 
+// applyAWGParams copies the AmneziaWG parameters present in kv (keys lowercased, as an [Interface]
+// section or a normalizedQuery holds them) into e.Params and reports whether there were any - the
+// presence of any of them is what makes a peer AmneziaWG rather than plain WireGuard. A 3.1 switch
+// the tools would refuse is an error, as it is for `awg setconf`.
+func applyAWGParams(e *model.Endpoint, kv map[string]string) (bool, error) {
+	isAWG := false
+	for _, k := range awgKeys {
+		if v, ok := kv[k]; ok {
+			isAWG = true
+			// H1-H4 are 32-bit magic values that routinely exceed 2^31; atoiDefault
+			// (strconv.Atoi) OVERFLOWS on a 32-bit build (mipsle/mips OpenWrt) and
+			// returns 0, zeroing the header so the AWG handshake fails. Keep them as
+			// strings (numStr emits them verbatim, no parse) — a "min-max" range (2.0)
+			// is already a string. Jc/Jmin/Jmax/S1-S4 are small, so they stay ints.
+			if strings.HasPrefix(k, "h") || strings.ContainsRune(v, '-') {
+				e.Params[k] = v
+			} else {
+				e.Params[k] = atoiDefault(v, 0)
+			}
+		}
+	}
+	for _, k := range awgKeysHex {
+		if v, ok := kv[k]; ok {
+			e.Params[k] = v // I1-I5 hex magic (2.0); on their own they do not make a peer AWG
+		}
+	}
+	for _, k := range awgKeys3 {
+		if v, ok := kv[k.conf]; ok {
+			isAWG = true
+			e.Params[k.param] = v
+		}
+	}
+	for _, k := range awgBools3 {
+		if v, ok := kv[k.conf]; ok {
+			isAWG = true
+			b, err := awg.ParseBool(v)
+			if err != nil {
+				return false, fmt.Errorf("%s: %v", k.name, err)
+			}
+			e.Params[k.param] = b
+		}
+	}
+	if !isAWG {
+		// Plain WireGuard: undo any I1-I5 copied above, which only mean something to AmneziaWG.
+		for _, k := range awgKeysHex {
+			delete(e.Params, k)
+		}
+	}
+	return isAWG, nil
+}
+
+// What a WireGuard or AmneziaWG .conf can express (sourceFields): its keys, peers, addresses, reserved
+// bytes and AmneziaWG parameters, and its keepalive and MTU as params. The form's keepalive and MTU
+// are the top-level knobs, which stay.
+var confFields = sourceFields{params: append([]string{"private_key", "peer_public_key", "pre_shared_key",
+	"persistent_keepalive", "peers", "local_address", "reserved", "mtu"}, awgParamKeys()...)}
+
 // parseConf parses a WireGuard / AmneziaWG .conf (INI) into an endpoint.
 func parseConf(text string) (*model.Endpoint, error) {
 	iface := map[string]string{}
@@ -100,22 +157,6 @@ func parseConf(text string) (*model.Endpoint, error) {
 	}
 	if port == 0 {
 		port = 51820
-	}
-
-	isAWG := false
-	for _, k := range awgKeys {
-		if _, ok := iface[k]; ok {
-			isAWG = true
-			break
-		}
-	}
-	for _, k := range awgKeys3 {
-		_, ok := iface[k.conf]
-		isAWG = isAWG || ok
-	}
-	for _, k := range awgBools3 {
-		_, ok := iface[k.conf]
-		isAWG = isAWG || ok
 	}
 
 	e := &model.Endpoint{
@@ -194,42 +235,13 @@ func parseConf(text string) (*model.Endpoint, error) {
 	// faithful to the config and the safe default is applied at the consumer (awgUp for the
 	// AmneziaWG kernel iface, see plugin.awgMTU). TestParseConf_AWG_MTU enforces this.
 
+	isAWG, err := applyAWGParams(e, iface)
+	if err != nil {
+		return nil, fmt.Errorf("conf: %w", err)
+	}
 	if isAWG {
 		e.Protocol = model.ProtoAmneziaWG
 		e.Engine = model.EngineAmneziaWG
-		for _, k := range awgKeys {
-			if v, ok := iface[k]; ok {
-				// H1-H4 are 32-bit magic values that routinely exceed 2^31; atoiDefault
-				// (strconv.Atoi) OVERFLOWS on a 32-bit build (mipsle/mips OpenWrt) and
-				// returns 0, zeroing the header so the AWG handshake fails. Keep them as
-				// strings (numStr emits them verbatim, no parse) — a "min-max" range (2.0)
-				// is already a string. Jc/Jmin/Jmax/S1-S4 are small, so they stay ints.
-				if strings.HasPrefix(k, "h") || strings.ContainsRune(v, '-') {
-					e.Params[k] = v
-				} else {
-					e.Params[k] = atoiDefault(v, 0)
-				}
-			}
-		}
-		for _, k := range awgKeysHex {
-			if v, ok := iface[k]; ok {
-				e.Params[k] = v // I1-I5 hex magic
-			}
-		}
-		for _, k := range awgKeys3 {
-			if v, ok := iface[k.conf]; ok {
-				e.Params[k.param] = v
-			}
-		}
-		for _, k := range awgBools3 {
-			if v, ok := iface[k.conf]; ok {
-				b, err := awg.ParseBool(v)
-				if err != nil {
-					return nil, fmt.Errorf("conf: %s: %v", k.name, err)
-				}
-				e.Params[k.param] = b
-			}
-		}
 		e.Name = "AmneziaWG " + host
 	} else {
 		e.Protocol = model.ProtoWireGuard

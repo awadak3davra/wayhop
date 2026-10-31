@@ -213,6 +213,7 @@ func TestDesiredSnapshotRevisionCoversEveryApplyDecisionInput(t *testing.T) {
 		// and therefore emitted sing-box JSON, but the old canonicalHash did not include it.
 		{"rule-set detour", func(c *config.Config) { c.RuleSetDetour = "edge" }},
 		{"native firewall zone", func(c *config.Config) { c.NativeFirewallZone = "vpn" }},
+		{"core override", func(c *config.Config) { c.CoreOverride = `{"log":{"level":"info"}}` }},
 		{"fail-safe target", func(c *config.Config) { c.FailSafe.Target = "9.9.9.9" }},
 		{"fail-safe reboot policy", func(c *config.Config) { c.FailSafe.AutoReboot = !c.FailSafe.AutoReboot }},
 	}

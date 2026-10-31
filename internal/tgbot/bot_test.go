@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,6 +36,7 @@ type fakeBackend struct {
 	restarts   int
 	restartErr error
 	lists      ListsRefresh
+	listsGate  chan struct{} // when set, RefreshLists waits on it
 	subAdded   int
 	subErr     error
 	preview    ApplyPreview
@@ -50,6 +52,24 @@ type fakeBackend struct {
 	speedErr   error
 	speedRuns  int
 	speedExits []string // the exit each run measured, "" for the default route
+	// routed records every SetRouting call (true = on); routeErr fails them.
+	routed   []bool
+	routeErr error
+}
+
+// SetRouting flips the fake's routing switch the way the daemon does, unless routeErr is set.
+func (f *fakeBackend) SetRouting(_ context.Context, on bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.routed = append(f.routed, on)
+	if f.routeErr != nil {
+		return f.routeErr
+	}
+	f.status.Routing = Routing{}
+	if !on {
+		f.status.Routing = Routing{Off: true, By: "telegram"}
+	}
+	return nil
 }
 
 func (f *fakeBackend) ClaimDigest(day string) bool {
@@ -95,6 +115,12 @@ func (f *fakeBackend) RestartDaemon(context.Context) error {
 }
 
 func (f *fakeBackend) RefreshLists(context.Context) (ListsRefresh, error) {
+	f.mu.Lock()
+	gate := f.listsGate
+	f.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.lists, nil
@@ -198,14 +224,14 @@ func (f *fakeBackend) Boot() BootInfo {
 	return f.boot
 }
 
-func (f *fakeBackend) ConfirmApply(context.Context) error {
+func (f *fakeBackend) ConfirmApply(context.Context, string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.kept++
 	return f.decideErr
 }
 
-func (f *fakeBackend) RollbackApply(context.Context) error {
+func (f *fakeBackend) RollbackApply(context.Context, string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.rolledBack++
@@ -309,11 +335,14 @@ func (h *harness) text(chat int64, typ, text, lang string) {
 	}})
 }
 
+// press handles a button press and waits for the work it detached from the handler (an Apply, a
+// refresh, a speed test), so a test reads the outcome.
 func (h *harness) press(chat int64, data string) {
 	h.bot.handle(context.Background(), Update{CallbackQuery: &CallbackQuery{
 		ID: "q1", From: User{ID: chat, FirstName: "Sam"}, Data: data,
 		Message: &Message{MessageID: 99, Chat: Chat{ID: chat, Type: "private"}},
 	}})
+	h.bot.wg.Wait()
 }
 
 func (h *harness) sent() []string {
@@ -562,12 +591,72 @@ func TestAlertsOnlyChatGetsNoState(t *testing.T) {
 	}
 }
 
-func TestOldCommandsAfterAnOutageAreDropped(t *testing.T) {
+// A command queued at Telegram while the router was out of touch is not run when it finally
+// arrives, and its sender is told so, once. Its age is measured when it arrives, on Telegram's own
+// clock: against the bot's start, every command queued during an outage after the start was run,
+// and against the router's clock a router that is ahead dropped fresh commands.
+func TestLateCommandsAreNotRunAndTheSenderIsTold(t *testing.T) {
+	viewerGroup := config.TelegramChat{ID: -300, Name: "Family", Role: roleViewer, Lang: "en"}
+	for _, tc := range []struct {
+		name    string
+		chat    int64
+		typ     string
+		text    string
+		sent    time.Time // the message's date
+		recv    time.Time // when it arrived, by Telegram's clock (zero: unknown)
+		routerT time.Time // the router's clock
+		run     bool      // answered with the status
+		told    bool      // got the late notice
+	}{
+		{"fresh", 500, "private", "/status", testNow, testNow.Add(2 * time.Second), testNow, true, false},
+		{"fresh, router clock three hours ahead", 500, "private", "/status", testNow, testNow.Add(time.Second), testNow.Add(3 * time.Hour), true, false},
+		{"after an outage the bot rode out", 500, "private", "/status", testNow, testNow.Add(40 * time.Minute), testNow.Add(40 * time.Minute), false, true},
+		{"after an outage, router clock behind", 500, "private", "/status", testNow, testNow.Add(40 * time.Minute), testNow.Add(-time.Hour), false, true},
+		{"no server time: the router's clock", 500, "private", "/status", testNow.Add(-3 * time.Hour), time.Time{}, testNow, false, true},
+		{"a late site name in private", 500, "private", "youtube.com", testNow, testNow.Add(time.Hour), testNow, false, true},
+		{"late group chatter", -300, "group", "hello all", testNow, testNow.Add(time.Hour), testNow, false, false},
+		{"late command in a group", -300, "group", "/status@home_wayhop_bot", testNow, testNow.Add(time.Hour), testNow, false, true},
+		{"late stranger", 777, "private", "/status", testNow, testNow.Add(time.Hour), testNow, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, owner, viewerGroup)
+			h.bot.now = func() time.Time { return tc.routerT }
+			h.bot.handle(context.Background(), Update{Message: &Message{Chat: Chat{ID: tc.chat, Type: tc.typ},
+				Date: tc.sent.Unix(), Text: tc.text, From: &User{ID: 500, FirstName: "Sam"}, recv: tc.recv}})
+			sent := h.sent()
+			ran := len(sent) == 1 && strings.Contains(sent[0], "Degraded")
+			told := len(sent) == 1 && strings.Contains(sent[0], "arrived only now")
+			if ran != tc.run || told != tc.told || len(sent) > 1 {
+				t.Fatalf("sent %q", sent)
+			}
+			if told && !strings.Contains(sent[0], "<code>"+esc(tc.text)+"</code> from "+(view{lang: "en", now: tc.routerT}).clock(tc.sent)) {
+				t.Fatalf("the notice does not say which message, sent when: %q", sent[0])
+			}
+		})
+	}
+	// A backlog is told once, not once per message.
 	h := newHarness(t, owner)
-	h.bot.handle(context.Background(), Update{Message: &Message{Chat: Chat{ID: 500, Type: "private"},
-		Date: testNow.Add(-3 * time.Hour).Unix(), Text: "/status", From: &User{ID: 500}}})
-	if len(h.sent()) != 0 {
-		t.Fatal("answered a three-hour-old command")
+	for i := 0; i < 5; i++ {
+		h.bot.handle(context.Background(), Update{Message: &Message{Chat: Chat{ID: 500, Type: "private"},
+			Date: testNow.Add(-3 * time.Hour).Unix(), Text: "/restart", From: &User{ID: 500}}})
+	}
+	if sent := h.sent(); len(sent) != 1 || !strings.Contains(sent[0], "arrived only now") {
+		t.Fatalf("backlog: %q", sent)
+	}
+	if h.be.restarts != 0 {
+		t.Fatal("a late command was run")
+	}
+}
+
+// The age of a command is read on the clock of the server that delivered it.
+func TestPollUpdatesReportsTheServersTime(t *testing.T) {
+	f := newFakeAPI(t)
+	_, at, err := f.client().pollUpdates(context.Background(), 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(at); at.IsZero() || d < -5*time.Second || d > 5*time.Second {
+		t.Fatalf("server time %v (%v off)", at, d)
 	}
 }
 
@@ -629,7 +718,7 @@ func TestRunConnectsPublishesMenuAndServes(t *testing.T) {
 		defer pmu.Unlock()
 		polls++
 		if polls == 1 {
-			return 200, fmt.Sprintf(`{"ok":true,"result":[{"update_id":7,"message":{"message_id":1,"date":%d,"text":"/status","chat":{"id":500,"type":"private"},"from":{"id":500,"first_name":"Sam"}}}]}`, testNow.Unix())
+			return 200, fmt.Sprintf(`{"ok":true,"result":[{"update_id":7,"message":{"message_id":1,"date":%d,"text":"/status","chat":{"id":500,"type":"private"},"from":{"id":500,"first_name":"Sam"}}}]}`, time.Now().Unix()) // dated on the clock the fake's Date header is on
 		}
 		if p["offset"] != float64(8) {
 			t.Errorf("offset not advanced: %v", p["offset"])
@@ -687,4 +776,203 @@ func TestRunReportsARejectedToken(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// A proxy's own 404 in front of the Bot API is a path that does not work yet, not a revoked token:
+// the bot keeps retrying with its backoff instead of sleeping ten minutes as "unauthorized", and
+// the state it shows names the page, never the token.
+func TestRunTreatsAProxyErrorPageAsTheNetwork(t *testing.T) {
+	h := newHarness(t)
+	var calls int32
+	var mu sync.Mutex
+	h.api.on("getMe", func(map[string]any) (int, string) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		if calls == 1 {
+			return 404, "<html>404 Not Found: /bot" + testToken + "/getMe</html>"
+		}
+		return 200, `{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"Home","username":"home_wayhop_bot"}}`
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { h.bot.Run(ctx); close(done) }()
+	deadline := time.Now().Add(5 * time.Second)
+	sawError := false
+	for h.bot.Info().State != StateOnline {
+		i := h.bot.Info()
+		if i.State == StateUnauthorized {
+			t.Fatalf("a proxy page read as a rejected token: %+v", i)
+		}
+		if i.State == StateError {
+			sawError = true
+			if strings.Contains(i.Error, strings.SplitN(testToken, ":", 2)[1]) {
+				t.Fatalf("token in the state: %q", i.Error)
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("did not come online after the page went away: %+v", i)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if !sawError {
+		t.Log("the error state was not sampled; the retry still came within the 1s backoff")
+	}
+}
+
+// Every status the bot shows is drawn for the chat's own role and mute. After pairing, a language
+// switch and the panel's welcome it was drawn as if for nobody: an owner lost Keep / Roll back in
+// the middle of a test Apply, and a muted chat the line saying so.
+func TestStatusAlwaysCarriesTheChatsRole(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		role  string
+		muted bool
+		show  func(h *harness)
+	}{
+		{"paired with an owner code", roleOwner, false, func(h *harness) {
+			code, _ := h.bot.gate.NewCode(roleOwner)
+			h.text(500, "private", "/start "+code, "en")
+		}},
+		{"language switched", roleOwner, true, func(h *harness) {
+			_ = h.st.UpdateTelegram(func(tg *config.Telegram) error { tg.Chats = []config.TelegramChat{owner}; return nil })
+			h.bot.out.mute(500, testNow.Add(time.Hour))
+			h.press(500, cbLang+"en")
+		}},
+		{"welcomed from the panel", roleOwner, true, func(h *harness) {
+			_ = h.st.UpdateTelegram(func(tg *config.Telegram) error { tg.Chats = []config.TelegramChat{owner}; return nil })
+			h.bot.out.mute(500, testNow.Add(time.Hour))
+			m := NewManager(h.be, h.st, nil)
+			m.cur, m.api = h.bot, h.bot.api
+			if err := m.Welcome(context.Background(), owner); err != nil {
+				h.t.Fatal(err)
+			}
+		}},
+		{"a viewer still gets no Keep", roleViewer, false, func(h *harness) {
+			code, _ := h.bot.gate.NewCode(roleViewer)
+			h.text(500, "private", "/start "+code, "en")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.be.status.FailSafe = FailSafe{Armed: true, Remaining: 3 * time.Minute, Window: "w1"}
+			tc.show(h)
+			calls := append(h.api.callsTo("sendMessage"), h.api.callsTo("editMessageText")...)
+			var status apiCall
+			for _, c := range calls {
+				if strings.Contains(c.Params["text"].(string), "Test Apply awaiting confirmation") {
+					status = c
+				}
+			}
+			if status.Method == "" {
+				t.Fatalf("no status shown: %q", h.sent())
+			}
+			kb, text := toJSON(status.Params["reply_markup"]), status.Params["text"].(string)
+			if keep := strings.Contains(kb, `"ak:w1"`); keep != (tc.role == roleOwner) {
+				t.Fatalf("Keep offered=%v to a %s: %s", keep, tc.role, kb)
+			}
+			if muted := strings.Contains(text, "Alerts muted until"); muted != tc.muted {
+				t.Fatalf("mute line shown=%v: %s", muted, text)
+			}
+		})
+	}
+}
+
+// A view is edited in place. Only a message Telegram refuses for good (a Bad Request: too old,
+// deleted) gets the view as a new message; flood control is waited out and the edit tried again,
+// and a server error or a page that is not Telegram's leaves no second copy behind.
+func TestShowSendsANewMessageOnlyWhenTheOldOneIsGone(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		first  [2]any // the first edit's answer: status, body
+		edits  int
+		sends  int
+		minDur time.Duration
+	}{
+		{"edited", [2]any{200, `{"ok":true,"result":true}`}, 1, 0, 0},
+		{"message gone", [2]any{400, `{"ok":false,"error_code":400,"description":"Bad Request: message to edit not found"}`}, 1, 1, 0},
+		{"too old to edit", [2]any{400, `{"ok":false,"error_code":400,"description":"Bad Request: message can't be edited"}`}, 1, 1, 0},
+		{"flood control, short", [2]any{429, `{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 1","parameters":{"retry_after":1}}`}, 2, 0, time.Second},
+		{"flood control, too long to wait", [2]any{429, `{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 300","parameters":{"retry_after":300}}`}, 1, 0, 0},
+		{"server error", [2]any{500, `{"ok":false,"error_code":500,"description":"Internal Server Error"}`}, 1, 0, 0},
+		{"proxy page", [2]any{502, "<html>Bad Gateway</html>"}, 1, 0, 0},
+		{"chat blocked the bot", [2]any{403, `{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}`}, 1, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, owner)
+			var n atomic.Int32
+			h.api.on("editMessageText", func(map[string]any) (int, string) {
+				if n.Add(1) == 1 {
+					return tc.first[0].(int), tc.first[1].(string)
+				}
+				return 200, `{"ok":true,"result":true}`
+			})
+			start := time.Now()
+			h.press(500, cbStatus)
+			if e, s := len(h.api.callsTo("editMessageText")), len(h.api.callsTo("sendMessage")); e != tc.edits || s != tc.sends {
+				t.Fatalf("edits %d (want %d), sends %d (want %d)", e, tc.edits, s, tc.sends)
+			}
+			if time.Since(start) < tc.minDur {
+				t.Fatal("the flood-control wait was not honoured")
+			}
+		})
+	}
+}
+
+// A reply refused by flood control is sent again after the wait Telegram names.
+func TestReplyWaitsOutFloodControl(t *testing.T) {
+	h := newHarness(t, owner)
+	var n atomic.Int32
+	h.api.on("sendMessage", func(map[string]any) (int, string) {
+		if n.Add(1) == 1 {
+			return 429, `{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 1","parameters":{"retry_after":1}}`
+		}
+		return 200, `{"ok":true,"result":{"message_id":3,"chat":{"id":500,"type":"private"},"date":1}}`
+	})
+	h.text(500, "private", "/status", "en")
+	if got := n.Load(); got != 2 {
+		t.Fatalf("%d sends, want the refused one and its retry", got)
+	}
+}
+
+// A pairing code issued without a role, or with one the bot does not know, pairs a viewer: never an
+// owner, who can apply, restart and download every secret.
+func TestPairingCodeRoleDefaultsToViewer(t *testing.T) {
+	for _, tc := range []struct{ asked, got string }{
+		{"", roleViewer}, {"admin", roleViewer}, {"OWNER", roleViewer},
+		{roleOwner, roleOwner}, {roleViewer, roleViewer}, {roleAlerts, roleAlerts},
+	} {
+		g := NewGate()
+		code, _ := g.NewCode(tc.asked)
+		if role, res := g.Redeem(Chat{ID: 1, Type: "private"}, code); res != RedeemOK || role != tc.got {
+			t.Errorf("code for %q paired a %q (%v), want %q", tc.asked, role, res, tc.got)
+		}
+	}
+}
+
+// Wrong codes are remembered for their hour, per chat, and no longer: a stream of wrong codes from
+// ever new chats grew the map for the life of the daemon. The limit itself still holds.
+func TestWrongCodesAreForgottenAndBounded(t *testing.T) {
+	g := NewGate()
+	now := testNow
+	g.now = func() time.Time { return now }
+	for id := int64(1); id <= maxBadChats+50; id++ {
+		g.Redeem(Chat{ID: id, Type: "private"}, "ZZZZZZZZ")
+	}
+	if n := len(g.bad); n > maxBadChats {
+		t.Fatalf("%d chats remembered, cap %d", n, maxBadChats)
+	}
+	for i := 0; i < maxBadCodes; i++ {
+		g.Redeem(Chat{ID: 9999, Type: "private"}, "ZZZZZZZZ")
+	}
+	if _, res := g.Redeem(Chat{ID: 9999, Type: "private"}, "ZZZZZZZZ"); res != RedeemLimited {
+		t.Fatalf("the limit no longer holds: %v", res)
+	}
+	now = now.Add(badCodeWindow)
+	g.Strangers() // any visit to the gate prunes
+	if n := len(g.bad); n != 0 {
+		t.Fatalf("%d chats still remembered after their hour", n)
+	}
 }

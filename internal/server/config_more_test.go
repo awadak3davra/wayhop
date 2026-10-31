@@ -66,21 +66,23 @@ func TestApplyConfigFields_CopiesEveryExportedField(t *testing.T) {
 		// copied by applyConfigFields, but the fixture never set it, so its coverage here was the
 		// same nil-equals-nil as IgnoredDrift's. Copied-and-untested is a weaker failure than
 		// uncopied, and it was equally invisible.
-		RuleSetDetour: "wg0", NativeFirewallZone: "vpn",
-		Ports:        config.Ports{UI: 1, Clash: 2, DNS: 3, Mixed: 4},
-		Clash:        config.Clash{Controller: "127.0.0.1:9090", Secret: "s"},
-		SingBox:      config.SingBox{Bin: "/b", Config: "/c"},
-		Updater:      config.Updater{Arch: "arm64", Mirrors: []string{"m"}, SelfRepo: "o/r", AutoUpdate: true},
-		FailSafe:     config.FailSafe{Target: "8.8.8.8", AutoReboot: true},
-		Watchdog:     config.Watchdog{NotifyURL: "https://x"},
-		Auth:         config.Auth{Username: "operator", PasswordHash: "hash"},
-		Subscription: config.Subscription{URL: "https://provider.example/sub", RefreshHours: 6},
-		AllowedHosts: []string{"router.lan"},
-		AllowAnyHost: true,
-		Features:     map[string]config.FeatureConfig{"iptv": {Enabled: true}},
-		Backup:       config.Backup{AutoHours: 6, KeepN: 5, Dir: "/bk"},
-		IgnoredDrift: []string{"ep1"},
-		Telegram:     config.Telegram{Enabled: true, Token: "123456:abcdefghijklmnopqrstuvwxyz"},
+		RuleSetDetour: "wg0", CoreRestart: "04:30", NativeFirewallZone: "vpn",
+		CoreOverride:   `{"log":{"level":"info"}}`,
+		Ports:          config.Ports{UI: 1, Clash: 2, DNS: 3, Mixed: 4},
+		Clash:          config.Clash{Controller: "127.0.0.1:9090", Secret: "s"},
+		SingBox:        config.SingBox{Bin: "/b", Config: "/c"},
+		Updater:        config.Updater{Arch: "arm64", Mirrors: []string{"m"}, SelfRepo: "o/r", AutoUpdate: true},
+		FailSafe:       config.FailSafe{Target: "8.8.8.8", AutoReboot: true},
+		Watchdog:       config.Watchdog{NotifyURL: "https://x"},
+		Auth:           config.Auth{Username: "operator", PasswordHash: "hash"},
+		Subscription:   config.Subscription{URL: "https://provider.example/sub", RefreshHours: 6},
+		AllowedHosts:   []string{"router.lan"},
+		AllowAnyHost:   true,
+		Features:       map[string]config.FeatureConfig{"iptv": {Enabled: true}},
+		Backup:         config.Backup{AutoHours: 6, KeepN: 5, Dir: "/bk"},
+		IgnoredDrift:   []string{"ep1"},
+		Telegram:       config.Telegram{Enabled: true, Token: "123456:abcdefghijklmnopqrstuvwxyz"},
+		TelegramBridge: config.TelegramBridge{Enabled: true, Port: 2443, Secret: "0123456789abcdef0123456789abcdef"},
 	}
 	dst := &config.Config{}
 
@@ -129,6 +131,14 @@ func TestApplyConfigFields_CopiesEveryExportedField(t *testing.T) {
 			// masked token, so a bulk copy would store the mask as the token and drop paired chats.
 			if !reflect.DeepEqual(gotDst, config.Telegram{}) {
 				t.Errorf("Telegram must NOT be copied (its own endpoints), got %+v", gotDst)
+			}
+			continue
+		}
+		if f.Name == "TelegramBridge" {
+			// Written by PUT /api/telegram-bridge. The Settings page holds the masked secret, so a
+			// bulk copy would store the mask as the secret and break every client's link.
+			if !reflect.DeepEqual(gotDst, config.TelegramBridge{}) {
+				t.Errorf("TelegramBridge must NOT be copied (its own endpoint), got %+v", gotDst)
 			}
 			continue
 		}

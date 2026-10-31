@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"wayhop/internal/awg"
 )
 
 // Capabilities is the platform capability probe — which VPN/proxy protocols this router can
@@ -27,6 +29,9 @@ type Capabilities struct {
 	Installable     map[string]string `json:"installable"`      // proto -> recommended package to install
 	SingboxRequired []string          `json:"singbox_required"` // proxy protos with NO native path
 	SingboxPresent  bool              `json:"singbox_present"`
+	// SingboxMinMinor names the protocols in SingboxRequired that need a newer core than the oldest
+	// WayHop supports: proto -> first sing-box 1.x minor that carries it. Additive.
+	SingboxMinMinor map[string]int `json:"singbox_min_minor,omitempty"`
 	// PackageManager is the detected installer ("apk" | "opkg" | ""), and InstallCmds maps a
 	// proto from Installable to the exact copy-paste install command for THIS host — so the
 	// recommend UX shows `apk add …` on newer OpenWrt and `opkg install …` elsewhere instead of
@@ -53,6 +58,11 @@ type Capabilities struct {
 	// means probed and nothing found. Native writers fail closed on both: nil is a retryable unknown;
 	// empty is proof the requested handler is absent. Additive.
 	NetifdProtos map[string]bool `json:"netifd_protos,omitempty"`
+	// FirmwareRelease is the firmware's release as the router prints it: KeeneticOS's `release:` line
+	// of `show version`, long (`4.01.C.7.0-0`) or short (`4.1.7`). On KeeneticOS it decides what the
+	// router's own AmneziaWG can carry (KeeneticReleaseAWG): the WireGuard component is older than
+	// `wireguard asc`. "" where it was not read (OpenWrt, or a failed probe). Additive.
+	FirmwareRelease string `json:"firmware_release,omitempty"`
 }
 
 // Accel describes the router's forwarding accelerator. Kind: "nft-flowtable" = WayHop's own
@@ -68,8 +78,12 @@ type Accel struct {
 // for them. This is the floor: run any of these and the userspace core must run.
 var singboxRequired = []string{
 	"vless", "vmess", "trojan", "shadowsocks", "hysteria2", "tuic",
-	"anytls", "socks", "http",
+	"anytls", "socks", "http", "openvpn", "snell", "openconnect", "ssh",
 }
+
+// singboxMinMinor is the first sing-box 1.x minor that carries a protocol, for the protocols that
+// arrived after the oldest core WayHop supports. A usable core older than that is not enough.
+var singboxMinMinor = map[string]int{"openvpn": 14, "snell": 14, "openconnect": 14}
 
 // hostInputs is everything the pure decision functions read from the live host, captured up
 // front so the decision (decideOpenWrt / decideKeenetic) is a pure function unit-tested with
@@ -115,6 +129,7 @@ func decideOpenWrt(in hostInputs) Capabilities {
 		Native:          map[string]bool{},
 		Installable:     map[string]string{},
 		SingboxRequired: append([]string(nil), singboxRequired...),
+		SingboxMinMinor: singboxMinMinorCopy(),
 		SingboxPresent:  in.tools["sing-box"],
 	}
 
@@ -159,7 +174,8 @@ func decideOpenWrt(in hostInputs) Capabilities {
 //
 // Rules (docs/NATIVE_INTEGRATION_DESIGN.md §1-2) in the development repository: WireGuard/AmneziaWG
 // are native if the "wireguard" firmware component is present, OR an NDM interface of type
-// "Wireguard" exists (the NDM Wireguard type carries AmneziaWG params on Keenetic). KeeneticOS
+// "Wireguard" exists (the NDM Wireguard type carries AmneziaWG params on Keenetic) - AmneziaWG only
+// on a release that has `wireguard asc` (4.2 on, KeeneticReleaseAWG; QA-127). KeeneticOS
 // firmware also ships ipsec/openvpn/l2tp/etc. components — those are populated too when present
 // (best-effort), but WG/AWG are the priority this iteration.
 func decideKeenetic(in hostInputs) Capabilities {
@@ -171,20 +187,33 @@ func decideKeenetic(in hostInputs) Capabilities {
 		Native:          map[string]bool{},
 		Installable:     map[string]string{},
 		SingboxRequired: append([]string(nil), singboxRequired...),
+		SingboxMinMinor: singboxMinMinorCopy(),
 		SingboxPresent:  in.tools["sing-box"],
+		FirmwareRelease: ndmcField(in.ndmcVersion, "release"),
 	}
+
+	// The WireGuard component is older than AmneziaWG on KeeneticOS: a release before 4.2 has
+	// WireGuard and no `wireguard asc` (QA-127, see KeeneticReleaseAWG). There the router carries no
+	// AmneziaWG of its own, installing the component would not change that, and the endpoint belongs
+	// to WayHop's AmneziaWG engine. A release that cannot be read keeps the component's answer.
+	awgGen, releaseKnown := KeeneticReleaseAWG(caps.FirmwareRelease)
+	awgFirmware := !releaseKnown || awgGen != awg.GenNone
 
 	// An NDM "Wireguard" interface type backs both vanilla WG and AmneziaWG on KeeneticOS.
 	wgIface := ndmHasInterfaceType(iface, "wireguard")
 	wgComponent := hasComponent(ver, "wireguard")
 	if wgComponent || wgIface {
 		caps.Native["wireguard"] = true
-		caps.Native["amneziawg"] = true
+		if awgFirmware {
+			caps.Native["amneziawg"] = true
+		}
 	} else {
 		// Keenetic WG/AWG are firmware components installed via the device's own component UI,
 		// not opkg — recommend the firmware component name.
 		caps.Installable["wireguard"] = "wireguard (firmware component)"
-		caps.Installable["amneziawg"] = "wireguard (firmware component)"
+		if awgFirmware {
+			caps.Installable["amneziawg"] = "wireguard (firmware component)"
+		}
 	}
 
 	// Other firmware-native protocols (best-effort; tests only assert WG/AWG). The component
@@ -438,6 +467,7 @@ func DetectCapabilitiesObservedContext(ctx context.Context) (Capabilities, []str
 			Native:          map[string]bool{},
 			Installable:     map[string]string{},
 			SingboxRequired: append([]string(nil), singboxRequired...),
+			SingboxMinMinor: singboxMinMinorCopy(),
 			SingboxPresent:  in.tools["sing-box"],
 		}, []string{"router platform capability probe could not identify the host"}
 	}
@@ -622,4 +652,13 @@ func detectHWOffloadSysfs() bool {
 	}
 	matches, err := filepath.Glob("/sys/kernel/debug/ppe*")
 	return err == nil && len(matches) > 0
+}
+
+// singboxMinMinorCopy hands each Capabilities its own copy, so a caller cannot edit the table.
+func singboxMinMinorCopy() map[string]int {
+	out := make(map[string]int, len(singboxMinMinor))
+	for k, v := range singboxMinMinor {
+		out[k] = v
+	}
+	return out
 }

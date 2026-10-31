@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"wayhop/internal/binstore"
+	"wayhop/internal/localtz"
 	"wayhop/internal/netdiag"
 	"wayhop/internal/pm"
 )
@@ -41,7 +42,9 @@ import (
 //
 //	core         — the sing-box proxy core
 //	kernel-plugin— an engine driving a kernel iface (AmneziaWG)
-//	socks-plugin — a long-running chained-SOCKS engine (olcRTC)
+//	socks-plugin — a long-running chained-SOCKS engine (ByeDPI's ciadpi)
+//	service      — a router service the daemon runs for itself, not for a connection (the
+//	               Telegram bridge, tg-ws-proxy)
 //	standalone   — a separate core wayhop does NOT run here; sing-box covers the
 //	               protocol natively, so it's catalog-only (install only for a manual
 //	               setup). The UI files these under "Advanced".
@@ -50,15 +53,10 @@ type Engine struct {
 	Name        string   `json:"name"`
 	Repo        string   `json:"repo"`     // GitHub "owner/name"
 	BinName     string   `json:"bin_name"` // installed filename
-	Role        string   `json:"role"`     // core | kernel-plugin | socks-plugin | standalone
+	Role        string   `json:"role"`     // core | kernel-plugin | socks-plugin | service | standalone
 	VersionArgs []string `json:"-"`        // args that print the version
 	SourceOnly  bool     `json:"source_only"`
-	// Nightly marks an engine whose GitHub releases are all prerelease nightlies (no stable tag).
-	// For update-detection the "latest version" is the DATE parsed from the newest release's NAME
-	// (e.g. olcRTC's "olcRTC nightly 2026.07.23 (…)"), compared against the binary's stamped date —
-	// LatestStable would otherwise only yield the opaque nightly-<sha> tag, uncomparable to the date.
-	Nightly bool   `json:"nightly,omitempty"`
-	Note    string `json:"note,omitempty"`
+	Note        string   `json:"note,omitempty"`
 	// Provides is the protocol this engine exists to carry, named as the platform capability matrix
 	// names it. It is set only where a KERNEL path for the same protocol can exist, because that is
 	// the only case where it changes what the operator should do.
@@ -73,6 +71,32 @@ type Engine struct {
 	// because its upstream publishes none (see companion.go). Repo is then WayHop's, and the versions
 	// are the upstream ones written into the asset names.
 	Companion string `json:"companion,omitempty"`
+	// BareArch marks an engine whose Linux builds carry only an arch in the asset name
+	// (byedpi-17.3-aarch64.tar.gz): matched without the "linux" token, refusing other-OS builds.
+	BareArch bool `json:"-"`
+	// Member is the archive member to install as BinName when the archive names it otherwise; a
+	// trailing '*' matches a prefix (byedpi's ciadpi-<arch>). Empty = BinName.
+	Member string `json:"-"`
+	// ShortVersion: the binary prints MAJOR.MINOR of a 0.MAJOR.MINOR tag (ciadpi --version says
+	// "17.3" for v0.17.3), read back as the tag's version.
+	ShortVersion bool `json:"-"`
+	// Skip lists asset-name fragments that rule a build out although it matches the arch
+	// (tg-ws-proxy's "-upx" twins).
+	Skip []string `json:"-"`
+	// SoftFloatARM ranks a 32-bit ARM soft-float build (...-musleabi) above its hard-float twin
+	// (...-musleabihf) for the arm arch.
+	SoftFloatARM bool `json:"-"`
+	// SumsAsset names the release's own checksum list (a sha256sum file). Install then also
+	// requires the list's line for the asset to equal the digest it verifies the bytes against.
+	SumsAsset string `json:"-"`
+}
+
+// member is the archive member that holds the engine's binary.
+func (e Engine) member() string {
+	if e.Member != "" {
+		return e.Member
+	}
+	return e.BinName
 }
 
 // RouterUsed reports whether the router actually runs this engine (vs catalog-only).
@@ -92,8 +116,25 @@ var Engines = []Engine{
 	{ID: "amneziawg-go", Name: "AmneziaWG (userspace)", Repo: DefaultSelfRepo, BinName: "amneziawg-go", Role: "kernel-plugin",
 		VersionArgs: []string{"--version"}, Provides: "amneziawg", Companion: "amneziawg-go-",
 		Note: "AmneziaWG 3 in userspace, for routers whose kernel module is older than the config or absent. Built by WayHop from upstream amneziawg-go, which publishes no binaries, and attached to every WayHop release."},
-	{ID: "olcrtc", Name: "olcRTC (WebRTC tunnel)", Repo: "awadak3davra/olcrtc", BinName: "olcrtc", Role: "socks-plugin", VersionArgs: []string{"version"}, Nightly: true,
-		Note: "Anti-whitelist WebRTC-over-meet tunnel (Jitsi/Telemost/WbStream). Pulled from the awadak3davra/olcrtc fork, which daily auto-syncs upstream openlibrecommunity/olcrtc and publishes prebuilt `olcrtc-linux-<arch>` binaries (upstream ships none; the WebRTC stack is too heavy to build on the router)."},
+	// ByeDPI's local SOCKS proxy (a ByeDPI connection runs it, plugin/byedpi.go). Upstream publishes
+	// static builds per arch as byedpi-<ver>-<arch>.tar.gz holding ciadpi-<arch>.
+	{ID: "byedpi", Name: "ByeDPI (ciadpi)", Repo: "hufrea/byedpi", BinName: "ciadpi", Role: "socks-plugin",
+		VersionArgs: []string{"--version"}, BareArch: true, Member: "ciadpi-*", ShortVersion: true,
+		Note: "A local SOCKS proxy that rewrites the start of each connection against DPI; a ByeDPI connection runs it."},
+	// tg-ws-proxy-rs, the Telegram bridge (server/tgbridge.go). Upstream publishes static musl builds
+	// per target triple as tg-ws-proxy-<triple>.tar.gz holding tg-ws-proxy, a "-upx" twin of each,
+	// and a SHA256SUMS over every asset (v2.5.8, read with gh api on 2026-10-29).
+	//
+	// The -upx twins are skipped: UPX unpacks the whole binary into anonymous memory at every start,
+	// which upstream's own README calls the RAM trade-off, and on a router RAM is the scarcer of the
+	// two (the plain build is about 4 MB on flash). On ARMv7 the soft-float musleabi build wins over
+	// musleabihf: a static binary's float ABI only matters for whether the core has VFP, and the
+	// soft-float one runs on every ARMv7 core while the hard-float one dies with SIGILL on a core
+	// without it (upstream's README warns of exactly that on Entware's soft-float ARMv7 feeds).
+	// Releases up to v2.5.0 ship only musleabihf, which is still taken there.
+	{ID: "tg-ws-proxy", Name: "Telegram bridge (tg-ws-proxy-rs)", Repo: "valnesfjord/tg-ws-proxy-rs", BinName: "tg-ws-proxy", Role: "service",
+		VersionArgs: []string{"--version"}, Skip: []string{"-upx"}, SoftFloatARM: true, SumsAsset: "SHA256SUMS",
+		Note: "A local MTProto proxy on the LAN address that carries Telegram over WebSocket to Telegram's web domains, for networks that block Telegram's servers; the Telegram bridge runs it."},
 }
 
 // EngineByID returns the engine with the given id, or nil.
@@ -141,6 +182,9 @@ type Updater struct {
 	// low-space upgrade path and a test that has to fill the dev host's disk to reach it would never
 	// be written. The alternative the gates forbid is a t.Skip on a host-dependent condition.
 	availBytes func(dir string) (uint64, bool)
+	// selfStageDir is where a self-update stages its download before the flash is touched (see
+	// stageSelfInRAM); "" is os.TempDir(), the router's tmpfs. A seam for the same reason as availBytes.
+	selfStageDir string
 	// pmStatusMu serializes package-ownership/catalog reads. The Updater page loads the WayHop row
 	// and engine rows concurrently; Entware opkg can reject even read-only commands while another
 	// opkg process is inspecting its database. A single failed Owner call made a packaged sing-box
@@ -148,6 +192,17 @@ type Updater struct {
 	pmStatusMu sync.Mutex
 	// awgRun runs WayHop's AmneziaWG installer (awginstall.go), as a seam: nil runs it for real.
 	awgRun AWGRunFunc
+	// zone is the zone times are shown to the owner in, as a seam: nil is the router's
+	// (localtz.Location), which is not Go's time.Local on Keenetic or OpenWrt.
+	zone func() *time.Location
+}
+
+// routerZone is the zone a time in a message for the owner is written in.
+func (u *Updater) routerZone() *time.Location {
+	if u.zone != nil {
+		return u.zone()
+	}
+	return localtz.Location()
 }
 
 // New builds an Updater. An empty arch autodetects from the running binary
@@ -329,7 +384,33 @@ func (u *Updater) selfManaged(exePath string) (owner string, yes bool, err error
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return u.pm.Owner(ctx, exePath)
+	for _, p := range selfPackagePaths(exePath) {
+		if owner, yes, err = u.pm.Owner(ctx, p); err != nil || yes {
+			return owner, yes, err
+		}
+	}
+	return "", false, nil
+}
+
+// selfPackagePaths are the paths whose package ownership makes the running binary a package's: the
+// binary itself (the .ipk owns /usr/sbin/wayhop), and the file the apk package actually ships. The
+// .apk owns /usr/libexec/wayhop/wayhop and its post-install publishes it at /usr/sbin/wayhop (a copy
+// up to 0.5.8, a hard link since), a path apk does not own — so asking about the running binary
+// alone answered "not a package's" on every apk install, and the panel self-updated a binary the
+// next `apk upgrade wayhop` would overwrite while the package database named another version.
+func selfPackagePaths(exePath string) []string {
+	paths := []string{exePath}
+	if filepath.Base(exePath) != "wayhop" {
+		return paths
+	}
+	staged := filepath.Join(filepath.Dir(filepath.Dir(exePath)), "libexec", "wayhop", "wayhop")
+	if staged == filepath.Clean(exePath) {
+		return paths
+	}
+	if fi, err := os.Stat(staged); err == nil && fi.Mode().IsRegular() {
+		paths = append(paths, staged)
+	}
+	return paths
 }
 
 // sanitizeMirrors keeps only usable mirror prefixes: the "" sentinel (direct, no
@@ -410,7 +491,7 @@ func (u *Updater) Installed(e Engine) Installed {
 	if !exists {
 		return Installed{Present: false}
 	}
-	v, _ := binaryRunnable(path, e.VersionArgs)
+	v, _ := engineVersion(e, path)
 	return Installed{Present: true, Path: path, Version: v}
 }
 
@@ -419,6 +500,29 @@ func (u *Updater) Installed(e Engine) Installed {
 // corrupt / missing loader): an ExitError (it ran but exited non-zero) and an empty/unparsed version
 // are NOT errors, since some engines print their version to stderr or exit non-zero. Empty
 // versionArgs is a no-op — nothing to probe.
+// shortVerRe reads the MAJOR.MINOR a ShortVersion engine prints.
+var shortVerRe = regexp.MustCompile(`\b(\d+)\.(\d+)\b`)
+
+// engineVersion is binaryRunnable with the engine's own version reading.
+func engineVersion(e Engine, path string) (string, error) {
+	v, err := binaryRunnable(path, e.VersionArgs)
+	if v == "" && e.ShortVersion && len(e.VersionArgs) > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		out, _ := exec.CommandContext(ctx, path, e.VersionArgs...).CombinedOutput()
+		v = parseShortVersion(string(out))
+	}
+	return v, err
+}
+
+// parseShortVersion reads "17.3" as the 0.17.3 its release is tagged.
+func parseShortVersion(out string) string {
+	if m := shortVerRe.FindStringSubmatch(out); m != nil {
+		return "0." + m[1] + "." + m[2]
+	}
+	return ""
+}
+
 func binaryRunnable(path string, versionArgs []string) (version string, err error) {
 	if len(versionArgs) == 0 {
 		return "", nil
@@ -550,7 +654,7 @@ func (u *Updater) apiGetDirect(ctx context.Context, path string, v any) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 8<<20))
-		return fmt.Errorf("%s: %s", url, describeGHStatus(resp))
+		return fmt.Errorf("%s: %s", url, describeGHStatus(resp, u.routerZone()))
 	}
 	// Same 8 MiB decode cap as apiGet so a misbehaving endpoint can't stream unbounded into RAM.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
@@ -569,13 +673,16 @@ func (u *Updater) apiGetDirect(ctx context.Context, path string, v any) error {
 // "status 403" is the answer GitHub gives when the ANONYMOUS request allowance for this router's
 // public IP is used up — 60 an hour, shared by everything behind that address — and it reached the
 // panel as a bare number that reads like a broken router. It is neither broken nor permanent, and the
-// one fact that makes it bearable is when it lifts, which the response carries.
-func describeGHStatus(resp *http.Response) string {
+// one fact that makes it bearable is when it lifts, which the response carries. That time is written
+// in loc, the router's zone, and named: Go's time.Local is UTC on Keenetic and OpenWrt, so a reset at
+// 23:05 router time in UTC+3 read "until 20:05".
+func describeGHStatus(resp *http.Response, loc *time.Location) string {
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
 		if resp.Header.Get("X-RateLimit-Remaining") == "0" {
 			when := ""
 			if sec, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil && sec > 0 {
-				when = " until " + time.Unix(sec, 0).Format("15:04")
+				at := time.Unix(sec, 0).In(loc)
+				when = " until " + at.Format("15:04") + " (" + localtz.Label(at) + ")"
 			}
 			return "GitHub's hourly request allowance for this router's address is used up" + when +
 				" — nothing is wrong with the router, and the panel keeps working from what it already knows"
@@ -841,15 +948,6 @@ func flashRefusal(id, dir string, avail, need uint64) error {
 		id, dir, avail>>20, need>>20, shortfallMiB(avail, need))
 }
 
-// selfFlashRefusal is the same refusal for WayHop's own binary. Deliberately NOT carrying the
-// sing-box-binary advice: this directory is the one the running daemon sits in, and no panel
-// setting moves it — repeating that suggestion here would be pointing at a lever that is not
-// connected to anything. The shortfall applies either way.
-func selfFlashRefusal(dir string, avail, need uint64) error {
-	return fmt.Errorf("not enough free space to self-update safely on %s (~%d MiB free, need ~%d MiB for the new binary + backup — free at least %d MiB more) — free space, mount external storage, or update over SSH",
-		dir, avail>>20, need>>20, shortfallMiB(avail, need))
-}
-
 func enoughSpaceFor(avail uint64, known bool, binSize int, withBackup bool) bool {
 	if !known {
 		return true
@@ -908,12 +1006,25 @@ func (u *Updater) Install(ctx context.Context, e Engine, tag string) (string, er
 	if err != nil {
 		return "", fmt.Errorf("lookup %s %s: %w", e.ID, tag, err)
 	}
-	asset := pickAsset(rel.Assets, u.Arch)
+	asset := pickAssetFor(e, rel.Assets, u.Arch)
 	if asset == nil {
 		return "", fmt.Errorf("no %s asset for arch %q in %s %s", e.ID, u.Arch, e.ID, tag)
 	}
+	if e.SumsAsset != "" {
+		if err := u.checkReleaseSums(ctx, e, rel, *asset); err != nil {
+			return "", fmt.Errorf("%s %s: %w", e.ID, rel.Tag, err)
+		}
+	}
 	if err := os.MkdirAll(u.BinDir, 0o755); err != nil {
 		return "", err
+	}
+	// The staging files an interrupted install of this engine left behind (only Install writes these
+	// names, and it holds u.mu): on a full overlay a partial sing-box.new is the room this one needs.
+	for _, p := range []string{filepath.Join(u.BinDir, e.BinName) + ".new", filepath.Join(u.BinDir, e.BinName) + ".new.zip",
+		binstore.Stored(u.BinDir, e.BinName, true) + ".new"} {
+		if fi, err := os.Lstat(p); err == nil && fi.Mode().IsRegular() && os.Remove(p) == nil {
+			log.Printf("updater: removed %s, left by an interrupted install", p)
+		}
 	}
 	// Flash pre-flight BEFORE downloading: streamAssetToFile writes the decompressed binary into
 	// BinDir as it downloads. On a tiny router overlay a large core simply cannot fit, so refuse
@@ -950,14 +1061,14 @@ func (u *Updater) Install(ctx context.Context, e Engine, tag string) (string, er
 	// DIRECT release lookup above, so it is an independent anchor, not a number the same mirror chose.
 	// A release that simply has no digest (older assets predating GitHub's digest field) is refused
 	// with an actionable message from verifyDigestSum rather than installed on trust.
-	if err := u.streamAssetToFile(ctx, *asset, e.BinName, tmp, true); err != nil {
+	if err := u.streamAssetToFile(ctx, *asset, e.member(), tmp, true); err != nil {
 		return "", fmt.Errorf("download %s: %w", asset.Name, err)
 	}
 	// Re-verify BEFORE swapping: probe the STAGED binary's version command to confirm it executes on
 	// this arch. A wrong-arch/corrupt asset can pass the digest yet fail to run (the "installed but
 	// crash-loops on start" class). If it won't run, drop the staged file and keep the existing binary
 	// untouched — no rollback needed because we never overwrote it. Skipped when e has no VersionArgs.
-	v, verr := binaryRunnable(tmp, e.VersionArgs)
+	v, verr := engineVersion(e, tmp)
 	if verr != nil {
 		_ = os.Remove(tmp)
 		return "", fmt.Errorf("downloaded %s but it %v — wrong arch or corrupt asset; the existing binary was left untouched, retry or install over SSH", e.ID, verr)
@@ -974,8 +1085,13 @@ func (u *Updater) Install(ctx context.Context, e Engine, tag string) (string, er
 		return "", err
 	}
 	if e.Companion != "" {
-		// A gzip kept from an earlier install on a fuller flash is no longer the copy that runs.
+		// A gzip kept from an earlier install on a fuller flash is no longer the copy that runs, and
+		// neither is the copy unpacked from it into RAM: the plugin prefers the binary in BinDir, so
+		// that copy would hold 3-4 MB of tmpfs until reboot, uncounted once the record says raw.
 		_ = os.Remove(binstore.Stored(u.BinDir, e.BinName, true))
+		if _, err := binstore.RemoveUnpacked(u.BinDir, e.BinName, u.RunDir); err != nil {
+			log.Printf("wayhop: %s installed, but the copy unpacked from its old gzip could not be removed: %v", e.ID, err)
+		}
 		// The binary's own --version is upstream's stale constant; the release says what this is.
 		if err := binstore.Write(u.BinDir, e.BinName, rel.Tag, false); err != nil {
 			log.Printf("wayhop: %s installed, but its version record could not be written: %v", e.ID, err)
@@ -1123,14 +1239,17 @@ var archTokens = map[string][]string{
 // build — explicit armv7/armhf/arm32 > a bare "-linux-arm" > armv6 > armv5 — so an
 // ARMv7 router never settles for a slower lowest-common-denominator binary when a
 // better one is published.
-func pickAsset(assets []Asset, arch string) *Asset {
+func pickAsset(assets []Asset, arch string) *Asset { return pickAssetFor(Engine{}, assets, arch) }
+
+// pickAssetFor is pickAsset with the engine's own naming (BareArch).
+func pickAssetFor(e Engine, assets []Asset, arch string) *Asset {
 	var best *Asset
 	bestScore := -1
 	for i := range assets {
-		if !matchAsset(assets[i].Name, arch) {
+		if !matchAssetFor(e, assets[i].Name, arch) {
 			continue
 		}
-		if sc := assetScore(assets[i].Name, arch); sc > bestScore {
+		if sc := assetScoreFor(e, assets[i].Name, arch); sc > bestScore {
 			bestScore = sc
 			best = &assets[i]
 		}
@@ -1143,6 +1262,16 @@ func pickAsset(assets []Asset, arch string) *Asset {
 // question among binaries that at least load.
 func assetScore(name, arch string) int {
 	return libcScore(name)*10 + archVariantScore(name, arch)
+}
+
+// assetScoreFor is assetScore with the engine's own preference as the last tie-break.
+func assetScoreFor(e Engine, name, arch string) int {
+	sc := assetScore(name, arch) * 2
+	n := strings.ToLower(name)
+	if e.SoftFloatARM && arch == "arm" && strings.Contains(n, "eabi") && !strings.Contains(n, "eabihf") {
+		sc++
+	}
+	return sc
 }
 
 // libcScore ranks an asset by the C library it expects.
@@ -1170,20 +1299,56 @@ func libcScore(name string) int {
 }
 
 func archVariantScore(name, arch string) int {
+	n := strings.ToLower(name)
+	if arch == "mips" || arch == "mipsle" {
+		// Router MIPS SoCs (MT7621, ath79) have no FPU; a hardfloat build leans on kernel emulation or
+		// dies with SIGILL. sing-box ships only softfloat there; mihomo ships both, hardfloat first.
+		switch {
+		case strings.Contains(n, "softfloat"):
+			return 2
+		case strings.Contains(n, "hardfloat"):
+			return 0
+		}
+		return 1
+	}
 	if arch != "arm" {
 		return 1 // any matching asset is equally good on this dimension
 	}
-	n := strings.ToLower(name)
+	// The ISA level is read before the bare "arm32" family token: Xray ships arm32-v5, arm32-v6 and
+	// arm32-v7a, and scoring "arm32" first made all three equal, so the first listed - the soft-float
+	// v5 build - was installed on ARMv7 routers.
 	switch {
+	case strings.Contains(n, "armv5"), strings.Contains(n, "arm32-v5"):
+		return 0
+	case strings.Contains(n, "armv6"), strings.Contains(n, "arm32-v6"):
+		return 1
 	case strings.Contains(n, "armv7"), strings.Contains(n, "armhf"), strings.Contains(n, "arm32"):
 		return 3
-	case strings.Contains(n, "armv6"):
-		return 1
-	case strings.Contains(n, "armv5"):
-		return 0
 	default:
 		return 2 // bare "-linux-arm": ARMv7-safe baseline, better than v5/v6
 	}
+}
+
+// otherOS marks an asset built for something other than Linux, for engines whose names carry no OS.
+var otherOS = []string{"windows", "-w64", "-w32", "win32", "win64", "darwin", "macos", "freebsd", "android", "ios"}
+
+// matchAssetFor is matchAsset for one engine: a BareArch engine's Linux builds name only the arch.
+func matchAssetFor(e Engine, name, arch string) bool {
+	n := strings.ToLower(name)
+	for _, skip := range e.Skip {
+		if strings.Contains(n, strings.ToLower(skip)) {
+			return false
+		}
+	}
+	if !e.BareArch {
+		return matchAsset(name, arch)
+	}
+	for _, o := range otherOS {
+		if strings.Contains(n, o) {
+			return false
+		}
+	}
+	return matchArch(n, arch)
 }
 
 // matchAsset reports whether a release asset name is the Linux build for arch.
@@ -1192,7 +1357,15 @@ func matchAsset(name, arch string) bool {
 	if !strings.Contains(n, "linux") {
 		return false
 	}
-	for _, ext := range []string{".sha256", ".asc", ".sig", ".pem", ".dgst", ".txt", ".json"} {
+	return matchArch(n, arch)
+}
+
+// matchArch is the arch half of matchAsset, on a lower-cased name.
+func matchArch(n, arch string) bool {
+	// Distro packages are not archives this updater opens: extractStreamTo would copy a .deb verbatim
+	// as the "binary" (mihomo lists .deb, .rpm and .pkg.tar.zst beside its .gz, and the .deb came first).
+	for _, ext := range []string{".sha256", ".asc", ".sig", ".pem", ".dgst", ".txt", ".json",
+		".deb", ".rpm", ".ipk", ".apk", ".zst", ".xz", ".minisig"} {
 		if strings.HasSuffix(n, ext) {
 			return false
 		}
@@ -1371,6 +1544,15 @@ func pickSelfRelease(rels []Release, arch string) (Release, bool) {
 // restart the service to run it (the running process keeps the old inode until then).
 // The sanity-run guarantees a corrupt/wrong-arch download never replaces a working daemon.
 func (u *Updater) SelfUpdate(ctx context.Context, repo, tag, exePath string) (string, error) {
+	return u.SelfUpdateWith(ctx, repo, tag, exePath, nil)
+}
+
+// SelfUpdateWith is SelfUpdate with beforeSwap called once the new binary is verified, sanity-run
+// and its rollback copy is in place, immediately before the rename that makes it the binary; it gets
+// the new build's --version line. An error from it aborts the update with nothing swapped. The
+// server records the update for the supervisor that judges it from outside the daemon there, so that
+// the record exists before the moment there is anything to judge.
+func (u *Updater) SelfUpdateWith(ctx context.Context, repo, tag, exePath string, beforeSwap func(versionLine string) error) (string, error) {
 	u.mu.Lock() // serialize with any other Install/SelfUpdate (fixed staging paths) — see Updater.mu
 	defer u.mu.Unlock()
 	// If wayhop itself was installed from the wayhop-feed (opkg/apk owns exePath), do NOT self-swap
@@ -1402,54 +1584,105 @@ func (u *Updater) SelfUpdate(ctx context.Context, repo, tag, exePath string) (st
 	if asset == nil {
 		return "", fmt.Errorf("no wayhop %s asset in %s", u.Arch, tag)
 	}
+	// Refused before anything on disk is touched: the binary runs as root, so the digest is mandatory.
+	if !digestDeclared(asset.Digest) {
+		return "", verifyDigestSum("", asset.Digest, true)
+	}
 	dir := filepath.Dir(exePath)
-	// Flash pre-flight: the staged binary AND the .bak backup both land on exePath's filesystem.
-	// On the tiny router overlay a swap that won't fit would otherwise fail mid-write — abort
-	// cleanly, untouched. (Streaming retired the in-RAM peak, so flash is the binding constraint.)
-	if avail, ok := AvailBytes(dir); !enoughFlashFor(avail, ok, asset.Size, asset.Name, true) {
-		return "", selfFlashRefusal(dir, avail, peakInstallDisk(asset.Size, asset.Name, true))
+	// What interrupted updates and installs left beside the binary goes first, so the pre-flight sees
+	// the room it gives back (selfspace.go; the installer's staging names only once they are old).
+	if removed := reclaimSelfLeftovers(exePath, time.Now()); len(removed) > 0 {
+		log.Printf("self-update: removed what an earlier update left behind: %s", strings.Join(removed, ", "))
+	}
+	var oldBytes uint64
+	if fi, serr := os.Stat(exePath); serr == nil {
+		oldBytes = uint64(fi.Size())
 	}
 	// Memory pre-flight (the lock): self-update restarts the daemon, briefly holding old+new resident
 	// alongside sing-box + routing — refuse on a tight router rather than risk an OOM that drops it.
 	if avail, ok := availMemBytes(); !enoughMemForUpdate(avail, ok, asset.Size, asset.Name) {
 		return "", fmt.Errorf("not enough free memory to self-update safely (~%d MiB free, need ~%d MiB) — free RAM or update over SSH", avail>>20, updateMemNeed(asset.Size, asset.Name)>>20)
 	}
-	staged := filepath.Join(dir, ".wayhop.new")
-	// Stream the asset straight to the staged file (digest MANDATORY — the new binary runs as root):
-	// no compressed/decompressed RAM buffer, so a self-update can't OOM the router mid-swap.
-	if err := u.streamAssetToFile(ctx, *asset, "wayhop-"+u.Arch, staged, true); err != nil {
-		return "", fmt.Errorf("download wayhop-%s: %w", u.Arch, err)
+	// Flash pre-flight, before anything is downloaded: the new binary must fit in the free space plus
+	// the rollback copy it supersedes — the new rollback copy is a hard link and costs nothing. Where
+	// the download can be staged in RAM, only the floor is checked now (a binary is at least as large
+	// as the archive carrying it) and the EXACT size decides once it is verified, which rescues the
+	// box the 3x estimate would refuse; staged beside the binary, the estimate has to decide.
+	est := unpackedBytes(asset.Size, asset.Name)
+	stage := u.stageSelfInRAM(est, asset.Size, asset.Name)
+	if stage != "" {
+		defer os.RemoveAll(stage)
 	}
-	// Sanity-run BEFORE swapping — refuse a binary that won't execute on this arch.
-	out, runErr := exec.CommandContext(ctx, staged, "-version").CombinedOutput()
+	first := est
+	if stage != "" && asset.Size > 0 {
+		first = uint64(asset.Size)
+	}
+	if p := u.planSelfSpace(exePath, first, 0); !p.fits() {
+		return "", selfRefusal(dir, p, oldBytes)
+	}
+	flash := filepath.Join(dir, ".wayhop.new")
+	if stage != "" {
+		inRAM := filepath.Join(stage, "wayhop")
+		// Digest MANDATORY (the new binary runs as root), checked over the stream.
+		if err := u.streamAssetToFile(ctx, *asset, "wayhop-"+u.Arch, inRAM, true); err != nil {
+			return "", fmt.Errorf("download wayhop-%s: %w", u.Arch, err)
+		}
+		fi, err := os.Stat(inRAM)
+		if err != nil {
+			return "", fmt.Errorf("staged wayhop binary: %w", err)
+		}
+		if p := u.planSelfSpace(exePath, uint64(fi.Size()), 0); !p.fits() {
+			return "", selfRefusal(dir, p, oldBytes)
+		}
+		// The rollback copy before the new binary: publishing it frees the copy it supersedes.
+		if _, err := linkRollback(exePath); err != nil {
+			return "", err
+		}
+		if err := copyVerified(inRAM, flash); err != nil {
+			_ = os.Remove(flash)
+			return "", fmt.Errorf("write the new binary beside %s: %w (the running binary is untouched)", exePath, err)
+		}
+	}
+	// Staged beside the binary, the rollback copy goes first only when the stream needs the room the
+	// copy it supersedes gives back; otherwise after the sanity run, so a failed download changes nothing.
+	early := false
+	if stage == "" {
+		if p := u.planSelfSpace(exePath, est, 0); p.known && p.avail < p.need {
+			if _, err := linkRollback(exePath); err != nil {
+				return "", err
+			}
+			early = true
+		}
+		// Stream the asset straight to the staged file (digest MANDATORY): no compressed/decompressed
+		// RAM buffer, so a self-update can't OOM the router mid-swap.
+		if err := u.streamAssetToFile(ctx, *asset, "wayhop-"+u.Arch, flash, true); err != nil {
+			return "", fmt.Errorf("download wayhop-%s: %w", u.Arch, err)
+		}
+	}
+	// Sanity-run the copy that will become the binary, BEFORE swapping — refuse one that won't
+	// execute on this arch. (On flash, not in /tmp: a noexec tmpfs must not fail a good update.)
+	out, runErr := exec.CommandContext(ctx, flash, "-version").CombinedOutput()
 	if runErr != nil || parseVersion(string(out)) == "" {
-		_ = os.Remove(staged)
+		_ = os.Remove(flash)
 		return "", fmt.Errorf("staged wayhop binary failed its sanity check (corrupt or wrong arch): %v", runErr)
 	}
-	// Back up the current binary on the same filesystem, then atomically swap. The .bak is
-	// the reboot-safe rollback, so it is MANDATORY: if we can't read the running binary or
-	// write a COMPLETE backup, abort the swap rather than land a new daemon with no way back
-	// (a self-update that strands the router is the worst outcome). Write via a temp + rename so
-	// a failed backup write can neither leave a half-written .bak (poses as a valid rollback) NOR
-	// destroy a prior good .bak from an earlier update (os.WriteFile would O_TRUNC it before failing).
-	cur, err := os.ReadFile(exePath)
-	if err != nil {
-		_ = os.Remove(staged)
-		return "", fmt.Errorf("read current binary for rollback backup: %w", err)
+	if stage == "" && !early {
+		if _, err := linkRollback(exePath); err != nil {
+			_ = os.Remove(flash)
+			return "", err
+		}
 	}
-	bakTmp := exePath + ".bak.tmp"
-	if werr := os.WriteFile(bakTmp, cur, 0o755); werr != nil {
-		_ = os.Remove(bakTmp)
-		_ = os.Remove(staged)
-		return "", fmt.Errorf("write rollback backup: %w", werr)
+	if beforeSwap != nil {
+		if err := beforeSwap(firstLine(string(out))); err != nil {
+			_ = os.Remove(flash)
+			return "", fmt.Errorf("record the update before the swap: %w (nothing was swapped)", err)
+		}
 	}
-	if werr := os.Rename(bakTmp, exePath+".bak"); werr != nil {
-		_ = os.Remove(bakTmp)
-		_ = os.Remove(staged)
-		return "", fmt.Errorf("install rollback backup: %w", werr)
-	}
-	if err := os.Rename(staged, exePath); err != nil {
-		_ = os.Remove(staged)
+	// The .bak written above is the reboot-safe rollback and it is MANDATORY: linkRollback fails the
+	// update rather than land a new daemon with no way back, and goes through a temp name so a failure
+	// can neither leave a half-written .bak nor destroy the previous one. The swap is one rename.
+	if err := os.Rename(flash, exePath); err != nil {
+		_ = os.Remove(flash)
 		return "", fmt.Errorf("swap binary: %w", err)
 	}
 	return rel.Tag, nil

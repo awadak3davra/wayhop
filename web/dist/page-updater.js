@@ -88,7 +88,7 @@ function downloadPathRow(storage) {
     try {
       const cfg = await api.get("/api/config");
       cfg.updater = Object.assign({}, cfg.updater, { download_via: sel.value });
-      await api.put("/api/config", cfg);
+      await api.put("/api/config", cfg, { "If-Match": cfg.rev }); // refused if anything saved the settings in between (QA-152)
       const fresh = await api.get("/api/updater/storage");
       storage.download_via = fresh.download_via || "";
       storage.download_iface = fresh.download_iface || "";
@@ -433,7 +433,8 @@ function updStatePill(state, note) {
     default: return el("span", { class: "pill muted upd-unchecked" }, t("not checked"));
   }
 }
-const ENGINE_ROLE_HINT = { "core": "core", "kernel-plugin": "kernel plugin", "socks-plugin": "SOCKS plugin", "standalone": "standalone core" };
+const ENGINE_ROLE_HINT = { "core": "core", "kernel-plugin": "kernel plugin", "socks-plugin": "SOCKS plugin", "standalone": "standalone core",
+  "service": "router service" };
 
 // updItem builds the shared shell: one grid row plus a full-width detail area beneath it for notes,
 // errors and the source-build version picker. Returns the pieces the callers fill in.
@@ -546,10 +547,15 @@ function selfUpdateRow() {
           p.vbox.appendChild(el("div", { class: "hint" },
             t("The installed package is newer than the package catalog. No downgrade is offered.")));
         } else if (pkg.state === "behind") {
+          // The daemon hands the package manager to a supervisor outside the service, which also
+          // judges the build it installs (internal/updatetx).
+          p.acts.appendChild(el("button", { class: "btn btn-sm btn-primary", onclick: ev => selfUpdate(ev.target) }, "Update now"));
           p.vbox.appendChild(el("div", { class: "upd-remedy" },
             el("strong", {}, t("A package update is available.")),
-            el("span", {}, t("WayHop cannot safely replace its own package from inside the running service yet. Use the package manager over SSH for this update."))));
+            el("span", {}, t("{1} runs {0} outside the service and puts the previous build back if the new one does not answer.",
+              (s.package_manager === "apk" ? "apk" : "opkg") + " upgrade wayhop", t("Update now")))));
         }
+        if (s.last_update_note) p.vbox.appendChild(el("div", { class: "upd-target-warn" }, s.last_update_note));
         p.vbox.appendChild(el("div", { class: "hint upd-auto-note" },
           t("Automatic WayHop updates are controlled by the package manager for this installation.")));
         return;
@@ -607,6 +613,8 @@ function selfUpdateRow() {
       // Cleared first, above, so a repeated "Check all" replaces this panel instead of stacking a
       // second copy of it under the row.
       if (s.error) p.vbox.appendChild(updSelfErrorDetails(s));
+      // A rollback or a failed update, as the update supervisor recorded it (the daemon's sentence).
+      if (s.last_update_note) p.vbox.appendChild(el("div", { class: "upd-target-warn" }, s.last_update_note));
       if (undecidable) {
         p.vbox.appendChild(el("div", { class: "hint" },
           t("The newest release is tagged “{0}”, which carries no version number to compare with.", s.latest || "?")));
@@ -988,6 +996,21 @@ function installedNextStep(usedBy, converged, demo) {
       : t("Nothing is waiting on it: the applied configuration does not run this engine.")));
 }
 
+// serviceInstalledStep is installedNextStep for a service (the Telegram bridge), which the daemon
+// starts by itself once its binary is there, not at an Apply. installedNextStep's sentences about
+// the next Apply sent its operator to wait for, or look for, a step that does not exist. The demo
+// case is answered first, as there: it installs nothing.
+function serviceInstalledStep(demo) {
+  if (demo) {
+    return el("div", { class: "upd-remedy" },
+      el("strong", {}, t("Nothing was installed — demo mode.")),
+      el("span", {}, t("On a router this is where the outcome of the install would be reported.")));
+  }
+  return el("div", { class: "upd-remedy" },
+    el("strong", {}, t("Installed.")),
+    el("span", {}, t("Nothing to apply.")));
+}
+
 // componentsToShow picks the rows this router's datapath can actually use, out of the whole catalog.
 //
 // An operational row carries buttons, and that is the whole constraint. Widening this to every engine
@@ -1011,8 +1034,12 @@ function installedNextStep(usedBy, converged, demo) {
 // the router's own AmneziaWG is older than amneziawg-go's). That last row says it is optional and
 // why, so its Install reads as an offer rather than a fix. Only a router whose own AmneziaWG is
 // already the newest generation gets the prose below and no button.
+//
+// A router service (the Telegram bridge, server/tgbridge.go) always gets its row: it carries no
+// connection, so nothing here could say whether one needs it, and its Settings card sends the
+// operator to this page to install it. Its row reads as optional (engineRow), not as a gap.
 function componentsToShow(engines) {
-  return (engines || []).filter(e => e.role === "core" ||
+  return (engines || []).filter(e => e.role === "core" || e.role === "service" ||
     (e.awg && (e.awg.needed || e.awg.optional || (e.installed || {}).present)));
 }
 
@@ -1024,7 +1051,7 @@ function componentsToShow(engines) {
 // this page is not the place it gets changed.
 function kernelCarriedNote(engines) {
   const kernel = (engines || []).filter(e => e.carried_by_kernel && !(e.installed || {}).present);
-  const managed = (engines || []).filter(e => e.native_managed && !e.carried_by_kernel && e.role !== "core");
+  const managed = (engines || []).filter(e => e.native_managed && !e.carried_by_kernel && e.role !== "core" && e.role !== "service");
   const lines = [];
   if (kernel.length) {
     // The generation goes with the name where the daemon knows it: "carries AmneziaWG" alone once
@@ -1055,7 +1082,7 @@ function kernelCarriedNote(engines) {
 const PROTO_LABEL = {
   vless: "VLESS", vmess: "VMess", trojan: "Trojan", shadowsocks: "Shadowsocks",
   hysteria2: "Hysteria2", tuic: "TUIC", anytls: "AnyTLS", socks: "SOCKS", http: "HTTP",
-  wireguard: "WireGuard", amneziawg: "AmneziaWG",
+  wireguard: "WireGuard", amneziawg: "AmneziaWG", openvpn: "OpenVPN", snell: "Snell", openconnect: "OpenConnect", ssh: "SSH",
 };
 
 // usageNote states what in THIS profile depends on the engine — the fact that makes "not installed"
@@ -1090,7 +1117,10 @@ function unlockNote() {
   const line = el("div", { class: "hint" }, t("asking the router what it can carry…"));
   box.appendChild(line);
   api.get("/api/native/capabilities").then(c => {
-    const names = (ids) => ids.map(id => PROTO_LABEL[id] || id).join(", ");
+    // A protocol a newer core brought carries the version it needs: the core the package manager
+    // installs may be older (the OpenWrt feeds ship 1.13), and "would add" must not promise it.
+    const min = c.singbox_min_minor || {};
+    const names = (ids) => ids.map(id => (PROTO_LABEL[id] || id) + (min[id] ? " (1." + min[id] + "+)" : "")).join(", ");
     const need = (c.singbox_required || []).slice();
     const native = Object.keys(c.native || {}).filter(k => c.native[k]);
     box.innerHTML = "";
@@ -1406,17 +1436,22 @@ function awgFeedRemoval(e) {
   return det;
 }
 
-// installLatest is the one-click install the AmneziaWG 3 row offers when a connection needs it: the
-// newest stable version from the release listing, through the same install path as the picker.
+// installLatest is the one-click install the AmneziaWG 3 row offers when a connection needs it (and a
+// router service's row always): the newest stable version from the release listing, through the same
+// install path as the picker. The button is held while the listing is read; a declined question gives
+// it back, as installVersion does after a failure. A listing that cannot be read is said in this
+// button's own row and a toast: updItem(e.id) would build a fresh row that nothing ever attaches.
 async function installLatest(e, btn) {
   btn.disabled = true;
   try {
     const v = await api.get("/api/updater/" + encodeURIComponent(e.id) + "/versions");
     if (!v.latest) throw new Error(t("No release carries it yet."));
-    await installVersion(e, v.latest, btn);
+    if (!await installVersion(e, v.latest, btn)) btn.disabled = false;
   } catch (err) {
     btn.disabled = false;
-    updRowErr(updItem(e.id).vbox, err.message);
+    toast(t("{0} install failed: {1}", e.name, err.message), "err");
+    const row = btn.closest(".upd-item");
+    updRowErr(row && row.querySelector(".upd-detail"), t("Install failed:") + " " + err.message);
   }
 }
 
@@ -1450,7 +1485,7 @@ function engineRow(e, pmKind, advanced) {
   const byKernel = !!e.carried_by_kernel && !installed.present;
   const managedState = ({ behind: "behind", current: "current", ahead: "ahead",
     catalog_error: "error", channel_missing: "channel_missing" })[pkg.state] || "undecidable";
-  const rec = { id: e.id, failed: e.last_error || "", managed, optional: e.id === "sing-box" || !!(e.awg && !e.awg.needed),
+  const rec = { id: e.id, failed: e.last_error || "", managed, optional: e.id === "sing-box" || e.role === "service" || !!(e.awg && !e.awg.needed),
     state: managed ? managedState : unknownOwner ? "undecidable" : installed.present ? "unchecked"
       : byKernel ? "kernel" : "absent" };
   if (managed) p.latest.textContent = pkg.latest_version || "—";
@@ -1509,7 +1544,7 @@ function engineRow(e, pmKind, advanced) {
     updJustInstalled = null;
     updJustConverged = false;
     updJustDemo = false;
-    p.vbox.appendChild(installedNextStep(usedBy, converged, demo));
+    p.vbox.appendChild(e.role === "service" ? serviceInstalledStep(demo) : installedNextStep(usedBy, converged, demo));
   }
 
   if (e.id === "sing-box" && !installed.present) {
@@ -1573,7 +1608,7 @@ function engineRow(e, pmKind, advanced) {
     if (pkg.state !== "unknown") {
       p.vbox.appendChild(pmDelegation(e, pmKind, pkg.state === "behind" ? "owned" : "managed"));
     }
-  } else if (!installed.present && !byKernel && !unknownOwner && pmKind && !e.companion) {
+  } else if (!installed.present && !byKernel && !unknownOwner && pmKind && !e.companion && e.role !== "service") {
     // Install is the ONE action that can only apply while the binary is absent — and an absent binary
     // is owned by nobody, so `managed` is false and the branch above never runs for it. That is how
     // the action the operator named ("installing an absent package is not offered at all") stayed
@@ -1585,6 +1620,9 @@ function engineRow(e, pmKind, advanced) {
     // either with the command or with the blocked plan and its preconditions, and on this box's own
     // feed only two of the seven engines exist as packages. Pre-filtering would cost every engine a
     // round trip on every render to hide a button whose refusal is the more useful answer.
+    //
+    // Not for a router service (the Telegram bridge): no feed packages it, so the box only ever
+    // answered "Not possible here", in red under the release Install below that does work.
     p.vbox.appendChild(pmDelegation(e, pmKind, "install"));
   }
   // The source-only sentence has a second render site inside rec.check's version picker, and on the
@@ -1683,6 +1721,14 @@ function engineRow(e, pmKind, advanced) {
   // flag was set; the demo owns nothing through a package manager and never did.
   // Where WayHop's installer applies, its box above carries Install and offers this release-asset
   // install itself as the way round when the feed cannot serve the router.
+  // A router service installs the newest release in one click, as the AmneziaWG row below does (the
+  // asset checked against GitHub's digest and the release's SHA256SUMS). Without it the only way was
+  // Check updates, then a version picker, on the row its Settings card sends the operator to. Not
+  // primary: nothing is broken without it.
+  if (!noMutate && e.role === "service" && !installed.present) {
+    p.acts.appendChild(el("button", { class: "btn btn-sm", "aria-label": t("Install {0}", e.name),
+      onclick: ev => installLatest(e, ev.currentTarget) }, t("Install")));
+  }
   if (!noMutate && e.awg && (e.awg.needed || e.awg.optional) && !installed.present && !(e.awg.feed_modes || []).length) {
     // Primary only when a connection needs it: an optional component is offered, not urged.
     p.acts.appendChild(el("button", { class: e.awg.needed ? "btn btn-sm btn-primary" : "btn btn-sm", "aria-label": t("Install {0}", e.name),
@@ -1747,9 +1793,14 @@ async function selfAutoToggle(tog) {
   } catch (e) { toast(e.message, "err"); }
 }
 
+// installVersion answers false when nothing was attempted (no version, or the question declined), so a
+// caller that held the button (installLatest) gives it back.
 async function installVersion(e, version, btn) {
-  if (!version) return;
-  if (!await modalConfirm(t("Download and install {0} {1} for this router?", e.name, version))) return;
+  if (!version) return false;
+  if (!await modalConfirm(t("Download and install {0} {1} for this router?", e.name, version))) return false;
+  // The picker's "Install selected" and the one-click Install of a row (installLatest) both land here,
+  // and a failure gives the button back with its own label, not always the picker's.
+  const label = btn.textContent;
   btn.setAttribute("disabled", "true"); btn.textContent = "Installing…";
   try {
     const r = await api.post("/api/updater/" + encodeURIComponent(e.id) + "/install", { version });
@@ -1780,8 +1831,9 @@ async function installVersion(e, version, btn) {
     // recorded there too — otherwise the headline keeps the answer it computed before the click.
     const rec = updRows.get(e.id) || updAdvRows.get(e.id);
     if (rec) { rec.failed = err.message; paintUpdVerdict(); }
-    btn.removeAttribute("disabled"); btn.textContent = "Install selected";
+    btn.removeAttribute("disabled"); btn.textContent = label;
   }
+  return true;
 }
 
 async function removeEngine(e, btn) {

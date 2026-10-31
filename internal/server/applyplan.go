@@ -200,22 +200,28 @@ func (s *Server) capabilitySet(ctx context.Context, refresh bool) platform.Capab
 		rt := platform.RuntimeFacts{
 			KernelPBRWired:   true,
 			SingboxRunnable:  true,
-			SingboxVersion:   "demo",
+			SingboxVersion:   "1.14.4 (demo)",
 			NativeOperations: cloneHostBoolMap(s.nativeOperations),
 			ProbedAt:         time.Now(),
 		}
 		s.caps.set = platform.Evaluate(platform.DemoCapabilities(), rt)
 		return s.caps.set
 	}
-	s.caps.set = platform.Evaluate(platform.DetectCapabilities(), s.runtimeFacts(ctx))
+	caps := platform.DetectCapabilities()
+	// The same observation answers the accelerator for everything else that decides with it
+	// (QA-129): the offload resolver and the preflight must not keep an older one.
+	s.noteAccel(caps.Accel)
+	s.caps.set = platform.Evaluate(caps, s.runtimeFacts(ctx))
 	return s.caps.set
 }
 
-// runtimeFacts gathers the observations the pure evaluator cannot make for itself.
+// runtimeFacts gathers the observations the pure evaluator cannot make for itself. It is asked when
+// the capability set is probed, so it probes the kernel-PBR plane afresh and keeps the answer for
+// every other reader (QA-129).
 func (s *Server) runtimeFacts(ctx context.Context) platform.RuntimeFacts {
 	c := s.config()
 	rt := platform.RuntimeFacts{
-		KernelPBRWired:   s.kernelPBRAvailable(),
+		KernelPBRWired:   s.refreshKernelPBR(),
 		NativeOperations: cloneHostBoolMap(s.nativeOperations),
 		ProbedAt:         time.Now(),
 	}
@@ -260,7 +266,7 @@ func (s *Server) planCapabilities() platform.Capabilities {
 	if s.config().Demo {
 		caps = platform.DemoCapabilities()
 	}
-	caps.Accel = platform.Accel{Kind: s.accelKind(), HW: s.accelHW()}
+	caps.Accel = s.noteAccel(caps.Accel)
 	return caps
 }
 
@@ -431,7 +437,8 @@ func (s *Server) rawFindings(ctx context.Context, desired DesiredSnapshot, capse
 	// facts the apply path uses.
 	raw = append(raw, evaluatePlanFindings(capset, s.preflightFor(cfg, prof, s.planCapabilities(), s.offloadObservation(ctx).State))...)
 	// The core is required by this datapath but cannot run: nothing else in the plan matters then.
-	if s.datapathRequiresCore(cfg, prof) && !capset.Usable(platform.CapEngineSingbox) {
+	coreRuns := s.datapathRequiresCore(cfg, prof)
+	if coreRuns && !capset.Usable(platform.CapEngineSingbox) {
 		c := capset.Get(platform.CapEngineSingbox)
 		raw = append(raw, PlanFinding{
 			ID: "core.unavailable", CapabilityID: platform.CapEngineSingbox, Setting: "core",
@@ -441,13 +448,25 @@ func (s *Server) rawFindings(ctx context.Context, desired DesiredSnapshot, capse
 	}
 	raw = append(raw, s.endpointFindings(prof, capset)...)
 	raw = append(raw, unfetchedFeedFindings(&prof)...)
+	raw = append(raw, tlsFragmentFindings(&prof, desiredRoutingMode(cfg))...)
+	raw = append(raw, coreInlineSizeFindings(&prof, desiredRoutingMode(cfg))...)
+	raw = append(raw, coreOverrideFindings(cfg.CoreOverride, coreRuns, generator.DaemonUse{
+		ClashAddr: desired.Inputs.ClashAddr, ClashSecret: cfg.Clash.Secret, Probe: cfg.Ports.Probe() > 0,
+	})...)
 	// Dead rules are a property of the CONFIGURATION, not of the router's capabilities, but the
 	// review panel is the right moment to surface them: they are about to be applied, and a rule
 	// that can never fire reads exactly like one that works.
 	raw = append(raw, shadowedRuleFindings(&prof)...)
+	// A list sent to one of KeeneticOS's access policies is routed by NDM's mark for it, which only the
+	// router can say it has. Read once here, for the refusal and for the kernel compile below alike.
+	policies := s.reviewNDMPolicies(ctx, cfg, &prof)
+	raw = append(raw, ndmPolicyFindings(&prof, policies)...)
 	// What the KERNEL plane will not carry. pbr.Compile already works this out and the preview shows
 	// it — but only to somebody who opens the preview. The review panel is where Apply is decided.
-	raw = append(raw, s.kernelPlaneFindings(&cfg, &prof)...)
+	raw = append(raw, s.kernelPlaneFindings(&cfg, &prof, policies.marks)...)
+	// Not part of what Apply changes, but part of whether the router does what it was asked: an
+	// enabled Telegram bridge that cannot run, or that listens where it should not (tgbridge.go).
+	raw = append(raw, s.tgBridgeFindings()...)
 	return raw
 }
 
@@ -473,9 +492,10 @@ func (s *Server) datapathCoreReasons(cfg config.Config, prof model.Profile) []st
 // userspace decision the native planner makes (nativeplan.KeeneticUserspace), judged against the
 // review's capability set.
 func (s *Server) keeneticRoutePlanes(prof model.Profile) keenetic.RoutePlanes {
+	mode := desiredRoutingMode(s.config())
 	return keenetic.RoutePlanes{
-		DomainsViaDNSMasq: keeneticDomainsViaDNSMasq(),
-		ListsViaIpset:     keeneticKernelPBRPresent(),
+		DomainsViaDNSMasq: keeneticKernelPlaneCarriesLists(mode) && keeneticDomainsViaDNSMasq(),
+		ListsViaIpset:     keeneticKernelPlaneCarriesLists(mode),
 		Userspace: nativeplan.UserspaceDevices(
 			nativeplan.KeeneticUserspace(&prof, s.capabilitySet(context.Background(), false))),
 		Foreign: keeneticForeignDevices(prof),
@@ -497,6 +517,16 @@ func authFieldMissing(e model.Endpoint) string {
 	case model.ProtoTrojan, model.ProtoHysteria2:
 		if get("password") == "" {
 			return "password"
+		}
+	case model.ProtoOpenVPN:
+		// Only a profile that signs in with them (auth-user-pass); a certificate profile has none.
+		if signsIn, _ := e.Params["auth_user_pass"].(bool); signsIn {
+			if get("username") == "" {
+				return "user name"
+			}
+			if get("password") == "" {
+				return "password"
+			}
 		}
 	}
 	return ""
@@ -542,6 +572,152 @@ func unfetchedFeedFindings(p *model.Profile) []PlanFinding {
 	return out
 }
 
+// tlsFragmentFindings says where a list's TLS fragmentation will not happen, so the setting does not
+// read as working when it cannot. sing-box applies it to connections it makes itself: a tunnelled list
+// carries the ClientHello inside the tunnel, and in mixed or fast mode the LAN's traffic for a direct
+// list never reaches the core. Advisory only: the list itself still routes as before.
+func tlsFragmentFindings(p *model.Profile, mode string) []PlanFinding {
+	var out []PlanFinding
+	for i := range p.RoutingLists {
+		rl := &p.RoutingLists[i]
+		if !rl.Enabled || rl.TLSFragment == "" {
+			continue
+		}
+		detail := ""
+		switch {
+		case rl.Outbound != model.OutboundDirect:
+			detail = "TLS fragmentation is set, but this list goes through a tunnel, where the TLS handshake travels inside the tunnel; it applies only to a list routed direct."
+		case mode == "mixed" || mode == "fast":
+			detail = "TLS fragmentation is set, but in " + mode + " mode the LAN's traffic for this list does not pass through the proxy core, which is what fragments it."
+		default:
+			continue
+		}
+		out = append(out, PlanFinding{
+			ID: "list.tls_fragment_unused", Setting: "routing list", Item: listName(rl),
+			Severity: platform.SeverityDegraded, Reason: platform.ReasonModeConflict, Blocks: platform.BlocksNothing,
+			Detail: detail,
+			Remedy: "Route the list direct in tun or hybrid mode, or turn fragmentation off for it.",
+		})
+	}
+	return out
+}
+
+// coreInlineWarnEntries is where the lists the core holds inline start to cost a router something it
+// may not have. Measured on the live Keenetic (sing-box 1.13.19, 149 MB available): 100,000 names took
+// `sing-box check` to 9.3 s of Apply's 15 s limit and the core to 147 MB RSS against a 34 MB baseline;
+// adding 45,612 prefixes took the check to 12.8 s. On flash each entry costs roughly 150 bytes at the
+// peak of an Apply (the config, its staged check copy and the Apply record), and the AX3000T's overlay
+// had 6.1 MB free. Fetched feeds reach the core since QA-066, so a refilter-sized list sent to a proxy
+// lands here.
+const coreInlineWarnEntries = 20000
+
+func coreInlineSizeFindings(p *model.Profile, mode string) []PlanFinding {
+	if generator.DatapathNativeOnly(p, mode) {
+		return nil
+	}
+	n := generator.CoreInlineEntries(p, mode == "hybrid" || mode == "fast")
+	if n <= coreInlineWarnEntries {
+		return nil
+	}
+	return []PlanFinding{{
+		ID: "core.inline_size", Setting: "routing lists",
+		Severity: platform.SeverityDegraded, Reason: platform.ReasonOperatorChoice, Blocks: platform.BlocksNothing,
+		Detail: fmt.Sprintf("The proxy core will hold %d names and address ranges from routing lists. "+
+			"On a router that costs memory, flash space and time: measured, 100,000 took the core's config check to 9 s of its 15 s limit and over 100 MB of memory.", n),
+		Remedy: "Send large IP lists to a WireGuard or AmneziaWG connection in hybrid or fast mode, where the kernel routes them without the core, or choose a smaller list.",
+	}}
+}
+
+// coreOverrideFindings says that the operator's core override is in force and which top-level keys of
+// the core config it reaches, and names every listener it opens beyond loopback. None of it blocks:
+// the override is deliberate, Apply refuses one the core cannot read (`sing-box check`) or whose own
+// rules name a missing outbound (generator.ApplyCoreOverride), and the fail-safe window covers the
+// rest.
+//
+// The open listener is a privacy finding and not a blocker. Serving the LAN is a legitimate reason to
+// write an override - a SOCKS port for a device that cannot sit behind the TUN - and whether the port
+// is open on the WAN is the router's firewall's call, which the config cannot show. So it is said,
+// in plain sight with what it exposes, and Apply stays available.
+//
+// The keys, never the text: a prepended outbound carries a server's credentials.
+//
+// An override that takes from WayHop what it runs the core through (generator.DaemonLosses: the Clash
+// API, the probe inbound, the generated inbounds or route rules) is a warning of its own, naming what
+// stops working: the core runs and `sing-box check` passes, so nothing else would say it, and the
+// features go quiet rather than fail. It does not block either: the operator may mean it.
+func coreOverrideFindings(text string, coreRuns bool, use generator.DaemonUse) []PlanFinding {
+	o, err := generator.ParseCoreOverride(text)
+	if err != nil {
+		// Validate refuses this at save, so only a hand-edited config.json reaches here; Generate
+		// would refuse it at Apply too, one screen later and in its own words.
+		return []PlanFinding{{
+			ID: "core.override_invalid", Setting: "core_override", Severity: platform.SeverityBlocked,
+			Reason: platform.ReasonSavedValueIncompat, Blocks: platform.BlocksApply, Detail: err.Error(),
+		}}
+	}
+	if o == nil {
+		return nil
+	}
+	detail := "The sing-box config WayHop generates is changed by the core override saved in Settings, " +
+		"after everything else is generated. Apply checks the result with sing-box check before it is written."
+	if !coreRuns {
+		detail = "A core override is saved, but this configuration runs no proxy core, so the override changes nothing until one does."
+	}
+	var out []PlanFinding
+	for _, key := range o.Keys() {
+		out = append(out, PlanFinding{
+			ID: "core.override", Setting: "core_override", Item: key,
+			Severity: platform.SeverityDegraded, Reason: platform.ReasonOperatorChoice, Blocks: platform.BlocksNothing,
+			Detail: detail,
+		})
+	}
+	if !coreRuns {
+		return out
+	}
+	for _, l := range o.OpenListeners() {
+		out = append(out, PlanFinding{
+			ID: "core.override_open_listener", Setting: "core_override", Item: l,
+			Severity: platform.SeverityPrivacy, Reason: platform.ReasonOperatorChoice, Blocks: platform.BlocksNothing,
+		})
+	}
+	losses := o.DaemonLosses(use)
+	if len(losses) == 0 {
+		return out
+	}
+	// One detail for the folded finding: every PlanFinding of an ID shares the first one's.
+	var stops []string
+	for _, kind := range []generator.DaemonLossKind{generator.LossClashAPI, generator.LossProbe, generator.LossInbounds, generator.LossRouteRules} {
+		for _, l := range losses {
+			if l.Kind == kind {
+				stops = append(stops, daemonLossStops[kind])
+				break
+			}
+		}
+	}
+	lossDetail := "The core runs and sing-box check passes, but the override removes or changes what WayHop uses the core through, " +
+		"so nothing else will say this: " + strings.Join(stops, "; ") + "."
+	for _, l := range losses {
+		out = append(out, PlanFinding{
+			ID: "core.override_daemon_loss", Setting: "core_override", Item: l.Item,
+			Severity: platform.SeverityDegraded, Reason: platform.ReasonFeatureWouldBeDropped, Blocks: platform.BlocksNothing,
+			Detail: lossDetail,
+		})
+	}
+	return out
+}
+
+// daemonLossStops says, per generator.DaemonLossKind, what stops working.
+var daemonLossStops = map[generator.DaemonLossKind]string{
+	generator.LossClashAPI: "health checks, failover, the Connections page, the speed test, per-list traffic and the Telegram bot " +
+		"lose the Clash API they read and steer the core through",
+	generator.LossProbe: "the per-exit service check loses the probe inbound it asks each exit through",
+	generator.LossInbounds: "the inbounds WayHop generates stop following the profile and Settings, " +
+		"and the core has only those the override lists",
+	generator.LossRouteRules: "WayHop's guard rules go with the generated route rules - the probe rules (the service check then " +
+		"measures the routing, not the exit), the TUN's sniff, and the bypass that keeps each tunnel's own server traffic out " +
+		"of the tunnels - and the profile's rules and routing lists stop applying",
+}
+
 func listName(rl *model.RoutingList) string {
 	if rl.Name != "" {
 		return rl.Name
@@ -580,6 +756,10 @@ func (s *Server) openWrtUserspaceMoves(prof model.Profile, capset platform.Capab
 	}
 	previous := nativeBaselineFromMaterialization(&base.Materialization)
 	if previous == nil {
+		// A generic previous (no native plan) is not read here, although its AmneziaWG ran on
+		// WayHop's engine: the review cannot tell whether this Apply's native plan will compile at
+		// all, and a profile that stays generic moves nothing, so a blocker here could stop every
+		// Apply. The planner refuses the real move (genericPluginDevices), naming the same remedy.
 		return moves
 	}
 	was := make(map[string]nativeplan.Path, len(previous.Decisions))
@@ -651,6 +831,7 @@ func (s *Server) endpointFindings(prof model.Profile, capset platform.Capability
 		}
 		return e.ID
 	}
+	coreVer := s.coreVersion(s.config())
 	for _, e := range prof.Endpoints {
 		if !e.Enabled {
 			continue
@@ -674,6 +855,127 @@ func (s *Server) endpointFindings(prof model.Profile, capset platform.Capability
 				Blocks: platform.BlocksFeature,
 				Detail: "This connection has no " + field + ", so the server will refuse it. Everything else keeps working; this exit will not come up.",
 				Remedy: "Open the connection and fill in the " + field + ", or switch it off until you have one.",
+			})
+		}
+		out = append(out, pinFindings(&e, name(e), coreVer)...)
+		if generator.GeckoNeedsNewerCore(&e, coreVer) {
+			out = append(out, PlanFinding{
+				ID: "endpoint.hysteria2.gecko", Setting: "obfs", Item: name(e),
+				Severity: platform.SeverityDegraded, Reason: platform.ReasonBinaryTooOld,
+				Blocks: platform.BlocksFeature,
+				Detail: "This connection uses gecko obfuscation, which sing-box carries from 1.14; this router's core is older, so it is applied without it and will not reach its server. Everything else keeps working.",
+				Remedy: "Update sing-box to 1.14 or newer on the Components page, or switch this connection off.",
+			})
+		}
+		// QUIC tuning an older core refuses at decode is left out of the shared config: the connection
+		// comes up as it did before the setting, on the path that needed it.
+		if generator.QUICTuningNeedsNewerCore(&e, coreVer) {
+			out = append(out, PlanFinding{
+				ID: "endpoint.quic.tuning", Setting: "QUIC packet size", Item: name(e),
+				Severity: platform.SeverityDegraded, Reason: platform.ReasonBinaryTooOld,
+				Blocks: platform.BlocksNothing,
+				Detail: "This connection sets its QUIC packet size or turns off path MTU discovery, which sing-box carries from 1.14; this router's core is older, so it is applied without them and may still stall on a link that drops large packets. Everything else keeps working.",
+				Remedy: "Update sing-box to 1.14 or newer on the Components page, or clear these settings.",
+			})
+		}
+		// A Hysteria2 size the Chrome handshake replaces is written and does nothing; the panel says so
+		// beside the field, and this says it for a size that came from the API or an import.
+		if generator.QUICSizeReplacedByChrome(&e, coreVer) {
+			out = append(out, PlanFinding{
+				ID: "endpoint.hysteria2.quic_size_parrot", Setting: "QUIC packet size", Item: name(e),
+				Severity: platform.SeverityDegraded, Reason: platform.ReasonFeatureWouldBeDropped,
+				Blocks: platform.BlocksNothing,
+			})
+		}
+		// An SSH exit with no pinned host key: sing-box then takes whatever key answers, so anyone who
+		// can intercept the way to the server can pose as it. The exit works all the same, which is
+		// why nothing else would say so; it is a choice the operator may keep, so nothing is blocked.
+		if e.Protocol == model.ProtoSSH {
+			if keys, err := model.SSHHostKeys(&e); err == nil && len(keys) == 0 {
+				out = append(out, PlanFinding{
+					ID: "endpoint.ssh.host_key", Setting: "host key", Item: name(e),
+					Severity: platform.SeverityPrivacy, Reason: platform.ReasonOperatorChoice,
+					Blocks: platform.BlocksNothing,
+				})
+			}
+			// The exit carries TCP only, and what is routed to it sends UDP too: QUIC falls back to
+			// TCP, but calls, games and DNS over UDP fail, with nothing else to say why. A note, not a
+			// block: TCP through it works, which may be all the operator wants from it.
+			if generator.SSHExitGetsUDP(&prof, e.ID) {
+				out = append(out, PlanFinding{
+					ID: "endpoint.ssh.tcp_only", Setting: "UDP", Item: name(e),
+					Severity: platform.SeverityDegraded, Reason: platform.ReasonFeatureWouldBeDropped,
+					Blocks: platform.BlocksNothing,
+				})
+			}
+		}
+		if generator.SSHAlgorithmsNeedNewerCore(&e, coreVer) {
+			out = append(out, PlanFinding{
+				ID: "endpoint.ssh.algorithms", Setting: "algorithms", Item: name(e),
+				Severity: platform.SeverityDegraded, Reason: platform.ReasonBinaryTooOld,
+				Blocks: platform.BlocksNothing,
+			})
+		}
+		// Encrypted Client Hello (generator/ech.go). What the core leaves out is said here; what model
+		// .Validate refuses (a malformed config, ECH switched on with Reality) never gets this far.
+		switch {
+		case generator.ECHDroppedByCore(&e, coreVer):
+			out = append(out, PlanFinding{
+				ID: "endpoint.tls.ech.core", Setting: "ECH", Item: name(e),
+				Severity: platform.SeverityDegraded, Reason: platform.ReasonBinaryLacksFeature,
+				Blocks: platform.BlocksFeature,
+			})
+		case generator.ECHQueryNameNeedsNewerCore(&e, coreVer):
+			out = append(out, PlanFinding{
+				ID: "endpoint.tls.ech.qsn", Setting: "ECH", Item: name(e),
+				Severity: platform.SeverityDegraded, Reason: platform.ReasonBinaryTooOld,
+				Blocks: platform.BlocksFeature,
+			})
+		}
+		if generator.ECHFingerprintReplaced(&e, coreVer) != "" {
+			out = append(out, PlanFinding{
+				ID: "endpoint.tls.ech.fingerprint", Setting: "ECH", Item: name(e),
+				Severity: platform.SeverityDegraded, Reason: platform.ReasonFeatureWouldBeDropped,
+				Blocks: platform.BlocksNothing,
+			})
+		}
+		// The DNS lookup goes where the DNS rules send it (generator.ECHLookupFor). Through the
+		// connection it is for, it never answers while the connection is down: said, and to be
+		// acknowledged, rather than fixed by sending the name elsewhere, which would put it on a
+		// server the operator did not choose (the direct resolver: the WAN, often in the clear).
+		// To plain DNS it is answered, and the name ECH hides goes out in the clear.
+		if l := generator.ECHLookupFor(&prof, &e, coreVer); l != nil {
+			if l.Through != "" {
+				out = append(out, PlanFinding{
+					ID: "endpoint.tls.ech.dns_loop", Setting: "ECH", Item: name(e),
+					Severity: platform.SeverityDegraded, Reason: platform.ReasonSavedValueIncompat,
+					Blocks: platform.BlocksFeature,
+				})
+			}
+			switch {
+			case l.Clear:
+				out = append(out, PlanFinding{
+					ID: "endpoint.tls.ech.dns_clear", Setting: "ECH", Item: name(e),
+					Severity: platform.SeverityPrivacy, Reason: platform.ReasonOperatorChoice,
+					Blocks: platform.BlocksNothing,
+				})
+			case l.Through == "":
+				out = append(out, PlanFinding{
+					ID: "endpoint.tls.ech.dns", Setting: "ECH", Item: name(e),
+					Severity: platform.SeverityDegraded, Reason: platform.ReasonOperatorChoice,
+					Blocks: platform.BlocksNothing,
+				})
+			}
+		}
+		out = append(out, multiplexFindings(e, name(e))...)
+		out = append(out, finalMaskFindings(e, name(e))...)
+		if generator.RealmNeedsNewerCore(&e, coreVer) {
+			out = append(out, PlanFinding{
+				ID: "endpoint.hysteria2.realm", Setting: "realm", Item: name(e),
+				Severity: platform.SeverityDegraded, Reason: platform.ReasonBinaryTooOld,
+				Blocks: platform.BlocksFeature,
+				Detail: "This connection reaches its server through a Hysteria realm, which sing-box carries from 1.14; this router's core is older, so it is applied without a server and will not come up. Everything else keeps working.",
+				Remedy: "Update sing-box to 1.14 or newer on the Components page, or switch this connection off.",
 			})
 		}
 		switch e.Engine {
@@ -787,36 +1089,50 @@ func (s *Server) endpointFindings(prof model.Profile, capset platform.Capability
 				Remedy: "Install AmneziaWG (the awg tools or the platform package), or disable the connection.",
 			})
 		case model.EngineOlcRTC:
-			if s.pluginBinaryPresent("olcrtc") {
-				continue
-			}
+			// Retired: a profile saved by an older build can still hold one, and must load.
 			out = append(out, PlanFinding{
-				ID: "endpoint.engine.olcrtc", CapabilityID: platform.CapEngineOlcRTC,
-				Setting: "engine", Item: name(e), Requested: "olcrtc", Effective: "not started",
-				Severity: platform.SeverityBlocked, Reason: platform.ReasonMissingBinary,
-				Blocks: platform.BlocksFeature,
-				Detail: "The olcrtc binary is not installed, so this connection cannot come up.",
-				Remedy: "Install olcRTC through the Updater, or disable the connection.",
+				ID: "endpoint.engine.olcrtc", Setting: "engine", Item: name(e),
+				Requested: "olcrtc", Effective: "not applied",
+				Severity: platform.SeverityBlocked, Reason: platform.ReasonBackendNotWired,
+				Blocks: platform.BlocksApply,
+				Detail: "WayHop no longer runs olcRTC: the project ended (its repository was archived on 2026-09-30) and it was removed.",
+				Remedy: "Delete this connection, or disable it, and move what used it to another connection.",
 			})
-		case model.EngineNfqws:
-			if s.pluginBinaryPresent("nfqws2") {
+		case model.EngineByeDPI:
+			if s.byedpiUnavailable() {
+				// One stored enabled before the save gate refused it, or restored from another router's
+				// backup. The planner would fail the Apply on it; said here, the review names the
+				// connection and the way out before anything is attempted.
+				out = append(out, PlanFinding{
+					ID: "endpoint.engine.byedpi.keenetic", Setting: "engine", Item: name(e), Requested: "byedpi",
+					Effective: "not applied", Severity: platform.SeverityBlocked,
+					Reason: platform.ReasonPlatformUnsupported, Blocks: platform.BlocksApply,
+					Detail: nativeplan.ByeDPIOnKeenetic + ", so this connection cannot run on this router.",
+					Remedy: "Disable the connection, after pointing any routing list or rule that uses it at another connection.",
+				})
+				continue
+			}
+			if s.pluginBinaryPresent("ciadpi") {
 				continue
 			}
 			out = append(out, PlanFinding{
-				ID: "endpoint.engine.nfqws", Setting: "engine", Item: name(e), Requested: "nfqws",
+				ID: "endpoint.engine.byedpi", Setting: "engine", Item: name(e), Requested: "byedpi",
 				Effective: "not started", Severity: platform.SeverityBlocked,
 				Reason: platform.ReasonMissingBinary, Blocks: platform.BlocksFeature,
-				Detail: "The nfqws2 binary is not installed, so this desync profile cannot start.",
-				Remedy: "Install nfqws2, or disable the connection.",
+				Detail: "The ciadpi binary (ByeDPI) is not installed, so this connection cannot start.",
+				Remedy: "Install ByeDPI's ciadpi, or disable the connection.",
 			})
 		default:
+			// nfqws included (QA-055): its finding used to say "install nfqws2" and nothing when the
+			// binary was there, but the executor refuses the engine either way (it modifies packets and
+			// has no exit; classifyExecutionEndpoint), so the install it promised fixed nothing.
 			out = append(out, PlanFinding{
 				ID: "endpoint.engine." + string(e.Engine), Setting: "engine", Item: name(e),
 				Requested: string(e.Engine), Effective: "not applied",
 				Severity: platform.SeverityBlocked, Reason: platform.ReasonBackendNotWired,
 				Blocks: platform.BlocksApply,
 				Detail: "This WayHop build has no executor for the " + string(e.Engine) + " engine.",
-				Remedy: "Use sing-box, AmneziaWG or olcRTC for this connection, or disable it.",
+				Remedy: "Use sing-box or AmneziaWG for this connection, or disable it.",
 			})
 		}
 	}
@@ -1072,6 +1388,116 @@ func normalizeBlocks(blocks string) string {
 	}
 }
 
+// pinFindings says what the core does with an enabled connection's certificate pins
+// (generator/pin.go) where that is not what the pin's own format does: a pin an older core (or an
+// unknown version) leaves out, named apart when the connection then accepts any certificate; a pin
+// that is not a SHA-256 hash, ignored by every core; a Hysteria pin checked instead of the chain where
+// Hysteria checks both; a pin from a format that also accepts a CA's hash, which sing-box never
+// matches; pins beside Reality, which uses none; and a link's verify name (vcn) where sing-box checks
+// the SNI instead. None stops the core from loading, so none holds Apply.
+func pinFindings(e *model.Endpoint, item, coreVer string) []PlanFinding {
+	var out []PlanFinding
+	note := func(id string, reason platform.ReasonCode) PlanFinding {
+		return PlanFinding{ID: id, Setting: "certificate pin", Item: item, Severity: platform.SeverityDegraded,
+			Reason: reason, Blocks: platform.BlocksNothing}
+	}
+	coreName := strings.TrimSpace(strings.SplitN(coreVer, "\n", 2)[0])
+	if coreName == "" {
+		coreName = "a sing-box of unknown version"
+	}
+	if cov, left := generator.PinsLeftOut(e, coreVer); left {
+		f := note("endpoint.tls.pin.core", platform.ReasonBinaryTooOld)
+		f.Requested, f.Effective = "certificate pin", "not checked by "+coreName
+		if need := generator.PinCoreNeeded(e, coreVer); need != "" {
+			f.Requested = "certificate pin (sing-box " + need + " or newer)"
+		}
+		if cov.Insecure {
+			f.ID = "endpoint.tls.pin.unenforced"
+		}
+		out = append(out, f)
+	}
+	if generator.PinMalformed(e) {
+		out = append(out, note("endpoint.tls.pin.invalid", platform.ReasonSavedValueIncompat))
+	}
+	if generator.PinReplacesChainCheck(e, coreVer) {
+		out = append(out, note("endpoint.tls.pin.replaces_chain", platform.ReasonOperatorChoice))
+	}
+	if generator.PinsMayNameCA(e, coreVer) {
+		out = append(out, note("endpoint.tls.pin.leaf", platform.ReasonSavedValueIncompat))
+	}
+	if generator.PinsUnusedByReality(e) {
+		out = append(out, note("endpoint.tls.pin.reality", platform.ReasonFeatureWouldBeDropped))
+	}
+	if names := generator.CertNameUnchecked(e, coreVer); len(names) > 0 {
+		sni := e.Server
+		if e.TLS != nil && e.TLS.SNI != "" {
+			sni = e.TLS.SNI
+		}
+		out = append(out, PlanFinding{ID: "endpoint.tls.vcn", Setting: "certificate name", Item: item,
+			Severity: platform.SeverityDegraded, Reason: platform.ReasonSavedValueIncompat, Blocks: platform.BlocksNothing,
+			Requested: "certificate checked against " + strings.Join(names, ", "), Effective: "checked against the SNI " + sni})
+	}
+	return out
+}
+
+// multiplexFindings says what an enabled connection's multiplex will not do. The save refuses the
+// first two (model.EndpointParamProblem), so they reach here only from a profile that came another way
+// (a restored backup, a hand-edited file); the generator then leaves the setting out rather than fail
+// the shared config, and this says so. The third the save allows: Shadowsocks with UDP over TCP, where
+// sing-box never builds the multiplex client.
+func multiplexFindings(e model.Endpoint, item string) []PlanFinding {
+	m := e.Multiplex
+	if m == nil || !m.Enabled {
+		return nil
+	}
+	mk := func(id string, reason platform.ReasonCode, requested, effective string) []PlanFinding {
+		return []PlanFinding{{ID: id, Setting: "multiplex", Item: item, Severity: platform.SeverityDegraded,
+			Reason: reason, Blocks: platform.BlocksFeature, Requested: requested, Effective: effective}}
+	}
+	proto := m.Protocol
+	if proto == "" {
+		proto = "h2mux"
+	}
+	switch {
+	case !model.MultiplexCapable(e.Protocol) || !model.MuxProtocols[proto]:
+		return mk("endpoint.multiplex.unsupported", platform.ReasonSavedValueIncompat, "multiplex ("+proto+") on "+string(e.Protocol), "off")
+	case model.MuxUoTIgnored(&e):
+		return mk("endpoint.multiplex.uot_ignored", platform.ReasonFeatureWouldBeDropped, "multiplex with UDP over TCP", "multiplex off")
+	case m.Brutal != nil && m.Brutal.Enabled && (!model.BrutalRateOK(m.Brutal.UpMbps) || !model.BrutalRateOK(m.Brutal.DownMbps)):
+		return mk("endpoint.multiplex.brutal_speed", platform.ReasonSavedValueIncompat,
+			fmt.Sprintf("TCP Brutal %d/%d Mbps", m.Brutal.UpMbps, m.Brutal.DownMbps), "TCP Brutal off")
+	}
+	return nil
+}
+
+// finalMaskFindings says what sing-box does with a connection's Xray finalmask (a link's fm=,
+// model.ParseFinalMask): nothing. The masks that change only what the client sends are named, since the
+// connection works without them but without that evasion. The importers refuse a mask the server
+// undoes, and fm that is not a finalmask; one that arrives another way (the API, a restored backup)
+// is named as failing every connection. None stops the core from loading, so none holds Apply.
+func finalMaskFindings(e model.Endpoint, item string) []PlanFinding {
+	raw, _ := e.Params[model.ParamFinalMask].(string)
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	f := PlanFinding{Setting: "finalmask", Item: item, Severity: platform.SeverityDegraded, Effective: "not applied"}
+	fm, err := model.ParseFinalMask(raw)
+	switch {
+	case err != nil:
+		f.ID, f.Reason, f.Blocks, f.Requested = "endpoint.finalmask.peer", platform.ReasonSavedValueIncompat,
+			platform.BlocksFeature, "Xray finalmask ("+err.Error()+")"
+	case len(fm.Peer) > 0:
+		f.ID, f.Reason, f.Blocks, f.Requested = "endpoint.finalmask.peer", platform.ReasonSavedValueIncompat,
+			platform.BlocksFeature, "Xray finalmask: "+strings.Join(fm.Peer, ", ")
+	case len(fm.Sender) > 0:
+		f.ID, f.Reason, f.Blocks, f.Requested = "endpoint.finalmask.sender", platform.ReasonFeatureWouldBeDropped,
+			platform.BlocksNothing, "Xray finalmask: "+strings.Join(fm.Sender, ", ")
+	default:
+		return nil
+	}
+	return []PlanFinding{f}
+}
+
 // findingTemplate names a raw finding for humans: a closed code plus a title/detail/remedy the UI can
 // show even when the source supplied no prose.
 func findingTemplate(f PlanFinding) (code, title, detail, remedy string) {
@@ -1084,6 +1510,165 @@ func findingTemplate(f PlanFinding) (code, title, detail, remedy string) {
 		return "Connection has no credential", "Connection cannot authenticate",
 			"An enabled connection is missing the secret its protocol authenticates with.",
 			"Open the connection and fill it in, or switch it off until you have one."
+	case f.ID == "endpoint.ssh.host_key":
+		return "SSH_HOST_KEY_NOT_PINNED", "SSH exit accepts any server",
+			"The connection has no host key, so the router accepts whatever key the server presents. Anyone who can " +
+				"intercept the way to the server can pose as it: read or change every connection sent through this exit " +
+				"that is not encrypted end to end, and take the password if the connection logs in with one (a private key " +
+				"cannot be taken this way). The exit works; Apply is not held.",
+			"Paste the server's host key lines into the connection's Host keys: run ssh-keyscan -p <port> <server> " +
+				"where you trust the network, or read /etc/ssh/ssh_host_ed25519_key.pub on the server."
+	case f.ID == "endpoint.ssh.tcp_only":
+		return "SSH_EXIT_TCP_ONLY", "SSH exit carries TCP only",
+			"An SSH server forwards TCP connections and nothing else, and rules, routing lists or a DNS server over UDP " +
+				"send UDP to this exit too. That UDP is not carried: calls, games and DNS over UDP fail through it, and " +
+				"browsers fall back from QUIC to TCP. In an automatic group, UDP goes to a member that carries it instead. " +
+				"TCP works; Apply is not held.",
+			"Send what needs UDP through another exit, and point a DNS server that uses this exit at DNS over TLS or HTTPS."
+	case f.ID == "endpoint.ssh.algorithms":
+		return "SSH_ALGORITHMS_NEED_NEWER_CORE", "SSH algorithm limits need sing-box 1.14",
+			"This connection limits its ciphers, MACs or key exchanges, which sing-box carries from 1.14; this router's " +
+				"core is older, so it is applied without the limits and negotiates from the defaults. A server that " +
+				"accepts only the listed algorithms will refuse it.",
+			"Update sing-box to 1.14 or newer on the Components page."
+	case f.ID == "endpoint.tls.ech.core":
+		return "ECH_NOT_IN_CORE", "This sing-box has no ECH",
+			"This router's sing-box 1.12 was built with a Go older than 1.24, which has no Encrypted Client Hello, and it " +
+				"refuses any config that asks for it. These connections are applied without ECH, so their server name is " +
+				"sent in the clear, and a server that accepts only ECH refuses them.",
+			"Update sing-box on the Components page: 1.13 or newer, or a 1.12 build made with Go 1.24 or newer."
+	case f.ID == "endpoint.tls.ech.qsn":
+		return "ECH_QUERY_NAME_NEEDS_NEWER_CORE", "ECH query server name needs sing-box 1.13",
+			"This connection looks its ECH config up in DNS under a query server name, which sing-box carries from 1.13; " +
+				"this router's core is older, so it looks up the connection's server name (SNI) instead, and the connection " +
+				"fails unless that name publishes an ECH record.",
+			"Update sing-box to 1.13 or newer on the Components page, or paste the server's ECH config into the connection."
+	case f.ID == "endpoint.tls.pin.core":
+		return "CERT_PIN_NEEDS_NEWER_CORE", "Certificate pin not checked by this sing-box",
+			"These connections pin the server's certificate. sing-box checks a public-key pin from 1.13 and a " +
+				"whole-certificate pin, the kind share links carry, from 1.15; this router's core is older, or its " +
+				"version is not known yet, and an older core refuses the whole configuration over a pin, so the pins " +
+				"it cannot check are left out. Where a connection also has a pin the core can check, only that one is " +
+				"checked; otherwise the certificate's chain and name are checked as usual, and a server whose " +
+				"certificate no public authority signed (a self-signed one) is refused. Apply is not held.",
+			"Update sing-box to 1.15 or newer on the Components page."
+	case f.ID == "endpoint.tls.pin.unenforced":
+		return "CERT_PIN_NOT_ENFORCED", "Pinned connection accepts any certificate",
+			"These connections pin the server's certificate and turn certificate checks off (\"insecure\"), as " +
+				"their link asks, and the pin is left out: this router's sing-box is too old to check it (a " +
+				"whole-certificate pin needs 1.15, a public-key pin 1.13) or its version is not known yet. They " +
+				"accept any certificate, so anyone who can intercept the way to the server can pose as it. The " +
+				"connections work; Apply is not held.",
+			"Update sing-box to 1.15 or newer on the Components page."
+	case f.ID == "endpoint.tls.pin.invalid":
+		return "CERT_PIN_INVALID", "Certificate pin is not a valid SHA-256 hash",
+			"These connections carry a certificate pin, kept from a link an older WayHop imported, that is not a " +
+				"valid SHA-256 hash, so it is ignored: the connection checks the server as its other settings say, " +
+				"and with certificate checks off (\"insecure\") and no other pin it accepts any certificate. Apply is " +
+				"not held.",
+			"Open the connection and re-enter the server's pin, or remove it."
+	case f.ID == "endpoint.tls.pin.replaces_chain":
+		return "CERT_PIN_REPLACES_CHAIN_CHECK", "The pin is checked instead of the certificate chain",
+			"These connections pin the server's certificate with Hysteria's pinSHA256 and keep certificate checks " +
+				"on. Hysteria's own client then checks the certificate's chain, name and expiry as well as the pin; " +
+				"sing-box checks the pin instead, so a certificate that matches the pin is accepted even after it has " +
+				"expired. The pin names that one certificate exactly. Apply is not held.",
+			"Nothing is required. Replace the pin when the server's certificate is renewed."
+	case f.ID == "endpoint.tls.pin.leaf":
+		return "CERT_PIN_SERVER_CERT_ONLY", "A certificate pin must be the server's own certificate",
+			"These connections' whole-certificate pins, or some of them, came from a link or config whose format also " +
+				"accepts the hash of a CA certificate in the server's chain (Xray's pcs=, mihomo's fingerprint). sing-box " +
+				"compares a pin with the server's own certificate only, so a pin that is a CA's hash matches nothing, and " +
+				"unless another pin is the server's own certificate, every handshake of the connection fails. Apply is " +
+				"not held.",
+			"If the connection does not come up, pin the server's own certificate instead: on the server, " +
+				"openssl x509 -in <certificate> -noout -fingerprint -sha256 prints it."
+	case f.ID == "endpoint.tls.pin.reality":
+		return "CERT_PIN_UNUSED_WITH_REALITY", "Certificate pins are not used with Reality",
+			"These Reality connections carry certificate pins (a link's pcs=, or set through the API). Reality " +
+				"authenticates the server by its own key and replaces any certificate check, so the pins are not " +
+				"used; they are kept only to be shared again. Apply is not held.",
+			"Nothing is required. Remove the pins through the API, or switch the connection to plain TLS to use them."
+	case f.ID == "endpoint.finalmask.sender":
+		return "FINALMASK_SENDER_NOT_APPLIED", "Xray finalmask is not applied",
+			"These connections' links carry Xray masks (fm=) that change only what the client sends: fragment " +
+				"splits what it writes first (the TLS ClientHello), noise sends datagrams of its own ahead of the " +
+				"connection's, udphop hops between the server's ports. sing-box has no masks, so they are left out. " +
+				"The server reads the connection the same either way, so it works, without that evasion. Apply is " +
+				"not held.",
+			"Nothing is required. Where the network blocks the connection without them, try the connection's TLS " +
+				"fragment settings or another transport."
+	case f.ID == "endpoint.finalmask.peer":
+		return "FINALMASK_PEER_UNSUPPORTED", "The server expects an Xray mask sing-box lacks",
+			"These connections carry an Xray finalmask (fm=) that the server applies too, or one Xray itself would " +
+				"refuse. It reached the profile through the API or a restored backup: an import refuses such a " +
+				"link. sing-box has no masks, so every connection to that server fails. Apply is not held.",
+			"Switch the connection off, or connect to the server through an inbound without the mask."
+	case f.ID == "endpoint.tls.vcn":
+		return "CERT_NAME_NOT_CHECKED", "Certificate is checked against the SNI, not the link's name",
+			"These connections' links ask to check the server's certificate against another name (vcn), so that " +
+				"the real name can stay out of the SNI. sing-box has no such option: it checks the certificate " +
+				"against the SNI, so the connection fails unless the certificate also covers the SNI. Apply is not held.",
+			"Pin the server's certificate, which replaces the name check (sing-box 1.15 or newer for the pins " +
+				"share links carry), or set the SNI to a name the certificate covers."
+	case f.ID == "endpoint.hysteria2.quic_size_parrot":
+		return "QUIC_SIZE_REPLACED_BY_CHROME", "QUIC packet size is replaced by Chrome's",
+			"These Hysteria2 connections set an initial QUIC packet size, but they parrot Chrome's QUIC handshake, " +
+				"which starts at Chrome's own size (1250 bytes, 1230 over IPv6) instead, so the setting does nothing. " +
+				"Turning off path MTU discovery still applies. Apply is not held.",
+			"Turn on \"No Chrome QUIC fingerprint\" on the connection for the size to apply, or clear the size."
+	case f.ID == "endpoint.tls.ech.fingerprint":
+		return "ECH_FINGERPRINT_REPLACED", "ECH is sent with the chrome fingerprint",
+			"These connections ask for a uTLS fingerprint (safari, ios, edge, android, 360, qq, random or randomized) " +
+				"whose ClientHello cannot carry Encrypted Client Hello: with it every handshake fails. They are applied " +
+				"with the chrome fingerprint instead, so that ECH works. Apply is not held.",
+			"Nothing is required. Set the connection's fingerprint to chrome or firefox, or clear it, and this goes away; " +
+				"switch ECH off to keep the fingerprint."
+	case f.ID == "endpoint.tls.ech.dns":
+		return "ECH_FROM_ROUTER_DNS", "ECH config is looked up through the router's DNS",
+			"These connections look their ECH config up (an HTTPS record, kept for its TTL) through the router's DNS " +
+				"rules, not through the connection. A name answered by FakeIP, refused by a DNS rule or blocked by the " +
+				"network fails the lookup, and then the connection fails: it does not fall back to an unencrypted " +
+				"handshake. Apply is not held.",
+			"Make sure the DNS server that answers the name reaches it, or paste the server's ECH config into the " +
+				"connection, which needs no lookup."
+	case f.ID == "endpoint.tls.ech.dns_loop":
+		return "ECH_LOOKUP_THROUGH_ITSELF", "ECH lookup goes through the connection it is for",
+			"These connections look their ECH config up in DNS, and the DNS server the router's DNS rules give that " +
+				"lookup to is reached through the connection itself, or through a group that holds it (the secure DNS " +
+				"default rides the main exit). The lookup needs the connection it is for: the connection does not come " +
+				"up, or, in a group that can leave it, comes up only while DNS goes another way and drops again when the " +
+				"record expires.",
+			"Paste the server's ECH config into the connection, which needs no lookup, or add a DNS rule that sends the " +
+				"name it looks up (its query server name, else its SNI) to a server that does not go through it."
+	case f.ID == "endpoint.tls.ech.dns_clear":
+		return "ECH_NAME_IN_CLEAR_DNS", "ECH lookup sends the hidden name over plain DNS",
+			"These connections look their ECH config up in DNS, and the DNS server the router's DNS rules give that " +
+				"lookup to is plain DNS (udp or tcp) or the router's own resolver, which forwards it as the router is set " +
+				"up to. The name ECH hides (the query server name, else the SNI) then goes out in the DNS question, " +
+				"readable by the firewall ECH is meant to blind. The connection works; Apply is not held.",
+			"Paste the server's ECH config into the connection, which needs no lookup, or send the name to an encrypted " +
+				"DNS server (DoH, DoT, DoQ) with a DNS rule or as the final server on the DNS page."
+	case f.ID == "endpoint.multiplex.unsupported":
+		return "MULTIPLEX_NOT_APPLIED", "Multiplex is left out",
+			"These connections ask for multiplex where sing-box has none: on a protocol other than VLESS, VMess, Trojan " +
+				"or Shadowsocks, or with a multiplex protocol other than h2mux, smux or yamux (an Xray server's mux.cool " +
+				"is not one). Saving refuses this; it came with a restored or edited profile. The core would refuse the " +
+				"whole configuration over it, so these connections are applied without multiplex.",
+			"On Hysteria2, TUIC and the other protocols without multiplex, open the connection and save it: " +
+				"the form has no Multiplex section there, so saving drops the setting. On VLESS, VMess, Trojan or " +
+				"Shadowsocks, pick h2mux, smux or yamux in its Multiplex section, or switch multiplex off."
+	case f.ID == "endpoint.multiplex.brutal_speed":
+		return "MULTIPLEX_BRUTAL_RATE", "TCP Brutal is left out",
+			"These connections turn TCP Brutal on with an upload or download rate that is missing, zero, negative or " +
+				"past 100000 Mbps. The core refuses a missing or zero rate and misreads a negative one, so they are " +
+				"applied with multiplex and without TCP Brutal.",
+			"Open the connection and set both TCP Brutal rates in Mbps, or switch TCP Brutal off."
+	case f.ID == "endpoint.multiplex.uot_ignored":
+		return "MULTIPLEX_UOT_IGNORED", "Multiplex does nothing with UDP over TCP",
+			"These Shadowsocks connections send UDP over TCP, and sing-box then never starts multiplex: every " +
+				"connection opens its own. They work; only the multiplex is not used.",
+			"Switch multiplex off on the connection, or turn UDP over TCP off if the server does not need it."
 	case f.ID == "core.unavailable":
 		return "CORE_UNAVAILABLE", "The proxy core is unavailable",
 			"This datapath needs the configured sing-box core, but it cannot be run.",
@@ -1124,6 +1709,37 @@ func findingTemplate(f PlanFinding) (code, title, detail, remedy string) {
 		return "KERNEL_RULE_DROPPED", "Rule is not carried in fast mode",
 			"The kernel plane cannot carry this rule and fast mode has no TUN fallback.",
 			"Use kernel-compatible matchers or choose a mode with a TUN fallback."
+	case f.ID == "list.ndm_policy_missing":
+		return "NDM_POLICY_MISSING", "Routing list is sent to an access policy the router does not have",
+			"An enabled routing list names a KeeneticOS access policy that NDM no longer reports.",
+			"Send the list to an existing access policy, or point it at a connection."
+	case f.ID == "list.ndm_policy_unsupported":
+		return "NDM_POLICY_UNSUPPORTED", "Access policies exist only on KeeneticOS",
+			"An enabled routing list is sent to a KeeneticOS access policy on a router that is not running KeeneticOS.",
+			"Point the list at a connection or a group."
+	case f.ID == "list.ndm_policy_unread":
+		return "NDM_POLICY_UNREAD", "The router's access policies could not be read",
+			"An enabled routing list is sent to a KeeneticOS access policy, and NDM did not report its policies.",
+			"Review again; if it keeps failing, check that NDM answers on this router."
+	case f.ID == "core.override":
+		return "CORE_OVERRIDE_ACTIVE", "A core override changes the generated config",
+			"The core override saved in Settings changes the sing-box config WayHop generates.",
+			"Nothing is required. Clear the override in Settings to run the generated config as it is."
+	case f.ID == "core.override_open_listener":
+		return "CORE_OVERRIDE_OPEN_LISTENER", "The core override listens beyond loopback",
+			"The core override makes the core listen on an address other than loopback. Anyone who can reach it can use it: " +
+				"an open proxy, or a remote control for the core, on the LAN, and on the WAN wherever the firewall lets it through.",
+			"Listen on 127.0.0.1 unless the LAN is meant to use it; then require users on the inbound (or a secret on the Clash API) " +
+				"and keep the port closed on the WAN."
+	case f.ID == "core.override_daemon_loss":
+		return "CORE_OVERRIDE_DAEMON_LOSS", "The core override takes what WayHop runs the core through",
+			"The core override removes or changes part of the core that WayHop's own features use.",
+			"Add route rules with prepend instead of replacing route.rules, leave experimental.clash_api as WayHop writes it, " +
+				"and when the override restates inbounds, restate WayHop's own (probe-in among them) with the new ones."
+	case f.ID == "core.override_invalid":
+		return "CORE_OVERRIDE_INVALID", "The core override cannot be applied",
+			"The core override in config.json is not one WayHop can apply.",
+			"Correct the core override in Settings, or clear it."
 	case f.ID == "kernel_plane.fallback":
 		return "KERNEL_RULE_FALLBACK", "Rules use the userspace fallback",
 			"The kernel plane cannot carry these rules, so the TUN handles them instead.",
@@ -1197,8 +1813,10 @@ func (s *Server) preflightFor(c config.Config, prof model.Profile, caps platform
 	// DNS/traffic coherence rides in the same list because it answers the same pre-Apply question —
 	// "will this configuration do what it says?" — and the user should not have to look in two
 	// places. Encrypted direct DNS is an acknowledgeable exit-policy choice; plaintext direct DNS is
-	// a hard privacy failure.
-	for _, a := range dnsaudit.DetectAsymmetric(prof) {
+	// a hard privacy failure. The audit reads the DNS plane as the core will be generated for this
+	// mode and platform (dnsPlaneTUN): without TUN the generator drops fakeip servers.
+	plane := dnsaudit.Plane{TUN: dnsPlaneTUN(in.RoutingMode, platform.Platform(caps.Platform))}
+	for _, a := range dnsaudit.DetectAsymmetric(prof, plane) {
 		out = append(out, dnsPathUnsupported(a))
 	}
 
@@ -1251,6 +1869,11 @@ func evaluatePlanFindings(capset platform.CapabilitySet, pf []platform.Unsupport
 		}
 		if f.Severity == platform.SeverityPrivacy && strings.HasPrefix(f.Setting, "dns_path:plaintext:") {
 			f.Blocks = platform.BlocksApply
+		}
+		// A list on a KeeneticOS access policy: where its traffic leaves is NDM's to know, not WayHop's,
+		// so its DNS finding is advice (dnsPathUnsupported), never a refusal (QA-063).
+		if _, policy := model.NDMPolicyName(f.Requested); policy && strings.HasPrefix(f.Setting, "dns_path:") {
+			f.Blocks = platform.BlocksNothing
 		}
 		out = append(out, f)
 	}
@@ -1401,7 +2024,10 @@ func shadowedRuleFindings(prof *model.Profile) []PlanFinding {
 //
 // Compile errors are swallowed deliberately: a plan that cannot be compiled is surfaced by Apply
 // itself, and a second, differently-worded failure here would be noise rather than information.
-func (s *Server) kernelPlaneFindings(cfg *config.Config, prof *model.Profile) []PlanFinding {
+//
+// ndmPolicies are the router's access policies as the review read them (nil when no list uses one), so
+// a list sent to a policy that exists is not reported as one the kernel will not carry.
+func (s *Server) kernelPlaneFindings(cfg *config.Config, prof *model.Profile, ndmPolicies map[string]uint32) []PlanFinding {
 	if cfg == nil || prof == nil {
 		return nil
 	}
@@ -1417,9 +2043,18 @@ func (s *Server) kernelPlaneFindings(cfg *config.Config, prof *model.Profile) []
 		return nil
 	}
 
-	_, warns, err := pbr.Compile(prof, s.pbrCompileOptions(*cfg))
-	if err != nil || len(warns) == 0 {
+	opts := s.pbrCompileOptions(*cfg)
+	opts.NDMPolicies = ndmPolicies
+	plan, warns, err := pbr.Compile(prof, opts)
+	if err != nil {
 		return nil
+	}
+	var shadowed []PlanFinding
+	if mode == "hybrid" && !opts.CollectDomainZones {
+		shadowed = blockNamesShadowedFindings(prof, plan)
+	}
+	if len(warns) == 0 {
+		return shadowed
 	}
 
 	if mode == "fast" {
@@ -1477,6 +2112,57 @@ func (s *Server) kernelPlaneFindings(cfg *config.Config, prof *model.Profile) []
 		}
 		out = append(out, PlanFinding{ID: "kernel_plane.fallback", Setting: "routing", Item: item,
 			Severity: platform.SeverityDegraded, Reason: platform.ReasonFeatureWouldBeDropped, Blocks: platform.BlocksNothing})
+	}
+	return append(out, shadowed...)
+}
+
+// blockNamesShadowedFindings names each block list that blocks by NAME while the kernel plane routes
+// address ranges in hybrid. Names are matched only in the proxy core, and the kernel takes its lists'
+// addresses before the core sees the connection - the TUN excludes them - so a blocked name whose
+// address sits in one of those ranges is routed, not blocked, whatever the lists' order. Seen live:
+// a messenger listed to block, every one of its addresses inside another list's /20, and its traffic
+// left by the tunnel (QA-065). A block the kernel carries is emitted last and wins any overlap, hence the remedy.
+func blockNamesShadowedFindings(prof *model.Profile, plan *pbr.Plan) []PlanFinding {
+	if plan == nil {
+		return nil
+	}
+	blackhole := map[string]bool{}
+	for _, e := range plan.Egresses {
+		if e.Kind == pbr.EgressBlackhole {
+			blackhole[e.Tag] = true
+		}
+	}
+	kernelRanges := false
+	for _, z := range plan.Zones {
+		if !blackhole[z.EgressTag] && !z.SrcScoped && len(z.V4)+len(z.V6) > 0 {
+			kernelRanges = true
+			break
+		}
+	}
+	if !kernelRanges {
+		return nil
+	}
+	var out []PlanFinding
+	for i := range prof.RoutingLists {
+		rl := &prof.RoutingLists[i]
+		if !rl.Enabled || rl.Outbound != model.OutboundBlock {
+			continue
+		}
+		names := rl.DomainSource != "" || len(rl.DomainCache) > 0
+		for _, m := range rl.Manual {
+			if names = names || entryIsDomain(m); names {
+				break
+			}
+		}
+		if !names {
+			continue
+		}
+		out = append(out, PlanFinding{
+			ID: "kernel_plane.block_names_shadowed", Setting: "routing list", Item: listName(rl),
+			Severity: platform.SeverityDegraded, Reason: platform.ReasonModeConflict, Blocks: platform.BlocksNothing,
+			Detail: "This list blocks by name, which only the proxy core can match. In hybrid mode the kernel routes the address ranges of your IP lists before the core sees the connection, so a blocked name whose address falls in one of them is routed, not blocked. The order of the lists does not change this.",
+			Remedy: "Add the service's IP ranges to this list as well: a block the kernel carries wins over any route.",
+		})
 	}
 	return out
 }

@@ -55,10 +55,10 @@ const engines = (pm) => ({
     // the version picker is built by the per-row check that "Check all" runs for every row — so this
     // one still grew a self-managed "Install selected" over a binary opkg or apk owns.
     {
-      id: 'olcrtc', name: 'olcRTC', role: 'socks-plugin', provides: 'olcrtc',
-      installed: { present: true, version: '1.0.0', path: '/usr/sbin/olcrtc' },
+      id: 'pkg-plugin', name: 'Example plugin', role: 'socks-plugin', provides: 'pkg-plugin',
+      installed: { present: true, version: '1.0.0', path: '/usr/sbin/pkg-plugin' },
       carried_by_kernel: false, ownership_unknown: false,
-      native_managed: true, native_owner: 'olcrtc',
+      native_managed: true, native_owner: 'pkg-plugin',
     },
   ],
 });
@@ -66,7 +66,7 @@ const engines = (pm) => ({
 // The per-engine version list, so the picker actually renders. Without it `pickable` is null and the
 // control this gate is looking for never exists — a check that would pass by measuring nothing.
 const versionsFor = (id) => ({
-  installed: id === 'olcrtc' ? '1.0.0' : '',
+  installed: id === 'pkg-plugin' ? '1.0.0' : '',
   latest: '1.2.0',
   versions: ['1.2.0', '1.1.0', '1.0.0'],
 });
@@ -134,9 +134,9 @@ try {
         }
         var m = s.match(/\\/api\\/updater\\/([^/]+)\\/versions/);
         if (m) {
-          var vs = ${JSON.stringify(JSON.stringify({ ac: versionsFor('amneziawg-go'), sb: versionsFor('sing-box'), ol: versionsFor('olcrtc') }))};
+          var vs = ${JSON.stringify(JSON.stringify({ ac: versionsFor('amneziawg-go'), sb: versionsFor('sing-box'), ol: versionsFor('pkg-plugin') }))};
           var by = JSON.parse(vs);
-          var pick = m[1] === 'olcrtc' ? by.ol : (m[1] === 'sing-box' ? by.sb : by.ac);
+          var pick = m[1] === 'pkg-plugin' ? by.ol : (m[1] === 'sing-box' ? by.sb : by.ac);
           return Promise.resolve(new Response(JSON.stringify(pick),
             { status: 200, headers: { 'Content-Type': 'application/json' } }));
         }
@@ -179,7 +179,7 @@ try {
         const rowFor = (txt) => rows.find(r => r.textContent.includes(txt));
         const kernelRow = rowFor('AmneziaWG');
         const plainRow  = rowFor('sing-box');
-        const deferredRow = rowFor('olcRTC');
+        const deferredRow = rowFor('Example plugin');
         return {
           rowCount: rows.length,
           kernelRowFound: !!kernelRow,
@@ -202,7 +202,7 @@ try {
       check(`${tag}: only WayHop and the optional core are operational rows`, seen.rowCount === 2,
         `rows=${seen.rowCount}`);
       check(`${tag}: the kernel-carried userspace alternative stays out of Updater`, !seen.kernelRowFound);
-      check(`${tag}: the deferred olcRTC plugin stays out of Updater`, !seen.deferredRowFound);
+      check(`${tag}: a package-managed plugin stays out of Updater`, !seen.deferredRowFound);
       check(`${tag}: the optional compatibility core remains visible`, seen.plainRowFound);
       check(`${tag}: sing-box is labelled as optional compatibility`, /optional compatibility/i.test(seen.plainRole),
         JSON.stringify(seen.plainRole));

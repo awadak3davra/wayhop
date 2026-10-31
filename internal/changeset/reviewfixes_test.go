@@ -10,9 +10,10 @@ import (
 
 // Regression guards for defects found by adversarial review of the change-set/undo work.
 
-// #1/#10/#15 (HIGH): "Discard all" must revert only what the review REPORTED. Diff does not cover
-// Profile.Rules/DeviceGroups/DNS, nor config fields outside the three reviewable settings — returning
-// the baseline verbatim silently destroyed all of it.
+// #1/#10/#15 (HIGH): "Discard all" must revert only what the review REPORTED. Config fields outside
+// the reviewable settings are never shown, so they must survive — returning the baseline verbatim
+// silently destroyed them. Rules, device groups and the DNS plane ARE reported now (QA-088), so
+// discard-all must revert them: it used to answer "undone" while those rows stayed pending.
 func TestUndoAll_PreservesUnreviewedState(t *testing.T) {
 	base := model.Profile{
 		Endpoints: []model.Endpoint{ep("a", "A")},
@@ -20,9 +21,9 @@ func TestUndoAll_PreservesUnreviewedState(t *testing.T) {
 	}
 	desired := model.Profile{
 		Endpoints:    []model.Endpoint{ep("a", "A-edited")},            // reviewed
-		Rules:        []model.Rule{{ID: "old-rule"}, {ID: "new-rule"}}, // NOT diffed
-		DeviceGroups: []model.DeviceGroup{{ID: "dg1", Name: "Kids"}},   // NOT diffed
-		DNS:          &model.DNSSettings{Enabled: true},                // NOT diffed
+		Rules:        []model.Rule{{ID: "old-rule"}, {ID: "new-rule"}}, // reviewed (Device rules)
+		DeviceGroups: []model.DeviceGroup{{ID: "dg1", Name: "Kids"}},   // reviewed (Device rules)
+		DNS:          &model.DNSSettings{Enabled: true},                // reviewed (DNS)
 	}
 	baseCfg := config.Config{RoutingMode: "tun", Listen: ":8088"}
 	desiredCfg := config.Config{RoutingMode: "hybrid", Listen: ":8443"} // only RoutingMode is reviewed
@@ -38,16 +39,19 @@ func TestUndoAll_PreservesUnreviewedState(t *testing.T) {
 	if gotC.RoutingMode != "tun" {
 		t.Errorf("reviewed setting should revert, got %q", gotC.RoutingMode)
 	}
+	if len(gotP.Rules) != 1 || gotP.Rules[0].ID != "old-rule" {
+		t.Errorf("the reviewed rule addition should revert, got %+v", gotP.Rules)
+	}
+	if len(gotP.DeviceGroups) != 0 {
+		t.Errorf("the reviewed device group addition should revert, got %+v", gotP.DeviceGroups)
+	}
+	if gotP.DNS != nil {
+		t.Errorf("the reviewed DNS plane addition should revert, got %+v", gotP.DNS)
+	}
+	if n := changeCount(base, gotP, baseCfg, gotC); n != 0 {
+		t.Errorf("discard-all must leave nothing pending, got %d rows", n)
+	}
 	// Unreviewed state MUST survive.
-	if len(gotP.Rules) != 2 {
-		t.Errorf("Rules were never reviewed and must survive discard-all, got %d", len(gotP.Rules))
-	}
-	if len(gotP.DeviceGroups) != 1 {
-		t.Errorf("DeviceGroups must survive discard-all, got %d", len(gotP.DeviceGroups))
-	}
-	if gotP.DNS == nil {
-		t.Error("the DNS plane must survive discard-all")
-	}
 	if gotC.Listen != ":8443" {
 		t.Errorf("an unreviewed config field must NOT be reverted (panel-lockout risk), got %q", gotC.Listen)
 	}

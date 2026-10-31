@@ -1,6 +1,7 @@
 package tgbot
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -243,5 +244,47 @@ func TestRefreshesOfferApplyWhenSomethingChanged(t *testing.T) {
 	h.press(500, cbDo+actSub)
 	if e := lastEdit(h); !strings.Contains(e, "could not be refreshed: no subscription is imported") {
 		t.Fatalf("sub: %q", e)
+	}
+}
+
+// Long maintenance runs outside the handler slots. Four refreshes in flight used to hold every slot,
+// and an owner's Keep pressed meanwhile waited behind them, its window running out.
+func TestKeepIsNotQueuedBehindLongMaintenance(t *testing.T) {
+	h := newHarness(t, owner)
+	gate := make(chan struct{})
+	h.be.listsGate = gate
+	h.be.pulse.FailSafe = FailSafePulse{Pending: true, Window: "w1"}
+	press := func(data string) Update {
+		return Update{CallbackQuery: &CallbackQuery{ID: "q", From: User{ID: 500, FirstName: "Sam"}, Data: data,
+			Message: &Message{MessageID: 99, Chat: Chat{ID: 500, Type: "private"}}}}
+	}
+	ctx := context.Background()
+	kept := make(chan struct{})
+	go func() {
+		for i := 0; i < maxInflight+2; i++ {
+			h.bot.dispatch(ctx, press(cbDo+actLists))
+		}
+		h.bot.dispatch(ctx, press(cbKeep+"w1"))
+		for {
+			h.be.mu.Lock()
+			n := h.be.kept
+			h.be.mu.Unlock()
+			if n == 1 {
+				close(kept)
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+	select {
+	case <-kept:
+	case <-time.After(5 * time.Second):
+		close(gate)
+		t.Fatal("Keep waited behind the refreshes")
+	}
+	close(gate)
+	h.bot.wg.Wait()
+	if n := len(h.api.callsTo("editMessageText")); n < maxInflight+2 {
+		t.Fatalf("the refreshes did not finish: %d edits", n)
 	}
 }

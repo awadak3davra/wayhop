@@ -15,6 +15,12 @@ const (
 	memHighPct     = 92.0
 	memOKPct       = 85.0
 	memHighSamples = 3
+	// diskLowBytes free for diskLowSamples pulses in a row opens the storage incident; diskOKBytes
+	// closes it. The low mark is the Diagnostics battery's "critically low" (server/diskspace.go):
+	// below it a settings save, an Apply and an update fail.
+	diskLowBytes   = 3 << 20
+	diskOKBytes    = 5 << 20
+	diskLowSamples = 3
 	// countdownEvery: how often the test-Apply message's countdown is refreshed.
 	countdownEvery = 30 * time.Second
 )
@@ -56,7 +62,20 @@ type watcher struct {
 	coreAlerted bool
 	memHigh     int
 	memAlerted  bool
+	diskLow     int
+	diskAlerted bool
 	countdownAt time.Time
+	// window is the test Apply the open apply message is about (its Keep / Roll back name it), "" when
+	// none is open or its name is not known yet. A second Test inside a running window supersedes it
+	// without the window ever closing, and only the name tells the two apart (QA-100).
+	window string
+	// autoRollback: the running window's fail-safe rolled back by itself. Its window stays pending until
+	// the next healthy tick, so by the close the phase no longer tells the fail-safe's rollback from a
+	// pressed one: the last check passed and the phase before the close is rolled_back (QA-098).
+	autoRollback bool
+	// announce: the running window replaced another one at a step whose read still showed the old
+	// window's phase and time left, so its own message waits for the next step.
+	announce bool
 }
 
 func newWatcher() *watcher {
@@ -85,7 +104,8 @@ func (l *lazyStatus) status() Status {
 }
 
 // step compares p and log with the previous step. The first step only records a baseline: nothing
-// that was already true when the bot started is announced as if it had just happened.
+// that was already true when the bot started is announced as if it had just happened, except an
+// outstanding failed rollback (see below).
 func (w *watcher) step(now time.Time, p Pulse, log EventLog, status func() Status) []Alert {
 	if !w.primed {
 		w.primed, w.prev = true, p
@@ -95,7 +115,12 @@ func (w *watcher) step(now time.Time, p Pulse, log EventLog, status func() Statu
 		}
 		if p.FailSafe.Pending {
 			w.countdownAt = now
+			w.window, w.autoRollback = p.FailSafe.Window, p.FailSafe.Phase == "rolled_back"
 		}
+		// The one exception: a failed rollback the record still waits on is told at the next step. The
+		// daemon retries boot's rollback as it starts, so its failure can land before the bot's first
+		// look and would never be told; and a restart lost any memory of having told an older one.
+		w.prev.FailSafe.RollbackOutstanding = false
 		return nil
 	}
 	snap := &lazyStatus{get: status}
@@ -115,6 +140,17 @@ func (w *watcher) step(now time.Time, p Pulse, log EventLog, status func() Statu
 	// outage, so one that stays dead is marked down a probe round or two after the internet
 	// returned, and a quiet window after the outage used to swallow exactly that tunnel.
 	quiet := p.LocalFault || w.prev.LocalFault
+
+	// The routing switch. Switched off, the core is stopped on purpose and every exit it carried fails
+	// with it: that is what the operator asked for, not news, so exits stay quiet until the step after
+	// routing is back (the monitor needs a probe round to see them up again).
+	switch {
+	case !w.prev.RoutingOff && p.RoutingOff:
+		out = append(out, routingSwitched(now, true))
+	case w.prev.RoutingOff && !p.RoutingOff:
+		out = append(out, routingSwitched(now, false))
+	}
+	quiet = quiet || p.RoutingOff || w.prev.RoutingOff
 
 	// A step's failures are told first, then the switches they caused, then the recoveries; several
 	// failures or recoveries in one step are one message each (see coalesceMin).
@@ -155,6 +191,7 @@ func (w *watcher) step(now time.Time, p Pulse, log EventLog, status func() Statu
 	out = append(out, w.core(now, p)...)
 	out = append(out, w.apply(now, p)...)
 	out = append(out, w.memory(now, p)...)
+	out = append(out, w.disk(now, p)...)
 	w.prev = p
 	return out
 }
@@ -212,37 +249,120 @@ func (w *watcher) apply(now time.Time, p Pulse) []Alert {
 	from, to := applyState(w.prev.FailSafe), applyState(p.FailSafe)
 	f := p.FailSafe
 	var out []Alert
+	// A failed rollback outside a running window: Roll back pressed after the window closed, or boot's
+	// rollback of a Test a restart left. Inside a window its phase tells it (rollback_failed below);
+	// these two set nothing else the bot reads, so they went untold, and the "unsaved" message kept
+	// offering a Keep the daemon refuses. Told once, when the record first shows it.
+	outstanding := to == applyUnsaved && f.RollbackOutstanding && !w.prev.FailSafe.RollbackOutstanding
+	// The fail-safe's own rollback, as the window last showed it before this step.
+	autoRollback := w.autoRollback
+	if to != applyTesting {
+		w.window, w.autoRollback, w.announce = "", false, false
+	}
 	if from == to {
 		if to == applyTesting {
-			if f.Phase == "degraded" && w.prev.FailSafe.Phase != "degraded" {
+			if f.Window != "" && w.window != "" && f.Window != w.window {
+				// Another Test was applied inside this one's window, which supersedes it: pending never
+				// drops, so this is no open or close, and the countdown re-rendered the old message with the
+				// new window's Keep. An owner deciding about the first Test then kept the second, which
+				// nobody had asked about (QA-100). The old message is closed without buttons, and the new
+				// Test is announced in its own message. A window whose rollback has finished has no name
+				// until then (nothing is live), so that is not taken for a new one.
+				//
+				// The pulse reads the fail-safe before the record, so a Test applied in between is seen
+				// once with the old window's phase under the new one's name. rolled_back there is the old
+				// window's own rollback, and the old message closes as that; it is not the new window's.
+				// Carried over, it made the new Test's later Roll back close as "Connectivity was lost", and
+				// the new message was drawn from the old window's time left, 0:00, until the countdown 30 s
+				// later. The new Test is announced from the next step's read instead, which is its own.
+				out = append(out, w.replacedOutcome(now, f, autoRollback || f.Phase == "rolled_back"))
+				w.window, w.autoRollback = f.Window, false
+				if f.Phase == "rolled_back" {
+					w.announce = true
+					return out
+				}
+				// Any other phase under a new name is the new window's to start with ("armed"): an old
+				// window's rollback_failed must not open the new one's message as a failed rollback.
+				armed := f
+				armed.Phase = "armed"
+				w.countdownAt = now
+				return append(out, applyArmed(now, armed))
+			}
+			if w.announce {
+				w.announce, w.countdownAt = false, now
+				out = append(out, applyArmed(now, f))
+			}
+			if w.window == "" {
+				w.window = f.Window
+			}
+			if f.Phase == "rolled_back" {
+				// Only the fail-safe's own rollback leaves the window pending on rolled_back: a pressed
+				// one (RollbackNow, MarkRolledBack) closes it in the same step. The countdown stops (below)
+				// but its last edit kept Keep / Roll back until the window closed, and a Roll back pressed
+				// meanwhile read "Did not work: a rollback is already in progress" right before the
+				// critical alert. The message is redrawn once, without them.
+				if !w.autoRollback {
+					out = append(out, applyRollingBack(now))
+				}
+				w.autoRollback = true
+			}
+			// After a failed Roll back the next tick relabels the phase "degraded": that is not news.
+			if f.Phase == "degraded" && w.prev.FailSafe.Phase != "degraded" && !rollbackFailed(f) {
 				out = append(out, applyDegraded(now))
 			}
-			if f.Phase == "rollback_failed" && w.prev.FailSafe.Phase != "rollback_failed" {
-				out = append(out, applyRollbackFailed(now, f.LastError))
+			// Phase or record, whichever the bot sees first, and once: the record is marked a moment
+			// before the phase, and the phase can be relabelled before the bot looks.
+			if rollbackFailed(f) && !rollbackFailed(w.prev.FailSafe) {
+				out = append(out, applyRollbackFailed(now, rollbackErrorText(f)))
 			}
-			if now.Sub(w.countdownAt) >= countdownEvery {
+			// Once the fail-safe has rolled back nothing counts down any more: the countdown said "rolls
+			// back by itself in 0:00 unless you keep it" with Keep / Roll back until the window closed.
+			if f.Phase != "rolled_back" && now.Sub(w.countdownAt) >= countdownEvery {
 				w.countdownAt = now
 				out = append(out, applyCountdown(now, f))
 			}
 		}
+		if outstanding {
+			out = append(out, applyRollbackOutstanding(now, f.RollbackError, f.Window))
+		}
 		return out
 	}
-	// Close what was open.
+	// Close what was open. The phase is the window's verdict and is read first: a rollback that failed
+	// keeps the tested revision on record (it is what a retry undoes), so such a window closes into the
+	// "unsaved" state too, and reading that first told a failed rollback as "the test window passed
+	// with the internet up" followed by "runs unsaved, a reboot brings the previous one back". The
+	// record's mark counts as much as the phase: after a Roll back that failed inside the window the
+	// next connectivity tick relabels the phase (degraded, armed, even an optimistic rolled_back for a
+	// rollback the window can no longer dispatch), while the mark stays until the rollback is finished.
+	passed, told := false, false
 	switch from {
 	case applyTesting:
 		switch {
-		case to == applyUnsaved:
-			out = append(out, applyClosed(now, "al.apply.passed", SevInfo, true))
+		case f.Phase == "reboot":
+			// Read before the failed rollback: with auto-reboot on, that is how a failed rollback's window
+			// ends, and its mark sent "closed, but the rollback failed, roll back again" instead, never the
+			// reboot: the owners were asked to retry on a router going down (on Keenetic the next process
+			// drops Live, so that message was never closed). The reboot answers the failed rollback too,
+			// so it is not told again below as an outstanding one.
+			told = true
+			out = append(out, applyClosed(now, "al.apply.reboot", SevCritical, false))
+		case rollbackFailed(f):
+			told = true
+			out = append(out, applyClosedRollbackFailed(now, rollbackErrorText(f), f.Window))
 		case f.Phase == "committed":
 			out = append(out, applyClosed(now, "al.apply.kept", SevInfo, true))
-		case f.Phase == "rolled_back" && (w.prev.FailSafe.Phase == "degraded" || (f.Checked && !f.CheckOK)):
-			// The fail-safe rolled back because the connection was lost: loud.
+		case f.Phase == "rolled_back" && (autoRollback || w.prev.FailSafe.Phase == "degraded" || (f.Checked && !f.CheckOK)):
+			// The fail-safe rolled back because the connection was lost: loud. Its window usually closes a
+			// tick after the rollback, on the check that passed with the previous configuration back, so the
+			// phase and the check at the close are a pressed Roll back's; what the window showed before it
+			// is the fail-safe's (QA-098).
 			out = append(out, applyClosed(now, "al.apply.rolledback", SevCritical, false))
 		case f.Phase == "rolled_back":
 			// Somebody pressed Roll back (here or in the panel): the outcome, quietly.
 			out = append(out, applyClosed(now, "al.apply.reverted", SevInfo, true))
-		case f.Phase == "reboot":
-			out = append(out, applyClosed(now, "al.apply.reboot", SevCritical, false))
+		case to == applyUnsaved:
+			passed = true
+			out = append(out, applyClosed(now, "al.apply.passed", SevInfo, true))
 		default:
 			out = append(out, applyClosed(now, "al.apply.ended", SevInfo, true))
 		}
@@ -257,11 +377,32 @@ func (w *watcher) apply(now time.Time, p Pulse) []Alert {
 	switch to {
 	case applyTesting:
 		w.countdownAt = now
+		w.window, w.autoRollback = f.Window, f.Phase == "rolled_back"
 		out = append(out, applyArmed(now, f))
 	case applyUnsaved:
-		out = append(out, applyUnsavedAlert(now))
+		// Only a window that passed leaves the tested configuration running as tested. One that closed
+		// on a rollback is not "unsaved, undone by a reboot", and its Keep would be refused.
+		switch {
+		case outstanding:
+			if !told {
+				out = append(out, applyRollbackOutstanding(now, f.RollbackError, f.Window))
+			}
+		case f.RollbackOutstanding:
+			// Told when it first showed; Keep would be refused.
+		case from != applyTesting || passed:
+			out = append(out, applyUnsavedAlert(now, f.Window))
+		}
 	}
 	return out
+}
+
+// rollbackErrorText is why the rollback failed: the record's word when it holds one (it outlives the
+// window, and a retry outside it updates only the record), else the window's.
+func rollbackErrorText(f FailSafePulse) string {
+	if f.RollbackOutstanding && f.RollbackError != "" {
+		return f.RollbackError
+	}
+	return f.LastError
 }
 
 func (w *watcher) memory(now time.Time, p Pulse) []Alert {
@@ -288,6 +429,36 @@ func (w *watcher) memory(now time.Time, p Pulse) []Alert {
 		}
 	default:
 		w.memHigh = 0
+	}
+	return nil
+}
+
+// disk is the storage incident, in the memory's way: a few low pulses in a row open it, and it closes
+// only once there is clearly room again, so a log rotating around the mark does not flap.
+func (w *watcher) disk(now time.Time, p Pulse) []Alert {
+	if !p.Disk.Known {
+		return nil
+	}
+	free := int64(p.Disk.FreeBytes)
+	switch {
+	case p.Disk.FreeBytes < diskLowBytes:
+		w.diskLow++
+		if w.diskLow >= diskLowSamples && !w.diskAlerted {
+			w.diskAlerted = true
+			a := simpleAlert(KindSystem, SevWarning, now, func(lang string) string { return T(lang, "al.disk", Bytes(lang, free)) })
+			a.Incident = "disk"
+			return []Alert{a}
+		}
+	case p.Disk.FreeBytes >= diskOKBytes:
+		w.diskLow = 0
+		if w.diskAlerted {
+			w.diskAlerted = false
+			a := simpleAlert(KindSystem, SevInfo, now, func(lang string) string { return T(lang, "al.disk.ok", Bytes(lang, free)) })
+			a.Incident, a.Resolves = "disk", true
+			return []Alert{a}
+		}
+	default:
+		w.diskLow = 0
 	}
 	return nil
 }
@@ -539,6 +710,19 @@ func coreDown(now time.Time, was time.Duration, lastErr string) Alert {
 	return a
 }
 
+// routingSwitched tells every chat that WayHop's routing was switched off, or back on. Filed under
+// the Apply news: it changes what the router runs, like a Keep or a rollback does.
+func routingSwitched(now time.Time, off bool) Alert {
+	if off {
+		a := simpleAlert(KindApply, SevWarning, now, func(lang string) string { return T(lang, "al.routing.off") })
+		a.Incident = "routing"
+		return a
+	}
+	a := simpleAlert(KindApply, SevInfo, now, func(lang string) string { return T(lang, "al.routing.on") })
+	a.Incident, a.Resolves = "routing", true
+	return a
+}
+
 func coreUp(now time.Time, was time.Duration) Alert {
 	a := simpleAlert(KindCore, SevInfo, now, func(lang string) string { return T(lang, "al.core.up", Duration(lang, was)) })
 	a.Incident, a.Resolves = "core", true
@@ -550,18 +734,32 @@ func coreUp(now time.Time, was time.Duration) Alert {
 func applyArmed(now time.Time, f FailSafePulse) Alert {
 	left := time.Duration(f.SecondsLeft) * time.Second
 	text := func(lang string) string { return T(lang, "al.apply.armed", Countdown(left)) }
+	keyboard := applyKeyboard
+	if rollbackFailed(f) {
+		// The window holds on for its reboot fallback, but nothing rolls back by itself any more and
+		// Keep is refused: the message says what happened and offers the retry.
+		errText := rollbackErrorText(f)
+		text = func(lang string) string { return T(lang, "al.apply.rbfailed", esc(errText)) }
+		keyboard = applyRetryKeyboard
+	}
 	return Alert{Kind: KindApply, Sev: SevAction, At: now, Incident: "apply",
-		Render: func(lang, role string) (string, *Keyboard) { return text(lang), applyKeyboard(lang, role) },
+		Render: func(lang, role string) (string, *Keyboard) { return text(lang), keyboard(lang, role, f.Window) },
 		Line:   func(lang string) string { return firstLine(text(lang)) },
 	}
 }
 
+// rollbackFailed reports a window whose rollback failed and is not finished: by its phase, or by the
+// daemon's record, which keeps saying so after the next connectivity tick has relabelled the phase.
+func rollbackFailed(f FailSafePulse) bool {
+	return f.Phase == "rollback_failed" || f.RollbackOutstanding
+}
+
 func applyCountdown(now time.Time, f FailSafePulse) Alert {
 	a := applyArmed(now, f)
-	if f.Phase == "degraded" {
+	if f.Phase == "degraded" && !rollbackFailed(f) {
 		left := time.Duration(f.SecondsLeft) * time.Second
 		a.Render = func(lang, role string) (string, *Keyboard) {
-			return T(lang, "al.apply.armed", Countdown(left)) + "\n" + T(lang, "al.apply.failing"), applyKeyboard(lang, role)
+			return T(lang, "al.apply.armed", Countdown(left)) + "\n" + T(lang, "al.apply.failing"), applyKeyboard(lang, role, f.Window)
 		}
 	}
 	a.Edit = true
@@ -594,10 +792,66 @@ func applyClosed(now time.Time, key string, sev Severity, quiet bool) Alert {
 	return a
 }
 
-func applyUnsavedAlert(now time.Time) Alert {
+// applyReplaced ends the message of a test window that a newer Test superseded: quietly, without its
+// buttons, unless the fail-safe had already rolled the old Test back, which is told as that rollback.
+func applyReplaced(now time.Time, autoRollback bool) Alert {
+	if autoRollback {
+		return applyClosed(now, "al.apply.rolledback", SevCritical, false)
+	}
+	return applyClosed(now, "al.apply.replaced", SevInfo, true)
+}
+
+// replacedOutcome closes the window w names when f shows another one. A Keep in the panel followed by
+// a new Test within one pulse looks the same as the new Test superseding the old one, and was told as
+// "replaced"; a kept Test is the committed revision now, under its own name. A Roll back pressed
+// before the new Test still reads as replaced: the committed revision is the same either way.
+func (w *watcher) replacedOutcome(now time.Time, f FailSafePulse, autoRollback bool) Alert {
+	if f.Committed != "" && f.Committed == w.window {
+		return applyClosed(now, "al.apply.kept", SevInfo, true)
+	}
+	return applyReplaced(now, autoRollback)
+}
+
+// applyRollingBack redraws a test window's message once its fail-safe has rolled back by itself: the
+// window stays pending until the next healthy tick, and the countdown's Keep / Roll back are no use
+// any more. Its close follows, loud. The text is plain: it is also the toast of a Keep or Roll back
+// pressed before this edit lands (decideApply).
+func applyRollingBack(now time.Time) Alert {
+	text := func(lang string) string { return T(lang, "al.apply.rolling") }
+	return Alert{Kind: KindApply, Sev: SevAction, At: now, Incident: "apply", Edit: true,
+		Render: func(lang, _ string) (string, *Keyboard) { return text(lang), nil },
+		Line:   func(lang string) string { return firstLine(text(lang)) },
+	}
+}
+
+// applyClosedRollbackFailed ends a test window whose rollback failed (it closes at the reboot
+// threshold with auto-reboot off): loud, since part of the tested configuration may still run, and
+// with Roll back for the owners to retry: the tested revision stays on record for exactly that.
+func applyClosedRollbackFailed(now time.Time, errText, window string) Alert {
+	text := func(lang string) string { return T(lang, "al.apply.rbclosed", esc(errText)) }
+	return Alert{Kind: KindApply, Sev: SevCritical, At: now, Incident: "apply", Resolves: true,
+		Render: func(lang, role string) (string, *Keyboard) { return text(lang), applyRetryKeyboard(lang, role, window) },
+		Line:   func(lang string) string { return firstLine(text(lang)) },
+		Closed: text,
+	}
+}
+
+// applyRollbackOutstanding tells a failed rollback outside a running window: loud, with Roll back alone
+// for the owners. It closes the apply incident so the earlier "unsaved" message loses its Keep, which the
+// daemon now refuses; the retry's outcome (rolled back, or the Test replaced) arrives on its own.
+func applyRollbackOutstanding(now time.Time, errText, window string) Alert {
+	text := func(lang string) string { return T(lang, "al.apply.rbopen", esc(errText)) }
+	return Alert{Kind: KindApply, Sev: SevCritical, At: now, Incident: "apply", Resolves: true,
+		Render: func(lang, role string) (string, *Keyboard) { return text(lang), applyRetryKeyboard(lang, role, window) },
+		Line:   func(lang string) string { return firstLine(text(lang)) },
+		Closed: text,
+	}
+}
+
+func applyUnsavedAlert(now time.Time, window string) Alert {
 	text := func(lang string) string { return T(lang, "al.apply.unsaved") }
 	return Alert{Kind: KindApply, Sev: SevAction, At: now, Incident: "apply",
-		Render: func(lang, role string) (string, *Keyboard) { return text(lang), applyKeyboard(lang, role) },
+		Render: func(lang, role string) (string, *Keyboard) { return text(lang), applyKeyboard(lang, role, window) },
 		Line:   func(lang string) string { return firstLine(text(lang)) },
 	}
 }
@@ -633,6 +887,12 @@ func bootAlert(b BootInfo, now time.Time) Alert {
 		text = func(lang string) string { return T(lang, "al.boot.reboot", view{lang: lang, now: now}.clock(bootAt)) }
 	default:
 		text = func(lang string) string { return T(lang, "al.boot.restart", esc(b.Version)) }
+	}
+	if b.UpdateNote != "" {
+		// The restart was the update supervisor putting the previous build back: say so with it.
+		sev = SevWarning
+		inner := text
+		text = func(lang string) string { return inner(lang) + "\n" + T(lang, "up.lastnote", esc(b.UpdateNote)) }
 	}
 	return simpleAlert(KindBoot, sev, now, text)
 }

@@ -6,20 +6,21 @@ import (
 )
 
 // Round-trip: adopt the OpenWrt fixture → render uci → the plan must preserve every DoH resolver (in
-// order, sequential ports), noresolv, the dnsmasq proxy refs, and the plaintext fallbacks.
+// order, each on the instance and port it was adopted from), noresolv, the dnsmasq proxy refs, and the
+// plaintext fallbacks.
 func TestRenderUCI_RoundTripResolvers(t *testing.T) {
 	nd := ReadUCI(fixtureHTTPSDNSProxy, fixtureDHCP) // 3 DoH + 3 plain-fallback
 	plan := strings.Join(RenderUCI(nd), "\n")
 
-	for _, url := range []string{"https://1.1.1.1/dns-query", "https://9.9.9.9/dns-query", "https://8.8.8.8/dns-query"} {
-		if !strings.Contains(plan, "resolver_url='"+url+"'") {
-			t.Errorf("plan missing DoH %s", url)
+	for i, url := range []string{"https://1.1.1.1/dns-query", "https://9.9.9.9/dns-query", "https://8.8.8.8/dns-query"} {
+		if !strings.Contains(plan, "https-dns-proxy.@https-dns-proxy["+string(rune('0'+i))+"].resolver_url='"+url+"'") {
+			t.Errorf("plan does not update DoH %s on the instance it came from", url)
 		}
 	}
+	if strings.Contains(plan, "listen_port") || strings.Contains(plan, "uci add https-dns-proxy") {
+		t.Errorf("adopted proxies already listen on their ports; the plan must neither move nor recreate them:\n%s", plan)
+	}
 	for _, p := range []string{"5053", "5054", "5055"} {
-		if !strings.Contains(plan, "listen_port='"+p+"'") {
-			t.Errorf("plan missing listen_port %s", p)
-		}
 		if !strings.Contains(plan, "server='127.0.0.1#"+p+"'") {
 			t.Errorf("plan missing dnsmasq server ref 127.0.0.1#%s", p)
 		}

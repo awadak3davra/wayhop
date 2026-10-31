@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"wayhop/internal/config"
+	"wayhop/internal/localtz"
 	"wayhop/internal/model"
 	"wayhop/internal/serverstore"
 	"wayhop/internal/speedtest"
@@ -190,6 +191,110 @@ func TestTelegramViaAcceptsProfileObjectsAndTheLocalProxy(t *testing.T) {
 	}
 }
 
+// A path the bot cannot be bound to used to be accepted and to resolve to the ordinary path at dial
+// time, so the bot went straight out while the panel showed a tunnel. Such a choice is refused when
+// it is made, with what to choose instead, and the unchanged saved choice stays savable.
+func TestTelegramViaRefusesWhatCannotCarryTheBot(t *testing.T) {
+	s := tgServer(t)
+	profile := model.Profile{
+		Endpoints: []model.Endpoint{
+			adopted("nwg3", "nwg3", true),
+			adopted("off", "nwg9", false),
+			proxied("vless-de"),
+		},
+		Groups: []model.Group{
+			{ID: "proxies", Name: "Proxies", Type: model.GroupFallback, Members: []string{"vless-de"}},
+			{ID: "tunnels", Name: "Tunnels", Type: model.GroupFallback, Members: []string{"nwg3"}},
+		},
+	}
+	if err := s.store.Replace(profile); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		via  string
+		ok   bool
+		want string
+	}{
+		{"", true, ""},
+		{viaLocalProxy, true, ""},
+		{"nwg3", true, ""},
+		{"vless-de", false, "local proxy"},
+		{"off", false, "disabled"},
+		{"proxies", false, `no member of \"Proxies\" has a network link`},
+		// Nothing measured yet: no member is known up, so the group cannot carry the bot now.
+		{"tunnels", false, "is up right now"},
+		{"gone", false, "no connection or group"},
+	} {
+		w := tgDo(t, s, http.MethodPut, "/api/telegram", `{"via":"`+tc.via+`"}`)
+		if (w.Code == http.StatusOK) != tc.ok || !strings.Contains(w.Body.String(), tc.want) {
+			t.Errorf("via %q = %d %s", tc.via, w.Code, w.Body)
+		}
+		// Check answers the same refusal before anything reaches Telegram.
+		if !tc.ok {
+			c := tgDo(t, s, http.MethodPost, "/api/telegram/check", `{"token":"`+tgTestToken+`","via":"`+tc.via+`"}`)
+			if !strings.Contains(c.Body.String(), `"ok":false`) || !strings.Contains(c.Body.String(), tc.want) {
+				t.Errorf("check via %q = %s", tc.via, c.Body)
+			}
+		}
+	}
+	// A choice saved before it stopped resolving (here: an older build accepted it) must not make the
+	// alert switches unsavable: every save sends it back unchanged.
+	if err := s.UpdateTelegram(func(tg *config.Telegram) error { tg.Via = "vless-de"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if w := tgDo(t, s, http.MethodPut, "/api/telegram", `{"via":"vless-de","quiet_from":"23:00","quiet_to":"07:00"}`); w.Code != http.StatusOK {
+		t.Fatalf("an unchanged saved choice was refused: %d %s", w.Code, w.Body)
+	}
+}
+
+// The panel offers the paths the daemon can bind the bot to and shows the one in force.
+func TestTelegramViewShowsThePathInForce(t *testing.T) {
+	s := tgServer(t)
+	profile := model.Profile{Endpoints: []model.Endpoint{adopted("nwg3", "nwg3", true), proxied("vless-de")}}
+	if err := s.store.Replace(profile); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ via, iface string }{{"nwg3", "nwg3"}, {"vless-de", ""}, {viaLocalProxy, ""}, {"", ""}} {
+		if err := s.UpdateTelegram(func(tg *config.Telegram) error { tg.Via = tc.via; return nil }); err != nil {
+			t.Fatal(err)
+		}
+		var v telegramView
+		if err := json.Unmarshal(tgDo(t, s, http.MethodGet, "/api/telegram", "").Body.Bytes(), &v); err != nil {
+			t.Fatal(err)
+		}
+		if v.ViaIface != tc.iface || len(v.ViaPaths) != 1 || v.ViaPaths[0].ID != "nwg3" {
+			t.Errorf("via %q: iface %q, paths %+v", tc.via, v.ViaIface, v.ViaPaths)
+		}
+	}
+}
+
+// At run time a chosen path that resolves to nothing fails the dial: no Telegram traffic leaves by
+// the ordinary path when a route was chosen. The ordinary path itself still dials.
+func TestTelegramClientFailsClosed(t *testing.T) {
+	s := tgServer(t)
+	profile := model.Profile{
+		Endpoints: []model.Endpoint{adopted("nwg3", "nwg3", true), adopted("off", "nwg9", false), proxied("vless-de")},
+		Groups:    []model.Group{{ID: "tunnels", Name: "Tunnels", Type: model.GroupFallback, Members: []string{"nwg3"}}},
+	}
+	if err := s.store.Replace(profile); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") }))
+	defer srv.Close()
+	for _, tc := range []struct {
+		via    string
+		closed bool
+	}{{"", false}, {model.OutboundDirect, false}, {"tunnels", true}, {"off", true}, {"vless-de", true}, {"deleted", true}} {
+		resp, err := s.telegramClient(config.Telegram{Via: tc.via}).Get(srv.URL)
+		if resp != nil {
+			resp.Body.Close()
+		}
+		if closed := errors.Is(err, errTelegramPathDown); closed != tc.closed || (!tc.closed && err != nil) {
+			t.Errorf("via %q: %v", tc.via, err)
+		}
+	}
+}
+
 // The bulk Settings save carries the masked token back. It must neither store the mask nor drop
 // the chats the bot paired.
 func TestSettingsSaveLeavesTheBotAlone(t *testing.T) {
@@ -214,8 +319,20 @@ func TestSettingsSaveLeavesTheBotAlone(t *testing.T) {
 	}
 }
 
+// QA-034: with no token there is no bot, so no code is handed out to send to it.
+func TestTelegramPairRefusedWithoutToken(t *testing.T) {
+	s := tgServer(t)
+	w := tgDo(t, s, http.MethodPost, "/api/telegram/pair", `{"role":"viewer"}`)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "bot token first") {
+		t.Fatalf("pair without a token = %d %s, want 409 naming the token", w.Code, w.Body)
+	}
+}
+
 func TestTelegramPairIssuesAUsableCode(t *testing.T) {
 	s := tgServer(t)
+	if err := s.UpdateTelegram(func(tg *config.Telegram) error { tg.Token = tgTestToken; return nil }); err != nil {
+		t.Fatal(err)
+	}
 	w := tgDo(t, s, http.MethodPost, "/api/telegram/pair", `{"role":"viewer"}`)
 	var out struct {
 		Code string `json:"code"`
@@ -326,11 +443,38 @@ func TestTelegramPulseAndDecisionsOnABareDemo(t *testing.T) {
 	if !p.Mem.Known || p.FailSafe.Pending || p.FailSafe.Live || p.Core.Supervised {
 		t.Fatalf("pulse %+v", p)
 	}
-	if err := (tgBackend{s}).ConfirmApply(context.Background()); err == nil || !strings.Contains(err.Error(), "no unsaved configuration to keep") {
+	if err := (tgBackend{s}).ConfirmApply(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "no unsaved configuration to keep") {
 		t.Fatalf("keep without a window: %v", err)
 	}
-	if err := (tgBackend{s}).RollbackApply(context.Background()); err == nil || !strings.Contains(err.Error(), "no unsaved configuration to roll back") {
+	if err := (tgBackend{s}).RollbackApply(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "no unsaved configuration to roll back") {
 		t.Fatalf("roll back without a window: %v", err)
+	}
+}
+
+// The bot's Keep and Roll back buttons name the test Apply they decide: the live (unsaved) revision
+// and when it was applied, short enough for Telegram's 64-byte callback data.
+func TestTelegramPulseNamesTheTestApply(t *testing.T) {
+	s := tgServer(t)
+	if w := (tgBackend{s}).Pulse(context.Background()).FailSafe.Window; w != "" {
+		t.Fatalf("a window named with nothing under test: %q", w)
+	}
+	s.recordApplied(false, &appliedRevision{Rev: "rev-a", At: 100, Materialization: applyhealth_demoMaterialization()})
+	first := (tgBackend{s}).Pulse(context.Background()).FailSafe
+	if !first.Live || len(first.Window) != 10 {
+		t.Fatalf("pulse %+v", first)
+	}
+	for _, tc := range []struct {
+		rev  string
+		at   int64
+		same bool
+	}{{"rev-a", 100, true}, {"rev-a", 101, false}, {"rev-b", 100, false}} {
+		if got := applyWindow(&appliedRevision{Rev: tc.rev, At: tc.at}); (got == first.Window) != tc.same {
+			t.Errorf("%s@%d: %q vs %q", tc.rev, tc.at, got, first.Window)
+		}
+	}
+	s.recordRollback()
+	if w := (tgBackend{s}).Pulse(context.Background()).FailSafe.Window; w != "" {
+		t.Fatalf("the window outlived its test Apply: %q", w)
 	}
 }
 
@@ -426,7 +570,7 @@ func TestTelegramViewCarriesTheRoutersClock(t *testing.T) {
 		{time.FixedZone("", 5*3600+45*60), "+05:45"},
 		{time.UTC, "UTC"},
 	} {
-		if got := zoneLabel(time.Date(2026, 9, 24, 12, 0, 0, 0, c.loc)); got != c.want {
+		if got := localtz.Label(time.Date(2026, 9, 24, 12, 0, 0, 0, c.loc)); got != c.want {
 			t.Errorf("%v: %q, want %q", c.loc, got, c.want)
 		}
 	}
@@ -857,5 +1001,23 @@ func TestMemberOnLink(t *testing.T) {
 	}
 	if got := memberOnLink(g, ifaceOf, "tun9"); got != "" {
 		t.Fatalf("an unknown link named %q", got)
+	}
+}
+
+// The bot's backup is named by the router's clock, as its caption is, not by the UTC that Go reads
+// on a router without zoneinfo.
+func TestTelegramBackupIsNamedInTheRoutersTime(t *testing.T) {
+	at := time.Date(2026, 10, 17, 21, 30, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		loc  *time.Location
+		want string
+	}{
+		{time.UTC, "wayhop-backup-20261017-2130.json"},
+		{time.FixedZone("MSK", 3*3600), "wayhop-backup-20261018-0030.json"},
+		{time.FixedZone("<-05>", -5*3600), "wayhop-backup-20261017-1630.json"},
+	} {
+		if got := backupName(at, tc.loc); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.loc, got, tc.want)
+		}
 	}
 }

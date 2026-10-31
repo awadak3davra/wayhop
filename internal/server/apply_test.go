@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
+	"wayhop/internal/keenetic"
 	"wayhop/internal/model"
+	"wayhop/internal/nativeplan"
 	"wayhop/internal/platform"
 )
 
@@ -455,5 +458,177 @@ func TestRunApply_InvalidProfileIsNamed(t *testing.T) {
 	}
 	if len(fake.snapshot()) != 0 {
 		t.Error("an invalid profile must not reach the router")
+	}
+}
+
+// apply_failRollbackCore fails the core step of the rollback that follows a failed Apply: the core
+// calls are counted from now, and the forward run makes the first.
+func apply_failRollbackCore(s *Server, fake *applytest_ops) {
+	ops := fake.ops()
+	inner := ops.core
+	n := 0
+	ops.core = func(ctx context.Context, artifact executionCoreArtifactV1) error {
+		if n++; n == 2 {
+			return errors.New("sing-box did not restart")
+		}
+		return inner(ctx, artifact)
+	}
+	s.execOps = &ops
+}
+
+// QA-140: a failed Apply whose rollback also failed was recorded only while an earlier rollback was
+// outstanding. Otherwise the record went on naming the committed revision as running over the Apply's
+// leftovers: Roll back answered "the committed configuration is running", and the reconcile loop put
+// the committed plane back under the failed Apply's core. The Apply is now the live state with its
+// rollback outstanding, which Keep refuses and Roll back finishes.
+func TestRunApply_FailedRollbackOfAFailedApplyIsRecorded(t *testing.T) {
+	s, fake := applytest_server(t)
+	apply_seedVLESS(t, s)
+	if _, aerr := s.runApply(context.Background(), applyRequest{Save: true}); aerr != nil {
+		t.Fatalf("baseline apply: %v", aerr.body())
+	}
+	committed := s.committedRevision()
+	if err := s.store.UpsertEndpoint(profilehandlers_endpoint("v2", "DE")); err != nil {
+		t.Fatal(err)
+	}
+	apply_failRollbackCore(s, fake)
+	fake.failOnce = true
+	fake.kernelErr = errors.New("nft: table wayhop_pbr busy")
+
+	_, aerr := s.runApply(context.Background(), applyRequest{Save: true})
+	if aerr == nil || aerr.Stage != stepKernel || aerr.RolledBack == nil || *aerr.RolledBack {
+		t.Fatalf("got %+v, want a kernel-stage failure that was not rolled back", aerr)
+	}
+	live, mark := s.liveRevision(), s.liveRollbackFailed()
+	if live == nil || live.Rev == committed.Rev || mark == nil || !strings.Contains(mark.Error, "did not restart") {
+		t.Fatalf("live %+v, mark %+v: want the failed Apply on record with its rollback outstanding", live, mark)
+	}
+	// The forward run failed at its kernel step and the rollback stopped before its own: neither
+	// revision's plane can be vouched for, so the reconcile loop puts none back.
+	if mark.KernelPlane != rollbackPlaneUnknown || s.supervisedBaseline() != nil {
+		t.Fatalf("mark plane %q, supervised %+v", mark.KernelPlane, s.supervisedBaseline())
+	}
+	if c := s.committedRevision(); c != committed {
+		t.Fatalf("committed = %+v, want the untouched %s", c, committed.Rev)
+	}
+	if code, resp := s.applyConfirm(context.Background(), ""); code != http.StatusConflict || resp["code"] != applyCodeRollbackOutstanding {
+		t.Fatalf("Keep = %d %v, want the outstanding rollback refused", code, resp)
+	}
+	if code, resp := s.applyRollback(context.Background(), ""); code != http.StatusOK || resp["rolled_back"] != true {
+		t.Fatalf("Roll back = %d %v, want it to finish the rollback", code, resp)
+	}
+	if s.liveRevision() != nil || s.liveRollbackFailed() != nil || s.committedRevision() != committed {
+		t.Fatalf("after Roll back: live %+v, mark %+v", s.liveRevision(), s.liveRollbackFailed())
+	}
+}
+
+// With a Test window open the failed Apply rolls back to the Test. When that fails too, the Test no
+// longer runs as tested, and Keep must not commit it.
+func TestRunApply_FailedRollbackToTheTestMarksIt(t *testing.T) {
+	s, fake := applytest_server(t)
+	apply_seedVLESS(t, s)
+	if _, aerr := s.runApply(context.Background(), applyRequest{Save: true}); aerr != nil {
+		t.Fatalf("baseline apply: %v", aerr.body())
+	}
+	committed := s.committedRevision()
+	if err := s.store.UpsertEndpoint(profilehandlers_endpoint("v2", "DE")); err != nil {
+		t.Fatal(err)
+	}
+	if _, aerr := s.runApply(context.Background(), applyRequest{}); aerr != nil {
+		t.Fatalf("test apply: %v", aerr.body())
+	}
+	tested := s.liveRevision()
+	if err := s.store.UpsertEndpoint(profilehandlers_endpoint("v3", "FR")); err != nil {
+		t.Fatal(err)
+	}
+	apply_failRollbackCore(s, fake)
+	fake.failOnce = true
+	fake.kernelErr = errors.New("nft: table wayhop_pbr busy")
+
+	_, aerr := s.runApply(context.Background(), applyRequest{Save: true})
+	if aerr == nil || aerr.RolledBack == nil || *aerr.RolledBack {
+		t.Fatalf("got %+v, want a failure that was not rolled back", aerr)
+	}
+	mark := s.liveRollbackFailed()
+	if l := s.liveRevision(); !sameRevision(l, tested) || mark == nil || mark.KernelPlane != rollbackPlaneUnknown {
+		t.Fatalf("live %+v, mark %+v: want the Test marked with a plane nobody can vouch for", l, mark)
+	}
+	if code, resp := s.applyConfirm(context.Background(), ""); code != http.StatusConflict || resp["code"] != applyCodeRollbackOutstanding {
+		t.Fatalf("Keep = %d %v, want the half-restored Test refused", code, resp)
+	}
+	if c := s.committedRevision(); c != committed {
+		t.Fatalf("committed = %+v, want the untouched %s", c, committed.Rev)
+	}
+}
+
+// The failed Apply recorded as live is the next Apply's ownership baseline, and alone it left out what
+// the committed configuration created and the failed Apply never retired: it stopped before its native
+// commit, so the committed tunnel stayed on the router, outside every later Apply's ownership. The next
+// Apply retires what either of them left that its capture still finds; what is gone is not retired.
+func TestRunApply_OverAFailedApplyRetiresWhatTheCommittedOneLeft(t *testing.T) {
+	for _, present := range []bool{true, false} {
+		t.Run(map[bool]string{true: "still on the router", false: "already gone"}[present], func(t *testing.T) {
+			s, fake := applytest_server(t)
+			applytest_keenetic(s)
+			for _, id := range []string{"wg1", "wg2"} {
+				if err := s.store.UpsertEndpoint(applytest_wireguardEndpoint(id)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, aerr := s.runApply(context.Background(), applyRequest{Save: true}); aerr != nil {
+				t.Fatalf("committed apply: %v", aerr.body())
+			}
+			committed := s.committedRevision().Materialization.nativeTarget()
+			retired := "no interface " + committed.Keenetic.IfaceFor["wg2"]
+			// The router runs the committed configuration, minus wg2's tunnel when it is gone.
+			running := *committed
+			running.Keenetic = &keenetic.Plan{Interfaces: committed.Keenetic.Interfaces, Routes: committed.Keenetic.Routes}
+			if !present {
+				running.Keenetic.Interfaces, running.Keenetic.Routes = nil, nil
+				for _, block := range committed.Keenetic.Interfaces {
+					if "no "+block[0] != retired {
+						running.Keenetic.Interfaces = append(running.Keenetic.Interfaces, block)
+					}
+				}
+			}
+			config := exactKeeneticBaselineConfig + "\n" + exactKeeneticTargetRunningConfig(running)
+			s.keeneticConfigReader = func(context.Context) (string, error) { return config, nil }
+			if err := s.store.DeleteEndpoint("wg2"); err != nil {
+				t.Fatal(err)
+			}
+
+			// The Apply that drops wg2 fails at its kernel step, before its native commit, and its
+			// rollback fails at native prepare: it becomes the live state with its rollback outstanding.
+			ops := fake.ops()
+			prepare, commit := ops.prepareNative, ops.commitNative
+			prepares := 0
+			ops.prepareNative = func(ctx context.Context, target nativeplan.Plan) error {
+				if prepares++; prepares == 2 {
+					return errors.New("ndmc: NDM not answering")
+				}
+				return prepare(ctx, target)
+			}
+			var teardown []string
+			ops.commitNative = func(ctx context.Context, reconcile nativeplan.Reconciliation) error {
+				teardown = append(teardown, reconcile.KeeneticTeardown...)
+				return commit(ctx, reconcile)
+			}
+			s.execOps = &ops
+			fake.failOnce = true
+			fake.kernelErr = errors.New("nft: table wayhop_pbr busy")
+			if _, aerr := s.runApply(context.Background(), applyRequest{Save: true}); aerr == nil || s.liveRollbackFailed() == nil {
+				t.Fatalf("setup: got %+v, mark %+v; want a failed Apply whose rollback failed", aerr, s.liveRollbackFailed())
+			}
+			if len(teardown) != 0 {
+				t.Fatalf("setup: the failed Apply reached its native commit: %v", teardown)
+			}
+
+			if _, aerr := s.runApply(context.Background(), applyRequest{Save: true}); aerr != nil {
+				t.Fatalf("next apply: %v", aerr.body())
+			}
+			if got := slices.Contains(teardown, retired); got != present {
+				t.Fatalf("teardown %v: %q retired = %v, want %v", teardown, retired, got, present)
+			}
+		})
 	}
 }

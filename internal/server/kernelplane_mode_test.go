@@ -26,12 +26,12 @@ func TestKernelPlaneFindings_ModesThatNeverAskTheKernelSayNothing(t *testing.T) 
 	prof := kernelPlaneProfile()
 
 	// The fixture must actually produce warnings, or every case below passes for the wrong reason.
-	if got := s.kernelPlaneFindings(modeCfg("hybrid"), &prof); len(got) == 0 {
+	if got := s.kernelPlaneFindings(modeCfg("hybrid"), &prof, nil); len(got) == 0 {
 		t.Skip("this build's compiler produced no warnings for the fixture; there is nothing to suppress")
 	}
 
 	for _, mode := range []string{"tun", "mixed"} {
-		if got := s.kernelPlaneFindings(modeCfg(mode), &prof); len(got) != 0 {
+		if got := s.kernelPlaneFindings(modeCfg(mode), &prof, nil); len(got) != 0 {
 			t.Errorf("%s produced %d kernel-plane finding(s); the kernel plane is not part of that mode, "+
 				"so anything said about it is noise: %+v", mode, len(got), got[0])
 		}
@@ -44,7 +44,7 @@ func TestKernelPlaneFindings_HybridReportsOnceWithTheCount(t *testing.T) {
 	s := dnsSeed(t)
 	prof := kernelPlaneProfile()
 
-	got := s.kernelPlaneFindings(modeCfg("hybrid"), &prof)
+	got := s.kernelPlaneFindings(modeCfg("hybrid"), &prof, nil)
 	if len(got) == 0 {
 		t.Skip("this build's compiler produced no warnings for the fixture")
 	}
@@ -70,7 +70,7 @@ func TestKernelPlaneFindings_FastDoesNotPromiseASingBoxFallback(t *testing.T) {
 	s := dnsSeed(t)
 	prof := kernelPlaneProfile()
 
-	got := s.kernelPlaneFindings(modeCfg("fast"), &prof)
+	got := s.kernelPlaneFindings(modeCfg("fast"), &prof, nil)
 	if len(got) == 0 {
 		t.Skip("this build's compiler produced no warnings for the fixture")
 	}

@@ -25,7 +25,7 @@ func TestUserspaceAWGEndpoints(t *testing.T) {
 	m := New(t.TempDir(), t.TempDir())
 	m.procs = map[string]*proc{
 		"b": mk("amneziawg-go", true, false), "a": mk("amneziawg-go", true, false),
-		"olc": mk("olcrtc", true, false), "stopped": mk("amneziawg-go", false, false),
+		"dsy": mk("nfqws2", true, false), "stopped": mk("amneziawg-go", false, false),
 		"dead": mk("amneziawg-go", true, true), "kernel": {running: true},
 	}
 	if got := strings.Join(m.UserspaceAWGEndpoints(), ","); got != "a,b" {

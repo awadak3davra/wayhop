@@ -283,6 +283,11 @@ func (s *Server) pmCore() pmCoreState {
 			// that got far enough to unlink it), Start() fails and the caller reports that separately.
 			s.applyMu.Lock()
 			defer s.applyMu.Unlock()
+			// Routing was switched off while the package operation ran: the core it stopped is not
+			// wanted back. Starting it would bring the TUN — WayHop's capture — back with it.
+			if s.routingIsOff() {
+				return nil
+			}
 			return s.singbox.Start()
 		},
 		restorePlugin: func() {
@@ -481,7 +486,7 @@ func (s *Server) handleUpdaterPMApply(w http.ResponseWriter, r *http.Request) {
 	// package manager's line.
 	resp := map[string]any{"output": out, "plan": plan, "stopped": stoppedProcs, "demo": s.demoMode()}
 	//
-	// A plugin engine has the same problem and needed the same answer: olcRTC's proc was exec'd from
+	// A plugin engine has the same problem and needed the same answer: its proc was exec'd from
 	// the old file too, and nothing respawns it on its own — the watchdog's Supervise only relaunches
 	// procs that DIED, so an upgraded plugin would keep serving the previous build until the next
 	// Apply, with the page showing the new version. The core is simply the half that was noticed

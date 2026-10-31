@@ -184,6 +184,11 @@ func (pl *Plan) RenderNft() string {
 	}
 	sourceOnly := false
 	for _, z := range pl.Zones {
+		// An access-policy zone is KeeneticOS's, which has no nftables; Compile only builds one from
+		// policies read off NDM. Merging its whole mark through this plane's mask would route nothing.
+		if z.NDMPolicy != "" {
+			continue
+		}
 		// Source-scoped zones prepend source matches so ONLY traffic from the matching source
 		// gets the mark (the dest set still bounds it to the rule's destinations — so this line
 		// never matches a tunnel peer IP, which lives in @bypass and was marked WAN above; no
@@ -457,6 +462,12 @@ func (pl *Plan) HasV6() bool { return pl.hasV6() }
 // the iface is up, and only the blackhole remains once that route is flushed on link-down.
 const failClosedMetric = 1000
 
+// failClosedMetricV6 is failClosedMetric for IPv6. The kernel gives an IPv6 route added without a
+// metric 1024 (and treats metric 0 as that default), so the v6 `default dev <iface>` route sits at
+// 1024 and a blackhole at 1000 sorted AHEAD of it: with the kill switch on, all marked IPv6 was
+// dropped while the tunnel was up (QA-096; measured in WSL: blackhole 1000 listed before dev 1024).
+const failClosedMetricV6 = 2048
+
 // RenderIP returns the idempotent `ip rule`/`ip route` (and symmetric `ip -6 rule`/
 // `ip -6 route` when the plan marks v6) commands to install the plan.
 // WAN-marked traffic (the bypass) needs no rule — it falls through to the main table.
@@ -496,7 +507,7 @@ func (pl *Plan) RenderIP(opt Options) []string {
 				// and orders it below the metric-0 dev route.)
 				cmds = append(cmds, fmt.Sprintf("ip route replace blackhole default metric %d table %d", failClosedMetric, e.Table))
 				if v6 {
-					cmds = append(cmds, fmt.Sprintf("ip -6 route replace blackhole default metric %d table %d", failClosedMetric, e.Table))
+					cmds = append(cmds, fmt.Sprintf("ip -6 route replace blackhole default metric %d table %d", failClosedMetricV6, e.Table))
 				}
 			}
 		case EgressBlackhole:

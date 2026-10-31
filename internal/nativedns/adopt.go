@@ -47,8 +47,7 @@ func AdoptKeenetic(run Runner) (NativeDNS, error) {
 	// distinction that matters: the write-back writes 00-upstream.conf inside the conf-dir and
 	// leaves the main config untouched, so those upstreams are added beside the originals, not
 	// replacing them.
-	conf, _ := run("sh", "-c",
-		"cat /opt/etc/dnsmasq.conf 2>/dev/null; echo '"+DnsmasqDirSentinel+"'; cat /opt/etc/dnsmasq.d/*.conf 2>/dev/null")
+	conf, _ := run("sh", "-c", keeneticDnsmasqRead)
 	ps, _ := run("sh", "-c", "ps 2>/dev/null | grep '[h]ttps-dns-proxy'")
 	return ReadDnsmasqD(conf, ps), nil
 }

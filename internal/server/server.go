@@ -4,6 +4,7 @@ package server
 import (
 	"context"
 	"io/fs"
+	"net"
 	"net/http"
 	"path/filepath"
 	"sync"
@@ -17,11 +18,13 @@ import (
 	"wayhop/internal/failsafe"
 	"wayhop/internal/health"
 	"wayhop/internal/initserver"
+	"wayhop/internal/netdiag"
 	"wayhop/internal/netvpn"
 	"wayhop/internal/pbr"
 	"wayhop/internal/platform"
 	"wayhop/internal/plugin"
 	"wayhop/internal/serverstore"
+	"wayhop/internal/speedtest"
 	"wayhop/internal/store"
 	"wayhop/internal/tgbot"
 	"wayhop/internal/traffic"
@@ -60,6 +63,9 @@ type Server struct {
 	startedAt time.Time
 	// feedFails records the routing lists whose feed refreshes keep failing; see feedfailures.go.
 	feedFails feedFailures
+	// keeneticLeft records the WayHop-created KeeneticOS tunnels last found changed outside WayHop;
+	// see keeneticleft.go.
+	keeneticLeft keeneticLeftAsIs
 	// The optional-module (Plugins/IPTV) state used to live here as a featurestore handle plus a data
 	// dir, wired by a setter that nothing ever called: its routes were never registered, its start
 	// hook never ran, and the field stayed nil for the life of every process. The subsystem is
@@ -71,6 +77,10 @@ type Server struct {
 	// speedMu lets one throughput test run at a time, the panel's and the Telegram bot's alike: two
 	// at once share the line, and each would report about half of it.
 	speedMu sync.Mutex
+	// speedRunOf is nil in production (the real run, see speedRun); tests answer for the panel's run,
+	// so which path it took (through the core, straight out, or bound to the kernel tunnel link) and
+	// what the answer calls that path can be checked without a network.
+	speedRunOf func(ctx context.Context, viaProxy bool, link string, bytes int) (speedtest.Result, error)
 
 	// nativeOperations names the exact NDM operations the Keenetic adapter implements (set at
 	// StartApply on that platform); the capability evaluator offers native adoption/creation only
@@ -81,6 +91,17 @@ type Server struct {
 	// lives once StartApply told us the startup config path. See applystate.go.
 	applyState    applyStateStore
 	applyStateDir string
+	// bootDroppedPlan is the kernel plan of the Test state the previous process left installed;
+	// convergeOnBoot moves its flows once the committed plane is back (see ctflush.go).
+	bootDroppedPlan *pbr.Plan
+	// bootLive is that Test state when it is still on the router and boot must roll it back rather
+	// than discard it (liveNeedsRollbackOnBoot); nil otherwise.
+	bootLive *appliedRevision
+	// bootIDOf is nil in production (reads /proc/sys/kernel/random/boot_id); tests answer for it.
+	bootIDOf func() string
+	// failSafePingOf is nil in production (netdiag.Ping); tests answer for the fail-safe window's
+	// connectivity ping, which would otherwise measure the developer host's own internet.
+	failSafePingOf func(ctx context.Context, host string, count int) netdiag.PingResult
 	// applyStage / applyInProgress publish the running Apply's step for GET /api/apply/status.
 	applyStage      atomic.Value
 	applyInProgress atomic.Bool
@@ -106,6 +127,12 @@ type Server struct {
 	// uciReader is nil in production (the real reader) and injected by tests; see netvpnplan.go.
 	uciReader            uciReadFunc
 	keeneticConfigReader keeneticConfigReadFunc
+	// keeneticInterfacesReader reads `show interface` (each WireGuard interface's own public key);
+	// nil means the real bounded ndmc read. Tests inject a stand-in.
+	keeneticInterfacesReader keeneticConfigReadFunc
+	// keeneticPolicyReader reads `show ip policy`; nil means the real bounded ndmc read. Tests inject
+	// the measured shape.
+	keeneticPolicyReader keeneticConfigReadFunc
 	// offloadObserver is nil in production (the bounded/cancellable strict observer). Tests inject a
 	// captured fixture so API truth can be checked without reading the development host's /proc.
 	offloadObserver func(context.Context, string, string) (platform.OffloadState, []string)
@@ -143,18 +170,19 @@ type Server struct {
 	tableRestoreErr map[string]string
 	// platformOf is nil in production (platform.Detect); injected so the refusal paths below can be
 	// exercised on a dev box, which is never OpenWrt and would otherwise stop every test at the door.
-	platformOf      func() platform.Platform
-	ui              fs.FS
-	etagOnce        sync.Once // computes the UI asset ETag lazily, once
-	etag            string
-	caps            capCache       // cached capability evaluation; see capabilitySet()
-	accelOnce       sync.Once      // detects the forwarding-accelerator kind lazily, once
-	accelKindCached string         // "nft-flowtable" | "ppe" | "" — gates nft flow-offload (see accelKind)
-	accelHWCached   bool           // a hardware fast path is present — "auto" needs this, not just the kind
-	pbrAvailOnce    sync.Once      // detects whether the nftables kernel-PBR plane can run, once
-	pbrAvail        bool           // false on Keenetic / no-nft hosts — daemon skips the nft plane (see kernelPBRAvailable)
-	exitIP          exitIPState    // cached public-exit-IP lookup for the Dashboard hero
-	exitTiles       exitTilesState // cached per-egress exit grid (name + WAN IP + geo per endpoint)
+	platformOf func() platform.Platform
+	// coreVer remembers the configured sing-box's `version` answer per binary identity, for the
+	// generator's schema gate (see coreversion.go). coreVersionOf is nil in production (runs the
+	// binary); tests answer for it.
+	coreVer       coreVersionCache
+	coreVersionOf func(ctx context.Context, bin string) (string, error)
+	ui            fs.FS
+	etagOnce      sync.Once // computes the UI asset ETag lazily, once
+	etag          string
+	caps          capCache         // cached capability evaluation; see capabilitySet()
+	hostVerdicts  hostVerdictCache // kernel-PBR and accelerator verdicts, as fresh as caps (see kernelPBRAvailable, accelKind)
+	exitIP        exitIPState      // cached public-exit-IP lookup for the Dashboard hero
+	exitTiles     exitTilesState   // cached per-egress exit grid (name + WAN IP + geo per endpoint)
 	// markExitResolver cache: the connmark→exit-tag map (Dashboard live-connections table) is
 	// derived from a full Profile() clone + pbr.Compile() that only changes on Apply, yet it was
 	// recomputed on EVERY /api/conntrack poll. Cache the resolver and recompute at most once per
@@ -178,10 +206,10 @@ type Server struct {
 	updErrMu sync.Mutex        // guards updErrs
 	updErrs  map[string]string // engine id -> last install-failure reason, so the Updater can show WHY it failed after the toast fades / a reload
 
-	// Last write outcome per routing-list table, so the failover owner reports a refusal once rather
-	// than every tick. See noteListFailoverWrite.
+	// Last write outcome per routing-list family/table, so the failover owner reports a refusal once
+	// rather than every tick. See noteListFailoverWrite.
 	listFailoverErrMu sync.Mutex
-	listFailoverErr   map[int]string
+	listFailoverErr   map[string]string
 
 	// tg is the Telegram bot manager, built on first use (see tgbot.go).
 	tgOnce     sync.Once
@@ -192,8 +220,27 @@ type Server struct {
 	tgDigestMu  sync.Mutex
 	tgDigestDay string
 
-	allowInternalFetch bool // test-only: skip the subscription-fetch SSRF dial guard so httptest (loopback) servers can be used
+	// tgBridge is what the last Telegram-bridge sync decided (tgbridge.go). tgBridgeAddrsOf and
+	// tgBridgeRoutesOf are nil in production (the interface's addresses, /proc/net/route); tests
+	// give the bridge a LAN.
+	tgBridge         tgBridgeState
+	tgBridgeAddrsOf  func(name string) ([]net.Addr, error)
+	tgBridgeRoutesOf func() map[string]bool
+	// tgBridgeReapOf replaces the start-up reap of a leftover bridge (reapTelegramBridge) in tests.
+	tgBridgeReapOf func()
 
+	allowInternalFetch bool // test-only: skip the subscription-fetch SSRF dial guard so httptest (loopback) servers can be used
+	// updInit and updSpawn are the self-update supervisor's seams (selfupdate_tx.go): nil = the real
+	// init script and the real detached spawn.
+	updInit  func() string
+	updSpawn func(etc string, args ...string) error
+	// updPIDFile is the supervisor's pid file ("" = updatetx.SupervisorPIDFile) and updZone the zone
+	// update times are named in, the in-flight refusal and the rollback note (nil =
+	// localtz.Location()), as seams for the same reason.
+	updPIDFile string
+	updZone    func() *time.Location
+	// selfSwap is the release-asset swap (updater.SelfUpdateWith), as a seam for the same reason.
+	selfSwap func(ctx context.Context, repo, tag, exe string, before func(string) error) (string, error)
 }
 
 // New builds a Server.
@@ -228,6 +275,17 @@ func New(cfg *config.Config, hub *traffic.Hub, cl *clash.Client, sb *core.SingBo
 	// Crash-restart supervision for sing-box (and best-effort the engine plugins).
 	wd := watchdog.New("sing-box", sb)
 	wd.SetPluginSupervisor(s.plugins.Supervise)
+	if mon != nil {
+		pm := s.plugins
+		mon.SetPluginStateResolver(func(id string) (health.PluginState, bool) {
+			for _, st := range pm.Status() {
+				if st.ID == id {
+					return health.PluginState{Running: st.Running, NeedsBinary: st.NeedsBinary, Reason: st.Reason}, true
+				}
+			}
+			return health.PluginState{}, false
+		})
+	}
 	// Route crash-restart alerts through s.alert so they read the CURRENT NotifyURL (a
 	// Settings change is honored, not frozen at startup) and share one notifier path with
 	// the fail-safe rollback/reboot alerts. No-op when no URL is configured.
@@ -244,7 +302,7 @@ func New(cfg *config.Config, hub *traffic.Hub, cl *clash.Client, sb *core.SingBo
 func (s *Server) Watchdog() *watchdog.Watchdog { return s.watchdog }
 
 // Plugins exposes the engine-plugin manager so the daemon can stop the engines
-// (olcRTC procs, AmneziaWG interfaces) cleanly on shutdown.
+// (nfqws2 procs, AmneziaWG interfaces) cleanly on shutdown.
 func (s *Server) Plugins() *plugin.Manager { return s.plugins }
 
 // Handler returns the root http.Handler with all routes mounted.
@@ -276,6 +334,8 @@ func (s *Server) Handler() http.Handler {
 	s.route(mux, authRouteProtected, "POST /api/endpoints", s.handleUpsertEndpoint)
 	s.route(mux, authRouteProtected, "POST /api/endpoints/bulk", s.handleBulkEndpoints)
 	s.route(mux, authRouteProtected, "DELETE /api/endpoints/{id}", s.handleDeleteEndpoint)
+	// A connection's on/off switch: {"enabled": bool} and nothing else (QA-152).
+	s.route(mux, authRouteProtected, "PATCH /api/endpoints/{id}", s.handlePatchEndpoint)
 	s.route(mux, authRouteProtected, "POST /api/groups", s.handleUpsertGroup)
 	s.route(mux, authRouteProtected, "DELETE /api/groups/{id}", s.handleDeleteGroup)
 	s.route(mux, authRouteProtected, "POST /api/rules", s.handleUpsertRule)
@@ -283,6 +343,7 @@ func (s *Server) Handler() http.Handler {
 	// Routing lists (the "Routing" page): list CRUD + the preset catalog.
 	s.route(mux, authRouteProtected, "POST /api/routing", s.handleUpsertRoutingList)
 	s.route(mux, authRouteProtected, "DELETE /api/routing/{id}", s.handleDeleteRoutingList)
+	s.route(mux, authRouteProtected, "PATCH /api/routing/{id}", s.handlePatchRoutingList) // the list's switch (QA-152)
 	s.route(mux, authRouteProtected, "POST /api/device-groups", s.handleUpsertDeviceGroup)
 	s.route(mux, authRouteProtected, "DELETE /api/device-groups/{id}", s.handleDeleteDeviceGroup)
 	s.route(mux, authRouteProtected, "GET /api/routing/catalog", s.handleRoutingCatalog)
@@ -290,6 +351,14 @@ func (s *Server) Handler() http.Handler {
 	s.route(mux, authRouteProtected, "GET /api/routing/traffic", s.handleRoutingTraffic)
 	s.route(mux, authRouteProtected, "POST /api/routing/refresh", s.handleRoutingRefresh)
 	s.route(mux, authRouteProtected, "POST /api/routing/reorder", s.handleRoutingReorder)
+	// Read-only previews of lists kept elsewhere (routingimport.go); the panel adds one via POST /api/routing.
+	s.route(mux, authRouteProtected, "GET /api/routing/import/keenetic", s.handleRoutingImportKeenetic)
+	// KeeneticOS's access policies a routing list can be sent to ("ndm-policy:<name>"); read-only.
+	s.route(mux, authRouteProtected, "GET /api/keenetic/policies", s.handleKeeneticPolicies)
+	s.route(mux, authRouteProtected, "POST /api/routing/import/hydraroute", s.handleRoutingImportHydraRoute)
+	// The routing switch (routingswitch.go): WayHop's routing off / back on, configuration untouched.
+	s.route(mux, authRouteProtected, "GET /api/routing/switch", s.handleRoutingSwitchGet)
+	s.route(mux, authRouteProtected, "POST /api/routing/switch", s.handleRoutingSwitchSet)
 	// DNS section: DNS-plane CRUD + provider presets (dns.go). /api/dns/doh-resolvers stays below.
 	s.route(mux, authRouteProtected, "GET /api/dns", s.handleGetDNS)
 	s.route(mux, authRouteProtected, "PUT /api/dns", s.handleSetDNS)
@@ -347,6 +416,7 @@ func (s *Server) Handler() http.Handler {
 	s.route(mux, authRouteProtected, "GET /api/healthcheck", s.handleHealthCheck)
 	s.route(mux, authRouteProtected, "POST /api/netdiag", s.handleNetDiag)
 	s.route(mux, authRouteProtected, "POST /api/netdiag/all", s.handleNetDiagAll)
+	s.route(mux, authRouteProtected, "POST /api/netdiag/services", s.handleNetDiagServices)
 	s.route(mux, authRouteProtected, "GET /api/netdiag/stream", s.handleNetDiagStream)
 	s.route(mux, authRouteProtected, "POST /api/probe/tls", s.handleProbeTLS)
 	s.route(mux, authRouteProtected, "GET /api/reality/dests", s.handleRealityDests)
@@ -394,6 +464,8 @@ func (s *Server) Handler() http.Handler {
 	s.route(mux, authRouteProtected, "DELETE /api/telegram/chats/{id}", s.handleTelegramChatDelete)
 	s.route(mux, authRouteProtected, "POST /api/telegram/strangers/{id}/allow", s.handleTelegramStrangerAllow)
 	s.route(mux, authRouteProtected, "DELETE /api/telegram/strangers/{id}", s.handleTelegramStrangerDelete)
+	s.route(mux, authRouteProtected, "GET /api/telegram-bridge", s.handleTelegramBridgeGet)
+	s.route(mux, authRouteProtected, "PUT /api/telegram-bridge", s.handleTelegramBridgePut)
 
 	// Engine version manager (Updater) + WayHop self-update.
 	s.route(mux, authRouteProtected, "GET /api/updater/engines", s.handleUpdaterEngines)

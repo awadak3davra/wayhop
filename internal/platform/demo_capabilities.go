@@ -15,6 +15,7 @@ func DemoCapabilities() Capabilities {
 		},
 		Installable:     map[string]string{},
 		SingboxRequired: append([]string(nil), singboxRequired...),
+		SingboxMinMinor: singboxMinMinorCopy(),
 		SingboxPresent:  true,
 		Accel: Accel{
 			Kind: "nft-flowtable",

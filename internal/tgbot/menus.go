@@ -38,7 +38,7 @@ func chatMenu(lang, role string) []Command {
 	}
 	names = append(names, "diag")
 	if role == roleOwner {
-		names = append(names, "maint")
+		names = append(names, "maint", "routing")
 	}
 	names = append(names, "alerts", "mute", "lang", "help")
 	out := make([]Command, 0, len(names))

@@ -137,6 +137,16 @@ fresh "$r"
 sed -i 's/identity-match\.sh/identity-missing.sh/g' "$r/Makefile"
 case_ 'dropping the local-package identity verifier is refused' 1 "$r"
 
+# Without the open-files limit in the init scripts a busy router runs the core out of descriptors,
+# and an owner's hand edit is lost on the next install or package upgrade.
+fresh "$r"
+sed -i 's#ulimit -n 16384#: -n 16384#' "$r/packaging/S99wayhop"
+case_ 'dropping the Entware open-files limit is refused' 1 "$r"
+
+fresh "$r"
+sed -i '/procd_set_param limits nofile=/d' "$r/packaging/openwrt/wayhop.init"
+case_ 'dropping the OpenWrt open-files limit is refused' 1 "$r"
+
 # A firmware sysupgrade wipes the overlay; without the keep entry it takes the config too.
 fresh "$r"
 rm -f "$r/packaging/openwrt/wayhop.keep"
@@ -156,4 +166,4 @@ if [ "$fails" -gt 0 ]; then
   echo "$fails manifest-audit case(s) failed"
   exit 1
 fi
-echo "package manifest faults: 24 cases, including 22 broken guarantees that must be refused"
+echo "package manifest faults: 26 cases, including 24 broken guarantees that must be refused"

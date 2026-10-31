@@ -52,6 +52,10 @@ type DesiredInputsV1 struct {
 	OffloadDevices     []string `json:"offload_devices"`
 	RuleSetDetour      string   `json:"rule_set_detour"`
 	NativeFirewallZone string   `json:"native_firewall_zone"`
+	// CoreOverride is the operator's patch of the generated core config. omitempty, unlike its
+	// neighbours: it is newer than every applied revision on a router, and a key added to the hash as
+	// "" would move each of those revisions and raise "unapplied changes" over an empty change list.
+	CoreOverride string `json:"core_override,omitempty"`
 
 	FailSafeTarget     string `json:"failsafe_target"`
 	FailSafeAutoReboot bool   `json:"failsafe_auto_reboot"`
@@ -168,6 +172,7 @@ func desiredInputsV1(cfg config.Config, profile model.Profile) DesiredInputsV1 {
 		OffloadDevices:     cloneDesiredStrings(cfg.OffloadDevices),
 		RuleSetDetour:      cfg.RuleSetDetour,
 		NativeFirewallZone: cfg.NativeFirewallZone,
+		CoreOverride:       cfg.CoreOverride,
 
 		FailSafeTarget:     cfg.FailSafe.Target,
 		FailSafeAutoReboot: cfg.FailSafe.AutoReboot,
@@ -215,6 +220,17 @@ func desiredProfileInputsV1(profile model.Profile) model.Profile {
 	}
 	if profile.RoutingLists == nil {
 		profile.RoutingLists = []model.RoutingList{}
+	}
+	// Endpoint.Import is a parse's format on its way to a save and is never stored; it says nothing
+	// about what runs, so it stays outside the revision. Copied first: the slice is the store's.
+	for i := range profile.Endpoints {
+		if profile.Endpoints[i].Import != "" {
+			profile.Endpoints = append([]model.Endpoint(nil), profile.Endpoints...)
+			for j := range profile.Endpoints {
+				profile.Endpoints[j].Import = ""
+			}
+			break
+		}
 	}
 	if len(profile.RoutingLists) == 0 {
 		return profile

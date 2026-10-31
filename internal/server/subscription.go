@@ -18,6 +18,12 @@ func (s *Server) handleEndpointExport(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	for _, e := range s.store.Profile().Endpoints {
 		if e.ID == id {
+			// A link that would be weaker than this connection (a pin it cannot carry, with
+			// certificate checks off) is refused with the reason, not given without it.
+			if why := exporter.Refusal(e); why != "" {
+				writeErr(w, http.StatusUnprocessableEntity, why)
+				return
+			}
 			res, ok := exporter.Export(e)
 			if !ok {
 				writeErr(w, http.StatusUnprocessableEntity, "this protocol has no shareable link or .conf")

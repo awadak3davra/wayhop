@@ -24,6 +24,8 @@ var allProtoNew = []struct {
 	{ProtoShadowsocks, "WR_PROTO=shadowsocks", "# ---- sing-box Shadowsocks", "ss://", model.ProtoShadowsocks, false, false},
 	{ProtoHysteria2, "WR_PROTO=hysteria2", "# ---- sing-box Hysteria2", "hysteria2://", model.ProtoHysteria2, true, true},
 	{ProtoTUIC, "WR_PROTO=tuic", "# ---- sing-box TUIC", "tuic://", model.ProtoTUIC, true, true},
+	{ProtoAnyTLS, "WR_PROTO=anytls", "# ---- sing-box AnyTLS", "anytls://", model.ProtoAnyTLS, true, true},
+	{ProtoSnell, "WR_PROTO=snell", "# ---- sing-box Snell", "wayhop-snell = snell, ", model.ProtoSnell, false, false},
 }
 
 // TestNewProtosRegistered confirms each new protocol has a catalog Option with a
@@ -104,6 +106,8 @@ func TestNewProtosPersistIdentity(t *testing.T) {
 			`[ -f "$SBD/wr-tuic-uuid" ] || sing-box generate uuid`,
 			`[ -f "$SBD/wr-tuic-pass" ] || sing-box generate rand`,
 		},
+		ProtoAnyTLS: {`[ -f "$SBD/wr-anytls-pass" ] || sing-box generate rand`},
+		ProtoSnell:  {`[ -f "$SBD/wr-snell-psk" ] || sing-box generate rand --base64 24`},
 	}
 	for id, want := range guards {
 		s := BuildScript([]string{id}, "")
@@ -192,7 +196,7 @@ func TestNewProtosDetectFallback(t *testing.T) {
 // and every marker — and that the shared sing-box service unit also keeps Reality's
 // standalone config.json (so the two coexist in one sing-box process).
 func TestNewProtosCombinedWithReality(t *testing.T) {
-	sel := []string{ProtoReality, ProtoVMess, ProtoTrojan, ProtoShadowsocks, ProtoHysteria2, ProtoTUIC}
+	sel := []string{ProtoReality, ProtoVMess, ProtoTrojan, ProtoShadowsocks, ProtoHysteria2, ProtoTUIC, ProtoAnyTLS, ProtoSnell}
 	s := BuildScript(sel, "198.51.100.5")
 	for _, want := range []string{
 		"WR_PROTO=vless-reality",
@@ -201,6 +205,8 @@ func TestNewProtosCombinedWithReality(t *testing.T) {
 		"WR_PROTO=shadowsocks",
 		"WR_PROTO=hysteria2",
 		"WR_PROTO=tuic",
+		"WR_PROTO=anytls",
+		"WR_PROTO=snell",
 		"-c /etc/sing-box/config.json", // the superset unit keeps Reality's config
 	} {
 		if !strings.Contains(s, want) {
@@ -242,6 +248,64 @@ func sampleLink(id string) string {
 		return "hysteria2://Pa%2Bss%2Fword%3D@203.0.113.9:8445?sni=wayhop.local&insecure=1#wayhop-hy2"
 	case ProtoTUIC:
 		return "tuic://11111111-2222-3333-4444-555555555555:Pa%2Bss%2Fword%3D@203.0.113.9:8446?sni=wayhop.local&insecure=1&congestion_control=bbr&alpn=h3#wayhop-tuic"
+	case ProtoAnyTLS:
+		return "anytls://Pa%2Bss%2Fword%3D@203.0.113.9:8447?sni=wayhop.local&insecure=1#wayhop-anytls"
+	case ProtoSnell:
+		// base64 PSK with '+', '/' and '=' padding, as `sing-box generate rand --base64 24` prints it
+		return "wayhop-snell = snell, 203.0.113.9, 8448, psk=Ab+cd/EFgh1234567890ijklmnopQRST, version=6"
 	}
 	return ""
+}
+
+// The Snell fragment needs the 1.14 inbound and refuses an older sing-box before writing it; its
+// client line imports as a v6 Snell connection with the PSK intact (padding included).
+func TestSnellServerFragment(t *testing.T) {
+	s := BuildScript([]string{ProtoSnell}, "")
+	guard := strings.Index(s, `if [ "${SBMIN:-0}" -lt 1014 ]; then`)
+	write := strings.Index(s, "cat > /etc/sing-box/conf.d/wr-snell.json")
+	if guard < 0 || write < 0 || guard > write || !strings.Contains(s[guard:write], "exit 1") {
+		t.Fatalf("version guard at %d, config write at %d: the guard must come first and stop", guard, write)
+	}
+	if !strings.Contains(s, `"type":"snell"`) || !strings.Contains(s, `"version":6`) {
+		t.Error("inbound must be Snell v6")
+	}
+	for _, link := range []string{sampleLink(ProtoSnell), "wayhop-snell = snell, 203.0.113.9, 8448, psk=abcdefghijklmnopqrstuvwxyz012345==, version=6"} {
+		ep, err := importer.Parse(link)
+		if err != nil {
+			t.Fatalf("%q: %v", link, err)
+		}
+		psk := link[strings.Index(link, "psk=")+4 : strings.Index(link, ", version")]
+		if ep.Params["version"] != 6 || ep.Params["psk"] != psk || ep.Port != 8448 {
+			t.Errorf("imported %+v, want v6 with psk %q on 8448", ep.Params, psk)
+		}
+	}
+	o := optionByID(ProtoSnell)
+	for _, other := range catalog {
+		if other.ID != ProtoSnell && other.Port == o.Port && other.Transport == o.Transport {
+			t.Errorf("port %d/%s already used by %s", o.Port, o.Transport, other.ID)
+		}
+	}
+}
+
+// The AnyTLS fragment refuses a sing-box older than 1.12 BEFORE it writes its inbound: the installer
+// keeps an existing sing-box, and an inbound type that sing-box does not know stops the whole service.
+func TestAnyTLSRefusesOldCoreBeforeWritingConfig(t *testing.T) {
+	s := BuildScript([]string{ProtoAnyTLS}, "")
+	guard := strings.Index(s, `if [ "${SBMIN:-0}" -lt 1012 ]; then`)
+	write := strings.Index(s, "cat > /etc/sing-box/conf.d/wr-anytls.json")
+	if guard < 0 || write < 0 || guard > write {
+		t.Fatalf("version guard at %d, config write at %d: the guard must come first", guard, write)
+	}
+	if !strings.Contains(s[guard:write], "exit 1") {
+		t.Error("the guard must stop the script, not just log")
+	}
+	o := optionByID(ProtoAnyTLS)
+	if o == nil || o.Port != 8447 || o.Transport != "tcp" {
+		t.Fatalf("option = %+v", o)
+	}
+	for _, other := range catalog {
+		if other.ID != ProtoAnyTLS && other.Port == o.Port && other.Transport == o.Transport {
+			t.Errorf("port %d/%s already used by %s", o.Port, o.Transport, other.ID)
+		}
+	}
 }

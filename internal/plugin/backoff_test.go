@@ -2,7 +2,7 @@ package plugin
 
 import "testing"
 
-// TestPluginBackoffTicks locks the crash-loop throttle curve a long-running plugin (olcRTC/nfqws2)
+// TestPluginBackoffTicks locks the crash-loop throttle curve a long-running plugin (nfqws2)
 // is restarted on: no backoff within the grace window, then exponential, monotonic non-decreasing,
 // capped at pluginMaxCooldown (so a plugin that dies every tick is throttled, never hammered), and
 // safe against a pathological restart counter. Asserts PROPERTIES, not the constants' values.

@@ -66,6 +66,10 @@ type HostFacts struct {
 	// or deterministic wr_* name is not ownership evidence and must never authorize an update.
 	OwnedInterfaces    map[string]string
 	OccupiedInterfaces map[string]bool
+	// KeeneticOwnedBlocks likewise comes only from the authenticated previous native plan (see the
+	// function of that name): endpoint -> the NDM interface block that plan created for it, which an
+	// unchanged endpoint keeps (keenetic.CompileOptions.OwnedBlocks, QA-108). OpenWrt ignores it.
+	KeeneticOwnedBlocks map[string][]string
 	// GlobalPriorities is the router's own `ip global` ladder (Keenetic). A default route is
 	// expressed by raising an interface above whatever holds it today, so the plan is compiled
 	// against these observed numbers rather than invented ones.
@@ -84,8 +88,16 @@ type HostFacts struct {
 	// (netvpn.AWGWriterGeneration): with a 3.0 or 3.1 module an AmneziaWG 3 connection runs as the
 	// router's own interface instead of on WayHop's engine. The zero value keeps the writer at
 	// generation 2, as before the module was asked. KeeneticOS ignores it: NDM's writer is
-	// generation 2 whatever the module.
+	// generation 2 whatever the module, held down by the firmware release instead
+	// (KeeneticAWGGeneration, read from Capabilities).
 	AWGKernel awg.Generation
+	// ProbePort and ClashSecret are settings, not captured facts: the KeeneticOS fallback core is
+	// assembled here rather than by the generator, and needs them for the probe inbound the per-exit
+	// service check asks through (keenetic.FallbackOptions). OpenWrt ignores them.
+	ProbePort   int
+	ClashSecret string
+	// CoreVersion is the detected sing-box, for the fallback core's version-gated options.
+	CoreVersion string
 }
 
 // Plan is credential-bearing. It must never be exposed through the public review DTO.
@@ -126,7 +138,9 @@ func compileOpenWrt(profile *model.Profile, facts HostFacts) (*Plan, error) {
 			continue
 		}
 		protocol, native := netvpn.ProtoForModel(endpoint.Protocol)
-		if !native {
+		// A ByeDPI connection is core-carried whatever protocol it was stored with (see
+		// compatibilityDecision), so a native-family value there must not send it to the writer.
+		if !native || endpoint.Engine == model.EngineByeDPI {
 			decision, err := compatibilityDecision(endpoint, facts.Capabilities)
 			if err != nil {
 				return nil, err
@@ -257,12 +271,22 @@ func reserveInterface(claimed map[string]string, name, endpointID string) error 
 	return nil
 }
 
+// ByeDPIOnKeenetic is why KeeneticOS cannot run a ByeDPI connection yet: beside NDM's own tunnels
+// WayHop runs only the AmneziaWG engine plugins this plan hands it, and the KeeneticOS core
+// (keenetic.SingboxFallback) has no outbound to a local SOCKS proxy, so nothing would start ciadpi or
+// send a list to it. The planner refuses with it; the save gate and the review say the same.
+const ByeDPIOnKeenetic = "ByeDPI is not available on KeeneticOS yet: WayHop's KeeneticOS backend neither starts ciadpi nor routes to it"
+
 func compileKeenetic(profile *model.Profile, facts HostFacts) (*Plan, error) {
 	plan := &Plan{Platform: platform.Keenetic}
 	userspace := UserspaceDevices(KeeneticUserspace(profile, facts.Capabilities))
 	for _, endpoint := range profile.Endpoints {
 		if !endpoint.Enabled {
 			continue
+		}
+		// Before the protocol, which a ByeDPI connection does not mean anything by.
+		if endpoint.Engine == model.EngineByeDPI {
+			return nil, fmt.Errorf("native plan: endpoint %q: %s; disable the connection", endpoint.ID, ByeDPIOnKeenetic)
 		}
 		_, native := netvpn.ProtoForModel(endpoint.Protocol)
 		if !native {
@@ -319,7 +343,11 @@ func compileKeenetic(profile *model.Profile, facts HostFacts) (*Plan, error) {
 		GlobalPriorityNow:  cloneIntMap(facts.GlobalPriorities),
 		ListsViaIpset:      facts.ListsViaIpset,
 		OccupiedInterfaces: cloneBoolMap(facts.OccupiedInterfaces),
+		OwnedBlocks:        cloneBlocks(facts.KeeneticOwnedBlocks),
 		Userspace:          userspace,
+		AWGGeneration:      KeeneticAWGGeneration(facts.Capabilities),
+		Fallback: keenetic.FallbackOptions{ProbePort: facts.ProbePort, ClashSecret: facts.ClashSecret,
+			CoreVersion: facts.CoreVersion},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("native plan: keenetic: %w", err)
@@ -356,6 +384,31 @@ func compileKeenetic(profile *model.Profile, facts HostFacts) (*Plan, error) {
 	return plan, nil
 }
 
+// KeeneticOwnedBlocks lists, per endpoint, the NDM interface block an authenticated Keenetic plan
+// created for it: what the next compile may keep in place (HostFacts.KeeneticOwnedBlocks). Only a
+// decision on a managed path counts; an adopted or external interface is never WayHop's to keep.
+func KeeneticOwnedBlocks(previous *Plan) map[string][]string {
+	owned := make(map[string][]string)
+	if previous == nil || previous.Platform != platform.Keenetic || previous.Keenetic == nil {
+		return owned
+	}
+	blocks := make(map[string][]string, len(previous.Keenetic.Interfaces))
+	for _, block := range previous.Keenetic.Interfaces {
+		if len(block) != 0 {
+			blocks[block[0]] = block
+		}
+	}
+	for _, decision := range previous.Decisions {
+		if !nativeManagedPath(decision.Path) || decision.EndpointID == "" || decision.Interface == "" {
+			continue
+		}
+		if block, ok := blocks["interface "+decision.Interface]; ok {
+			owned[decision.EndpointID] = append([]string(nil), block...)
+		}
+	}
+	return owned
+}
+
 func adoptDecision(endpoint model.Endpoint, facts HostFacts, _ netvpn.Proto) (EndpointDecision, error) {
 	legacyOpenWrtExternal := facts.Platform == platform.OpenWrt &&
 		endpoint.Engine == model.EngineExternal && endpoint.Owner == model.OwnerWayHop
@@ -380,13 +433,21 @@ func compatibilityDecision(endpoint model.Endpoint, capabilities platform.Capabi
 	if endpoint.Engine == model.EngineExternal || endpoint.IsExternal() {
 		return EndpointDecision{EndpointID: endpoint.ID, Protocol: endpoint.Protocol, Path: PathExternal}, nil
 	}
-	if endpoint.Engine != model.EngineSingBox {
+	protocol := endpoint.Protocol
+	switch endpoint.Engine {
+	case model.EngineSingBox:
+	case model.EngineByeDPI:
+		// ciadpi is a local SOCKS proxy the plugin manager runs, and the core reaches it through a
+		// SOCKS outbound: the core and its SOCKS client carry it, which is what the save gate asks
+		// for (endpointCapabilityRequirements). Its stored protocol is not semantic.
+		protocol = model.ProtoSOCKS
+	default:
 		return EndpointDecision{}, fmt.Errorf("native plan: endpoint %q protocol %q has no native path and engine %q is not a supported addon", endpoint.ID, endpoint.Protocol, endpoint.Engine)
 	}
 	if err := requireCapability(capabilities, platform.CapEngineSingbox, endpoint.ID); err != nil {
 		return EndpointDecision{}, err
 	}
-	protocolCapability := platform.CapProtocolPrefix + string(endpoint.Protocol)
+	protocolCapability := platform.CapProtocolPrefix + string(protocol)
 	if err := requireCapability(capabilities, protocolCapability, endpoint.ID); err != nil {
 		return EndpointDecision{}, err
 	}
@@ -460,6 +521,16 @@ func UserspaceFor(profile *model.Profile, p platform.Platform, capabilities plat
 		return OpenWrtUserspaceFor(profile, capabilities, kernel)
 	}
 	return map[string]UserspaceEndpoint{}
+}
+
+// UserspaceLane is UserspaceFor asked of one endpoint: whether Compile runs it on WayHop's AmneziaWG
+// engine (PathEnginePlugin) rather than on the router's own, and why. Each endpoint's place in the set
+// depends on it alone, so this is the planner's answer for the profile it will be part of. The save
+// check asks it of a connection the router's own AmneziaWG cannot create (QA-133): one the planner
+// hands to the engine is not refused for want of a native operation it never uses.
+func UserspaceLane(endpoint model.Endpoint, p platform.Platform, capabilities platform.CapabilitySet, kernel awg.Generation) (UserspaceEndpoint, bool) {
+	u, ok := UserspaceFor(&model.Profile{Endpoints: []model.Endpoint{endpoint}}, p, capabilities, kernel)[endpoint.ID]
+	return u, ok
 }
 
 // OpenWrtUserspace is OpenWrtUserspaceFor with no kernel module generation known: the UCI writer at
@@ -622,20 +693,47 @@ func keeneticUserspaceReason(endpoint model.Endpoint, capabilities platform.Capa
 	if _, native := netvpn.ProtoForModel(endpoint.Protocol); !native {
 		return UserspaceEndpoint{}, false
 	}
-	// The operator's choice moves it whatever NDM could carry. Unlike a failed probe below, the
-	// choice is a definite answer, so a native tunnel it names is torn down by the reconcile.
+	// The operator's choice moves it whatever NDM could carry. Unlike a failed probe, the choice is a
+	// definite answer, so a native tunnel it names is torn down by the reconcile.
 	if endpoint.AWGUserspace {
+		// Where Automatic would move it as well - a release without AmneziaWG, settings NDM cannot
+		// carry, no WireGuard component - going back to Automatic leads nowhere native. The reason is
+		// Automatic's then, and so is the remedy, with the choice undone after it.
+		if u, moved := keeneticAutomaticReason(endpoint, capabilities); moved {
+			u.Reason = "it is set to run on amneziawg-go, where Automatic would run it too: " + u.Reason
+			if u.Remedy != "" {
+				u.Remedy += " Then set the connection's engine back to Automatic."
+			}
+			u.Code = platform.ReasonOperatorChoice
+			return u, true
+		}
 		return UserspaceEndpoint{
-			Reason: awgChosenReason("KeeneticOS's", keenetic.AWGGeneration), Code: platform.ReasonOperatorChoice,
+			Reason: awgChosenReason("KeeneticOS's", KeeneticAWGGeneration(capabilities)), Code: platform.ReasonOperatorChoice,
 			Remedy: "Set the connection's engine back to Automatic to run it on KeeneticOS's own AmneziaWG.",
 		}, true
 	}
-	if settings := BeyondNative(endpoint, platform.Keenetic); len(settings) != 0 {
-		return UserspaceEndpoint{
+	return keeneticAutomaticReason(endpoint, capabilities)
+}
+
+// keeneticAutomaticReason is where an endpoint of WayHop's own AmneziaWG goes with its engine set to
+// Automatic: to amneziawg-go when NDM definitely cannot carry it, with the reason and what would
+// change that; otherwise it stays native (false).
+func keeneticAutomaticReason(endpoint model.Endpoint, capabilities platform.CapabilitySet) (UserspaceEndpoint, bool) {
+	generation := KeeneticAWGGeneration(capabilities)
+	if settings := beyondGeneration(endpoint, generation); len(settings) != 0 {
+		out := UserspaceEndpoint{
 			Reason: fmt.Sprintf("it uses AmneziaWG %s settings (%s) that KeeneticOS's own AmneziaWG cannot carry",
 				awg.Need(endpoint.Params), strings.Join(settings, ", ")),
 			Code: platform.ReasonPlatformUnsupported,
-		}, true
+		}
+		if len(beyondGeneration(endpoint, keenetic.AWGGeneration)) == 0 {
+			// The writer has the arguments; this firmware release does not take them (QA-127).
+			firmware := capabilities.Get(platform.CapNativeAWGGen2)
+			out.Reason = fmt.Sprintf("it uses AmneziaWG %s settings (%s): %s",
+				awg.Need(endpoint.Params), strings.Join(settings, ", "), firmware.Detail)
+			out.Remedy = firmware.Remedy
+		}
+		return out, true
 	}
 	for _, operation := range []platform.NativeOperation{platform.NativeCreate, platform.NativeRemove} {
 		capability := capabilities.Get(platform.NativeOperationCapabilityID(string(endpoint.Protocol), operation))
@@ -661,6 +759,27 @@ func keeneticUserspaceReason(endpoint model.Endpoint, capabilities platform.Capa
 	return UserspaceEndpoint{}, false
 }
 
+// KeeneticAWGGeneration is the newest AmneziaWG generation NDM's `wireguard asc` expresses on this
+// router: the writer's own (keenetic.AWGGeneration), unless the capability set proves the firmware
+// release takes less - platform.CapNativeAWGGen2 unsupported for want of the platform, KeeneticOS
+// 4.2 to 5.0 (QA-127). Only that definite answer lowers it; a set without the item, or with it
+// unknown, keeps the writer's generation, as before the release was read.
+func KeeneticAWGGeneration(capabilities platform.CapabilitySet) awg.Generation {
+	if capabilities.Get(platform.CapNativeAWGGen2).Reason == platform.ReasonPlatformUnsupported {
+		return awg.Gen1
+	}
+	return keenetic.AWGGeneration
+}
+
+// beyondGeneration is BeyondNativeFor against a generation already decided: the endpoint's
+// AmneziaWG settings above it, nil for any other protocol.
+func beyondGeneration(endpoint model.Endpoint, generation awg.Generation) []string {
+	if endpoint.Protocol != model.ProtoAmneziaWG {
+		return nil
+	}
+	return awg.Beyond(endpoint.Params, generation)
+}
+
 // NativeAWGGeneration is NativeAWGGenerationFor with no kernel module generation known: each writer's
 // baseline, the generation it expresses on any router.
 func NativeAWGGeneration(p platform.Platform) awg.Generation {
@@ -669,7 +788,8 @@ func NativeAWGGeneration(p platform.Platform) awg.Generation {
 
 // NativeAWGGenerationFor is the newest AmneziaWG generation the platform's native writer expresses on
 // a router whose loaded kernel module is kernel: NDM's `wireguard asc` on KeeneticOS, which stays at
-// its own whatever the module; the UCI interface on OpenWrt, which writes up to what the module
+// its own whatever the module (the firmware release lowers it, which KeeneticAWGGeneration asks the
+// capability set for); the UCI interface on OpenWrt, which writes up to what the module
 // carries (netvpn.AWGWriterGeneration). Each writer states its own, next to the settings it writes and
 // held to them by its tests; GenNone is a platform with no writer.
 func NativeAWGGenerationFor(p platform.Platform, kernel awg.Generation) awg.Generation {
@@ -732,6 +852,17 @@ func cloneMap(source map[string]string) map[string]string {
 	result := make(map[string]string, len(source))
 	for key, value := range source {
 		result[key] = value
+	}
+	return result
+}
+
+func cloneBlocks(source map[string][]string) map[string][]string {
+	if source == nil {
+		return nil
+	}
+	result := make(map[string][]string, len(source))
+	for key, block := range source {
+		result[key] = append([]string(nil), block...)
 	}
 	return result
 }

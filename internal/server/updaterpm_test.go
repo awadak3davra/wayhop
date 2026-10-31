@@ -503,12 +503,12 @@ func TestPMApplyEndpoint_ARemovalDoesNotReloadTheCore(t *testing.T) {
 	}
 }
 
-// The core is not the only process that keeps running the file it was exec'd from. olcRTC's proc has
+// The core is not the only process that keeps running the file it was exec'd from. a plugin's proc has
 // the same problem, and nothing brings it back on its own: the watchdog's Supervise only relaunches
 // procs that DIED, so an upgraded plugin serves the previous build until the next Apply while the
 // page reports the new version — the same false success the core's reload was added for.
 func TestPMApplyEndpoint_RestartsAPluginOntoItsNewBinary(t *testing.T) {
-	s, sc := pmPluginServer(t, "olcrtc")
+	s, sc := pmPluginServer(t, "xray")
 	var restarted []string
 	s.pmCoreHook = &pmCoreState{
 		running:       func() bool { return false },
@@ -517,19 +517,19 @@ func TestPMApplyEndpoint_RestartsAPluginOntoItsNewBinary(t *testing.T) {
 		reload:        func() (bool, error) { t.Fatal("a plugin upgrade reloaded the core"); return false, nil },
 		restartPlugin: func(bin string) int { restarted = append(restarted, bin); return 1 },
 	}
-	sc.answers["apk upgrade olcrtc"] = "OK: 1 package upgraded"
+	sc.answers["apk upgrade xray"] = "OK: 1 package upgraded"
 
-	body := `{"action":"upgrade","argv":["apk","upgrade","olcrtc"],"steps":[["apk","upgrade","olcrtc"]]}`
-	r := httptest.NewRequest(http.MethodPost, "/api/updater/olcrtc/pm/apply", strings.NewReader(body))
-	r.SetPathValue("id", "olcrtc")
+	body := `{"action":"upgrade","argv":["apk","upgrade","xray"],"steps":[["apk","upgrade","xray"]]}`
+	r := httptest.NewRequest(http.MethodPost, "/api/updater/xray/pm/apply", strings.NewReader(body))
+	r.SetPathValue("id", "xray")
 	w := httptest.NewRecorder()
 	s.handleUpdaterPMApply(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body %s", w.Code, w.Body.String())
 	}
-	if len(restarted) != 1 || restarted[0] != "olcrtc" {
-		t.Fatalf("plugin restarts = %v, want one for the olcrtc binary — the tunnel is still the old build", restarted)
+	if len(restarted) != 1 || restarted[0] != "xray" {
+		t.Fatalf("plugin restarts = %v, want one for the xray binary — the tunnel is still the old build", restarted)
 	}
 	var got map[string]any
 	_ = json.Unmarshal(w.Body.Bytes(), &got)
@@ -541,7 +541,7 @@ func TestPMApplyEndpoint_RestartsAPluginOntoItsNewBinary(t *testing.T) {
 // And not after a removal: there is no binary left to restart onto, and Sync would relaunch the proc
 // against a file that was just deleted.
 func TestPMApplyEndpoint_ARemovalDoesNotRestartThePlugin(t *testing.T) {
-	s, sc := pmPluginServer(t, "olcrtc")
+	s, sc := pmPluginServer(t, "xray")
 	restarts := 0
 	s.pmCoreHook = &pmCoreState{
 		running:       func() bool { return false },
@@ -550,11 +550,11 @@ func TestPMApplyEndpoint_ARemovalDoesNotRestartThePlugin(t *testing.T) {
 		reload:        func() (bool, error) { return false, nil },
 		restartPlugin: func(string) int { restarts++; return 1 },
 	}
-	sc.answers["apk del olcrtc"] = "OK: 1 package removed"
+	sc.answers["apk del xray"] = "OK: 1 package removed"
 
-	body := `{"action":"remove","argv":["apk","del","olcrtc"]}`
-	r := httptest.NewRequest(http.MethodPost, "/api/updater/olcrtc/pm/apply", strings.NewReader(body))
-	r.SetPathValue("id", "olcrtc")
+	body := `{"action":"remove","argv":["apk","del","xray"]}`
+	r := httptest.NewRequest(http.MethodPost, "/api/updater/xray/pm/apply", strings.NewReader(body))
+	r.SetPathValue("id", "xray")
 	w := httptest.NewRecorder()
 	s.handleUpdaterPMApply(w, r)
 
@@ -571,26 +571,26 @@ func TestPMApplyEndpoint_ARemovalDoesNotRestartThePlugin(t *testing.T) {
 // reason it stops the core — an orphan holding ports and locks. The gate is core-only by design
 // (removing a plugin implies stopping it), but the STOP is not.
 func TestPMApplyEndpoint_StopsARunningPluginBeforeRemovingIt(t *testing.T) {
-	s, sc := pmPluginServer(t, "olcrtc")
+	s, sc := pmPluginServer(t, "xray")
 	var stoppedBins []string
 	s.pmCoreHook = &pmCoreState{
 		running:    func() bool { return false }, // not the core; the core's state is irrelevant here
 		stop:       func() error { t.Fatal("the core was stopped for a plugin removal"); return nil },
 		stopPlugin: func(bin string) int { stoppedBins = append(stoppedBins, bin); return 1 },
 	}
-	sc.answers["apk del olcrtc"] = "OK: 1 package removed"
+	sc.answers["apk del xray"] = "OK: 1 package removed"
 
-	body := `{"action":"remove","argv":["apk","del","olcrtc"]}`
-	r := httptest.NewRequest(http.MethodPost, "/api/updater/olcrtc/pm/apply", strings.NewReader(body))
-	r.SetPathValue("id", "olcrtc")
+	body := `{"action":"remove","argv":["apk","del","xray"]}`
+	r := httptest.NewRequest(http.MethodPost, "/api/updater/xray/pm/apply", strings.NewReader(body))
+	r.SetPathValue("id", "xray")
 	w := httptest.NewRecorder()
 	s.handleUpdaterPMApply(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body %s", w.Code, w.Body.String())
 	}
-	if len(stoppedBins) != 1 || stoppedBins[0] != "olcrtc" {
-		t.Fatalf("plugin stops = %v, want exactly one for the olcrtc binary — its binary was deleted under the running process", stoppedBins)
+	if len(stoppedBins) != 1 || stoppedBins[0] != "xray" {
+		t.Fatalf("plugin stops = %v, want exactly one for the xray binary — its binary was deleted under the running process", stoppedBins)
 	}
 	if !sc.ran("del") {
 		t.Fatalf("nothing was removed: %v", sc.seen)
@@ -600,7 +600,7 @@ func TestPMApplyEndpoint_StopsARunningPluginBeforeRemovingIt(t *testing.T) {
 // And the same inversion guard as the core has: a plugin removal that will be refused must not stop
 // the plugin on its way to being refused, or the tunnel is down with its binary still installed.
 func TestPMApplyEndpoint_ARefusedPluginRemovalDoesNotStopIt(t *testing.T) {
-	s, sc := pmPluginServer(t, "olcrtc")
+	s, sc := pmPluginServer(t, "xray")
 	stops := 0
 	s.pmCoreHook = &pmCoreState{
 		running:    func() bool { return false },
@@ -609,8 +609,8 @@ func TestPMApplyEndpoint_ARefusedPluginRemovalDoesNotStopIt(t *testing.T) {
 	}
 
 	body := `{"action":"remove","argv":["apk","del","busybox"]}`
-	r := httptest.NewRequest(http.MethodPost, "/api/updater/olcrtc/pm/apply", strings.NewReader(body))
-	r.SetPathValue("id", "olcrtc")
+	r := httptest.NewRequest(http.MethodPost, "/api/updater/xray/pm/apply", strings.NewReader(body))
+	r.SetPathValue("id", "xray")
 	w := httptest.NewRecorder()
 	s.handleUpdaterPMApply(w, r)
 
@@ -785,7 +785,7 @@ func TestPMApplyEndpoint_AFailedRestartIsReportedAsItsOwnCriticalResult(t *testi
 // stopped plugin must be re-synced onto the binary still on disk — the counterpart to the core's
 // restart.
 func TestPMApplyEndpoint_APluginRemoveThatFailsAfterTheStopReSyncsIt(t *testing.T) {
-	s, sc := pmPluginServer(t, "olcrtc")
+	s, sc := pmPluginServer(t, "xray")
 	stopped, restored := 0, 0
 	s.pmCoreHook = &pmCoreState{
 		running:       func() bool { return false },
@@ -795,11 +795,11 @@ func TestPMApplyEndpoint_APluginRemoveThatFailsAfterTheStopReSyncsIt(t *testing.
 		restartPlugin: func(string) int { return 0 },
 		restorePlugin: func() { restored++ },
 	}
-	sc.errs["apk del olcrtc"] = errors.New("apk: I/O error deleting package")
+	sc.errs["apk del xray"] = errors.New("apk: I/O error deleting package")
 
-	body := `{"action":"remove","argv":["apk","del","olcrtc"]}`
-	r := httptest.NewRequest(http.MethodPost, "/api/updater/olcrtc/pm/apply", strings.NewReader(body))
-	r.SetPathValue("id", "olcrtc")
+	body := `{"action":"remove","argv":["apk","del","xray"]}`
+	r := httptest.NewRequest(http.MethodPost, "/api/updater/xray/pm/apply", strings.NewReader(body))
+	r.SetPathValue("id", "xray")
 	w := httptest.NewRecorder()
 	s.handleUpdaterPMApply(w, r)
 

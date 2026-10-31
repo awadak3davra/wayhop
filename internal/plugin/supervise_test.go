@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"wayhop/internal/model"
 )
@@ -24,15 +25,11 @@ func pluginsup_awgEndpoint(id string) model.Endpoint {
 	}
 }
 
-// pluginsup_olcEndpoint builds an olcRTC endpoint mirroring TestOlcConfig.
-func pluginsup_olcEndpoint(id string) model.Endpoint {
+// pluginsup_dsyEndpoint builds an nfqws2 desync endpoint, the long-running supervised engine.
+func pluginsup_dsyEndpoint(id string) model.Endpoint {
 	return model.Endpoint{
-		ID: id, Engine: model.EngineOlcRTC, Protocol: model.ProtoOlcRTC,
-		Server: "meet.x", Port: 443,
-		Params: map[string]any{
-			"provider": "telemost", "room": "https://telemost.yandex.ru/j/1",
-			"key": "KEY", "transport": "vp8channel",
-		},
+		ID: id, Engine: model.EngineNfqws,
+		Params: map[string]any{"dpi_desync": "disorder2"},
 	}
 }
 
@@ -55,24 +52,24 @@ func pluginsup_newManager(t *testing.T) (*Manager, string) {
 }
 
 // TestPluginsup_SyncNoBinariesWritesConfigsAndNeedsBinary verifies that syncing
-// an amneziawg + an olcrtc Spec on a host without engine binaries writes each
+// an amneziawg + an nfqws2 Spec on a host without engine binaries writes each
 // per-id native config to disk and reports needs_binary=true, running=false.
 func TestPluginsup_SyncNoBinariesWritesConfigsAndNeedsBinary(t *testing.T) {
 	// Hermetic: resolve() falls back to PATH to find an engine binary, so a host
-	// with a real olcrtc/awg on PATH (e.g. the self-hosted CI runner = a live VPN
+	// with a real nfqws2/awg on PATH (e.g. the self-hosted CI runner = a live VPN
 	// box) would make "no binary present" false. An empty PATH keeps it deterministic.
 	t.Setenv("PATH", t.TempDir())
 	m, cfgDir := pluginsup_newManager(t)
 
 	specs := []Spec{
 		{ID: "awg1", Endpoint: pluginsup_awgEndpoint("awg1"), SOCKSPort: 0},
-		{ID: "olc1", Endpoint: pluginsup_olcEndpoint("olc1"), SOCKSPort: 17901},
+		{ID: "dsy1", Endpoint: pluginsup_dsyEndpoint("dsy1"), SOCKSPort: 17901},
 	}
 	m.Sync(specs)
 
 	// Both config files must be written with the engine-native names/extensions.
 	awgPath := filepath.Join(cfgDir, "awg1.conf")
-	olcPath := filepath.Join(cfgDir, "olc1.yaml")
+	dsyPath := filepath.Join(cfgDir, "dsy1.nfqws")
 
 	awgBytes, err := os.ReadFile(awgPath)
 	if err != nil {
@@ -82,19 +79,19 @@ func TestPluginsup_SyncNoBinariesWritesConfigsAndNeedsBinary(t *testing.T) {
 		t.Errorf("awg config content unexpected:\n%s", got)
 	}
 
-	olcBytes, err := os.ReadFile(olcPath)
+	dsyBytes, err := os.ReadFile(dsyPath)
 	if err != nil {
-		t.Fatalf("olcrtc config not written: %v", err)
+		t.Fatalf("nfqws2 config not written: %v", err)
 	}
-	if got := string(olcBytes); !strings.Contains(got, "mode: cnc") || !strings.Contains(got, "port: 17901") {
-		t.Errorf("olc config content unexpected:\n%s", got)
+	if got := string(dsyBytes); !strings.Contains(got, "--qnum=200") || !strings.Contains(got, "--dpi-desync=disorder2") {
+		t.Errorf("nfqws2 config content unexpected:\n%s", got)
 	}
 
 	st := pluginsup_statusByID(m.Status())
 	if len(st) != 2 {
 		t.Fatalf("Status() len = %d, want 2: %+v", len(st), st)
 	}
-	for _, id := range []string{"awg1", "olc1"} {
+	for _, id := range []string{"awg1", "dsy1"} {
 		s, ok := st[id]
 		if !ok {
 			t.Fatalf("Status() missing id %q", id)
@@ -110,11 +107,11 @@ func TestPluginsup_SyncNoBinariesWritesConfigsAndNeedsBinary(t *testing.T) {
 	if st["awg1"].Engine != string(model.EngineAmneziaWG) {
 		t.Errorf("awg1 Engine = %q, want %q", st["awg1"].Engine, model.EngineAmneziaWG)
 	}
-	if st["olc1"].Engine != string(model.EngineOlcRTC) {
-		t.Errorf("olc1 Engine = %q, want %q", st["olc1"].Engine, model.EngineOlcRTC)
+	if st["dsy1"].Engine != string(model.EngineNfqws) {
+		t.Errorf("dsy1 Engine = %q, want %q", st["dsy1"].Engine, model.EngineNfqws)
 	}
-	if st["olc1"].SOCKSPort != 17901 {
-		t.Errorf("olc1 SOCKSPort = %d, want 17901", st["olc1"].SOCKSPort)
+	if st["dsy1"].SOCKSPort != 17901 {
+		t.Errorf("dsy1 SOCKSPort = %d, want 17901", st["dsy1"].SOCKSPort)
 	}
 }
 
@@ -134,15 +131,15 @@ func TestPluginsup_SyncReportsTheSameStateAndConfig(t *testing.T) {
 
 	specs := []Spec{
 		{ID: "awg1", Endpoint: pluginsup_awgEndpoint("awg1"), SOCKSPort: 0},
-		{ID: "olc1", Endpoint: pluginsup_olcEndpoint("olc1"), SOCKSPort: 17901},
+		{ID: "dsy1", Endpoint: pluginsup_dsyEndpoint("dsy1"), SOCKSPort: 17901},
 	}
 	m.Sync(specs)
 	first := pluginsup_statusByID(m.Status())
 
-	olcPath := filepath.Join(cfgDir, "olc1.yaml")
-	before, err := os.ReadFile(olcPath)
+	dsyPath := filepath.Join(cfgDir, "dsy1.nfqws")
+	before, err := os.ReadFile(dsyPath)
 	if err != nil {
-		t.Fatalf("read olc config: %v", err)
+		t.Fatalf("read nfqws2 config: %v", err)
 	}
 
 	// Second identical sync must be a no-op.
@@ -163,12 +160,12 @@ func TestPluginsup_SyncReportsTheSameStateAndConfig(t *testing.T) {
 		}
 	}
 
-	after, err := os.ReadFile(olcPath)
+	after, err := os.ReadFile(dsyPath)
 	if err != nil {
-		t.Fatalf("read olc config after second Sync: %v", err)
+		t.Fatalf("read nfqws2 config after second Sync: %v", err)
 	}
 	if string(before) != string(after) {
-		t.Errorf("olc config content changed after idempotent Sync")
+		t.Errorf("nfqws2 config content changed after idempotent Sync")
 	}
 }
 
@@ -179,7 +176,7 @@ func TestPluginsup_SyncEmptyStopsAndRemoves(t *testing.T) {
 
 	m.Sync([]Spec{
 		{ID: "awg1", Endpoint: pluginsup_awgEndpoint("awg1"), SOCKSPort: 0},
-		{ID: "olc1", Endpoint: pluginsup_olcEndpoint("olc1"), SOCKSPort: 17901},
+		{ID: "dsy1", Endpoint: pluginsup_dsyEndpoint("dsy1"), SOCKSPort: 17901},
 	})
 	if got := len(m.Status()); got != 2 {
 		t.Fatalf("precondition: Status() len = %d, want 2", got)
@@ -205,7 +202,7 @@ func TestPluginsup_SyncEmptyStopsAndRemoves(t *testing.T) {
 // no-op when no process is actually running (all degraded to needs_binary).
 func TestPluginsup_SuperviseNoopWhenNothingRunning(t *testing.T) {
 	// Hermetic: empty PATH so resolve()'s PATH fallback can't find a host engine
-	// binary (the self-hosted runner has real olcrtc/awg on PATH).
+	// binary (the self-hosted runner has real nfqws2/awg on PATH).
 	t.Setenv("PATH", t.TempDir())
 	m, _ := pluginsup_newManager(t)
 
@@ -218,7 +215,7 @@ func TestPluginsup_SuperviseNoopWhenNothingRunning(t *testing.T) {
 	// With needs_binary plugins (running=false), Supervise must not flip state.
 	m.Sync([]Spec{
 		{ID: "awg1", Endpoint: pluginsup_awgEndpoint("awg1")},
-		{ID: "olc1", Endpoint: pluginsup_olcEndpoint("olc1"), SOCKSPort: 17901},
+		{ID: "dsy1", Endpoint: pluginsup_dsyEndpoint("dsy1"), SOCKSPort: 17901},
 	})
 	before := pluginsup_statusByID(m.Status())
 
@@ -243,7 +240,7 @@ func TestPluginsup_StopAllClearsStatus(t *testing.T) {
 	m, _ := pluginsup_newManager(t)
 	m.Sync([]Spec{
 		{ID: "awg1", Endpoint: pluginsup_awgEndpoint("awg1")},
-		{ID: "olc1", Endpoint: pluginsup_olcEndpoint("olc1"), SOCKSPort: 17901},
+		{ID: "dsy1", Endpoint: pluginsup_dsyEndpoint("dsy1"), SOCKSPort: 17901},
 	})
 	if got := len(m.Status()); got != 2 {
 		t.Fatalf("precondition: Status() len = %d, want 2", got)
@@ -262,22 +259,22 @@ func TestPluginsup_StopAllClearsStatus(t *testing.T) {
 }
 
 // TestPluginsup_SuperviseThrottleSkipsDuringCooldown verifies that a managed
-// olcRTC proc still inside its crash-loop cooldown window is NOT relaunched on this
+// long-running proc still inside its crash-loop cooldown window is NOT relaunched on this
 // tick — Supervise only decrements the cooldown. This is the log-spam fix: a tick
 // that throttles writes nothing and spawns no process.
 func TestPluginsup_SuperviseThrottleSkipsDuringCooldown(t *testing.T) {
-	m, _ := pluginsup_newManager(t) // empty binDir: no olcrtc binary resolvable
+	m, _ := pluginsup_newManager(t) // empty binDir: no nfqws2 binary resolvable
 
 	p := &proc{
-		engine:   model.EngineOlcRTC,
+		engine:   model.EngineNfqws,
 		managed:  true,
 		running:  false, // crashed; awaiting its next backed-off relaunch
-		cfgPath:  filepath.Join(t.TempDir(), "olc1.yaml"),
+		cfgPath:  filepath.Join(t.TempDir(), "dsy1.nfqws"),
 		restarts: 6,
 		cooldown: 3,
 	}
 	m.mu.Lock()
-	m.procs["olc1"] = p
+	m.procs["dsy1"] = p
 	m.mu.Unlock()
 
 	m.Supervise()
@@ -302,33 +299,49 @@ func TestPluginsup_SuperviseThrottleSkipsDuringCooldown(t *testing.T) {
 	}
 }
 
-// TestPluginsup_SuperviseResetsThrottleWhenAlive verifies a managed olcRTC proc
-// that survives a full tick (alive, open done) has its crash-loop counters reset —
-// so a plugin that recovers keeps being restarted normally on a future crash.
+// TestPluginsup_SuperviseResetsThrottleWhenAlive verifies a managed long-running proc
+// that has stayed up for the stable window (alive, open done) has its crash-loop counters
+// reset — so a plugin that recovers keeps being restarted normally on a future crash — and
+// that one alive tick soon after a relaunch is not yet that (QA-110).
 func TestPluginsup_SuperviseResetsThrottleWhenAlive(t *testing.T) {
-	m, _ := pluginsup_newManager(t)
+	for _, tc := range []struct {
+		name  string
+		up    time.Duration
+		reset bool
+	}{
+		{"stable", pluginStableWindow + time.Second, true},
+		{"just relaunched", time.Second, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := pluginsup_newManager(t)
 
-	p := &proc{
-		engine:   model.EngineOlcRTC,
-		managed:  true,
-		running:  true,
-		done:     make(chan struct{}), // open => procDied=false => observed alive
-		restarts: 5,
-		cooldown: 7,
-	}
-	m.mu.Lock()
-	m.procs["olc1"] = p
-	m.mu.Unlock()
+			p := &proc{
+				engine:     model.EngineNfqws,
+				managed:    true,
+				running:    true,
+				done:       make(chan struct{}), // open => procDied=false => observed alive
+				restarts:   5,
+				cooldown:   7,
+				launchedAt: time.Now().Add(-tc.up),
+			}
+			m.mu.Lock()
+			m.procs["dsy1"] = p
+			m.mu.Unlock()
 
-	m.Supervise()
+			m.Supervise()
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if p.restarts != 0 || p.cooldown != 0 {
-		t.Errorf("throttle not reset for a healthy proc: restarts=%d cooldown=%d, want 0/0", p.restarts, p.cooldown)
-	}
-	if !p.running {
-		t.Errorf("Supervise flipped a healthy proc to not-running")
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			if reset := p.restarts == 0 && p.cooldown == 0; reset != tc.reset {
+				t.Errorf("up %v: restarts=%d cooldown=%d, want reset=%v", tc.up, p.restarts, p.cooldown, tc.reset)
+			}
+			if !tc.reset && (p.restarts != 5 || p.cooldown != 7) {
+				t.Errorf("an alive tick changed the throttle: restarts=%d cooldown=%d, want 5/7", p.restarts, p.cooldown)
+			}
+			if !p.running {
+				t.Errorf("Supervise flipped a healthy proc to not-running")
+			}
+		})
 	}
 }
 
@@ -337,26 +350,26 @@ func TestPluginsup_SuperviseResetsThrottleWhenAlive(t *testing.T) {
 // that lets a plugin start after its binary is installed without a daemon restart.
 // White-box: the tracked *proc identity must change across the two Syncs.
 func TestPluginsup_SyncReCreatesDownProc(t *testing.T) {
-	// Hermetic: empty PATH so resolve()'s PATH fallback can't find a host olcrtc
+	// Hermetic: empty PATH so resolve()'s PATH fallback can't find a host nfqws2
 	// (the self-hosted runner has one), which would make the proc "running".
 	t.Setenv("PATH", t.TempDir())
 	m, _ := pluginsup_newManager(t) // empty binDir -> the proc is needs_binary (not running)
-	spec := Spec{ID: "olc1", Endpoint: pluginsup_olcEndpoint("olc1"), SOCKSPort: 17901}
+	spec := Spec{ID: "dsy1", Endpoint: pluginsup_dsyEndpoint("dsy1"), SOCKSPort: 17901}
 
 	m.Sync([]Spec{spec})
 	m.mu.Lock()
-	first := m.procs["olc1"]
+	first := m.procs["dsy1"]
 	m.mu.Unlock()
 	if first == nil || first.running {
-		t.Fatalf("precondition: olc1 should be a tracked, not-running proc, got %+v", first)
+		t.Fatalf("precondition: dsy1 should be a tracked, not-running proc, got %+v", first)
 	}
 
 	m.Sync([]Spec{spec}) // re-Apply, unchanged spec
 	m.mu.Lock()
-	second := m.procs["olc1"]
+	second := m.procs["dsy1"]
 	m.mu.Unlock()
 	if second == nil {
-		t.Fatal("olc1 dropped after re-Apply")
+		t.Fatal("dsy1 dropped after re-Apply")
 	}
 	if second == first {
 		t.Error("re-Apply did not re-create the down proc (same *proc) — its binary would never be re-resolved without a daemon restart")

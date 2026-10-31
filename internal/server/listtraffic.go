@@ -38,6 +38,18 @@ type listStats struct {
 	Live  int   `json:"live"`  // connections open right now
 	Conns int64 `json:"conns"` // connections first seen since the daemon started
 	Bytes int64 `json:"bytes"` // up+down attributed to this list since the daemon started
+	// Kernel is what the kernel plane matched for the list's zone, nil when it was not read. It has
+	// its own field and unit because it is a different count: the core counts connections since the
+	// daemon started, the kernel counts packets since the rules were last installed. They used to share
+	// Conns, so the Matched column read 52,341 packets as "52341 conns" (QA-113). The column still
+	// turns to the core's count once the core attributes a connection, now under the core's unit.
+	Kernel *kernelListStats `json:"kernel,omitempty"`
+}
+
+// kernelListStats is the mangle chain's counters for one list's zone sets.
+type kernelListStats struct {
+	Packets int64 `json:"packets"`
+	Bytes   int64 `json:"bytes"`
 }
 
 // listIDFromRulePayload maps a Clash rulePayload to the routing list it belongs to.
@@ -135,9 +147,10 @@ func (s *Server) handleRoutingTraffic(w http.ResponseWriter, r *http.Request) {
 	}
 	// On a kernel-routed router the core has nothing to report, and reporting ITS silence as the
 	// list's activity is what made every row read "nothing yet" while the mangle chain was matching.
-	// Read the plane that is actually carrying the traffic. Core numbers win when both exist: they
-	// are per-connection and live, where these are cumulative since the rules were installed.
-	kernelStats := map[string]listStats{}
+	// Read the plane that is actually carrying the traffic. Its counters go beside the core's, never
+	// into them: the page shows the core's when the core has any (they are per-connection and live,
+	// where these are cumulative since the rules were installed), and Diagnostics reads these alone.
+	kernelStats := map[string]kernelListStats{}
 	if s.detectedPlatform() == platform.Keenetic || s.routingMode(s.config()) == "fast" ||
 		s.routingMode(s.config()) == "hybrid" {
 		ids := make([]string, 0, len(prof.RoutingLists))
@@ -153,10 +166,8 @@ func (s *Server) handleRoutingTraffic(w http.ResponseWriter, r *http.Request) {
 	out := make(map[string]listStats, len(prof.RoutingLists))
 	for _, rl := range prof.RoutingLists {
 		st := stats[rl.ID]
-		if st.Bytes == 0 && st.Conns == 0 && st.Live == 0 {
-			if k, ok := kernelStats[rl.ID]; ok {
-				st = k
-			}
+		if k, ok := kernelStats[rl.ID]; ok {
+			st.Kernel = &k
 		}
 		out[rl.ID] = st
 	}

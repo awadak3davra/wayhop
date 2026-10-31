@@ -3,5 +3,5 @@
  * (i18n/<lang>.js) is loaded separately and fills this object in place, so only ONE language is
  * ever downloaded (see the index.html bootstrap). */
 window.WR_DICTS = window.WR_DICTS || {};
-window.WR_LANGS = [{"code":"auto","name":"Auto (browser)"},{"code":"en","name":"English"},{"code":"ru","name":"Русский"},{"code":"fa","name":"فارسی"},{"code":"tr","name":"Türkçe"},{"code":"es","name":"Español"},{"code":"fr","name":"Français"},{"code":"de","name":"Deutsch"},{"code":"pt","name":"Português"},{"code":"uk","name":"Українська"},{"code":"be","name":"Беларуская"}];
+window.WR_LANGS = [{"code":"auto","name":"Auto (browser)"},{"code":"en","name":"English"},{"code":"ru","name":"Русский"},{"code":"fa","name":"فارسی"},{"code":"tr","name":"Türkçe"},{"code":"es","name":"Español"},{"code":"fr","name":"Français"},{"code":"de","name":"Deutsch"},{"code":"pt","name":"Português"},{"code":"uk","name":"Українська"},{"code":"be","name":"Беларуская"},{"code":"zh-CN","name":"简体中文"}];
 window.WR_RTL = ["fa"];

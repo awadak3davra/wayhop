@@ -503,6 +503,45 @@ func TestSaveProvisionedServer_ConcurrentProtocolsBothSurvive(t *testing.T) {
 	}
 }
 
+// The same two jobs on a host the list does not know yet. Both found no record, then each created
+// one: the create was a separate lock acquisition after Patch's miss, and Upsert replaces the whole
+// record, so the later job's record dropped the earlier job's protocol. Find-or-create and the merge
+// now happen under one hold of the store lock.
+func TestSaveProvisionedServer_ConcurrentFirstProvisionsBothSurvive(t *testing.T) {
+	s := provision_newServer(t)
+	for round := 0; round < 60; round++ {
+		b := provisionReq{Host: fmt.Sprintf("203.0.113.%d", 10+round), Port: 22, User: "root",
+			Protocols: []string{initserver.ProtoAmneziaWG, initserver.ProtoReality}}
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for _, proto := range []string{initserver.ProtoAmneziaWG, initserver.ProtoReality} {
+			wg.Add(1)
+			go func(p string) {
+				defer wg.Done()
+				<-start
+				s.saveProvisionedServer(s.jobs.New("provision", ""), b, []string{p})
+			}(proto)
+		}
+		close(start)
+		wg.Wait()
+
+		sv, ok := s.servers.Get(serverIDFor(b))
+		if !ok {
+			t.Fatalf("round %d: server not saved", round)
+		}
+		got := map[string]bool{}
+		for _, p := range sv.Installed {
+			got[p] = true
+		}
+		if !got[initserver.ProtoAmneziaWG] || !got[initserver.ProtoReality] {
+			t.Fatalf("round %d: two first provisions lost a protocol: Installed = %v, want both", round, sv.Installed)
+		}
+		if sv.CreatedAt == "" {
+			t.Fatalf("round %d: a created record must carry CreatedAt", round)
+		}
+	}
+}
+
 // A store write that fails must not pass for a saved server: the store persists BEFORE it commits,
 // so the record is missing from disk and memory alike while the job hands back its server_id. The
 // job has to say so - the imported connections work, the list entry does not exist.

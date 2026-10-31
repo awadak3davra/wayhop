@@ -1,4 +1,5 @@
-// page-telegram.js — the Telegram bot card's content in Settings and the manager it opens.
+// page-telegram.js — the Telegram bot card's content in Settings and the manager it opens, and the
+// same for the Telegram bridge (at the end of the file).
 //
 // Loaded by loadChunk() when Settings renders the card, NOT from index.html, so its bytes stay out of
 // the initial payload. A classic script, like app.js: these declarations
@@ -63,13 +64,14 @@ function telegramSummary(m) {
 // opens the manager. The card refreshes after anything the manager saves.
 function telegramCardFill(slot) {
   const line = el("div", { class: "tg-card-line" });
-  const manage = el("button", { class: "btn", type: "button" }, t("Set up…"));
+  const manage = el("button", { class: "btn", type: "button", "aria-label": t("Set up…") + " " + t("Telegram bot") }, t("Set up…"));
   const fill = m => {
     line.innerHTML = "";
     line.appendChild(telegramPill(m && m.bot));
     const text = telegramSummary(m);
     if (text) line.appendChild(el("span", { class: "hint tg-card-text" }, text));
     manage.textContent = m && m.has_token ? t("Manage…") : t("Set up…");
+    manage.setAttribute("aria-label", manage.textContent + " " + t("Telegram bot"));
   };
   manage.addEventListener("click", async () => {
     manage.disabled = true;
@@ -126,28 +128,43 @@ async function telegramManage(onChange) {
     "aria-label": t("Bot API server") });
   const saveConn = el("button", { class: "btn btn-primary", type: "button" }, t("Save connection"));
 
+  // The path in force, as the daemon resolves it now: a chosen tunnel or group that cannot carry the
+  // bot keeps it offline rather than letting it reach Telegram another way.
+  const viaNote = el("div", { class: "hint" });
   const fillVia = () => {
     via.innerHTML = "";
     via.appendChild(el("option", { value: "" }, t("The router's own connection")));
     via.appendChild(el("option", { value: "@proxy" }, t("WayHop's local proxy (follows your routing)")));
-    const eps = (state.profile && state.profile.endpoints) || [];
-    const groups = (state.profile && state.profile.groups) || [];
+    // The daemon says what the bot can be bound to, as it does for component downloads. Built from
+    // the profile, this offered exits an engine carries (VLESS, Trojan) and disabled ones, which have
+    // no link to bind to: the bot then went straight out. Those go through the local proxy above.
+    const paths = model.via_paths || [];
+    const groups = paths.filter(p => p.group);
+    const eps = paths.filter(p => !p.group);
     if (groups.length) {
       const og = el("optgroup", { label: t("Failover groups") });
-      groups.forEach(g => og.appendChild(el("option", { value: g.id }, g.name || g.id)));
+      groups.forEach(g => og.appendChild(el("option", { value: g.id }, g.name)));
       via.appendChild(og);
     }
     if (eps.length) {
       const og = el("optgroup", { label: t("Connections") });
-      eps.forEach(e => og.appendChild(el("option", { value: e.id }, (e.name || e.id) + (e.enabled ? "" : " — " + t("disabled")))));
+      eps.forEach(e => og.appendChild(el("option", { value: e.id }, e.name)));
       via.appendChild(og);
     }
-    // A saved choice that no longer matches the profile stays visible rather than silently
-    // turning into "the router's own connection".
+    // A saved choice the bot cannot use stays visible rather than silently turning into "the
+    // router's own connection".
     if (model.via && ![...via.options].some(o => o.value === model.via)) {
-      via.appendChild(el("option", { value: model.via }, t("{0} (no longer in the profile)", model.via)));
+      const prof = state.profile || {};
+      const known = [...(prof.endpoints || []), ...(prof.groups || [])].find(x => x.id === model.via);
+      via.appendChild(el("option", { value: model.via },
+        known ? (known.name || known.id) + t(" (unavailable)") : t("{0} (no longer in the profile)", model.via)));
     }
     via.value = model.via || "";
+  };
+  const renderVia = () => {
+    viaNote.textContent = !model.via || model.via === "@proxy" ? ""
+      : model.via_iface ? t("in force: through {0}", model.via_iface)
+        : t("not in force — the bot stays offline until this path works");
   };
 
   const renderToken = () => {
@@ -212,6 +229,7 @@ async function telegramManage(onChange) {
       model = await api.put("/api/telegram", settingsBody());
       delete tokenInput.dataset.replacing;
       tokenInput.value = "";
+      fillVia();
       renderToken();
       renderLive();
       toast(okMsg, "ok");
@@ -258,11 +276,12 @@ async function telegramManage(onChange) {
   // The option names are short so they fit a row; what a role may do is the select's title and,
   // where there is room, a line under it.
   const roleHint = key => t((TG_ROLES.find(r => r[0] === key) || TG_ROLES[0])[2]);
-  const roleSelect = (value, isGroup) => {
+  // A channel only receives alerts: its subscribers can press its buttons without being in it.
+  const roleSelect = (value, isGroup, isChannel) => {
     const s = el("select", {});
     TG_ROLES.forEach(([key, label]) => {
       const o = el("option", { value: key }, t(label));
-      if (key === "owner" && isGroup) o.disabled = true;
+      if ((key === "owner" && isGroup) || (isChannel && key !== "alerts")) o.disabled = true;
       s.appendChild(o);
     });
     s.value = value;
@@ -280,7 +299,7 @@ async function telegramManage(onChange) {
     }
     chats.forEach(c => {
       const isGroup = c.id < 0;
-      const role = roleSelect(c.role, isGroup);
+      const role = roleSelect(c.role, isGroup, c.type === "channel");
       role.setAttribute("aria-label", t("Role of {0}", c.name || c.id));
       role.addEventListener("change", async () => {
         try { model = await api.put("/api/telegram/chats/" + c.id, { role: role.value }); renderLive(); changed(); }
@@ -318,7 +337,8 @@ async function telegramManage(onChange) {
       const isGroup = s.type !== "private";
       // Viewer by default: letting in a chat that nobody vouched for with a code should not hand it the
       // Keep and Roll back buttons unless the operator picks that on purpose.
-      const role = roleSelect("viewer", isGroup);
+      const isChannel = s.type === "channel";
+      const role = roleSelect(isChannel ? "alerts" : "viewer", isGroup, isChannel);
       role.setAttribute("aria-label", t("Role for {0}", s.name));
       const allow = el("button", { class: "btn btn-sm", type: "button" }, t("Let in"));
       allow.addEventListener("click", async () => {
@@ -408,7 +428,7 @@ async function telegramManage(onChange) {
         chatsBefore: new Set((model.chats || []).map(c => c.id)) };
       renderPair();
     } catch (e) { toast(e.message, "err"); }
-    finally { pairBtn.disabled = false; }
+    finally { pairBtn.disabled = !model.has_token; }
   });
 
   const testBtn = el("button", { class: "btn btn-sm", type: "button" }, t("Send a test message"));
@@ -427,11 +447,14 @@ async function telegramManage(onChange) {
   // chats, the strangers. The forms are left alone, so a poll never eats what is being typed.
   const renderLive = () => {
     renderClock();
+    renderVia();
     statusRow.innerHTML = "";
     const b = model.bot || {};
     statusRow.appendChild(telegramPill(b));
     statusRow.appendChild(el("span", { class: "tg-status-line" }, telegramSummary(model)));
     testBtn.disabled = b.state !== "online" || !(model.chats || []).length;
+    // No token, no bot: a code would be sent nowhere (QA-034). A bot still starting may take one.
+    pairBtn.disabled = !model.has_token;
     statusRow.appendChild(testBtn);
     if (pairing && !pairing.done) {
       const fresh = (model.chats || []).find(c => !pairing.chatsBefore.has(c.id));
@@ -455,7 +478,7 @@ async function telegramManage(onChange) {
     el("div", { class: "hint" }, t("In Telegram, open @BotFather, send /newbot, and paste the token it gives you here. The router talks to Telegram itself, so no port has to be opened.")),
     el("div", { class: "field" }, el("label", {}, t("Bot token")),
       el("div", { class: "tg-token" }, tokenInput, tokenSaved, checkBtn), checkOut),
-    el("div", { class: "field" }, el("label", {}, t("Reach Telegram through")), via,
+    el("div", { class: "field" }, el("label", {}, t("Reach Telegram through")), via, viaNote,
       el("div", { class: "hint" }, t("Where Telegram is blocked, send the bot through a tunnel or through WayHop's own routing."))),
     el("details", { class: "tg-adv" }, el("summary", {}, t("Advanced")),
       el("div", { class: "field" }, el("label", {}, t("Bot API server")), apiBase,
@@ -489,6 +512,185 @@ async function telegramManage(onChange) {
       if (!alive()) return;
       model = { ...fresh };
       renderLive();
+    } catch (_) { /* the next tick tries again; the dialog keeps what it has */ }
+  }, 3000);
+  return dlg;
+}
+
+// ── Telegram bridge (gap 13) ─────────────────────────────────────────────────────────────────────
+// The card and the dialog for the Telegram-over-WebSocket bridge the daemon runs as a router service
+// (server/tgbridge.go). Like the bot, the card holds no inputs: the bridge is saved by its own route
+// (PUT /api/telegram-bridge), which takes effect at once and which the Settings page's Save does not
+// store, so its form is a dialog. The secret is never a field of its own: it is shown only inside the
+// tg://proxy link (and its QR code), which a phone on the LAN needs to use the bridge at all, and only
+// while the bridge serves - a link to a bridge that is not running would be one more thing that fails.
+
+// tgBridgePill says whether the bridge serves, or the first thing that stops it. The words are the
+// Components page's own state words, so the two pages describe one binary the same way. crash_loop
+// comes first: it is the review's "keeps exiting" finding, decided by the daemon, and a bridge in that
+// loop is up between two restarts, when "running" alone would read it as healthy. Its word is the
+// Dashboard's for sing-box in the same state.
+function tgBridgePill(v) {
+  const [cls, label] = v.crash_loop ? ["warn", t("Crash-loop")]
+    : v.running ? ["ok", t("running")]
+      : !v.installed ? [v.enabled ? "err" : "muted", t("not installed")]
+        : v.enabled ? ["err", t("stopped")] : ["muted", t("off")];
+  return el("span", { class: "pill " + cls }, el("span", { class: "dot" }), label);
+}
+
+// tgBridgeSummary is the line beside the pill: where it listens, or the daemon's reason it does not
+// (its own sentence, untranslated, like every reason the daemon sends), and in a crash loop how it
+// last ended, up or not. The address is isolated (LRI…PDI) so a right-to-left page does not reorder
+// "192.168.50.1:1443".
+function tgBridgeSummary(v) {
+  if (v.crash_loop) return v.last_error || "";
+  if (v.running && v.listen) return "⁦" + v.listen + "⁩";
+  return v.running ? "" : v.last_error || "";
+}
+
+// tgBridgeInstallLink sends a router without the binary to the Components page, where its row is.
+function tgBridgeInstallLink(onGo) {
+  return el("a", { class: "hint", href: "#updater", onclick: onGo }, t("Install it on the Components page first."));
+}
+
+// tgBridgeCardFill fills the Settings card (app.js telegramCard(true)): the state, and the button
+// that opens the dialog. The card refreshes after anything the dialog saves.
+function tgBridgeCardFill(slot) {
+  const line = el("div", { class: "tg-card-line" });
+  const manage = el("button", { class: "btn", type: "button", "aria-label": t("Set up…") + " " + t("Telegram bridge") }, t("Set up…"));
+  const fill = v => {
+    line.innerHTML = "";
+    line.appendChild(tgBridgePill(v));
+    const text = tgBridgeSummary(v);
+    if (text) line.appendChild(el("span", { class: "hint tg-card-text" }, text));
+    if (!v.installed) line.appendChild(tgBridgeInstallLink());
+    manage.textContent = v.enabled ? t("Manage…") : t("Set up…");
+    manage.setAttribute("aria-label", manage.textContent + " " + t("Telegram bridge"));
+  };
+  manage.addEventListener("click", async () => {
+    manage.disabled = true;
+    try { await tgBridgeManage(fill); } catch (e) { toast(e.message, "err"); }
+    finally { manage.disabled = false; }
+  });
+  slot.innerHTML = "";
+  slot.appendChild(line);
+  slot.appendChild(manage);
+  api.get("/api/telegram-bridge").then(fill).catch(e => {
+    line.innerHTML = "";
+    line.appendChild(el("span", { class: "hint" }, e.message));
+  });
+}
+
+// tgBridgeBody is the PUT body from the form. The secret is left out, which keeps the saved one; a
+// blank port is the default (1443).
+function tgBridgeBody(f) {
+  return {
+    enabled: f.enabled.checked,
+    port: parseInt(f.port.value, 10) || 0,
+    cf_domain: f.cfDomain.value.trim(),
+    cf_worker_domain: f.cfWorker.value.trim(),
+  };
+}
+
+// tgBridgeManage opens the dialog. onChange runs after every save, so the Settings card can refresh.
+async function tgBridgeManage(onChange) {
+  let v = await api.get("/api/telegram-bridge");
+  await tgStylesReady;
+  const changed = () => { if (typeof onChange === "function") onChange(v); };
+  let dlg = null;
+
+  const statusRow = el("div", { class: "tg-status" });
+  const linkBox = el("div", { class: "tg-pair" });
+  const f = {
+    enabled: el("input", { type: "checkbox" }),
+    port: el("input", { type: "number", min: "1024", max: "65535", step: "1", inputmode: "numeric", placeholder: "1443",
+      "aria-label": t("Port") }),
+    cfDomain: el("input", { type: "text", spellcheck: "false", autocomplete: "off", placeholder: "tg.example.com",
+      "aria-label": t("Cloudflare domain") }),
+    cfWorker: el("input", { type: "text", spellcheck: "false", autocomplete: "off", placeholder: "worker.example.com",
+      "aria-label": t("Cloudflare Worker") }),
+  };
+  f.enabled.checked = !!v.enabled;
+  f.port.value = v.port || "";
+  f.cfDomain.value = v.cf_domain || "";
+  f.cfWorker.value = v.cf_worker_domain || "";
+  const save = el("button", { class: "btn btn-primary", type: "button" }, t("Save"));
+  const regen = el("button", { class: "btn btn-sm", type: "button" }, t("New secret"));
+
+  // renderLive redraws what the router can change under the open dialog. The link box is rebuilt only
+  // when what it shows changed, so a poll never pulls Copy out from under the pointer; the form is
+  // never touched, so a poll never eats what is being typed.
+  let linkSig = null;
+  const renderLive = () => {
+    statusRow.innerHTML = "";
+    statusRow.appendChild(tgBridgePill(v));
+    const text = tgBridgeSummary(v);
+    if (text) statusRow.appendChild(el("span", { class: "tg-status-line" }, text));
+    regen.hidden = !v.enabled;
+    // A crash loop can be up between restarts: no link to hand out then, and no rebuild per flip.
+    const serving = v.running && !v.crash_loop;
+    const sig = JSON.stringify([!!v.installed, serving ? v.link || "" : ""]);
+    if (sig === linkSig) return;
+    linkSig = sig;
+    linkBox.innerHTML = "";
+    if (!v.installed) linkBox.appendChild(tgBridgeInstallLink(() => { if (dlg) dlg.remove(); }));
+    if (!serving || !v.link) return;
+    const link = v.link;
+    const copy = el("button", { class: "btn btn-sm", type: "button" }, t("Copy"));
+    copy.addEventListener("click", () => copyText(link));
+    linkBox.appendChild(el("div", { class: "tg-code-row" }, el("code", { class: "tg-link" }, link), copy));
+    if (v.qr_svg) {
+      // Drawn by the daemon from the link; an <img> of it, so nothing from the response is ever parsed
+      // as markup in this page (the same as the bot's pairing code).
+      linkBox.appendChild(el("div", { class: "tg-qr" },
+        el("img", { src: "data:image/svg+xml;charset=utf-8," + encodeURIComponent(v.qr_svg), alt: t("QR code of the link"), width: "164", height: "164" })));
+    }
+    linkBox.appendChild(el("div", { class: "hint" }, t("Open it on the phone: scan the code, or copy the link into Telegram.")));
+  };
+
+  const put = async (btn, body) => {
+    btn.disabled = true;
+    try {
+      v = await api.put("/api/telegram-bridge", body);
+      renderLive();
+      toast(t("Saved."), "ok");
+      changed();
+    } catch (e) { toast(e.message, "err"); }
+    finally { btn.disabled = false; }
+  };
+  save.addEventListener("click", () => put(save, tgBridgeBody(f)));
+  // A new secret changes only the secret: the saved settings go back as they are, whatever the form
+  // holds unsaved. Every link handed out so far stops working, hence the question first.
+  regen.addEventListener("click", async () => {
+    if (!await modalConfirm(t("Make a new secret? Every device using the bridge then needs the new link."))) return;
+    put(regen, { enabled: !!v.enabled, port: v.port || 0, cf_domain: v.cf_domain || "",
+      cf_worker_domain: v.cf_worker_domain || "", regenerate_secret: true });
+  });
+
+  const adv = el("details", { class: "tg-adv" }, el("summary", {}, t("Advanced")),
+    el("div", { class: "hint" }, t("Only if Telegram's web domains are blocked too: your own domain on Cloudflare, or a Worker. Comma-separated.")),
+    el("div", { class: "field" }, el("label", {}, t("Cloudflare domain")), f.cfDomain),
+    el("div", { class: "field" }, el("label", {}, t("Cloudflare Worker")), f.cfWorker));
+  adv.open = !!(v.cf_domain || v.cf_worker_domain);
+  const body = el("div", { class: "tg-mgr" }, statusRow, linkBox,
+    el("div", { class: "tg-section" },
+      el("div", { class: "field" }, el("label", {}, t("Port")), f.port),
+      adv,
+      el("div", { class: "tg-actions" },
+        el("label", { class: "check" }, f.enabled, el("span", {}, t("Enabled"))),
+        el("span", { class: "tg-btns" }, regen, save))));
+  renderLive();
+
+  dlg = modal({ title: t("Telegram bridge"), body, fixed: false });
+  const alive = () => document.contains(dlg);
+  const pollTimer = setInterval(async () => {
+    if (!alive()) return clearInterval(pollTimer);
+    try {
+      const fresh = await api.get("/api/telegram-bridge");
+      if (!alive()) return;
+      v = fresh;
+      renderLive();
+      changed(); // the card under the dialog follows too, e.g. once a just-enabled bridge serves
     } catch (_) { /* the next tick tries again; the dialog keeps what it has */ }
   }, 3000);
   return dlg;

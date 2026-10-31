@@ -42,11 +42,13 @@ var errFeedNotTried = errors.New("not tried, the refresh ran out of time")
 func feedsOf(rl model.RoutingList) string { return rl.CIDRSource + "\x00" + rl.DomainSource }
 
 // noteFeedRefresh records how a refresh of a list's feeds went: a success clears the list's record,
-// a failure extends it. Both the refresh loop and a manual refresh call it.
+// a failure extends it. Both the refresh loop and a manual refresh call it. A feed that loaded
+// without entries no list may carry (feedRefusal) did not fail: the list took the rest of it.
 func (s *Server) noteFeedRefresh(rl model.RoutingList, now time.Time, err error) {
 	if s == nil || rl.ID == "" {
 		return
 	}
+	err = feedFault(err)
 	f := &s.feedFails
 	f.mu.Lock()
 	defer f.mu.Unlock()

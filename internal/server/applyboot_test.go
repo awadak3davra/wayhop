@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,12 +23,18 @@ func applyboot_kernelMaterialization() executionMaterializationV1 {
 	return *m
 }
 
+// A Keenetic reboot is the one case where the Test is gone with the boot: NDM starts from
+// startup-config, which a Test never writes. There the unsaved window is simply discarded.
 func TestStartApply_DiscardsAnUnsavedWindowFromThePreviousLife(t *testing.T) {
 	s, fake := applytest_server(t)
+	s.platformOf = func() platform.Platform { return platform.Keenetic }
+	boot := "boot-before"
+	s.bootIDOf = func() string { return boot }
 	committed := &appliedRevision{Rev: "committed", At: 1, Materialization: applyboot_kernelMaterialization()}
 	s.recordApplied(true, committed)
 	s.recordApplied(false, &appliedRevision{Rev: "tested", At: 2, Materialization: applyboot_kernelMaterialization()})
 	s.setInFlight(false, "tested")
+	boot = "boot-after" // the router rebooted
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // the converge/reconcile goroutine exits immediately; the discard is synchronous
@@ -147,17 +154,110 @@ func TestConvergeOnBoot_FailureIsNeverFatal(t *testing.T) {
 	}
 }
 
+// QA-139: boot converge read the committed revision once, and its retry re-executed it without looking
+// again. Routing switched off, or an Apply & Save recorded, during the wait is what the router must run:
+// the retry put the core and the kernel plane back under a switch that said off, or ran the old core
+// config under a record that named the new one. Each attempt re-reads both under applyMu.
+func TestConvergeOnBoot_RetryStandsDownForWhatChangedDuringTheWait(t *testing.T) {
+	old := applyConvergeRetry
+	applyConvergeRetry = 300 * time.Millisecond
+	t.Cleanup(func() { applyConvergeRetry = old })
+
+	// run fails the first attempt at its core step and calls during while that attempt still holds
+	// applyMu, so what during does queues behind it and ahead of the retry. It returns the adapter
+	// calls made after during.
+	run := func(t *testing.T, s *Server, fake *applytest_ops, during func()) []string {
+		t.Helper()
+		failing := make(chan struct{})
+		var first sync.Once
+		ops := *s.execOps
+		inner := ops.core
+		ops.core = func(ctx context.Context, artifact executionCoreArtifactV1) error {
+			failed := false
+			first.Do(func() { failed = true; close(failing) })
+			if failed {
+				return errors.New("network not up yet")
+			}
+			return inner(ctx, artifact)
+		}
+		s.execOps = &ops
+		done := make(chan struct{})
+		go func() { s.convergeOnBoot(context.Background()); close(done) }()
+		select {
+		case <-failing:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the first attempt never ran")
+		}
+		during()
+		fake.reset()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("convergeOnBoot did not return")
+		}
+		return fake.snapshot()
+	}
+
+	t.Run("routing switched off", func(t *testing.T) {
+		s, fake, _ := routingtest_server(t)
+		calls := run(t, s, fake, func() {
+			if _, err := s.setRouting(context.Background(), false, routingByPanel); err != nil {
+				t.Errorf("routing off: %v", err.body())
+			}
+		})
+		if !s.routingIsOff() || len(calls) != 0 {
+			t.Fatalf("the retry touched the router after routing was switched off: %v", calls)
+		}
+	})
+
+	t.Run("an Apply & Save recorded", func(t *testing.T) {
+		s, fake := applytest_server(t)
+		s.recordApplied(true, &appliedRevision{Rev: "A", At: 1, Materialization: applyboot_kernelMaterialization()})
+		saved := &appliedRevision{Rev: "B", At: 2, Materialization: applyboot_kernelMaterialization()}
+		calls := run(t, s, fake, func() {
+			s.applyMu.Lock() // as runApply records it
+			s.recordApplied(true, saved)
+			s.applyMu.Unlock()
+		})
+		if s.committedRevision() != saved || len(calls) != 0 {
+			t.Fatalf("the retry re-executed A over the committed B: %v", calls)
+		}
+	})
+}
+
+// noReconcileSettle makes the reconcile loop's second read immediate.
+func noReconcileSettle(t *testing.T) {
+	old := applyReconcileSettle
+	applyReconcileSettle = 0
+	t.Cleanup(func() { applyReconcileSettle = old })
+}
+
 func TestReconcileKernelPlane_ReinstallsWhenTheRouterDroppedIt(t *testing.T) {
+	noReconcileSettle(t)
 	s, fake := applytest_server(t)
 	s.recordApplied(true, &appliedRevision{Rev: "committed", At: 1, Materialization: applyboot_kernelMaterialization()})
-	// The first postcheck reports the plane missing (an NDM firewall rebuild, an fw4 reload); the
-	// one after the reinstall proves it is back.
-	fake.failOnce = true
-	fake.kernelCheckErr = errors.New("nft: no such table")
+	// The plane is gone (an fw4 reload that no hook restores): both reads before the reinstall say so,
+	// the one after it proves it is back.
+	ops := fake.ops()
+	reinstalled := false
+	innerKernel := ops.kernel
+	ops.kernel = func(c context.Context, a executionKernelArtifactV1, r *executionKernelArtifactV1) error {
+		reinstalled = true
+		return innerKernel(c, a, r)
+	}
+	innerCheck := ops.kernelPostcheck
+	ops.kernelPostcheck = func(c context.Context, a executionKernelArtifactV1) error {
+		_ = innerCheck(c, a)
+		if !reinstalled {
+			return errors.New("nft: no such table")
+		}
+		return nil
+	}
+	s.execOps = &ops
 
 	s.reconcileKernelPlane(context.Background())
 
-	want := []string{"kernelPostcheck", "kernel:ensure_present", "kernelPostcheck"}
+	want := []string{"kernelPostcheck", "kernelPostcheck", "kernel:ensure_present", "kernelPostcheck"}
 	if got := strings.Join(fake.snapshot(), ","); got != strings.Join(want, ",") {
 		t.Fatalf("reconcile ops = %v, want %v", fake.snapshot(), want)
 	}
@@ -170,6 +270,48 @@ func TestReconcileKernelPlane_ReinstallsWhenTheRouterDroppedIt(t *testing.T) {
 	s.reconcileKernelPlane(context.Background())
 	if got := strings.Join(fake.snapshot(), ","); got != "kernelPostcheck" {
 		t.Errorf("a healthy plane was reinstalled: %v", fake.snapshot())
+	}
+}
+
+// QA-118: KeeneticOS rebuilds its firewall every 150 s and its hook restores WayHop's rules within a
+// second. A tick that reads inside that gap must not reinstall the plane on top of the hook: the
+// second read, after the settle, finds it back and nothing is reinstalled.
+func TestReconcileKernelPlane_RidesOutAFirmwareRebuild(t *testing.T) {
+	noReconcileSettle(t)
+	s, fake := applytest_server(t)
+	s.recordApplied(true, &appliedRevision{Rev: "committed", At: 1, Materialization: applyboot_kernelMaterialization()})
+	fake.failOnce = true
+	fake.kernelCheckErr = errors.New("iptables: No chain/target/match by that name.")
+
+	s.reconcileKernelPlane(context.Background())
+
+	if got := strings.Join(fake.snapshot(), ","); got != "kernelPostcheck,kernelPostcheck" {
+		t.Fatalf("a plane the hook restored within the settle was reinstalled: %v", fake.snapshot())
+	}
+	if s.kernelPlaneObserved() != kernelPlanePresent {
+		t.Error("a plane found on the second read must be recorded present")
+	}
+}
+
+// The settle never outlives the tick: a cancelled loop returns without reinstalling.
+func TestReconcileKernelPlane_SettleHonoursCancel(t *testing.T) {
+	old := applyReconcileSettle
+	applyReconcileSettle = time.Hour
+	t.Cleanup(func() { applyReconcileSettle = old })
+	s, fake := applytest_server(t)
+	s.recordApplied(true, &appliedRevision{Rev: "committed", At: 1, Materialization: applyboot_kernelMaterialization()})
+	fake.kernelCheckErr = errors.New("nft: no such table")
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	done := make(chan struct{})
+	go func() { s.reconcileKernelPlane(ctx); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the settle did not return on cancel")
+	}
+	if got := strings.Join(fake.snapshot(), ","); got != "kernelPostcheck" {
+		t.Errorf("a cancelled tick went on after the settle: %v", fake.snapshot())
 	}
 }
 

@@ -6,8 +6,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"wayhop/internal/model"
+	"wayhop/internal/platform"
 )
 
 func TestHandlePBRPreview(t *testing.T) {
@@ -53,7 +55,7 @@ func TestHandlePBRPreview(t *testing.T) {
 // preview silently omitted it, misleading offload users.
 func TestHandlePBRPreviewOffload(t *testing.T) {
 	s, _ := sharehandlers_server(t)
-	s.accelOnce.Do(func() { s.accelKindCached = "nft-flowtable" }) // flowtable-capable host, so offload compiles
+	s.hostVerdicts.accel, s.hostVerdicts.accelAt = platform.Accel{Kind: "nft-flowtable"}, time.Now() // flowtable-capable host, so offload compiles
 	// fast mode + hardware offload with explicit devices, so no host probe runs.
 	s.cfg.RoutingMode = "fast"
 	s.cfg.Offload = "hw"

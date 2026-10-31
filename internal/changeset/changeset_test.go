@@ -261,3 +261,93 @@ func TestFeedRefreshIsReviewable(t *testing.T) {
 		t.Errorf("a same-length feed with different prefixes was reported as unchanged")
 	}
 }
+
+// A Hysteria realm address carries the rendezvous token and the realm name that hides the server's
+// address, so it diffs like a password.
+func TestDiff_RealmIsSecret(t *testing.T) {
+	realm := func(v string) func(*model.Endpoint) {
+		return func(e *model.Endpoint) {
+			e.Protocol = model.ProtoHysteria2
+			e.Params = map[string]any{"password": "SUPERSECRET", "realm": v}
+		}
+	}
+	base := model.Profile{Endpoints: []model.Endpoint{ep("a", "Alpha", realm("realm://tok-one@rendezvous.example.com/cabin-one"))}}
+	desired := model.Profile{Endpoints: []model.Endpoint{ep("a", "Alpha", realm("realm://tok-two@rendezvous.example.com/cabin-two"))}}
+	cs := Diff("r1", "r2", base, desired, config.Config{}, config.Config{})
+	for _, ch := range cs.Changes {
+		blob := ch.Before + " " + ch.After + " " + ch.Impact + " " + strings.Join(ch.Warnings, " ")
+		for _, leak := range []string{"tok-one", "tok-two", "cabin-one", "cabin-two"} {
+			if strings.Contains(blob, leak) {
+				t.Fatalf("the realm leaked into the change set: %q in %+v", leak, ch)
+			}
+		}
+	}
+	if cs.Count() == 0 {
+		t.Fatal("a changed realm produced no change")
+	}
+}
+
+// An SSH exit's credentials diff like a password: the password, the private key and its passphrase.
+func TestDiff_SSHSecretsNeverRevealed(t *testing.T) {
+	sshParams := func(pw, key, pass string) func(*model.Endpoint) {
+		return func(e *model.Endpoint) {
+			e.Protocol = model.ProtoSSH
+			e.Params = map[string]any{"user": "root", "password": pw, "private_key": key, "private_key_passphrase": pass}
+		}
+	}
+	base := model.Profile{Endpoints: []model.Endpoint{ep("a", "Alpha", sshParams("pw-one", "key-one", "pass-one"))}}
+	desired := model.Profile{Endpoints: []model.Endpoint{ep("a", "Alpha", sshParams("pw-two", "key-two", "pass-two"))}}
+	cs := Diff("r1", "r2", base, desired, config.Config{}, config.Config{})
+	if cs.Count() != 3 {
+		t.Fatalf("want three changes, got %+v", cs.Changes)
+	}
+	for _, ch := range cs.Changes {
+		blob := ch.Before + " " + ch.After + " " + ch.Impact + " " + strings.Join(ch.Warnings, " ")
+		for _, leak := range []string{"pw-one", "pw-two", "key-one", "key-two", "pass-one", "pass-two"} {
+			if strings.Contains(blob, leak) {
+				t.Fatalf("an SSH secret leaked into the change set: %q in %+v", leak, ch)
+			}
+		}
+	}
+	if !IsSecretField("private_key_passphrase") {
+		t.Fatal("private_key_passphrase is not a secret field")
+	}
+}
+
+// QA-104: the Snell psk and the OpenConnect TOTP secret showed in the change review in the clear, and
+// so did an OpenVPN profile's client key, tls-auth / tls-crypt key and static key. Each diffs like a
+// password: a change row that names the field and never its value.
+func TestDiff_ProtocolSecretsNeverRevealed(t *testing.T) {
+	for _, tc := range []struct {
+		proto model.Protocol
+		key   string
+	}{
+		{model.ProtoSnell, "psk"},
+		{model.ProtoSnell, "userkey"},
+		{model.ProtoOpenConnect, "totp_secret"},
+		{model.ProtoOpenVPN, "key"},
+		{model.ProtoOpenVPN, "control_key"},
+		{model.ProtoOpenVPN, "static_key"},
+	} {
+		with := func(v string) func(*model.Endpoint) {
+			return func(e *model.Endpoint) {
+				e.Protocol = tc.proto
+				e.Params = map[string]any{tc.key: v}
+			}
+		}
+		base := model.Profile{Endpoints: []model.Endpoint{ep("a", "Alpha", with("value-one"))}}
+		desired := model.Profile{Endpoints: []model.Endpoint{ep("a", "Alpha", with("value-two"))}}
+		cs := Diff("r1", "r2", base, desired, config.Config{}, config.Config{})
+		if cs.Count() != 1 {
+			t.Fatalf("%s %s: want one change, got %+v", tc.proto, tc.key, cs.Changes)
+		}
+		ch := cs.Changes[0]
+		blob := ch.Before + " " + ch.After + " " + ch.Impact + " " + strings.Join(ch.Warnings, " ")
+		if strings.Contains(blob, "value-one") || strings.Contains(blob, "value-two") {
+			t.Errorf("%s %s leaked into the change set: %+v", tc.proto, tc.key, ch)
+		}
+		if !IsSecretField(tc.key) {
+			t.Errorf("%s is not a secret field", tc.key)
+		}
+	}
+}

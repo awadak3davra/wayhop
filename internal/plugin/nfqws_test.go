@@ -68,7 +68,7 @@ func TestNativeConfig_Nfqws(t *testing.T) {
 
 // TestNfqws_SyncNeedsBinaryWritesConfig: Sync of a nfqws2 spec on a host with no nfqws2 binary
 // writes the .nfqws args file, reports needs_binary / not-running, and surfaces the engine — the
-// same graceful degradation as olcRTC/awg.
+// same graceful degradation as awg.
 func TestNfqws_SyncNeedsBinaryWritesConfig(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()) // hermetic: no nfqws2 on PATH
 	cfgDir, binDir := t.TempDir(), t.TempDir()
@@ -94,7 +94,7 @@ func TestNfqws_SyncNeedsBinaryWritesConfig(t *testing.T) {
 
 // TestNfqws_RelaunchResolvesBinName: a managed nfqws2 proc whose binary has vanished (cooldown
 // elapsed) must be relaunched via its binName, fail to resolve, and degrade to needs_binary —
-// proving Supervise's generalized relaunch uses the per-proc binName, not a hardcoded "olcrtc".
+// proving Supervise's generalized relaunch uses the per-proc binName, not a hardcoded engine name.
 func TestNfqws_RelaunchResolvesBinName(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())      // hermetic
 	m := New(t.TempDir(), t.TempDir()) // empty binDir → nfqws2 unresolvable

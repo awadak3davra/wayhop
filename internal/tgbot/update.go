@@ -55,7 +55,7 @@ func (v view) Update(info UpdateInfo) (string, *Keyboard) {
 	var b strings.Builder
 	var extra []InlineButton
 	switch {
-	case info.Managed != "":
+	case info.Managed != "" && !info.Available:
 		b.WriteString(v.t("up.managed", esc(info.Managed)))
 	case info.NoChannel:
 		b.WriteString(v.t("up.nochannel"))
@@ -73,6 +73,9 @@ func (v view) Update(info UpdateInfo) (string, *Keyboard) {
 		b.WriteString(v.t("up.latest", esc(info.Current)))
 	default:
 		b.WriteString(v.t("up.unknown", esc(info.Current)))
+	}
+	if info.Note != "" {
+		b.WriteString("\n" + v.t("up.lastnote", esc(info.Note)))
 	}
 	return b.String(), v.maintBack(extra...)
 }
@@ -97,7 +100,7 @@ func (b *Bot) updateCheck(ctx context.Context, v view, m *Message) {
 // version, so what is installed is what was asked about.
 func (b *Bot) askInstall(ctx context.Context, v view, m *Message) {
 	info := b.checkUpdate(ctx)
-	if !info.Available || info.Managed != "" {
+	if !info.Available {
 		text, kb := v.Update(info)
 		if !info.Available && info.Managed == "" && info.Err == "" && !info.NoChannel {
 			text = v.t("up.none") + "\n" + text
@@ -119,7 +122,7 @@ func (b *Bot) install(ctx context.Context, v view, m *Message, version string) {
 	cancel()
 	switch {
 	case err != nil:
-		b.show(ctx, m, v.t("up.installfail", esc(err.Error())), v.maintBack())
+		b.show(ctx, m, v.t("up.installfail", esc(errorText(v, err))), v.maintBack())
 	case res.Restarting:
 		b.show(ctx, m, v.t("up.done", esc(res.Installed)), nil)
 	default:
@@ -136,7 +139,7 @@ func (b *Bot) updateLoop(ctx context.Context) {
 		}
 		wait = b.updateEvery
 		info := b.checkUpdate(ctx)
-		if info.Available && info.Managed == "" && b.upd.announce(info.Latest) {
+		if info.Available && b.upd.announce(info.Latest) {
 			b.Notify(updateAlert(info, b.now()))
 		}
 	}

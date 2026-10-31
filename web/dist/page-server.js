@@ -243,11 +243,12 @@ async function openProvision(sv) {
   // nothing on the dialog saying whether the host answered. The toast stays (it is the page-level
   // half and survives a re-render); this is the half that stays put.
   const checkOut = el("span", { class: "hint", style: "align-self:center" });
+  const linksOut = el("div", {}); // links a run hands back for people (MTProto's tg://proxy)
   const back = modal({
     title: t("Set up {0}", (sv && (sv.name || sv.host)) || t("server")),
     body: el("div", {}, c.node,
       el("div", { class: "card-title", style: "margin:18px 0 10px" }, "What to set up"),
-      picker.node, con.node),
+      picker.node, con.node, linksOut),
     footer: el("div", { style: "display:flex;gap:10px;flex-wrap:wrap" }, checkBtn, previewBtn, runBtn, checkOut),
   });
   checkBtn.addEventListener("click", async () => {
@@ -289,10 +290,24 @@ async function openProvision(sv) {
         const res = v.result || {};
         const req = (res.requested_protocols || []).length;
         const got = (res.provisioned_protocols || []).length;
+        const links = res.share_links || [];
         if (v.ok && res.partial) {
           toast("Partly set up — " + got + " of " + req + " ready, the rest failed. See the console.", "err");
-        } else if (v.ok) toast("Done — client added to Connections", "ok");
+        } else if (v.ok) toast(links.length && !(res.added_endpoints || []).length ? t("Done — the link is below") : "Done — client added to Connections", "ok");
         else toast("Finished with errors — see console", "err");
+        // A tg://proxy link is for a phone, not a connection: shown here, with its code, and nowhere else.
+        linksOut.innerHTML = "";
+        links.forEach(l => {
+          const field = el("input", { type: "text", readonly: "true", value: l.link, "aria-label": l.name, style: "font-family:var(--mono);font-size:12px;flex:1;min-width:0" });
+          linksOut.appendChild(el("div", { class: "card", style: "margin-top:12px" },
+            el("div", { class: "card-title", style: "margin-bottom:6px" }, l.name),
+            el("div", { class: "hint", style: "margin-bottom:8px" }, t("Open it on the phone: scan the code, or copy the link into Telegram.")),
+            l.qr_svg ? el("img", { src: "data:image/svg+xml;charset=utf-8," + encodeURIComponent(l.qr_svg), alt: t("QR code of the link"), width: "164", height: "164" }) : "",
+            el("div", { style: "display:flex;gap:8px;margin-top:8px" }, field,
+              el("button", { class: "btn btn-sm", onclick: () => copyText(l.link) }, t("Copy")))));
+        });
+        // Below the protocol list and the console: bring it into view, or "the link is below" points nowhere.
+        if (links.length) linksOut.scrollIntoView({ block: "nearest" });
       });
     } catch (e) { runBtn.disabled = false; runBtn.textContent = t("Set up"); toast(e.message, "err"); }
   });

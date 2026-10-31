@@ -8,14 +8,22 @@ import (
 	"wayhop/internal/generator"
 	"wayhop/internal/importer"
 	"wayhop/internal/model"
+	"wayhop/internal/updatetx"
 )
 
 // runTool handles non-daemon CLI subcommands used for quick testing:
 //
 //	wayhop import <share-link-or-conf>   # parse a link into the wayhop model (JSON)
 //	wayhop gen    <share-link-or-conf>   # parse + wrap in a profile + emit sing-box config
+//	wayhop update-verifier               # print the update supervisor (internal/updatetx)
 func runTool(args []string) error {
 	switch args[0] {
+	case "update-verifier":
+		// The update supervisor, for the installers and the package scripts to write beside the config
+		// (internal/updatetx): one copy, embedded in the build that knows how it is used.
+		_, err := os.Stdout.Write(updatetx.Script())
+		return err
+
 	case "import":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: wayhop import <share-link-or-conf>")

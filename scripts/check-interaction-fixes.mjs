@@ -14,6 +14,8 @@ const updater = fs.readFileSync('web/dist/page-updater.js', 'utf8');
 const server = fs.readFileSync('web/dist/page-server.js', 'utf8');
 const diagnostics = fs.readFileSync('web/dist/page-diagnostics.js', 'utf8');
 const dns = fs.readFileSync('web/dist/page-dns.js', 'utf8');
+// The failover-group dialogs and their member list moved to a route chunk with QA-149/QA-152.
+const failover = fs.readFileSync('web/dist/page-failover.js', 'utf8');
 const failures = [];
 let checks = 0;
 
@@ -749,7 +751,7 @@ function languageContext({ dirty = false, confirmLeave = true, stored = 'auto' }
     'a managed group gets its strict order from the daemon and says so', managedFallback);
 
   // And the dialog footer must stop making a blanket claim that contradicts the card.
-  const hint = (app.match(/const MEMBER_ORDER_HINT = "([^"]*)"/) || [])[1] || '';
+  const hint = (failover.match(/const MEMBER_ORDER_HINT = "([^"]*)"/) || [])[1] || '';
   check(!/urltest\/fallback auto-pick the fastest/.test(hint),
     'the dialog no longer tells every fallback group the fastest wins', hint.slice(0, 90));
   check(/strictly on router tunnels/.test(hint) && /tiebreak/.test(hint),
@@ -974,13 +976,13 @@ globalThis.row = healthRowEl;`, rowCtx);
     { id: 'xray', role: 'standalone' },
     { id: 'hysteria', role: 'standalone' },
     { id: 'dnscrypt-proxy', role: 'standalone' },
-    { id: 'olcrtc', name: 'olcRTC', role: 'socks-plugin', native_managed: true, installed: { present: true } },
+    { id: 'pkg-plugin', name: 'Example plugin', role: 'socks-plugin', native_managed: true, installed: { present: true } },
   ];
   const shown = context.run(catalog).map((e) => e.id);
   check(shown.includes('sing-box'), 'the core is listed', JSON.stringify(shown));
   check(!shown.includes('amneziawg-go'),
     'an engine the kernel already carries gets no installable row', JSON.stringify(shown));
-  check(!shown.includes('olcrtc'),
+  check(!shown.includes('pkg-plugin'),
     'an engine the package manager owns gets no installable row', JSON.stringify(shown));
   // A standalone binary WayHop's datapath never runs would be a row whose install changes no routing.
   check(!shown.includes('mihomo') && !shown.includes('xray') && !shown.includes('hysteria')
@@ -995,7 +997,7 @@ globalThis.row = healthRowEl;`, rowCtx);
   const note = text(context.note(catalog));
   check(/AmneziaWG/.test(note) && /nothing to install/.test(note),
     'the kernel-carried protocol is named, with nothing to install', note);
-  check(/olcRTC/.test(note) && /package manager/.test(note),
+  check(/Example plugin/.test(note) && /package manager/.test(note),
     'a package-manager-owned engine says where it is updated', note);
   check(context.note([{ id: 'sing-box', role: 'core' }]) === null,
     'an ordinary router gets no such note at all');
@@ -1733,7 +1735,7 @@ globalThis.row = healthRowEl;`, rowCtx);
 // always guarded on the sibling, so the clicks were harmless - the defect is that they looked like
 // actions. Measured on the demo: clicking each left the row order byte-identical with no feedback.
 {
-  const picker = functionSource(app, 'memberPicker');
+  const picker = functionSource(failover, 'memberPicker');
   check(picker.includes('_up.disabled = i === 0'),
     'the top member cannot be moved up, and its arrow says so', picker.slice(0, 120));
   check(picker.includes('_dn.disabled = i === rows.length - 1'),
@@ -2327,6 +2329,45 @@ globalThis.run = findingRow;`, context);
   check(!listeners.some((l) => l.type === 'click'), 'and wires nothing');
 }
 
+// The dictionary i18n-loader.js loads must be the one t() reads. The loader used to take the first
+// two letters of the browser's language, which cannot name a region-tagged code: Simplified Chinese
+// ships as zh-CN, and "zh" names no file. Both sides now resolve through the loader's WR_PICK, so
+// this runs the real meta + loader and the real detectLang and asserts they agree, for the tags a
+// Chinese browser actually reports and for the older single-subtag codes.
+{
+  const meta = fs.readFileSync('web/dist/i18n-meta.js', 'utf8');
+  const loader = fs.readFileSync('web/dist/i18n-loader.js', 'utf8');
+  const load = (stored, navLang) => {
+    const written = [];
+    const win = {};
+    const ctx = vm.createContext({
+      window: win, navigator: { language: navLang }, String, Map,
+      localStorage: { getItem: (k) => (k === 'wr-lang' ? stored : null) },
+      document: { write: (s) => written.push(s) },
+    });
+    vm.runInContext(meta + '\n' + loader, ctx);
+    vm.runInContext(`const LANG_RESOLVED = new Map();
+${functionSource(app, 'detectLang')}
+globalThis.detected = detectLang(localStorage.getItem('wr-lang'));`, ctx);
+    const file = (written.join('').match(/i18n\/([^"]+)\.js/) || [])[1] || 'en';
+    return { file: decodeURIComponent(file), lang: ctx.detected };
+  };
+  const cases = [
+    [null, 'zh', 'zh-CN'], [null, 'zh-CN', 'zh-CN'], [null, 'zh-cn', 'zh-CN'], [null, 'zh-Hans', 'zh-CN'],
+    [null, 'zh-Hans-CN', 'zh-CN'], [null, 'zh-SG', 'zh-CN'],
+    // No Traditional dictionary ships; Simplified is the readable choice over English, and the
+    // picker names it 简体中文 so a reader who prefers English can see what they got and switch.
+    [null, 'zh-TW', 'zh-CN'], [null, 'zh-HK', 'zh-CN'],
+    [null, 'ru-RU', 'ru'], [null, 'pt-BR', 'pt'], [null, 'en-US', 'en'], [null, 'ja-JP', 'en'],
+    ['zh', 'en-US', 'zh-CN'], ['zh-CN', 'en-US', 'zh-CN'], ['ru', 'zh-CN', 'ru'], ['en', 'zh-CN', 'en'],
+  ];
+  for (const [stored, navLang, want] of cases) {
+    const got = load(stored, navLang);
+    check(got.file === want && got.lang === want,
+      `stored ${stored} + browser ${navLang} loads and reads ${want}`, JSON.stringify(got));
+  }
+}
+
 // A counter's wording follows its COUNT, in every language the panel ships.
 //
 // Measured on a live router: the review header read "1 pending changes". German, Spanish,
@@ -2363,6 +2404,9 @@ globalThis.pi = pluralIndex; globalThis.tn = tn;`, context);
     'French treats zero as singular', [0, 1, 2].map((n) => pi('fr', n)).join(','));
   // Turkish does not pluralise a noun that already carries a number.
   check([0, 1, 2, 5, 21].every((n) => pi('tr', n) === 0), 'Turkish has one form');
+  // Chinese has no plural forms either; the code is region-tagged (zh-CN) and the rule reads only
+  // the language part.
+  check([0, 1, 2, 5, 21].every((n) => pi('zh-CN', n) === 0), 'Chinese has one form');
 
   // The Slavic rule, including the teens exception that a naive "last digit" version gets wrong:
   // 11..14 are MANY even though their last digits look like one/few.
@@ -2549,7 +2593,8 @@ globalThis.pi = pluralIndex; globalThis.tn = tn;`, context);
 // The throughput card must not name a path its own result contradicts.
 //
 // The title said "Throughput (through active proxy)" unconditionally while the result line prints
-// the server's `via` — derived from singbox.Running(), i.e. from what actually happened. Measured on
+// the server's `via` — derived from what actually happened (since QA-112, from where the rules send
+// the test's site, not from whether a core runs). Measured on
 // the demo, where no core runs: "Throughput (through active proxy)  ↓ 772.26 Mbps ↑ 319.43 Mbps ·
 // 227 ms (direct)" — a claim and its refutation on one line. The title is now the measurement, and
 // the path stays with the number that was measured through it.
@@ -2613,12 +2658,16 @@ globalThis.pi = pluralIndex; globalThis.tn = tn;`, context);
   check(/async function confirmEndpointReplace\(e\)/.test(add),
     'one helper owns the "this id already exists" check');
   const calls = (add.match(/await confirmEndpointReplace\(e\)/g) || []).length;
-  check(calls === 2, 'both the paste tab and the manual tab ask before overwriting', `calls=${calls}`);
-  const manual = add.slice(add.indexOf('function manualTab()'), add.indexOf('function subTab()'));
+  check(calls === 3, 'the paste, manual and ByeDPI tabs all ask before overwriting', `calls=${calls}`);
+  const manual = add.slice(add.indexOf('function manualTab()'), add.indexOf('function byedpiTab()'));
   check(/confirmEndpointReplace/.test(manual),
     'the manual tab specifically no longer posts an endpoint blind');
   check(/replacing \? t\("Replaced \{0\}"/.test(manual),
     'and it reports a replacement as a replacement, not as "Added"');
+  // The ByeDPI tab's id comes from the name, so a second "ByeDPI" would land on the first one.
+  const bye = add.slice(add.indexOf('function byedpiTab()'), add.indexOf('function subTab()'));
+  check(/await confirmEndpointReplace\(e\)/.test(bye) && /replacing \? t\("Replaced \{0\}"/.test(bye),
+    'the ByeDPI tab asks before overwriting and says when it replaced one');
 }
 // The routing-list editor submits the WHOLE struct, and the store reads a missing domain_source as
 // a CHANGED one - which also drops domain_cache and domain_refreshed. The form has no input for the
@@ -2670,6 +2719,990 @@ globalThis.pi = pluralIndex; globalThis.tn = tn;`, context);
   check(both[0]?.weak === true,
     "while an all-via-group dependency still is");
 }
+
+// QA-020: editing an imported Hysteria2 (a rename is enough) dropped every param the form does not
+// render: the keep-map listed hop_ports only, so bandwidth hints and the 1.14 options were lost.
+{
+  const keep = conns.match(/hysteria2: \[([^\]]*)\]/);
+  const kept = keep ? keep[1] : '';
+  check(['hop_ports', 'up_mbps', 'down_mbps', 'hop_interval', 'hop_interval_max', 'bbr_profile', 'obfs_min_packet_size', 'obfs_max_packet_size']
+    .every(k => kept.includes(`"${k}"`)), 'an edited Hysteria2 keeps the params its form does not render', kept);
+}
+
+// QA-021: the same loss for WireGuard / AmneziaWG. Every AmneziaWG 3.x key the .conf importer reads
+// (awgKeys3, awgBools3) has no form field and must match the server's, so it has to be kept; so does
+// a multi-peer .conf's peer list. Read from the importer's own tables so a new key cannot be missed.
+{
+  const conf = fs.readFileSync('internal/importer/conf.go', 'utf8');
+  const tables = conf.slice(conf.indexOf('var awgKeys3'), conf.indexOf('\n}\n', conf.indexOf('var awgBools3')));
+  const keys3 = [...tables.matchAll(/\{"[a-z0-9]+", "([a-z_0-9]+)"/g)].map(m => m[1]);
+  const keepOf = (proto) => (conns.match(new RegExp(proto + ': \\[([^\\]]*)\\]')) || ['', ''])[1];
+  const awg = keepOf('amneziawg');
+  check(keys3.length >= 9 && keys3.every(k => awg.includes(`"${k}"`)) && awg.includes('"peers"'),
+    'an edited AmneziaWG keeps every 3.x key and the peer list', `keys3=${keys3.join(',')} keep=${awg}`);
+  check(keepOf('wireguard').includes('"peers"'), 'an edited WireGuard keeps a multi-peer list', keepOf('wireguard'));
+}
+
+// QA-015: with WayHop's routing switched off from the header, the dashboard hero kept reading the
+// configuration ("Selective routing - 1 route via a tunnel") under a banner saying all traffic goes
+// straight out the WAN. The switch now outranks every configuration verdict.
+{
+  const context = vm.createContext({ t: (s) => s, state: { applyState: { routing: { enabled: false } } } });
+  vm.runInContext(`${functionSource(app, 'computeVerdict')}\nglobalThis.verdict = computeVerdict();`, context);
+  check(context.verdict.word === 'Off' && /routing is off/.test(context.verdict.verdict),
+    'routing switched off is what the dashboard hero says', JSON.stringify(context.verdict));
+  check(/box\.dataset\.sig = sig;\s*paintHero\(\);/.test(app),
+    'and the hero is repainted when the switch changes');
+}
+
+// A connection saved before olcRTC was removed opens to a notice, not to fields for an engine
+// WayHop no longer runs, and saving it keeps what it was stored with.
+{
+  const at = conns.indexOf('proto === "olcrtc") {');
+  const formSrc = conns.slice(at, at + 400);
+  check(at >= 0 && /olcRTC is no longer supported/.test(formSrc) && !/f-provider|f-room|f-key/.test(conns),
+    'a retired olcRTC connection explains itself and offers no olcRTC fields');
+  check(/if \(proto === "olcrtc"\) Object\.assign\(p, P\)/.test(conns),
+    'saving a retired olcRTC connection keeps its stored parameters');
+}
+
+// QA-027: the Subscription tab showed "N line(s) skipped" and dropped the reasons the daemon returns
+// with each line (Shadow TLS, TUIC v4, a retired engine), so a refused proxy could not be explained.
+{
+  const fetchSrc = conns.slice(conns.indexOf('api.post("/api/subscription"'), conns.indexOf('"Fetch / Parse")'));
+  check(/function skippedLines\(errors, summary\)[\s\S]{0,300}errors\.forEach\([\s\S]{0,80}redactSecrets/.test(conns),
+    'skipped subscription lines are listed with their reasons, redacted');
+  check((fetchSrc.match(/skippedLines\(r\.errors,/g) || []).length === 2,
+    'both the partial and the nothing-found answers carry those reasons', fetchSrc.slice(0, 200));
+}
+
+// Competitor gap 2: the Subscription tab sends the User-Agent the daemon fetches with and keeps for
+// the scheduled refresh, and shows the stored one again.
+{
+  check(/api\.post\("\/api\/subscription", \{ url: url\.value\.trim\(\), text: ta\.value, user_agent: ua\.value\.trim\(\)(, \.\.\.hw\.body\(\))? \}\)/.test(conns)
+    && /c\.subscription\.user_agent && !ua\.value\) ua\.value = c\.subscription\.user_agent/.test(conns),
+    'the subscription fetch sends the chosen User-Agent and the tab shows the stored one');
+}
+
+// Competitor gap 25: the Subscription tab's HWID (x-hwid). A device-limited panel (Remnawave) answers
+// 404 without one, and a changed one takes another device slot, so: the fetch sends the choice, the
+// tab shows the stored ID and, after a fetch, the one the provider was asked with (a generated one is
+// made by the daemon), and until the stored ID is known nothing is sent, so a tab whose config failed
+// to load cannot switch a working ID off. An operator's choice made before the config arrives stands.
+// The daemon keeps the generated ID apart from the one the URL is fetched with (generated_hwid), so
+// "Generated" is that ID, shown again after Off or Custom, and never a new one.
+{
+  check(/api\.post\("\/api\/subscription", \{ url: url\.value\.trim\(\), text: ta\.value, user_agent: ua\.value\.trim\(\), \.\.\.hw\.body\(\) \}\)/.test(conns)
+    && /if \("hwid" in r\) hw\.show\(r\);/.test(conns)
+    && /if \(c && c\.subscription\) hw\.load\(c\.subscription\);/.test(conns),
+    'the subscription fetch sends the HWID choice, and the tab shows the stored and the just-used ID');
+  const src = functionSource(conns, 'fHWID');
+  check(src.includes('t("Panels with a device limit (Remnawave) answer 404 without it. A generated ID is random and kept: a new one takes another device slot.")'),
+    'the HWID field says why it exists and why a generated ID is kept');
+  const node = (...a) => Object.assign(tinyEl(...a), { style: {} });
+  const context = vm.createContext({ el: node, t: (s) => s });
+  try {
+    vm.runInContext(`${src}; globalThis.run = fHWID;`, context);
+    const make = () => {
+      const box = context.run();
+      const [label, sel, id, hint] = box.children;
+      const pick = (v) => { sel.value = v; sel.listeners.change(); };
+      return { box, label, sel, id, hint, pick };
+    };
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const GEN = '0123456789abcdef';
+    let f = make();
+    check(same(f.box.body(), {}) && f.id.style.display === 'none',
+      'before the stored HWID is known the fetch sends no HWID choice, so the daemon keeps the stored one', JSON.stringify(f.box.body()));
+    // Named without new strings: the select by its label, the ID field by the label and the chosen
+    // mode, both described by the hint.
+    check(f.label.attrs.for === f.sel.attrs.id && f.id.attrs['aria-labelledby'] === `${f.label.attrs.id} ${f.sel.attrs.id}`
+      && f.sel.attrs['aria-describedby'] === f.hint.attrs.id && f.id.attrs['aria-describedby'] === f.hint.attrs.id && !f.id.attrs['aria-label'],
+      'the HWID controls are named by the label (and the mode) and described by the hint');
+    f.box.load({});
+    check(same(f.box.body(), { hwid_mode: 'off', hwid: '' }) && f.id.style.display === 'none', 'no stored HWID reads as off');
+    f = make(); f.box.load({ hwid: GEN, generated_hwid: GEN });
+    check(f.sel.value === 'generate' && f.id.value === GEN && f.id.readOnly && f.id.style.display === ''
+      && same(f.box.body(), { hwid_mode: 'generate', hwid: '' }),
+      'a stored generated ID shows read-only under Generated, and the fetch asks the daemon to keep it', `${f.sel.value} ${f.id.value} ${JSON.stringify(f.box.body())}`);
+    f = make(); f.box.load({ hwid: 'fedcba9876543210', generated_hwid: GEN });
+    check(f.sel.value === 'custom', 'a custom ID that looks generated is still Custom: the mode is read from the generated ID, not the shape');
+    f = make(); f.box.load({ hwid: 'Test-HWID=0123456789', generated_hwid: GEN });
+    check(f.sel.value === 'custom' && !f.id.readOnly && same(f.box.body(), { hwid_mode: 'custom', hwid: 'Test-HWID=0123456789' }),
+      "a stored custom ID shows editable under Custom and is sent as typed");
+    f.pick('generate');
+    check(f.id.value === GEN && f.id.readOnly && f.id.style.display === '' && same(f.box.body(), { hwid_mode: 'generate', hwid: '' }),
+      'Generated over a custom ID shows the kept generated ID and asks the daemon for it, not for the custom one', `${f.id.value} ${JSON.stringify(f.box.body())}`);
+    f = make(); f.box.load({ hwid: 'Test-HWID=0123456789' });
+    f.pick('generate');
+    check(f.id.value === '' && f.id.style.display === 'none' && same(f.box.body(), { hwid_mode: 'generate', hwid: '' }),
+      'Generated with none made yet shows nothing until the daemon makes one');
+    f.box.show({ hwid: 'fedcba9876543210', generated_hwid: 'fedcba9876543210' });
+    check(f.sel.value === 'generate' && f.id.value === 'fedcba9876543210' && f.id.style.display === '',
+      'after the fetch the tab shows the ID the daemon generated');
+    f = make(); f.box.show({ hwid: '', generated_hwid: GEN }); f.pick('generate');
+    check(f.id.value === GEN && f.id.style.display === '', 'after Off, Generated shows the same kept ID');
+    f = make(); f.pick('custom'); f.id.value = ' other-test-hwid-42 '; f.box.load({ hwid: GEN, generated_hwid: GEN });
+    check(f.sel.value === 'custom' && same(f.box.body(), { hwid_mode: 'custom', hwid: 'other-test-hwid-42' }),
+      "a choice made before the stored ID arrives is not overwritten by it", JSON.stringify(f.box.body()));
+    f = make(); f.box.load({ hwid: GEN, generated_hwid: GEN }); f.pick('off');
+    check(same(f.box.body(), { hwid_mode: 'off', hwid: '' }) && f.id.style.display === 'none', 'Off sends no HWID');
+  } catch (e) { check(false, 'the HWID field could not be run', e.message); }
+}
+
+// Competitor gap 1: the routing-list dialog rebuilds the list from its fields on save, so the TLS
+// fragmentation setting must be written back explicitly (as domain_source is), and cleared when the
+// list leaves direct, where it would be a hidden setting that does nothing.
+{
+  const routing = fs.readFileSync('web/dist/page-routing.js', 'utf8');
+  check(/body\.tls_fragment = routeSel\.value === "direct" \? fragSel\.value : "";/.test(routing)
+    && /fragSel\.value = rl\.tls_fragment \|\| "";/.test(routing),
+    'the routing-list dialog keeps TLS fragmentation on save and clears it off direct');
+}
+
+// QA-035..037: the connection form rebuilt the TLS block from its own fields, so an edit-and-save
+// dropped what it has no control for - an HTTPS proxy's whole TLS, Reality on AnyTLS, the fragment
+// flags a sing-box import sets. The carry-over must cover those and must not resurrect a field the
+// form renders (fingerprint is carried only where there is no f-fp input).
+{
+  const at = conns.indexOf('if (proto === "http" && T.enabled) out.tls = Object.assign({}, T);');
+  const block = conns.slice(at, at + 900);
+  check(at >= 0 && /proto === "anytls" && T\.type === "reality"/.test(block)
+    && /\["fragment", "record_fragment", "insecure"\]\.concat\(document\.getElementById\("f-fp"\) \? \[\] : \["fingerprint"\]\)/.test(block)
+    && /T\[k\] !== undefined && out\.tls\[k\] === undefined/.test(block),
+    'an edit-and-save keeps the TLS settings the form has no control for, without resurrecting cleared ones');
+  check(at > 0 && at < conns.indexOf('const healthEl = document.getElementById("f-health");'),
+    'and runs after every branch that builds out.tls');
+}
+
+// QA-034: "Get a pairing code" worked with no bot token and told the user to send the code to a bot
+// that did not exist; the test-message button beside it was already gated.
+{
+  const tg = fs.readFileSync('web/dist/page-telegram.js', 'utf8');
+  check(/pairBtn\.disabled = !model\.has_token;/.test(tg) && /finally \{ pairBtn\.disabled = !model\.has_token; \}/.test(tg),
+    'a pairing code is offered only once a bot token is saved');
+}
+
+// QA-032: adding a preset refetched every feed (an empty refresh body) and never read the per-feed
+// errors that come back in a 200, so a failed fetch of the new list went unsaid.
+{
+  const routingSrc = fs.readFileSync('web/dist/page-routing.js', 'utf8');
+  check(/api\.post\("\/api\/routing\/refresh", \{ id: body\.id \}\)/.test(routingSrc),
+    'adding a preset fetches that list only');
+  check(/r\.errors && r\.errors\.length\) toast\(t\("\{0\} was added but its source could not be fetched: \{1\}"/.test(routingSrc),
+    'and says so when its feed could not be fetched');
+}
+
+// QA-028: bulk import stores an entry the host cannot carry, or that cannot load, disabled and lists it
+// in stored_disabled; the dialog read only saved/duplicates/errors, so the flip went unreported.
+{
+  const bulkSrc = conns.slice(conns.indexOf('api.post("/api/endpoints/bulk"'), conns.indexOf('"Import selected")'));
+  check(/r\.stored_disabled/.test(bulkSrc) && /toast\(t\("disabled"\) \+ ": " \+ redactSecrets\(off\.join/.test(bulkSrc),
+    'an import that arrives disabled is reported, with the reasons, redacted');
+}
+// Gap 15: a Hysteria2 Realm connection lost its realm on any edit (the form rebuilt params from its
+// fields), and QA-053: every save path refused it for having no server. The form renders the realm and
+// its STUN servers and collects them, and a realm connection is saved without a server.
+{
+  const src = fs.readFileSync('web/dist/page-connections.js', 'utf8');
+  check(/fInput\("f-realm", /.test(src) && /p\.realm = g\("f-realm"\)/.test(src) && /p\.realm_stun = g\("f-realm-stun"\)/.test(src),
+    'the Hysteria2 form shows, and saves, a Realm and its STUN servers');
+  check((src.match(/needsServer\(e\) && \(!e\.server \|\| !e\.port\)/g) || []).length === 3,
+    'all three save paths let a Realm connection through without a server');
+}
+// Gap 6: a routing list's exit may be one of the Keenetic's own access policies. The three list-exit
+// selects offer them; a saved policy renders first as routingOutboundSelect's "unavailable" entry (the
+// list arrives before the policies), so the late answer must relabel that option, never add a second.
+{
+  const src = fs.readFileSync('web/dist/page-routing.js', 'utf8');
+  const fn = functionSource(src, 'addKeeneticPolicies');
+  check(/if \(have\) have\.textContent = label; else sel\.appendChild/.test(fn),
+    "a saved access policy is relabelled, not listed twice");
+  check((src.match(/addKeeneticPolicies\(routingOutboundSelect\(/g) || []).length === 3,
+    'every list-exit select offers the access policies');
+}
+// QA-050: Routing -> Import showed a pasted HydraRoute file's groups under "This Keenetic's own lists":
+// the paste replaces the rows, and the heading stayed. The heading follows the answer's source.
+{
+  const src = fs.readFileSync('web/dist/page-routing.js', 'utf8');
+  const fn = functionSource(src, 'openRoutingImport');
+  check(/const show = \(res\) => \{[^]*?keen\.hidden = res\.source !== "keenetic";/.test(fn),
+    "the Keenetic heading shows only over the Keenetic's own lists");
+}
+// QA-042: the external-tunnel form saved protocol "", server "" and port 0 whatever the tunnel had, so
+// renaming an adopted tunnel blanked fields the form does not even show. It must carry them through.
+{
+  const src = fs.readFileSync('web/dist/page-connections.js', 'utf8');
+  const form = functionSource(src, 'externalForm');
+  check(/protocol: ep\.protocol \|\| ""/.test(form) && /server: ep\.server \|\| ""/.test(form) && /port: ep\.port \|\| 0/.test(form),
+    'the external-tunnel form keeps the protocol, server and port it does not show');
+}
+
+// QA-040: a battery row the Diagnostics chunk adds (the per-exit service check) is not in app.js's
+// HC_ORDER. The rows, the "Checking… n/m" counter and the crash fallback read HC_ORDER alone, so the
+// row stayed invisible while it ran and the counter could read 13/13 with it still out.
+{
+  const src = fs.readFileSync('web/dist/page-diagnostics.js', 'utf8');
+  const fn = functionSource(src, 'batteryIds');
+  const batteryIds = new Function('hcIds', 'CHECKS', fn + '; return batteryIds;')(
+    (res) => ['core', 'internet', ...Object.keys(res).filter(id => !['core', 'internet'].includes(id))],
+    { core: 1, internet: 1, services: 1 });
+  const ids = batteryIds({ dns: {} });
+  check(ids.join() === 'core,internet,dns,services',
+    "batteryIds lists the fixed rows, the server rows, then the chunk's own checks before they report", ids.join());
+  const paint = functionSource(src, 'paintBattery');
+  check(/batteryIds\(res\)\.forEach\(id => wrap\.appendChild\(healthRowEl/.test(paint),
+    'the rows come from batteryIds, so a running chunk check shows as checking');
+  check(/const ids = batteryIds\(res\);[^\n]*t\("Checking… \{0\}\/\{1\}", ids\.filter\(id => res\[id\]\)\.length, ids\.length\)/.test(paint),
+    "the progress counts every row, not only app.js's fixed list");
+  check(/HC_LABEL\.services = L\("Services through each exit"\)/.test(src),
+    'the chunk names its own row, so it is labelled while still pending');
+}
+
+// An SSH private key imported from a sing-box config is a list of lines (sing-box's private_key is
+// listable), and the API keeps it so. The form rendered it with String(), which joins with commas:
+// opening such a connection and saving it unchanged sent a key the daemon refuses as not PEM. Every
+// multi-line field must join a list with line breaks, never hand fText a raw param.
+{
+  const src = fs.readFileSync('web/dist/page-connections.js', 'utf8');
+  const form = functionSource(src, 'manualForm');
+  check(/fText\("f-ssh-key", "Private key", asList\(P\.private_key\)\.join\("\\n"\)/.test(form),
+    'the SSH private key field joins a list of lines with line breaks');
+  check(!/fText\("[^"]+", "[^"]+", P\./.test(form),
+    'no multi-line field is given a raw param that String() would comma-join');
+  const asList = new Function(functionSource(app, 'asList') + '; return asList;')();
+  const lines = ['-----BEGIN OPENSSH PRIVATE KEY-----', 'b3BlbnNzaC1rZXktdjEAAAAA', '-----END OPENSSH PRIVATE KEY-----'];
+  check(asList(lines).join('\n') === lines.join('\n') && asList(lines.join('\n')).join('\n') === lines.join('\n'),
+    'a list and a text key render as the same PEM text');
+  check(/t\("TCP only, no UDP \(calls, games\)\./.test(form),
+    'the SSH form says the exit carries TCP only');
+}
+
+// Gap 13 (slice b): the Telegram bridge's Settings card and dialog. The secret reaches the page only
+// inside the tg://proxy link, shown only while the bridge serves; a new secret asks first and changes
+// nothing else; a router without the binary is sent to Components, where the row must then exist.
+{
+  const tg = fs.readFileSync('web/dist/page-telegram.js', 'utf8');
+  const text = (n) => (n == null ? '' : typeof n !== 'object' ? String(n) : (n.children || []).map(text).join(''));
+  const context = vm.createContext({
+    el: (tag, attrs = {}, ...children) => ({ tag, attrs, children: children.flat().filter((c) => c != null && c !== false) }),
+    t: (s, ...a) => s.replace(/\{(\d)\}/g, (_, i) => a[i]),
+  });
+  vm.runInContext(`${functionSource(tg, 'tgBridgePill')}\n${functionSource(tg, 'tgBridgeSummary')}\n`
+    + `${functionSource(tg, 'tgBridgeBody')}\n`
+    + 'globalThis.pill = tgBridgePill; globalThis.summary = tgBridgeSummary; globalThis.body = tgBridgeBody;', context);
+  const pill = (v) => { const p = context.pill(v); return p.attrs.class + '/' + text(p); };
+  check(pill({ enabled: true, installed: true, running: true }) === 'pill ok/running', 'a serving bridge reads running',
+    pill({ enabled: true, installed: true, running: true }));
+  check(pill({ enabled: true, installed: false }) === 'pill err/not installed'
+    && pill({ enabled: false, installed: false }) === 'pill muted/not installed',
+    'a missing binary is named first, as a fault only when the bridge is on');
+  check(pill({ enabled: true, installed: true }) === 'pill err/stopped' && pill({ enabled: false, installed: true }) === 'pill muted/off',
+    'an installed bridge that does not serve reads stopped when on, off when off');
+  check(context.summary({ running: true, listen: '10.0.0.1:1443', last_error: 'old' }) === '⁦10.0.0.1:1443⁩',
+    'a serving bridge out of any crash loop shows where it listens, isolated for right-to-left pages, and no stale error');
+  // Review of slice b: a bridge in a restart loop is up between restarts. The daemon's crash_loop (the
+  // review's own "keeps exiting" rule) wins over running, in the pill and in the line beside it.
+  const looping = { enabled: true, installed: true, running: true, crash_loop: true, exits: 5, listen: '10.0.0.1:1443',
+    last_error: 'it last exited with: failed to bind 10.0.0.1:1443: Address in use (os error 98)' };
+  check(pill(looping) === 'pill warn/Crash-loop' && pill({ ...looping, running: false }) === 'pill warn/Crash-loop',
+    'a bridge that keeps exiting reads as a crash loop (warning), up between restarts or not', pill(looping));
+  check(context.summary(looping) === looping.last_error && context.summary({ ...looping, running: false }) === looping.last_error,
+    'a bridge that keeps exiting shows how it last ended, not only its address', context.summary(looping));
+  const demo = 'This is the demo: the bridge runs only on a router.';
+  check(context.summary({ enabled: true, running: false, installed: true, listen: '10.0.0.1:1443', last_error: demo }) === demo,
+    "a bridge that does not serve shows the daemon's own reason, e.g. the demo's");
+  const form = (port) => ({ enabled: { checked: true }, port: { value: port }, cfDomain: { value: ' tg.example.com ' }, cfWorker: { value: '' } });
+  const b = context.body(form(''));
+  check(!('secret' in b) && b.enabled === true && b.port === 0 && b.cf_domain === 'tg.example.com' && b.cf_worker_domain === '',
+    'a save sends no secret (the saved one is kept) and a blank port as the default', JSON.stringify(b));
+  check(context.body(form('2443')).port === 2443, 'a typed port is sent as a number');
+
+  const bridge = tg.slice(tg.indexOf('function tgBridgePill('));
+  check(!/\.secret\b/.test(bridge), 'the bridge code reads no secret field: the secret is shown only inside the link');
+  const mgr = functionSource(tg, 'tgBridgeManage');
+  check(/const serving = v\.running && !v\.crash_loop;/.test(mgr) && /if \(!serving \|\| !v\.link\) return;/.test(mgr)
+    && /JSON\.stringify\(\[!!v\.installed, serving \? v\.link \|\| "" : ""\]\)/.test(mgr),
+    'the link and its QR code are shown only while the bridge serves, never up between crash-loop restarts');
+  check(/e\.native_managed && !e\.carried_by_kernel && e\.role !== "core" && e\.role !== "service"/.test(functionSource(updater, 'kernelCarriedNote')),
+    'a package-managed bridge is not named a second time in the package-manager sentence under its own row');
+  check(/el\("img", \{ src: "data:image\/svg\+xml;charset=utf-8," \+ encodeURIComponent\(v\.qr_svg\)/.test(mgr),
+    'the QR code is an <img> of the daemon\'s SVG, never markup parsed into the page');
+  check(/if \(!await modalConfirm\(t\("Make a new secret\?[^"]*"\)\)\) return;\s*put\(regen, \{ enabled: !!v\.enabled, port: v\.port \|\| 0, cf_domain: v\.cf_domain \|\| "",\s*cf_worker_domain: v\.cf_worker_domain \|\| "", regenerate_secret: true \}\);/.test(mgr),
+    'a new secret asks first, then sends the saved settings back unchanged with regenerate_secret');
+  check(/view\.appendChild\(telegramCard\(\)\);\s*view\.appendChild\(telegramCard\(true\)\);/.test(app)
+    && /\(bridge \? tgBridgeCardFill : telegramCardFill\)\(slot\)/.test(functionSource(app, 'telegramCard')),
+    'Settings shows the bridge card next to the bot card, filled from the route chunk');
+
+  const ctx = vm.createContext({});
+  vm.runInContext(`${functionSource(updater, 'componentsToShow')}\nglobalThis.run = componentsToShow;`, ctx);
+  const shown = ctx.run([{ id: 'sing-box', role: 'core' }, { id: 'tg-ws-proxy', role: 'service' }, { id: 'mihomo', role: 'standalone' }])
+    .map((e) => e.id);
+  check(shown.includes('tg-ws-proxy') && !shown.includes('mihomo'),
+    "the bridge's Components row is shown, so the card's pointer leads somewhere", JSON.stringify(shown));
+  const row = functionSource(updater, 'engineRow');
+  check(/optional: e\.id === "sing-box" \|\| e\.role === "service"/.test(row),
+    'an absent service is optional in the verdict, not a gap');
+  check(/if \(!noMutate && e\.role === "service" && !installed\.present\) \{\s*p\.acts\.appendChild\(el\("button", \{ class: "btn btn-sm", "aria-label": t\("Install \{0\}", e\.name\),\s*onclick: ev => installLatest\(e, ev\.currentTarget\) \}, t\("Install"\)\)\);/.test(row),
+    'an absent service gets a one-click Install of the newest release, not a primary one');
+  // No package feed carries a router service: the package-manager install box only ever said "Not
+  // possible here" in red under the Install that works.
+  check(/\} else if \(!installed\.present && !byKernel && !unknownOwner && pmKind && !e\.companion && e\.role !== "service"\) \{/.test(row),
+    'a router service gets no package-manager install box');
+  // The row's role hint is a word every dictionary carries, not the raw "service".
+  const hints = vm.runInContext(`${updater.match(/const ENGINE_ROLE_HINT = \{[^}]*\};/)[0]}\nENGINE_ROLE_HINT`, vm.createContext({}));
+  const noHint = fs.readdirSync('web/i18n').filter((f) => f.endsWith('.json') && f !== 'langs.json')
+    .filter((f) => !(hints.service in JSON.parse(fs.readFileSync(`web/i18n/${f}`, 'utf8'))));
+  check(hints.service === 'router service' && noHint.length === 0, 'a router service row names its role in every language',
+    JSON.stringify({ hint: hints.service, missing: noHint }));
+
+  // installLatest: a declined question gives the button back (it stayed disabled until a reload), and
+  // a release list that cannot be read is said in the button's own row and a toast (it went into a
+  // row updItem() had just built and nothing attached).
+  {
+    const detail = { id: 'detail' };
+    const mkBtn = () => ({ disabled: false, textContent: 'Install', attrs: {},
+      setAttribute(k) { this.attrs[k] = true; if (k === 'disabled') this.disabled = true; },
+      removeAttribute(k) { delete this.attrs[k]; if (k === 'disabled') this.disabled = false; },
+      closest: (sel) => (sel === '.upd-item' ? { querySelector: (q) => (q === '.upd-detail' ? detail : null) } : null) });
+    const seen = { toasts: [], rowErr: [], built: 0, posted: 0 };
+    let versions = async () => ({ latest: 'v1.13.19' });
+    let answer = false;
+    const ictx = vm.createContext({
+      t: (s, ...a) => s.replace(/\{(\d)\}/g, (_, i) => a[i]),
+      api: { get: () => versions(), post: async () => { seen.posted++; return { installed: 'v1.13.19' }; } },
+      modalConfirm: async () => answer,
+      toast: (m, kind) => seen.toasts.push(kind + ':' + m),
+      updRowErr: (vbox, m) => seen.rowErr.push([vbox, m]),
+      updItem: () => { seen.built++; return { vbox: { id: 'detached' } }; },
+      updRows: new Map(), updAdvRows: new Map(), paintUpdVerdict: () => {}, route: () => {},
+    });
+    vm.runInContext(`${functionSource(updater, 'installLatest')}\n${functionSource(updater, 'installVersion')}\n`
+      + 'globalThis.run = installLatest;', ictx);
+    const e = { id: 'tg-ws-proxy', name: 'Telegram bridge (tg-ws-proxy-rs)' };
+    let btn = mkBtn();
+    await ictx.run(e, btn);
+    check(!btn.disabled && seen.posted === 0, 'a declined "Download and install…?" gives the Install button back',
+      JSON.stringify({ disabled: btn.disabled, posted: seen.posted }));
+    versions = async () => { throw new Error('GitHub answered 403'); };
+    btn = mkBtn();
+    await ictx.run(e, btn);
+    check(!btn.disabled && seen.built === 0 && seen.rowErr.length === 1 && seen.rowErr[0][0] === detail
+      && /GitHub answered 403/.test(seen.rowErr[0][1]) && seen.toasts.some((m) => /^err:.*GitHub answered 403/.test(m)),
+    'an unreadable release list is said in the row the button sits in, and in a toast',
+    JSON.stringify({ disabled: btn.disabled, built: seen.built, rowErr: seen.rowErr.map(([v, m]) => [v && v.id, m]), toasts: seen.toasts }));
+  }
+}
+
+// The query path's catch-all row names the resolver that really answers what no rule matches. In fast
+// and mixed mode the core drops FakeIP servers (the Apply check reads the plane the same way), so an
+// enabled FakeIP server at the top was shown as "everything else" while the next one answered.
+{
+  const context = vm.createContext({});
+  vm.runInContext(functionSource(dns, 'dnsAnswersAll') + '; globalThis.run = dnsAnswersAll;', context);
+  const servers = [
+    { tag: 'fake', type: 'fakeip', enabled: true },
+    { tag: 'off', type: 'https', enabled: false },
+    { tag: 'cf', type: 'https', enabled: true },
+  ];
+  const answers = (final, tun) => context.run({ final, servers }, tun);
+  check(answers('', false) === 'cf', 'no default, no TUN: the FakeIP server is left out and cf answers', answers('', false));
+  check(answers('', true) === 'fake', 'no default, TUN: the FakeIP server at the top answers', answers('', true));
+  check(answers('fake', false) === 'cf', 'a FakeIP default without TUN is left out too', answers('fake', false));
+  check(answers('fake', true) === 'fake' && answers('cf', false) === 'cf', 'a default the core keeps answers');
+  check(context.run({ final: '', servers: [] }, false) === '', 'no server at all names none');
+  const path = functionSource(dns, 'dnsQueryPath');
+  check(path.includes('dnsAnswersAll(dnsState, tun)') && !path.includes('servers.find(s => s.enabled)'),
+    'the catch-all row is drawn from that reading', path.slice(path.indexOf('"★"') - 60, path.indexOf('"★"') + 80));
+  check(app.includes('dnsQueryPath(nat, !!(resp && resp.tun))'), 'and renderDNS hands it the plane GET /api/dns reports');
+}
+
+// The IPv6 warning names the routes IPv6 leaves open. It said "the DNS redirect and refusals cover
+// IPv4 only" for any gap, DoT alone included, while IPv6 had its own :53 redirect.
+{
+  const context = vm.createContext({});
+  vm.runInContext(functionSource(dns, 'dnsIPv6Routes') + '; globalThis.run = dnsIPv6Routes;', context);
+  check(context.run(['dot']) === 'DoT (:853)', 'DoT alone is named alone', context.run(['dot']));
+  check(context.run(['53', 'dot', 'doh']) === ':53, DoT (:853), DoH',
+    'and every open route is named, in order', context.run(['53', 'dot', 'doh']));
+  const path = functionSource(dns, 'dnsQueryPath');
+  check(path.includes('dnsIPv6Routes(eff.ipv6_gaps)') && !path.includes('the DNS redirect and refusals cover IPv4 only'),
+    'the warning is built from ipv6_gaps, not one sentence for every gap set');
+}
+
+// Diagnostics' "Lists matching traffic" decides its unit per list (QA-113 review). It used to decide
+// once for the page: in hybrid mode, with a rule-set list at 500 core connections and the kernel's
+// lists idle, the page read the kernel's figure for every list, found none, and said "none yet".
+// Each list now shows the kernel's packets where it has some, else the core's connections, and the
+// packets note appears only beside a packet figure.
+{
+  const fmt = (s, ...a) => String(s).replace(/\{(\d)\}/g, (_, i) => a[i]);
+  const listsRow = async (lists) => {
+    const answers = {
+      '/api/health': { singbox: { running: true } }, '/api/pbr/status': { installed: true, zones: 2, verified: true },
+      '/api/state': {}, '/api/routing/traffic': { lists },
+    };
+    const el = (tag, attrs, ...kids) => Object.assign(tinyEl(tag, attrs, ...kids), { replaceChildren(...k) { this.children = k; } });
+    const context = vm.createContext({
+      el, t: fmt, state: { profile: { rules: [], dns: {} } }, nameOf: (id) => ({ srs: 'RU bundle', yt: 'YouTube' })[id] || id,
+      fetch: async (p) => ({ ok: true, json: async () => answers[p] }),
+    });
+    vm.runInContext(`${functionSource(diagnostics, 'diagNowCard')}\nglobalThis.run = diagNowCard;`, context);
+    const card = context.run();
+    await new Promise((r) => setTimeout(r, 20));
+    let found = null;
+    walk(card, (n) => {
+      if (!found && n.attrs?.class === 'diag-now-row' && n.children[0]?.children[0] === 'Lists matching traffic') found = n;
+    });
+    return found && { value: found.children[1].children[0], note: found.children[2] ? found.children[2].children[0] : '' };
+  };
+  try {
+    const idle = { live: 0, conns: 0, bytes: 0, kernel: { packets: 0, bytes: 0 } };
+    let row = await listsRow({ srs: { live: 3, conns: 500, bytes: 9e6 }, k1: idle, k2: idle });
+    check(row && row.value === 'RU bundle (500 conns)' && row.note === '',
+      'Diagnostics names a core-counted list by its connections while the kernel\'s lists are idle', JSON.stringify(row));
+    row = await listsRow({ srs: { live: 3, conns: 500, bytes: 9e6 }, yt: { live: 0, conns: 0, bytes: 0, kernel: { packets: 52341, bytes: 7e7 } }, k2: idle });
+    check(row && row.value === 'YouTube (52341 pkts), RU bundle (500 conns)' && row.note === 'packets since the rules were installed',
+      'Diagnostics gives each list its own unit, and the packets note only beside a packet figure', JSON.stringify(row));
+  } catch (e) { check(false, 'Diagnostics\' lists row could not be rendered', e.message); }
+}
+
+// A feed that loaded without a line no list may carry was not a failure (QA-111 review). The refresh
+// answers such lines under `refused`, by list; the Refresh-sources toast counted one as "1 failed" in
+// red and named nothing, and adding a preset said its source "could not be fetched" though it loaded.
+// Both now name the list and what was left out, and count only real failures as failed.
+{
+  const routing = fs.readFileSync('web/dist/page-routing.js', 'utf8');
+  const fmt = (s, ...a) => String(s).replace(/\{(\d)\}/g, (_, i) => a[i]);
+  const base = (answer, toasts) => ({
+    t: fmt, tn: (k, n, ...a) => fmt(String(k).split('|')[n === 1 ? 0 : 1], n, ...a),
+    toast: (m, kind) => toasts.push(kind + ':' + m), loadProfile: async () => {}, route: () => {},
+    redactSecrets: (s) => s, nameOf: (id) => id, rlOutboundFor: () => 'nl',
+    state: { profile: { routing_lists: [{ id: 'cf', name: 'Cloudflare' }, { id: 'ru', name: 'RU' }] } },
+    api: { post: async (p) => (p === '/api/routing/refresh' ? answer : {}) },
+  });
+  const helper = () => functionSource(routing, 'refusedLines');
+  try {
+    const refreshToasts = async (answer) => {
+      const toasts = [];
+      const context = vm.createContext(base(answer, toasts));
+      vm.runInContext(`${helper()}\n${functionSource(app, 'refreshCidrSources')}\nglobalThis.run = refreshCidrSources;`, context);
+      await context.run(null);
+      return toasts;
+    };
+    const lists = [{ id: 'cf' }, { id: 'ru' }];
+    let toasts = await refreshToasts({ changed: true, errors: [], refused: { cf: ['0.0.0.0/0'] }, lists });
+    check(toasts.length === 1 && /^info:/.test(toasts[0]) && /Cloudflare/.test(toasts[0]) && /0\.0\.0\.0\/0/.test(toasts[0])
+      && !/failed/.test(toasts[0]), 'a refusal is named in the Refresh-sources toast, not counted as failed', JSON.stringify(toasts));
+    toasts = await refreshToasts({ changed: false, errors: ['refresh "ru": HTTP 404'], refused: { cf: ['0.0.0.0/0', '0.0.0.0/1', '::/0', '0.0.0.0/2'] }, lists });
+    check(toasts.length === 1 && /^err:/.test(toasts[0]) && /1 failed/.test(toasts[0]) && /Cloudflare/.test(toasts[0]) && /\+1/.test(toasts[0]),
+      'a real failure is counted beside a named refusal', JSON.stringify(toasts));
+
+    const addToasts = async (answer) => {
+      const toasts = [];
+      const ctx = base(answer, toasts);
+      ctx.state.profile.routing_lists = []; // the new list reaches the page's profile only after the toast
+      const context = vm.createContext(ctx);
+      vm.runInContext(`${helper()}\n${functionSource(routing, 'addPreset')}\nglobalThis.run = addPreset;`, context);
+      await context.run({ id: 'cf', name: 'Cloudflare', cidr_source: 'https://example.invalid/cf.lst' }, null);
+      return toasts;
+    };
+    toasts = await addToasts({ changed: true, errors: [], refused: { cf: ['0.0.0.0/0'] } });
+    check(!toasts.some((m) => /could not be fetched/.test(m)) && toasts.some((m) => /^info:.*Cloudflare.*0\.0\.0\.0\/0/.test(m)),
+      'adding a preset whose feed carried a refused line says what was left out, not that the feed failed', JSON.stringify(toasts));
+  } catch (e) { check(false, 'the refresh toasts could not be run', e.message); }
+}
+
+// Gap 17 (ECH), after its review. The DNS hint said the config is looked up "at each connection" (the
+// record is kept for its TTL) and nothing of the name a plain DNS server sees. A Hysteria 2 or TUIC link
+// that asked for the lookup opened on "Off", so saving it dropped the ECH unsaid; it opens on an empty
+// pasted config the save asks for. A Reality link's ECH config, kept switched off, was said on every
+// Apply with nothing to do about it; the form says it under Reality and the bulk import says it once.
+{
+  const src = fs.readFileSync('web/dist/page-connections.js', 'utf8');
+  const ech = functionSource(src, 'fECH');
+  check(/t\("The router's DNS looks the config up and keeps it for the record's TTL\. Over plain DNS the name ECH hides goes out in the clear;/.test(ech) &&
+    !/at each connection/.test(ech), "the ECH DNS hint names the record's TTL and what plain DNS discloses");
+  check(/sel\.value = modes\.some\(m => m\[0\] === mode\) \? mode : "config";/.test(ech),
+    'a QUIC connection that asked for the DNS lookup opens on the pasted config, not on off');
+  const form = functionSource(src, 'manualForm');
+  check(/const realityECH = T\.type === "reality" && T\.ech && T\.ech\.config \? el\("div", \{ class: "hint" \}, t\("This link's ECH config is not used: sing-box cannot combine ECH with Reality\."\)\) : null;/.test(form) &&
+    /add\(echBox, realityECH\);/.test(form) && /if \(realityECH\) realityECH\.style\.display = on \? "" : "none";/.test(form),
+    "the form says, under Reality only, that the link's ECH config is not used");
+  const bulkSrc = src.slice(src.indexOf('api.post("/api/endpoints/bulk"'), src.indexOf('"Import selected")'));
+  check(/if \(r\.notes && r\.notes\.length\) toast\(redactSecrets\(r\.notes\.join\("; "\)\), "info"\);/.test(bulkSrc),
+    "the bulk import shows the daemon's notes (an ECH config on a Reality link), redacted");
+}
+// Gap 21 (multiplex). The connection form has a Multiplex section on the four protocols whose sing-box
+// outbound takes one, and collect() builds the endpoint from nothing, so the block must be set from the
+// section or it is lost on the first save (the keep-list trap); a protocol without the field has no
+// section, so switching to it drops the block. The hints say what the server must run, and every new
+// string is in every dictionary. The subscription preview shows the importer's notes (a Clash smux
+// setting sing-box has no field for), redacted.
+{
+  const src = fs.readFileSync('web/dist/page-connections.js', 'utf8');
+  const mux = functionSource(src, 'fMux');
+  const form = functionSource(src, 'manualForm');
+  check(/if \(\["vless", "vmess", "trojan", "shadowsocks"\]\.includes\(proto\)\) add\(fMux\(ep\.multiplex, dyn\.querySelector\("#f-flow"\)\)\);/.test(form),
+    'the Multiplex section is rendered for vless, vmess, trojan and shadowsocks only');
+  check(/const muxBox = document\.getElementById\("f-mux-box"\);\s*const mux = muxBox && muxBox\.value\(\);\s*if \(mux\) out\.multiplex = mux;/.test(form),
+    'collect() sets the multiplex from its section, so a save keeps it and another protocol drops it');
+  check(/if \(proto !== "h2mux" \|\| M\.protocol\) m\.protocol = proto;/.test(mux) && /fresh \? 4 : M\.max_connections/.test(mux),
+    'an untouched save keeps an imported default protocol, and a new multiplex starts with a pool');
+  const keys = ['Multiplex', 'Max connections', 'Min streams', 'Max streams', 'Padding', 'Upload, Mbps', 'Download, Mbps',
+    'TCP Brutal needs Linux on the server, its tcp-brutal module and Brutal in the inbound; otherwise every connection fails.',
+    // Vision alone: the old hint said it "works only with a sing-box or mihomo server" with Vision,
+    // as if another server worked without it. A sing-box server needs multiplex on in the INBOUND
+    // (route.go refuses the connection otherwise); "speaks sing-mux" promised more than that.
+    'Vision does not reach the multiplexed streams.',
+    'The server needs multiplex switched on in its sing-box inbound, or mihomo; Xray, 3x-ui and Marzban servers drop every connection.'];
+  check(keys.every((k) => mux.includes('t(' + JSON.stringify(k) + ')')), 'the Multiplex section names its fields and hints through t()');
+  const dropped = ['With Vision it works only with a sing-box or mihomo server, and Vision does not reach the multiplexed streams.',
+    'The server must speak sing-mux (sing-box, mihomo): Xray, 3x-ui and Marzban servers drop every connection.'];
+  const dicts = fs.readdirSync('web/i18n').filter((f) => f.endsWith('.json') && f !== 'langs.json');
+  const missing = [], stale = [];
+  for (const f of dicts) {
+    const d = JSON.parse(fs.readFileSync('web/i18n/' + f, 'utf8'));
+    for (const k of keys) if (!d[k]) missing.push(f + ': ' + k);
+    for (const k of dropped) if (k in d) stale.push(f + ': ' + k);
+  }
+  check(dicts.length >= 10 && missing.length === 0, 'every Multiplex string is in every dictionary', missing.join('; '));
+  check(stale.length === 0 && !dropped.some((k) => src.includes(k)), 'the wrong server and Vision hints are gone', stale.join('; '));
+
+  // The section, run: TCP Brutal holds one connection and the generator drops the pool beside it, so
+  // while Brutal is ticked the pool is hidden and not saved (the prefilled 4/4 was shown and sent). The
+  // switch and the protocol name "Multiplex" for a screen reader: the dialog has its own "Protocol".
+  const mkNode = (tag) => {
+    const n = { tag, kids: [], attrs: {}, style: {}, on: {}, id: '', value: '', checked: false, className: '' };
+    n.setAttribute = (k, v) => { n.attrs[k] = String(v); if (k === 'id') n.id = v; if (k === 'value') n.value = String(v); if (k === 'checked') n.checked = true; };
+    n.appendChild = (k) => { n.kids.push(k); if (tag === 'select' && k.tag === 'option' && n.value === '') n.value = k.value; return k; };
+    n.addEventListener = (ev, fn) => { (n.on[ev] = n.on[ev] || []).push(fn); };
+    n.querySelector = (s) => {
+      const id = s.replace(/^#/, '');
+      const walk = (x) => { for (const k of x.kids) { if (k.id === id) return k; const r = k.kids && walk(k); if (r) return r; } return null; };
+      return walk(n);
+    };
+    return n;
+  };
+  const document = { createElement: mkNode, createTextNode: (s) => ({ tag: '#text', text: s, kids: [] }) };
+  const ctx = vm.createContext({ document, t: (s) => s });
+  vm.runInContext([functionSource(app, 'el'), functionSource(src, 'fInput'), functionSource(src, 'fSelect'),
+    functionSource(src, 'fCheck'), mux, 'globalThis.run = fMux;'].join('\n'), ctx);
+  const fire = (box) => (box.on.change || []).forEach((fn) => fn());
+  const pool = (box) => box.querySelector('#f-mux-maxc');
+  const shown = (box, node) => { for (let p = node; p; p = p.parent) if (p.style.display === 'none') return false; return true; };
+  const parented = (box) => { const walk = (x) => x.kids.forEach((k) => { k.parent = x; if (k.kids) walk(k); }); walk(box); return box; };
+
+  const fresh = parented(ctx.run(undefined, null));
+  fresh.querySelector('#f-mux').checked = true; fire(fresh);
+  check(shown(fresh, pool(fresh)) && JSON.stringify(fresh.value()) === '{"enabled":true,"max_connections":4,"min_streams":4}',
+    'a new multiplex shows and saves its 4/4 pool', JSON.stringify(fresh.value()));
+  fresh.querySelector('#f-mux-brutal').checked = true;
+  fresh.querySelector('#f-mux-up').value = '50'; fresh.querySelector('#f-mux-down').value = '100'; fire(fresh);
+  check(!shown(fresh, pool(fresh)) && JSON.stringify(fresh.value()) === '{"enabled":true,"brutal":{"enabled":true,"up_mbps":50,"down_mbps":100}}',
+    'with TCP Brutal ticked the pool is hidden and not saved', JSON.stringify(fresh.value()));
+  const stored = parented(ctx.run({ enabled: true, protocol: 'smux', max_connections: 4, min_streams: 4, brutal: { enabled: true, up_mbps: 50, down_mbps: 100 } }, null));
+  check(!shown(stored, pool(stored)) && JSON.stringify(stored.value()) === '{"enabled":true,"protocol":"smux","brutal":{"enabled":true,"up_mbps":50,"down_mbps":100}}',
+    'a stored pool beside TCP Brutal opens hidden and the save drops it', JSON.stringify(stored.value()));
+  stored.querySelector('#f-mux-brutal').checked = false; fire(stored);
+  check(shown(stored, pool(stored)) && stored.value().max_connections === 4 && !stored.value().brutal,
+    'unticking TCP Brutal brings the pool back', JSON.stringify(stored.value()));
+  check(stored.querySelector('#f-mux').attrs['aria-label'] === 'Multiplex Enabled'
+      && stored.querySelector('#f-mux-proto').attrs['aria-label'] === 'Multiplex Protocol',
+    'the multiplex switch and protocol carry "Multiplex" in their accessible names',
+    JSON.stringify([stored.querySelector('#f-mux').attrs, stored.querySelector('#f-mux-proto').attrs]));
+  const subSrc = src.slice(src.indexOf('api.post("/api/subscription"'), src.indexOf('"Fetch / Parse")'));
+  check(/if \(r\.notes && r\.notes\.length\) list\.appendChild\(skippedLines\(r\.notes, r\.notes\.length \+ " note\(s\)"\)\);/.test(subSrc),
+    "the subscription preview shows the importer's notes, through skippedLines (redacted)");
+}
+
+// QA-133. Before KeeneticOS 4.2 the router's own AmneziaWG cannot create a connection, and the form
+// refused AmneziaWG for a new connection and a pasted config, though the daemon runs one on WayHop's
+// engine. It now offers it where the daemon's save check says the engine carries it (engine_plugin),
+// says so and why, and still refuses where the engine cannot run it either.
+{
+  const context = vm.createContext({ t: (s) => s });
+  vm.runInContext(`${functionSource(app, 'connectionProtocolRequirementIDs')}
+${functionSource(conns, 'connectionProtocolSupport')}
+${functionSource(conns, 'enginePluginNote')}
+globalThis.support = connectionProtocolSupport; globalThis.note = enginePluginNote;`, context);
+  const unsupported = { state: 'unsupported_platform', detail: 'no AmneziaWG in this release' };
+  const items = {
+    'native.operation.wireguard.create': { state: 'supported' }, 'native.operation.wireguard.remove': { state: 'supported' },
+    'native.operation.amneziawg.create': unsupported, 'native.operation.amneziawg.remove': unsupported,
+  };
+  const offer = { carried: true, installed: false, reason: 'KeeneticOS cannot run it natively (no asc)',
+    remedy: 'Update KeeneticOS to 4.2 or newer.' };
+  check(context.support('amneziawg', items, { amneziawg: offer }) === 'engine' &&
+    context.support('wireguard', items, { amneziawg: offer }) === 'native',
+  'a new AmneziaWG connection is offered on the engine where the save check carries it, WireGuard natively');
+  const text = context.note(offer);
+  check(/^Runs on WayHop's AmneziaWG engine \(amneziawg-go\), not the router's own\. KeeneticOS cannot run it natively \(no asc\)\. Install amneziawg-go on the Components page first\. Update KeeneticOS to 4\.2 or newer\.$/.test(text),
+    'the offer says it runs on the engine, why, that amneziawg-go is still to install, and the remedy', text);
+  check(!/Install amneziawg-go/.test(context.note({ ...offer, installed: true })),
+    'an installed amneziawg-go is not asked for again');
+  const blocked = { carried: false, installed: true, reason: offer.reason, blocked: '/dev/net/tun is missing, so amneziawg-go cannot run' };
+  check(context.support('amneziawg', items, { amneziawg: blocked }) === '' && context.support('amneziawg', items, {}) === '' &&
+    context.note(blocked) === '/dev/net/tun is missing, so amneziawg-go cannot run.',
+  'where the engine cannot run it either, AmneziaWG stays refused and the form says why', context.note(blocked));
+  const nativeItems = { ...items, 'native.operation.amneziawg.create': { state: 'supported' }, 'native.operation.amneziawg.remove': { state: 'supported' } };
+  check(context.support('amneziawg', nativeItems, undefined) === 'native', 'a router that creates AmneziaWG itself is unchanged');
+  const paint = functionSource(conns, 'manualForm');
+  check(/const plugins = \(verified && response\.engine_plugin\) \|\| \{\};/.test(paint) &&
+    /connectionProtocolSupport\(option\.value, items, plugins\) !== ""/.test(paint) &&
+    /=== "engine"\) \{\s*protoSupportText\.textContent = enginePluginNote\(plugins\[protoSel\.value\]\);/.test(paint),
+  'the protocol selector (new connection and pasted config) decides and speaks through the same two helpers');
+}
+// QA-133 (review). engine_plugin answers for an AmneziaWG connection with no settings, so where the
+// router's own creates one (KeeneticOS 4.2 and newer, OpenWrt with its module) the selector said
+// "Supported natively ... can roll this connection back" - also for one whose AmneziaWG 2 settings, or
+// amneziawg-go chosen in the form, put it on WayHop's engine. The AmneziaWG hint now says when that is.
+{
+  const paint = functionSource(conns, 'manualForm');
+  const nativeBranch = /protoSel\.value === "amneziawg"\) \{\s*protoSupportText\.textContent = ([^;]+);/.exec(paint);
+  check(!!nativeBranch && nativeBranch[1] === 'nativeSupportNote(protoSel.value)',
+    'the native hint for WireGuard and AmneziaWG comes from nativeSupportNote', nativeBranch && nativeBranch[1]);
+  if (/function nativeSupportNote\(/.test(conns)) {
+    const context = vm.createContext({ t: (s) => s });
+    vm.runInContext(`${functionSource(conns, 'nativeSupportNote')}
+globalThis.note = nativeSupportNote;`, context);
+    const awgNote = context.note('amneziawg');
+    check(!/roll this connection back/.test(awgNote) && /newer AmneziaWG than the router's/.test(awgNote) &&
+      /amneziawg-go is chosen below/.test(awgNote) && /WayHop's engine runs it/.test(awgNote) && /Apply review/.test(awgNote),
+    'an AmneziaWG connection the router creates is not promised to the router: settings or amneziawg-go move it to the engine', awgNote);
+    check(context.note('wireguard') === 'Supported natively: WayHop will use the router backend and can roll this connection back.',
+      'WireGuard keeps the native hint', context.note('wireguard'));
+  }
+}
+
+// Gap 19 / QA-135 (certificate pins). collect() builds the TLS block from nothing, so the pins must come
+// from the form's field where it has one (every plain-TLS form: VLESS/VMess/Trojan, AnyTLS, Hysteria2,
+// TUIC), cleared ones staying cleared, and be carried where it has none: a public-key pin where no box
+// shows one (below), where the pins came from, and an HTTPS proxy's whole block. Otherwise an edit-and-save
+// drops the pin and the connection quietly goes back to the chain check, or to "insecure". A pin an
+// older WayHop kept in params.pin_sha256 (the keep map does not carry it) is shown in the field, so a
+// save keeps it, with Hysteria's meaning. The field is hidden under Reality, which uses no pin, AnyTLS
+// included (QA-137). Its check is the daemon's (model.ParsePinSHA256, model.SplitPinList): the same
+// pins pass both. Left as it was, the field keeps the pins as stored and does not hold the save over
+// one that is not a hash (a legacy Hysteria pin the review reports); edited, where the pins came from
+// holds while a pin it came with remains, typed pins beside it or not (QA-137).
+{
+  const form = functionSource(conns, 'manualForm');
+  check((form.match(/fPins\(T, P\)/g) || []).length === 4, 'every plain-TLS connection form shows the certificate pins');
+  check(/carry\.push\("pin_cert_may_be_ca", "pin_cert_beside_chain", "pin_cert_may_be_ca_of", "pin_cert_beside_chain_of",\s+\.\.\.\(document\.getElementById\("f-pins"\) \? \[\] : \["pin_cert_sha256"\]\), \.\.\.\(document\.getElementById\("f-pinkeys"\) \? \[\] : \["pin_pubkey_sha256"\]\)\);/.test(form) &&
+    /out\.tls\.pin_cert_sha256 = splitPins\(g\("f-pins"\)\);/.test(form),
+    'an edit-and-save keeps the pins: from the field where it is, carried where it is not');
+  // QA-138 review: the public-key pin Set up Server adds was carried through every save with no field,
+  // and sing-box 1.13+ checks it whatever "Allow insecure TLS" says, so a server whose key changed was
+  // refused with nothing in the panel to see or clear. Every plain-TLS form shows it (only when there is
+  // one, read-only: no link carries one to paste), Remove empties the box, and the save writes what the
+  // box holds, so an emptied box drops the pin. Hidden under Reality with the certificate pins.
+  check((form.match(/fKeyPins\(T\)/g) || []).length === 4 && /T\.type !== "reality" && fKeyPins\(T\)/.test(form) &&
+    /if \(keyPinsBox\) keyPinsBox\.style\.display = pinsBox\.style\.display;/.test(form),
+    'every plain-TLS connection form shows the public-key pins, hidden under Reality');
+  check(/const keyPinsEl = document\.getElementById\("f-pinkeys"\);\s+if \(keyPinsEl\) \{ const k = splitPins\(keyPinsEl\.value\); if \(k\.length\) out\.tls\.pin_pubkey_sha256 = k; \}/.test(form),
+    'the public-key pins are saved from their box, so removing them clears them');
+  const keyPins = functionSource(conns, 'fKeyPins');
+  check(/if \(!v\) return null;/.test(keyPins) && /id: "f-pinkeys", value: v, readonly: "readonly"/.test(keyPins) &&
+    /onclick: \(\) => \{ inp\.value = ""; \}/.test(keyPins) && /t\("Remove"\)/.test(keyPins),
+    'the public-key pin box shows only a stored pin, read-only, with a Remove that empties it');
+  check(/if \(pinsEl && pinsEl\.value\.trim\(\) === pinsEl\.defaultValue\) \{\s+\["pin_cert_sha256", "pin_cert_may_be_ca", "pin_cert_beside_chain", "pin_cert_may_be_ca_of", "pin_cert_beside_chain_of"\]\s+\.forEach\(k => \{ if \(T\[k\] !== undefined\) out\.tls\[k\] = T\[k\]; \}\);\s+if \(P\.pin_sha256\) p\.pin_sha256 = P\.pin_sha256;\s+\} else if \(pinsEl\) \{/.test(form),
+    'a save that leaves the pin field as it was keeps the pins as stored, a legacy Hysteria pin in its parameter');
+  // The provenance step, run as written: a pin typed beside imported ones keeps where they came from,
+  // and only for them, so removing them later drops it.
+  try {
+    const at = form.indexOf('const now = [...new Set(');
+    const body = at >= 0 ? form.slice(at, form.indexOf('about("pin_cert_beside_chain"', at)) : '';
+    check(/about\("pin_cert_may_be_ca", had\("pin_cert_may_be_ca"\)\);/.test(body) &&
+      /about\("pin_cert_beside_chain", had\("pin_cert_beside_chain"\)\.concat\(P\.pin_sha256 \? \[pinHex\(P\.pin_sha256\)\] : \[\]\)\);/.test(form),
+      'both pin flags go through the provenance step');
+    const context = vm.createContext({ atob });
+    vm.runInContext(`${functionSource(conns, 'pinHex')}
+globalThis.run = (T, P, pins) => { const out = { tls: Object.assign({}, T, { pin_cert_sha256: pins }) };
+${body.replace(/about\("pin_cert_may_be_ca", had\("pin_cert_may_be_ca"\)\);/, '')}
+about("pin_cert_may_be_ca", had("pin_cert_may_be_ca"));
+about("pin_cert_beside_chain", had("pin_cert_beside_chain").concat(P.pin_sha256 ? [pinHex(P.pin_sha256)] : []));
+return out.tls; };`, context);
+    const a = 'a'.repeat(64), b = 'b'.repeat(64), c = 'c'.repeat(64);
+    const imported = { pin_cert_sha256: [a], pin_cert_may_be_ca: true };
+    const typed = context.run(imported, {}, [a, b.toUpperCase().match(/../g).join(':')]);
+    check(typed.pin_cert_may_be_ca === true && JSON.stringify(typed.pin_cert_may_be_ca_of) === JSON.stringify([a]),
+      'a pin typed beside an imported pcs= pin keeps the CA condition, for the imported pin only', JSON.stringify(typed));
+    const later = context.run(typed, {}, [b]);
+    check(later.pin_cert_may_be_ca === undefined && later.pin_cert_may_be_ca_of === undefined,
+      'removing the imported pin in a later edit drops the CA condition', JSON.stringify(later));
+    const kept = context.run(typed, {}, [a, b, c]);
+    check(kept.pin_cert_may_be_ca === true && JSON.stringify(kept.pin_cert_may_be_ca_of) === JSON.stringify([a]),
+      'another typed pin keeps the condition on the imported one alone', JSON.stringify(kept));
+    const all = context.run(imported, {}, [a.toUpperCase()]);
+    check(all.pin_cert_may_be_ca === true && all.pin_cert_may_be_ca_of === undefined,
+      'the imported pins alone, however written, keep the condition for all', JSON.stringify(all));
+    const legacy = context.run({}, { pin_sha256: c }, [c, a]);
+    check(legacy.pin_cert_beside_chain === true && JSON.stringify(legacy.pin_cert_beside_chain_of) === JSON.stringify([c]) &&
+      legacy.pin_cert_may_be_ca === undefined, 'a legacy Hysteria pin keeps Hysteria\'s condition, for itself', JSON.stringify(legacy));
+  } catch (e) { check(false, 'the pin provenance step could not be run', e.message); }
+  check(/pinsBox\.style\.display = on \? "none" : "";/.test(form), 'the pin field is hidden under Reality, which uses no pin');
+  check(/T\.type !== "reality" && fPins\(T, P\)/.test(form), 'the AnyTLS form shows no pin field under Reality either');
+  for (const proto of ['vless', 'vmess', 'trojan', 'anytls', 'hysteria2', 'tuic']) {
+    const at = form.indexOf(`      ${proto}: [`, form.indexOf('const keep = {'));
+    const keep = at >= 0 ? form.slice(at, form.indexOf(']', at)) : '';
+    check(/"vcn"/.test(keep), `an edit-and-save of a ${proto} connection keeps the link's vcn`, keep);
+  }
+  // QA-136: a link's Xray finalmask (fm=) is kept to be shared again, on every protocol whose links carry it.
+  for (const proto of ['vless', 'vmess', 'trojan', 'anytls', 'shadowsocks', 'hysteria2', 'tuic']) {
+    const at = form.indexOf(`      ${proto}: [`, form.indexOf('const keep = {'));
+    const keep = at >= 0 ? form.slice(at, form.indexOf(']', at)) : '';
+    check(/"fm"/.test(keep), `an edit-and-save of a ${proto} connection keeps the link's fm`, keep);
+  }
+  const pins = functionSource(conns, 'fPins');
+  check(/P\.pin_sha256 \? \[P\.pin_sha256\] : \[\]/.test(pins) && /"Server certificate pin \(optional\)"/.test(pins),
+    "the pin field shows a legacy Hysteria2 pin and reuses the translated OpenConnect label");
+  check(/asStored = \(\) => \{ if \(inp\.value\.trim\(\) === v\) inp\.dataset\.invalid = ""; \};/.test(pins) &&
+    /inp\.addEventListener\("input", asStored\);\s+asStored\(\);/.test(pins),
+    'a stored pin that is not a hash is marked but does not hold an unrelated save');
+  try {
+    const context = vm.createContext({ atob, btoa });
+    vm.runInContext(`${functionSource(conns, 'splitPins')}
+${functionSource(conns, 'pinListError')}
+${functionSource(conns, 'pinHex')}
+globalThis.err = pinListError; globalThis.hex = pinHex;`, context);
+    const raw = Buffer.alloc(32, 0xfb);
+    raw[31] = 0x10;
+    const hex = raw.toString('hex'), b64 = raw.toString('base64');
+    const colons = hex.toUpperCase().match(/../g).join(':');
+    const next = (c) => { const a = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'; return a[(a.indexOf(c) + 1) % 64]; };
+    for (const ok of [hex, colons, colons.replace(/:/g, '-'), b64, `${hex}, ${b64};${colons}`, ` ${hex}\n${b64} `]) {
+      check(context.err(ok) === '', 'the form takes a pin the daemon takes', ok);
+    }
+    for (const same of [hex, colons, colons.replace(/:/g, '-'), b64]) {
+      check(context.hex(same) === hex, 'a pin written any way the daemon takes reads as the stored pin', same);
+    }
+    for (const bad of ['deadbeef', hex.slice(0, 43), hex.slice(0, 63), raw.toString('base64').replace(/=$/, ''),
+      raw.toString('base64url') + '=', b64.slice(0, 42) + next(b64[42]) + '=', colons.replace(/:/g, ' ')]) {
+      check(context.err(bad) !== '', 'the form refuses a pin the daemon refuses', bad);
+    }
+  } catch (e) { check(false, 'the pin check could not be run', e.message); }
+}
+
+// QA-152..155, QA-148/149 (the forms review). Shared doubles: an element that keeps the value it was
+// built with (an input's value attribute, a textarea's text) and has a style, which tinyEl does not.
+function formEl(tag, attrs = {}, ...children) {
+  const node = tinyEl(tag, attrs, ...children.flat());
+  node.style = {};
+  if (attrs && attrs.value != null) node.value = String(attrs.value);
+  if (tag === 'textarea' && typeof node.children[0] === 'string') node.value = node.children[0];
+  return node;
+}
+const findNode = (root, pred) => { let hit = null; walk(root, (n) => { if (!hit && pred(n)) hit = n; }); return hit; };
+const oneLine = (src, name) => (src.match(new RegExp(`^const ${name} = .*;$`, 'm')) || [''])[0];
+
+// QA-152. Every connection, group and routing list loadProfile hands out carries its OWN revision from
+// the daemon's revs, and ifMatch sends that one: a save is refused only when that object was saved
+// since, never because something else was (a profile-wide revision made every open form stale on any
+// write, the hourly feed refresh included). A copy carries none. keepRev takes a save's answered
+// revision only when the save was made from the object's current one.
+{
+  try {
+    const responses = [{ endpoints: [{ id: 'a', enabled: true }, { id: 'b' }], groups: [{ id: 'a' }], routing_lists: [{ id: 'l' }],
+      revs: { endpoints: { a: 'ea41', b: 'eb41' }, groups: { a: 'ga41' }, routing_lists: { l: 'rl41' } } },
+    { endpoints: [{ id: 'a', enabled: true }], groups: [], routing_lists: [], revs: { endpoints: { a: 'ea44' }, groups: {}, routing_lists: {} } }];
+    const context = vm.createContext({
+      state: {}, api: { get: async () => responses.shift() }, updateDirty: () => {}, refreshApplyState: () => {},
+    });
+    vm.runInContext(`${functionSource(app, 'loadProfile')}
+  ${oneLine(app, 'ifMatch')}
+  ${oneLine(app, 'keepRev')}
+  globalThis.load = loadProfile; globalThis.ifMatch = ifMatch; globalThis.keepRev = keepRev;`, context);
+    await context.load();
+    const first = context.state.profile.endpoints[0], other = context.state.profile.endpoints[1];
+    const group = context.state.profile.groups[0], list = context.state.profile.routing_lists[0];
+    check(context.ifMatch(first)['If-Match'] === 'ea41' && context.ifMatch(other)['If-Match'] === 'eb41' &&
+      context.ifMatch(group)['If-Match'] === 'ga41' && context.ifMatch(list)['If-Match'] === 'rl41',
+    'each loaded connection, group and list is saved with its own revision, by kind (a group may share a connection\'s id)',
+    JSON.stringify([context.ifMatch(first), context.ifMatch(group)]));
+    check(JSON.stringify(context.ifMatch({ ...first })) === '{}' && !('_rev' in JSON.parse(JSON.stringify(first))),
+      'a copy carries no revision, and a save body never carries the marker');
+    context.keepRev(first, { was: 'ea41', rev: 'ea42' });
+    check(context.ifMatch(first)['If-Match'] === 'ea42', 'a save made from the object\'s revision keeps its copy current');
+    context.keepRev(first, { was: 'somebody-elses', rev: 'ea44' });
+    check(context.ifMatch(first)['If-Match'] === 'ea42', 'a save made over somebody else\'s version does not vouch for the copy');
+    await context.load();
+    check(context.ifMatch(first)['If-Match'] === 'ea42' && context.ifMatch(context.state.profile.endpoints[0])['If-Match'] === 'ea44',
+      'an object held from before a reload keeps its own revision; the reloaded one has the new one');
+    check(/if \(error\.status === 412\) loadProfile\(\)\.then\(route, \(\) => \{\}\);/.test(functionSource(app, 'handleAuthAPIError')),
+      'a 412 reloads the profile and the page (closing the form) instead of leaving the stale copy up');
+    check(/async post\(p, body, h, m\) \{\s*await waitForAuthentication\(\);/.test(app) && /method: m \|\| "POST", headers: authRequestHeaders\(\{ "content-type": "application\/json", \.\.\.h \}, true\)/.test(app),
+      'api.post passes a method and headers through');
+  } catch (e) { check(false, 'the revision bookkeeping step could not be run', e.message); }
+}
+
+// QA-152, the switches: a connection's switch sends {enabled} alone, by PATCH, never the copy the page
+// loaded (which put back what another tab had saved), and keeps the answered revision when the switch
+// was made from the row's own.
+{
+  try {
+    const sent = [];
+    const context = vm.createContext({
+      applyInFlight: false, flipSwitch: () => {}, updateDirty: () => {}, refreshEnabledTile: () => {}, repaintExits: () => {},
+      toast: () => {}, t: (s) => s, tryDisableWithDependents: async () => false,
+      api: { post: async (url, body, h, m) => { sent.push({ url, body, m }); return { was: 'e7', rev: 'e8' }; } },
+    });
+    vm.runInContext(`${functionSource(app, 'toggleEndpoint')}
+  ${oneLine(app, 'keepRev')}
+  globalThis.run = toggleEndpoint;`, context);
+    const e = { id: 'vless de', name: 'DE', server: 'stale.example', enabled: true };
+    Object.defineProperty(e, '_rev', { value: 'e7', writable: true });
+    await context.run(e, null);
+    check(sent.length === 1 && sent[0].url === '/api/endpoints/vless%20de' && sent[0].m === 'PATCH' && JSON.stringify(sent[0].body) === '{"enabled":false}',
+      'the connection switch PATCHes only enabled', JSON.stringify(sent));
+    check(e._rev === 'e8', 'and its own save keeps the row current', String(e._rev));
+    const toggleRl = functionSource(app, 'toggleRoutingList');
+    check(/api\.post\("\/api\/routing\/" \+ encodeURIComponent\(rl\.id\), \{ enabled: want \}, 0, "PATCH"\)/.test(toggleRl) && !/\.\.\.rl/.test(toggleRl),
+      'the routing list switch PATCHes only enabled');
+    check(/api\.post\("\/api\/endpoints\/" \+ encodeURIComponent\(e\.id\) \+ q, \{ enabled: false \}, 0, "PATCH"\)/.test(functionSource(app, 'tryDisableWithDependents')),
+      'switching off through the dependents dialog PATCHes only enabled');
+  } catch (e) { check(false, 'the switch step could not be run', e.message); }
+}
+
+// QA-152, the forms: each edit form sends the revision of the object it opened with; the inline
+// routing-list writes send the list's and keep it; Settings and Components send the settings'.
+{
+  check(/api\.post\("\/api\/endpoints", e, ifMatch\(ep\)\)/.test(functionSource(conns, 'openEditEndpoint')),
+    'the connection edit form saves with the revision of the connection it opened');
+  const rlForm = functionSource(fs.readFileSync('web/dist/page-routing.js', 'utf8'), 'openRoutingList');
+  check(/api\.post\("\/api\/routing", body, ifMatch\(rl\)\)/.test(rlForm), 'the routing list form saves with the list\'s revision');
+  for (const [src, name] of [[fs.readFileSync('web/dist/page-routing.js', 'utf8'), 'saveRoutingList'], [app, 'routeDestAction']]) {
+    const body = functionSource(src, name);
+    check(/keepRev\(rl, await api\.post\("\/api\/routing", rl, ifMatch\(rl\)\)\);/.test(body),
+      `${name} sends the whole list only as it was saved, and keeps its revision`);
+  }
+  check(/api\.put\("\/api\/config", next, \{ "If-Match": cfg\.rev \}\)/.test(app) && /cfg = \{ \.\.\.next, rev: r\.rev \};/.test(app),
+    'Settings saves with the revision it loaded, and the next save with the one its save produced');
+  check(/api\.put\("\/api\/config", cfg, \{ "If-Match": cfg\.rev \}\)/.test(updater), 'Components saves download_via with the settings\' revision');
+}
+
+// QA-149. A group can hold another group or `direct`. The edit dialog lists them in their place,
+// checked and saying what they are, so saving without a change keeps every member, in order, and the
+// save carries the group's revision.
+{
+  try {
+    const sent = [];
+    let rows = null, footer = null;
+    const profile = { endpoints: [{ id: 'vless-de', name: 'DE', enabled: true }, { id: 'hy2', name: 'HY', enabled: true }], groups: [{ id: 'auto', name: 'Auto' }] };
+    const context = vm.createContext({
+      el: formEl, t: (s) => s, toast: () => {}, state: { profile },
+      findEndpoint: (id) => profile.endpoints.find((e) => e.id === id), findGroup: (id) => profile.groups.find((g) => g.id === id),
+      nameOf: (id) => ((profile.groups.find((g) => g.id === id) || {}).name || id),
+      memberPicker: (r) => { rows = r; return formEl('div'); },
+      $$: () => rows.filter((r) => r.checked).map((r) => ({ value: r.e.id })),
+      testTuningFields: () => ({ node: formEl('div'), read: () => undefined }),
+      dialogNotes: () => ({ wire: (x) => x, footer: (...b) => b }), MEMBER_ORDER_HINT: '',
+      modal: (o) => { footer = o.footer; return { remove() {} }; },
+      api: { post: async (url, body, h) => { sent.push({ url, body, h }); return {}; } },
+      loadProfile: async () => {}, route: () => {},
+    });
+    vm.runInContext(`${functionSource(failover, 'openEditGroup')}
+  ${oneLine(app, 'ifMatch')}
+  globalThis.run = openEditGroup;`, context);
+    const g = { id: 'grp-tiers', name: 'Tiers', type: 'fallback', members: ['vless-de', 'auto', 'direct'] };
+    Object.defineProperty(g, '_rev', { value: 'g12', writable: true });
+    context.run(g);
+    const shown = rows.map((r) => `${r.e.id}:${r.checked}:${r.e.member || ''}`).join(' ');
+    check(shown === 'vless-de:true: auto:true:nested group direct:true:direct hy2:false:',
+      'the edit dialog lists a nested group and direct in their place, checked, and says what they are', shown);
+    const save = footer.find((b) => b.children.includes('Save'));
+    await save.onclick({ currentTarget: save });
+    check(sent.length === 1 && JSON.stringify(sent[0].body.members) === '["vless-de","auto","direct"]',
+      'saving without a change keeps every member, in order', JSON.stringify(sent[0] && sent[0].body.members));
+    check(sent.length === 1 && sent[0].h['If-Match'] === 'g12', 'and the save carries the group\'s revision', JSON.stringify(sent[0] && sent[0].h));
+    const picker = functionSource(failover, 'memberPicker');
+    check(/if \(e\.member\) \{ note = t\(e\.member\); \}/.test(picker), 'the member list names a member that is not a connection');
+  } catch (e) { check(false, 'the group dialog step could not be run', e.message); }
+}
+
+// QA-150 and QA-154, the routing list form, run: a preset's explicit format is kept only for the URL it
+// was set for, and a list with both a URL and manual entries shows and saves both.
+{
+  try {
+    const routingSrc = fs.readFileSync('web/dist/page-routing.js', 'utf8');
+    const open = (rl, edit) => {
+      const sent = [];
+      let footer = null, body = null;
+      const context = vm.createContext({
+        el: formEl, t: (s) => s, toast: () => {}, asList: (v) => (Array.isArray(v) ? v : v ? [v] : []),
+        addKeeneticPolicies: (s) => s, routingOutboundSelect: (v) => formEl('select', { value: v }), rlFirstTunnel: () => 'direct',
+        rlCached: () => 0, deviceGroups: () => [], openDeviceGroup: () => {}, rlUniqueId: (x) => x, rlSlug: (x) => x, $$: () => [],
+        modal: (o) => { footer = o.footer; body = o.body; return { remove() {} }; },
+        api: { post: async (url, b, h) => { sent.push({ url, b, h }); return {}; } }, loadProfile: async () => {}, route: () => {},
+        ifMatch: () => ({}),
+      });
+      vm.runInContext(`${functionSource(routingSrc, 'openRoutingList')}
+  ${/function rlKeepsFormat\(/.test(routingSrc) ? functionSource(routingSrc, 'rlKeepsFormat') : 'function rlKeepsFormat() { return false; }'}
+  globalThis.run = openRoutingList;`, context);
+      context.run(rl);
+      const source = findNode(body, (n) => n.tag === 'input' && n.attrs.placeholder === 'https://…/list.srs');
+      const manual = findNode(body, (n) => n.tag === 'textarea');
+      edit({ source, manual });
+      const save = footer.find((b) => b.children.includes('Save'));
+      const shown = () => findNode(body, (n) => (n.children || []).includes(manual)).style.display !== 'none';
+      return { save: () => save.onclick({ currentTarget: save }).then(() => sent[0] && sent[0].b), shown };
+    };
+    const preset = { id: 'ru-bundle', name: 'RU bundle', source: 'https://example.com/ru-bundle.srs', format: 'binary', outbound: 'auto', enabled: true, manual: [] };
+    const moved = await open(preset, ({ source }) => { source.value = 'https://example.com/ru-bundle.json'; }).save();
+    check(moved && moved.source.endsWith('.json') && moved.format === undefined,
+      'a preset moved to a .json URL is saved without the binary format it had', JSON.stringify(moved));
+    const kept = await open(preset, () => {}).save();
+    check(kept && kept.format === 'binary', 'a preset whose URL is unchanged keeps its format', JSON.stringify(kept));
+    // A format set on purpose for a feed that names none stays when the feed moves to another such URL
+    // (dropped, the generator would skip the list), and goes when the new URL names the other format.
+    const feed = { ...preset, id: 'feed', source: 'https://example.com/get?list=ru', format: 'source' };
+    const feedMoved = await open(feed, ({ source }) => { source.value = 'https://example.com/get?list=ru&v=2'; }).save();
+    check(feedMoved && feedMoved.format === 'source', 'a format set for a feed with no extension survives a move to another such feed', JSON.stringify(feedMoved));
+    const feedToSrs = await open(feed, ({ source }) => { source.value = 'https://example.com/ru.srs'; }).save();
+    check(feedToSrs && feedToSrs.format === undefined, 'and goes when the new URL names the other format', JSON.stringify(feedToSrs));
+    const mirror = await open(preset, ({ source }) => { source.value = 'https://cdn.example.com/rules/ru-bundle'; }).save();
+    check(mirror && mirror.format === 'binary', 'a .srs list moved to a mirror with no extension keeps its format', JSON.stringify(mirror));
+    const toLst = await open({ ...feed, format: 'binary' }, ({ source }) => { source.value = 'https://example.com/lists/ru.lst'; }).save();
+    check(toLst && toLst.format === undefined, 'a format set for a feed goes when the list moves to a plain-text .lst', JSON.stringify(toLst));
+    // The panel's rule is the daemon's (model.RuleSetURLKind / CarriedRuleSetFormat): the same table
+    // as model/rulesetkind_test.go, read through rlKeepsFormat for both formats.
+    const keeps = vm.createContext({});
+    vm.runInContext(`${functionSource(routingSrc, 'rlKeepsFormat')}; globalThis.keeps = rlKeepsFormat;`, keeps);
+    for (const [url, kind] of [['https://example.com/lists/ru.srs', 'binary'], ['https://example.com/lists/RU.SRS?raw=true', 'binary'],
+      ['https://example.com/lists/ru.json#x', 'source'], ['https://example.com/lists/ru.lst', 'text'], ['https://example.com/lists/ru.txt', 'text'],
+      ['https://cdn.example.com/rules/ru-bundle', ''], ['https://example.com/get?list=ru.srs', ''], ['https://example.com', ''],
+      ['https://example.com/', ''], ['https://example.com/v1.2/list', '']]) {
+      for (const f of ['binary', 'source']) {
+        check(keeps.keeps(f, url) === (kind === '' || kind === f), `the panel and the daemon agree on ${f} for ${url}`);
+      }
+    }
+    const both = { id: 'both', name: 'Both', source: 'https://example.com/l.srs', manual: ['example.org', '192.0.2.0/24'], outbound: 'auto', enabled: true };
+    const form = open(both, ({ manual }) => { manual.value = [manual.value, 'example.net'].join('\n'); });
+    check(form.shown(), 'a list with a URL and manual entries shows the manual entries in URL mode');
+    const saved = await form.save();
+    check(saved && saved.source === both.source && JSON.stringify(saved.manual) === '["example.org","192.0.2.0/24","example.net"]',
+      'a list with a URL and manual entries saves both, the manual ones as edited', JSON.stringify(saved));
+    const urlOnly = open({ ...both, id: 'url', manual: [] }, () => {});
+    check(!urlOnly.shown(), 'a URL-only list still shows only the URL');
+    const urlSaved = await urlOnly.save();
+    check(urlSaved && JSON.stringify(urlSaved.manual) === '[]', 'and saves no manual entries', JSON.stringify(urlSaved));
+  } catch (e) { check(false, 'the routing list form step could not be run', e.message); }
+}
+
+// QA-151, QA-155, QA-153, QA-148: the rest of the review's panel fixes, by their code.
+{
+  const form = functionSource(conns, 'manualForm');
+  check(/if \(Array\.isArray\(p\.servers\) && p\.servers\.length > 1\) \{\s*p\.servers = \[\{ \.\.\.p\.servers\[0\], server: out\.server, port: out\.port, network: p\.network \}, \.\.\.p\.servers\.slice\(1\)\];/.test(form),
+    'an OpenVPN profile with several remotes takes the form\'s server, port and transport into its first entry');
+  check(/\["rule_sets", "domain_suffix", "domain", "geosite", "query_type"\]\.some\(k => asList\(o\[k\]\)\.some\(v => String\(v\)\.trim\(\)\)\)/.test(dns),
+    'the DNS rule form counts every match condition the daemon counts');
+  check(/if \(r\.routing_mode_note\) toast\(r\.routing_mode_note, "err"\);/.test(app), 'a full restore that kept the routing mode says so');
+  const bulkSrc = conns.slice(conns.indexOf('api.post("/api/endpoints/bulk"'), conns.indexOf('"Import selected")'));
+  check(/r\.added \?\? r\.saved/.test(bulkSrc) && /tn\(", \{0\} updated\|, \{0\} updated", r\.updated\)/.test(bulkSrc) &&
+    /tn\(", \{0\} unchanged\|, \{0\} unchanged", r\.unchanged\)/.test(bulkSrc),
+    'a subscription import says how many were added, updated and unchanged');
+}
+
 if (failures.length) {
   console.error(`interaction regressions FAILED (${failures.length}/${checks}):\n  - ${failures.join('\n  - ')}`);
   process.exit(1);

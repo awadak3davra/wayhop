@@ -1,8 +1,8 @@
 // Package plugin runs the non-sing-box "engine" binaries wayhop orchestrates
-// (AmneziaWG, olcRTC). It renders each engine's native config from the wayhop model
-// and supervises the process. sing-box reaches these via a chained SOCKS (olcRTC)
-// or the awg interface (AmneziaWG — full routing is M7). Off-device (no binary)
-// it degrades to needs_binary instead of failing.
+// (AmneziaWG, nfqws2). It renders each engine's native config from the wayhop model
+// and supervises the process. sing-box reaches an egress engine through its
+// interface (AmneziaWG) or, for a chained-SOCKS engine, a local SOCKS port. Off-device
+// (no binary) it degrades to needs_binary instead of failing.
 package plugin
 
 import (
@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"wayhop/internal/awg"
 	"wayhop/internal/binstore"
@@ -94,17 +95,24 @@ func awgKeepalive(e model.Endpoint) string {
 	return "20"
 }
 
-// NativeConfig renders the engine-native config text + filename for an endpoint.
+// NativeConfig renders the engine-native config text + filename for an endpoint. socksPort is the
+// local port a chained-SOCKS engine would listen on; no engine WayHop ships today is one (olcRTC
+// was, until its removal), so the AmneziaWG and nfqws2 renders ignore it.
 func NativeConfig(e model.Endpoint, socksPort int) (string, string, error) {
 	switch e.Engine {
 	case model.EngineAmneziaWG:
 		return awgConfig(e), e.ID + ".conf", nil
-	case model.EngineOlcRTC:
-		return olcConfig(e, socksPort), e.ID + ".yaml", nil
 	case model.EngineNfqws:
 		// nfqws2 is argv-driven (no config file); the joined args are the "config" used for
 		// change detection, and start() spawns the process from nfqwsArgs(e) directly.
 		return strings.Join(nfqwsArgs(e), " "), e.ID + ".nfqws", nil
+	case model.EngineByeDPI:
+		// ciadpi is argv-driven too: the listener the generator pointed sing-box at, then the strategy.
+		args, err := byedpiArgs(e, socksPort)
+		if err != nil {
+			return "", "", err
+		}
+		return strings.Join(args, " "), e.ID + ".byedpi", nil
 	default:
 		return "", "", fmt.Errorf("no native config for engine %q", e.Engine)
 	}
@@ -235,36 +243,6 @@ func awgConfig(e model.Endpoint) string {
 	return b.String()
 }
 
-func olcConfig(e model.Endpoint, socksPort int) string {
-	p := e.Params
-	transport := str(p, "transport")
-	if transport == "" {
-		transport = "datachannel"
-	}
-	dns := str(p, "dns")
-	if dns == "" {
-		dns = "8.8.8.8:53"
-	}
-	if socksPort <= 0 {
-		socksPort = 8808
-	}
-	return fmt.Sprintf("mode: cnc\nauth:\n  provider: %s\nroom:\n  id: %s\ncrypto:\n  key: %s\nnet:\n  transport: %s\n  dns: %s\nsocks:\n  host: \"127.0.0.1\"\n  port: %d\ndata: data\n",
-		yamlDQ(str(p, "provider")), yamlDQ(str(p, "room")), yamlDQ(str(p, "key")), yamlDQ(transport), yamlDQ(dns), socksPort)
-}
-
-// yamlDQ renders s as a YAML double-quoted scalar, escaping the characters that would
-// otherwise break the document or inject extra keys. A room id / crypto key / provider
-// comes from an imported config or the API — untrusted free text — and the old render
-// interpolated it raw (provider/transport unquoted; id/key/dns quoted but UNESCAPED), so
-// a value containing a quote (e.g. `id: "a"b"`) produced invalid YAML, and an unquoted
-// provider with a space/colon mis-parsed, breaking olcRTC bring-up. Backslash and
-// double-quote are escaped; control chars (the API can carry them even though the
-// single-line YAML importer can't) become their YAML escapes.
-func yamlDQ(s string) string {
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\r", `\r`, "\t", `\t`)
-	return `"` + r.Replace(s) + `"`
-}
-
 func str(p map[string]any, k string) string {
 	if v, ok := p[k]; ok {
 		if s, ok := v.(string); ok {
@@ -303,10 +281,11 @@ type proc struct {
 	config   string // last rendered config (to detect changes)
 	cfgPath  string
 	iface    string        // AmneziaWG: the kernel interface we created (for teardown)
-	binName  string        // engine binary to (re)resolve for a supervised long-running proc (olcRTC/nfqws2)
+	binName  string        // engine binary to (re)resolve for a supervised long-running proc (nfqws2)
 	runArgs  []string      // argv after the binary, for (re)launch
 	runEnv   []string      // environment added over the daemon's own, for (re)launch (amneziawg-go's GOGC)
-	cmd      *exec.Cmd     // long-running (olcRTC/nfqws2)
+	runUID   int           // run as this uid/gid when the daemon is root (ByeDPI); 0 = as the daemon
+	cmd      *exec.Cmd     // long-running (nfqws2)
 	done     chan struct{} // closed when cmd exits (nil for one-shot awg-quick)
 	running  bool
 	needsBin bool
@@ -314,12 +293,24 @@ type proc struct {
 	note     string // what it runs differently from its config (amneziawg-go's lowered MTU), surfaced in Status
 	// awgUserspace is the endpoint's AWGUserspace when it started: Sync restarts the proc when it changes.
 	awgUserspace bool
-	managed      bool // a launched long-running olcRTC proc under Supervise crash-restart control
-	restarts     int  // consecutive crash-restarts since the last healthy tick (drives backoff)
+	managed      bool // a launched long-running proc (nfqws2) under Supervise crash-restart control
+	restarts     int  // consecutive crash-restarts since the last stable run (drives backoff)
 	cooldown     int  // Supervise ticks to wait before the next relaunch (crash-loop throttle)
+	// launchedAt is when the current incarnation was spawned (launchProc). The throttle clears only
+	// once it has stayed up pluginStableWindow from then.
+	launchedAt time.Time
 	// setup runs after every launch of a proc that needs configuring once it is up - userspace
 	// AmneziaWG, whose settings live in the process and die with it. nil for the others.
 	setup func(*proc) error
+	// The service fields (service.go): what RunService was asked to run, where the process's output
+	// goes instead of the daemon's own log, and what its exits left behind for the API.
+	svc       *ServiceSpec
+	output    *tailWriter
+	waitErr   error // how the last incarnation ended; written before done closes, read after
+	exits     int   // unexpected exits since this spec was started
+	lastExit  time.Time
+	lastOut   string // the last line the process wrote before its last exit, scrubbed
+	startedAt time.Time
 }
 
 // Manager supervises the running engine plugins.
@@ -330,6 +321,16 @@ type Manager struct {
 	runDir    string // tmpfs where a binary kept compressed is unpacked to run (binstore.DefaultRunDir)
 	procs     map[string]*proc
 	lastSpecs []Spec // the most recent desired set passed to Sync (for fail-safe baseline snapshot)
+	// services are the processes the daemon runs for itself (RunService, service.go). Sync never
+	// touches them; Supervise, StopByBin and StopAll do.
+	services map[string]*proc
+	// closed is set by StopAll and never cleared: RunService refuses to start anything afterwards
+	// (service.go says why).
+	closed bool
+	// procRoot and killPID are what ReapStrays reads and signals: /proc and SIGKILL in production
+	// (empty and nil mean those); tests give it a fixture.
+	procRoot string
+	killPID  func(pid int) error
 
 	// The AmneziaWG path choice and the userspace path's socket and resolver; tests replace them.
 	awgProbe  func() awg.Probe
@@ -357,7 +358,7 @@ func (m *Manager) FirmwareOwnsAWGKernel() {
 // New builds a Manager. dir is created on first Sync.
 func New(dir, binDir string) *Manager {
 	return &Manager{
-		dir: dir, binDir: binDir, runDir: binstore.DefaultRunDir, procs: map[string]*proc{},
+		dir: dir, binDir: binDir, runDir: binstore.DefaultRunDir, procs: map[string]*proc{}, services: map[string]*proc{},
 		awgProbe: awg.ProbeHost, awgDial: dialAWG, awgPathMTU: awgRoutePathMTU,
 		awgLookup: func(ctx context.Context, host string) ([]netip.Addr, error) {
 			return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
@@ -370,6 +371,12 @@ func New(dir, binDir string) *Manager {
 func (m *Manager) Sync(specs []Spec) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// After StopAll (daemon shutdown) nothing may start again: an Apply or a Components install still
+	// running past the HTTP server's shutdown would otherwise start plugins nobody stops, and they
+	// would outlive the daemon holding their ports (QA-097; services had the same gap, fixed in RunService).
+	if m.closed {
+		return
+	}
 	_ = os.MkdirAll(m.dir, 0o755)
 
 	m.lastSpecs = append([]Spec(nil), specs...) // snapshot the desired set for Specs()
@@ -429,28 +436,36 @@ func (m *Manager) start(id string, s Spec) *proc {
 	}
 
 	switch s.Endpoint.Engine {
-	case model.EngineOlcRTC:
-		bin, ok := m.resolve("olcrtc")
-		if !ok {
-			p.needsBin = true
-			return p
-		}
-		p.binName, p.runArgs = "olcrtc", []string{"-config", p.cfgPath} // exact flag confirmed on-device
-		if err := launchProc(p, bin); err != nil {
-			p.reason = "start olcrtc: " + err.Error()
-			return p
-		}
 	case model.EngineNfqws:
 		bin, ok := m.resolve("nfqws2")
 		if !ok {
-			p.needsBin = true
+			p.needsBin, p.binName = true, "nfqws2" // named, so installing it finds this proc (StopByBin)
 			return p
 		}
 		// nfqws2 listens on the NFQUEUE; the iptables divert that feeds it is the `desync` routing
-		// target (kernel-PBR), applied separately. Supervised long-running, like olcRTC.
+		// target (kernel-PBR), applied separately. Supervised long-running.
 		p.binName, p.runArgs = "nfqws2", nfqwsArgs(s.Endpoint)
 		if err := launchProc(p, bin); err != nil {
 			p.reason = "start nfqws2: " + err.Error()
+			return p
+		}
+	case model.EngineByeDPI:
+		bin, ok := m.resolve("ciadpi")
+		if !ok {
+			p.needsBin, p.binName = true, "ciadpi" // named, so installing it finds this proc (StopByBin)
+			return p
+		}
+		args, err := byedpiArgs(s.Endpoint, s.SOCKSPort)
+		if err != nil {
+			p.reason = "byedpi: " + err.Error()
+			return p
+		}
+		// Its own uid, which the TUN excludes (generator): in tun and hybrid mode the router's own
+		// sockets are captured too, and ciadpi's would be routed straight back into sing-box - and,
+		// for a list sent to ByeDPI, back into ciadpi.
+		p.binName, p.runArgs, p.runUID = "ciadpi", args, model.ByeDPIUID
+		if err := launchProc(p, bin); err != nil {
+			p.reason = "start ciadpi: " + err.Error()
 			return p
 		}
 	case model.EngineAmneziaWG:
@@ -587,8 +602,8 @@ func (m *Manager) stop(_ string, p *proc) {
 			_ = exec.Command(ipBin, "link", "del", p.iface).Run()
 		}
 	}
-	// Remove the rendered config — it holds secrets (WireGuard PrivateKey/PresharedKey,
-	// olcRTC crypto.key) and would otherwise linger 0600 on the router overlay across
+	// Remove the rendered config — it holds secrets (WireGuard PrivateKey/PresharedKey)
+	// and would otherwise linger 0600 on the router overlay across
 	// add/remove cycles. Best-effort; ENOENT (one-shot already cleaned, or never written) is fine.
 	if p.cfgPath != "" {
 		if err := os.Remove(p.cfgPath); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -611,15 +626,21 @@ func procDied(p *proc) bool {
 	}
 }
 
-// Crash-restart throttle for the supervised olcRTC process. The watchdog calls
+// Crash-restart throttle for a supervised long-running process. The watchdog calls
 // Supervise once per tick (3s), so these are expressed in ticks. The first
 // pluginRestartGrace crash-restarts are immediate (transient-crash resilience);
 // past that the wait between relaunches doubles each crash up to pluginMaxCooldown
 // (~60s, mirroring the watchdog's maxBackoff). It never permanently gives up —
 // a true crash loop is merely slowed so it stops spamming the router log.
+//
+// The counters clear only after an incarnation has stayed up pluginStableWindow (the watchdog's own
+// stable window for the core). Clearing them on any tick that found the proc alive meant a proc that
+// lived one tick and died on the next was always on its first crash, inside the grace, and was
+// relaunched every other tick forever (QA-110).
 const (
 	pluginRestartGrace = 3
 	pluginMaxCooldown  = 20
+	pluginStableWindow = 30 * time.Second
 )
 
 // pluginBackoffTicks maps a consecutive crash-restart count to the number of
@@ -638,7 +659,7 @@ func pluginBackoffTicks(restarts int) int {
 	return pluginMaxCooldown
 }
 
-// Supervise restarts any long-running plugin process (olcRTC, nfqws2, userspace AmneziaWG's
+// Supervise restarts any long-running plugin process (nfqws2, userspace AmneziaWG's
 // amneziawg-go) that has crashed, re-launching it from its stored binName + runArgs, with
 // crash-loop backoff (see pluginBackoffTicks) so a plugin that dies every tick is throttled rather
 // than relaunched ~20x/min (each relaunch would spam the router log). Kernel-path AmneziaWG is a
@@ -655,52 +676,77 @@ func (m *Manager) Supervise() {
 	}
 	defer m.mu.Unlock()
 	for _, p := range m.procs {
-		// Only launched long-running procs (olcRTC/nfqws2) are supervised here (AmneziaWG is
-		// one-shot; needs_binary / failed-initial-start procs were never managed).
-		if !p.managed {
-			continue
-		}
-		if p.running {
-			if !procDied(p) {
-				// Alive across a full tick -> healthy -> clear the crash-loop throttle.
-				p.restarts, p.cooldown = 0, 0
-				continue
-			}
-			// Exited: retire the dead handle, then fall through to a throttled relaunch.
-			p.running = false
-			p.cmd, p.done = nil, nil
-		}
-		// Crash-loop throttle: wait out the backoff window before relaunching, and
-		// surface the throttled state so the UI doesn't read it as merely idle.
-		if p.cooldown > 0 {
-			p.cooldown--
-			p.reason = fmt.Sprintf("%s crash-looping; backing off (restart #%d)", p.binName, p.restarts)
-			continue
-		}
-		m.relaunchProc(p)
+		m.superviseProc(p)
 	}
+	for _, p := range m.services {
+		m.superviseProc(p)
+	}
+}
+
+// superviseProc is one Supervise tick for one proc.
+func (m *Manager) superviseProc(p *proc) {
+	// Only launched long-running procs (nfqws2) are supervised here (AmneziaWG is
+	// one-shot; needs_binary / failed-initial-start procs were never managed).
+	if !p.managed {
+		return
+	}
+	if p.running {
+		if !procDied(p) {
+			// Up for the stable window since its launch -> healthy -> clear the crash-loop throttle.
+			// Alive on one tick is not enough (see pluginStableWindow).
+			if time.Since(p.launchedAt) >= pluginStableWindow {
+				p.restarts, p.cooldown = 0, 0
+			}
+			return
+		}
+		// Exited: retire the dead handle, then fall through to a throttled relaunch.
+		noteExit(p)
+		p.running = false
+		p.cmd, p.done = nil, nil
+	}
+	// Crash-loop throttle: wait out the backoff window before relaunching, and
+	// surface the throttled state so the UI doesn't read it as merely idle.
+	if p.cooldown > 0 {
+		p.cooldown--
+		p.reason = fmt.Sprintf("%s crash-looping; backing off (restart #%d)", p.binName, p.restarts)
+		return
+	}
+	m.relaunchProc(p)
 }
 
 // launchProc spawns a supervised long-running engine process (bin + p.runArgs, p.runEnv over the
 // daemon's environment), wires the exit-tracking goroutine, and marks the proc running+managed.
-// Shared by olcRTC, nfqws2 and amneziawg-go. On a Start error it leaves the proc not-running (the
+// Shared by nfqws2 and amneziawg-go. On a Start error it leaves the proc not-running (the
 // caller sets reason) — never running on failure.
 func launchProc(p *proc, bin string) error {
+	bin, err := reachableFor(bin, p.runUID)
+	if err != nil {
+		return err
+	}
 	cmd := exec.Command(bin, p.runArgs...)
 	if len(p.runEnv) > 0 {
 		cmd.Env = append(os.Environ(), p.runEnv...)
 	}
+	if p.svc != nil {
+		runServiceAs(cmd, p.runUID)
+	} else {
+		runAs(cmd, p.runUID)
+	}
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if p.output != nil {
+		cmd.Stdout, cmd.Stderr = p.output, p.output
+	}
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 	p.cmd, p.running, p.managed = cmd, true, true
+	p.launchedAt = time.Now()
 	p.done = make(chan struct{})
-	go func(c *exec.Cmd, done chan struct{}) { _ = c.Wait(); close(done) }(cmd, p.done)
+	go func(c *exec.Cmd, done chan struct{}) { p.waitErr = c.Wait(); close(done) }(cmd, p.done)
 	return nil
 }
 
-// relaunchProc re-spawns a managed long-running proc (olcRTC/nfqws2) from its stored binName +
+// relaunchProc re-spawns a managed long-running proc (nfqws2) from its stored binName +
 // runArgs and arms the next backoff window. A binary that has vanished degrades the proc to
 // needs_binary and drops it from supervision (a later re-Apply re-creates and re-resolves it); a
 // failed Start is throttled like a crash so it keeps retrying without log spam.
@@ -789,14 +835,20 @@ func (m *Manager) Specs() []Spec {
 	return append([]Spec(nil), m.lastSpecs...)
 }
 
-// StopAll stops every plugin (daemon shutdown).
+// StopAll stops every plugin (daemon shutdown). It also closes the manager to services, so that no
+// RunService after it starts a process nobody will stop (see RunService).
 func (m *Manager) StopAll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.closed = true
 	for id, p := range m.procs {
 		m.stop(id, p)
 	}
 	m.procs = map[string]*proc{}
+	for name, p := range m.services {
+		m.stop(name, p)
+	}
+	m.services = map[string]*proc{}
 }
 
 // StopByBin stops every supervised plugin proc launched from engine binary binName, so that binary
@@ -813,6 +865,15 @@ func (m *Manager) StopByBin(binName string) int {
 		if p.binName == binName {
 			m.stop(id, p)
 			delete(m.procs, id)
+			n++
+		}
+	}
+	// A service is stopped and forgotten the same way; its owner runs it again once the binary is
+	// back (or finds it missing), as Sync does for the connections above.
+	for name, p := range m.services {
+		if p.binName == binName {
+			m.stop(name, p)
+			delete(m.services, name)
 			n++
 		}
 	}

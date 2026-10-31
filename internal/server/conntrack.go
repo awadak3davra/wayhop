@@ -240,13 +240,30 @@ func (s *Server) markExitResolver() func(uint32) string {
 // (single-bucket) and lights up per-exit automatically once `ct mark set meta mark` is deployed.
 func (s *Server) computeMarkExitResolver() func(uint32) string {
 	p := s.store.Profile()
-	plan, _, err := pbr.Compile(&p, pbr.Options{})
+	// A list sent to a KeeneticOS access policy compiles only with the policy's mark; the installed plan
+	// has the marks it was applied with. Its flows carry the policy's slot in the connmark, so the slot
+	// names the policy - without it they read as "direct", leaving by the WAN (gap 6 review).
+	var opts pbr.Options
+	if installed := s.installedKernelPlan(); installed != nil {
+		for _, ps := range installed.NDMPolicySlots() {
+			if opts.NDMPolicies == nil {
+				opts.NDMPolicies = map[string]uint32{}
+			}
+			opts.NDMPolicies[ps.Name] = ps.Mark
+		}
+	}
+	plan, _, err := pbr.Compile(&p, opts)
 	if err != nil || plan == nil {
 		return func(uint32) string { return "direct" }
 	}
 	byMark := map[uint32]string{}
 	for _, e := range plan.Egresses {
 		byMark[e.Mark] = e.Tag
+	}
+	for _, z := range plan.Zones {
+		if z.NDMPolicy != "" {
+			byMark[z.Mark] = z.EgressTag
+		}
 	}
 	mask := plan.Mask
 	return func(m uint32) string {

@@ -30,7 +30,7 @@ const (
 // id. A missing binary, an absent chain or an unparsable line yields no entry for that list rather
 // than a zero: "not measured" and "matched nothing" are different answers and the page words them
 // differently.
-func (s *Server) kernelListCounters(ctx context.Context, listIDs []string) map[string]listStats {
+func (s *Server) kernelListCounters(ctx context.Context, listIDs []string) map[string]kernelListStats {
 	if s == nil || len(listIDs) == 0 {
 		return nil
 	}
@@ -42,10 +42,10 @@ func (s *Server) kernelListCounters(ctx context.Context, listIDs []string) map[s
 		want[opts.ZoneSetName(zone, "4")] = id
 		want[opts.ZoneSetName(zone, "6")] = id
 	}
-	out := map[string]listStats{}
+	out := map[string]kernelListStats{}
 	for _, tool := range []string{executionToolIptables, executionToolIp6tables} {
 		text, err := runHostCommandBounded(ctx, kernelCounterTimeout, kernelCounterOutputLimit,
-			applyHostCommandWaitDelay, tool, "-t", "mangle", "-L", pbrChainName(opts), "-v", "-x", "-n")
+			applyHostCommandWaitDelay, tool, "-w", "-t", "mangle", "-L", pbrChainName(opts), "-v", "-x", "-n")
 		if err != nil {
 			continue // one family missing is not an answer about the other
 		}
@@ -63,7 +63,7 @@ func (s *Server) kernelListCounters(ctx context.Context, listIDs []string) map[s
 				continue
 			}
 			st := out[id]
-			st.Conns += pkts // packets matched; the column reads it as "how much has hit this list"
+			st.Packets += pkts // packets, not connections: the page names the unit (QA-113)
 			st.Bytes += bytes
 			out[id] = st
 		}

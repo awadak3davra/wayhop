@@ -88,8 +88,14 @@ must(diagnostics.includes('"aria-label": t("Copy") + " " + t(hcLabel(id, r))'),
 must(diagnostics.includes('"aria-label": t("Copy command") + " " + proto'),
   'page-diagnostics.js: the copy-command button must name its protocol');
 
+// The connection dialog has two fields labelled "Protocol" (the connection's and its multiplex) and
+// the multiplex switch reads "Enabled": both multiplex controls carry the section name.
+must(app.includes('q("#f-mux").setAttribute("aria-label", t("Multiplex") + " " + t("Enabled"))')
+  && app.includes('q("#f-mux-proto").setAttribute("aria-label", t("Multiplex") + " " + t("Protocol"))'),
+  'page-connections.js: the multiplex switch and protocol must name the Multiplex section');
+
 if (errs.length) {
   console.error('a11y contract FAILED:\n  - ' + errs.join('\n  - '));
   process.exit(1);
 }
-console.log('a11y OK: burger button+aria-expanded, apply-banner live region + cold-load, toasts/failsafe roles, aria-current, label wiring, nav-guard registry + beforeunload, auth-gate focus/inert isolation, secret redaction, contextual Routing action names, and Diagnostics Copy buttons naming their object.');
+console.log('a11y OK: burger button+aria-expanded, apply-banner live region + cold-load, toasts/failsafe roles, aria-current, label wiring, nav-guard registry + beforeunload, auth-gate focus/inert isolation, secret redaction, contextual Routing action names, Diagnostics Copy buttons naming their object, and the multiplex controls naming their section.');
