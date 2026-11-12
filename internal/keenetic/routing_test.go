@@ -10,7 +10,7 @@ func TestRouteCommands(t *testing.T) {
 		{CIDR: "0.0.0.0/0", Target: RouteTarget{Iface: "Wireguard5"}},                         // default via native AWG
 		{CIDR: "10.0.0.0/24", Target: RouteTarget{Iface: "Wireguard5"}},                       // selective list → VPN
 		{CIDR: "203.0.113.10/32", Target: RouteTarget{Iface: "ISP"}, Comment: "vpn endpoint"}, // anti-loop exception
-		{CIDR: "198.18.0.0/16", Target: RouteTarget{Iface: "ISP"}, Auto: true, Comment: "RU direct"},
+		{CIDR: "198.51.100.0/24", Target: RouteTarget{Iface: "ISP"}, Auto: true, Comment: "RU direct"},
 		{CIDR: "10.10.0.0/16", Target: RouteTarget{Reject: true}},         // blackhole
 		{CIDR: "2001:db8::/32", Target: RouteTarget{Iface: "Wireguard5"}}, // v6
 	}
@@ -22,7 +22,7 @@ func TestRouteCommands(t *testing.T) {
 		"ip route 0.0.0.0 0.0.0.0 Wireguard5",
 		"ip route 10.0.0.0 255.255.255.0 Wireguard5",
 		"ip route 203.0.113.10 255.255.255.255 ISP !vpn_endpoint",
-		"ip route 198.18.0.0 255.255.0.0 ISP auto !RU_direct",
+		"ip route 198.51.100.0 255.255.255.0 ISP auto !RU_direct",
 		"ip route 10.10.0.0 255.255.0.0 reject",
 		"ipv6 route 2001:db8::/32 Wireguard5",
 	}

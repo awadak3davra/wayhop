@@ -13,7 +13,7 @@ func TestTeardownCommands(t *testing.T) {
 	p := &model.Profile{
 		Endpoints: []model.Endpoint{awg},
 		RoutingLists: []model.RoutingList{
-			{ID: "ru", Manual: []string{"198.18.0.0/16"}, Outbound: model.OutboundDirect, Enabled: true}, // → ISP auto-less
+			{ID: "ru", Manual: []string{"198.51.100.0/24"}, Outbound: model.OutboundDirect, Enabled: true}, // → ISP auto-less
 			{ID: "banks", Manual: []string{"198.19.0.0/16"}, Outbound: "awg-example", Enabled: true},
 			{ID: "blk", Manual: []string{"192.0.2.0/24"}, Outbound: model.OutboundBlock, Enabled: true},
 		},
@@ -48,9 +48,9 @@ func TestTeardownCommands(t *testing.T) {
 
 func TestRouteKey(t *testing.T) {
 	cases := map[string]string{
-		"ip route 198.18.0.0 255.255.0.0 ISP auto !RU_direct": "ip route 198.18.0.0 255.255.0.0 ISP",
-		"ip route 203.0.113.10 255.255.255.255 ISP !wr_bypass": "ip route 203.0.113.10 255.255.255.255 ISP",
-		"ip route 192.0.2.0 255.255.255.0 reject":              "ip route 192.0.2.0 255.255.255.0 reject",
+		"ip route 198.51.100.0 255.255.255.0 ISP auto !RU_direct": "ip route 198.51.100.0 255.255.255.0 ISP",
+		"ip route 203.0.113.10 255.255.255.255 ISP !wr_bypass":    "ip route 203.0.113.10 255.255.255.255 ISP",
+		"ip route 192.0.2.0 255.255.255.0 reject":                 "ip route 192.0.2.0 255.255.255.0 reject",
 		// v6 identity is 4 tokens (slash-CIDR, no separate mask) — the trailing !comment/reject must
 		// still be stripped so the `no` removal matches.
 		"ipv6 route 2001:db8::/32 Wireguard10 !ru":  "ipv6 route 2001:db8::/32 Wireguard10",
