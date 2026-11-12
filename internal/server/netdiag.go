@@ -104,7 +104,7 @@ func (s *Server) handleNetDiagStream(w http.ResponseWriter, r *http.Request) {
 		// picked in the Egress selector, so a lookup chosen precisely to see what a name resolves to
 		// FROM a tunnel — geo-DNS, a resolver that answers differently per region — silently answered
 		// from the ordinary path instead. Measured on a live Keenetic: egress set to
-		// WgProvider_SiteB, "Resolve (DNS)" returned the same records the WAN resolver gives, with
+		// WgProvider_Malta, "Resolve (DNS)" returned the same records the WAN resolver gives, with
 		// nothing on screen saying the exit had been ignored. Ping and traceroute on the same row DO
 		// take it (-I/-i), which is what made the omission invisible.
 		//

@@ -5192,7 +5192,7 @@ function renderClientDests(wrap, r) {
   }
   clients.forEach(c => {
     wrap.appendChild(el("div", { class: "card-title", style: "margin:12px 0 4px;font-size:13px" },
-      // A device with no DHCP lease name rendered as "(192.168.50.11)" — parentheses around the only
+      // A device with no DHCP lease name rendered as "(192.168.88.11)" — parentheses around the only
       // thing there, which reads as a name that failed to load. Measured on a live Keenetic:
       // every one of the three devices Scan found is nameless, so the whole report was bracketed.
       c.name ? c.name + " (" + c.ip + ")" : c.ip));

@@ -752,7 +752,7 @@ async function loadNativeCaps() {
         // on adopt. It used to be dropped in favour of the public key, and on the KeeneticOS
         // discovery path the key is empty (`show interface` does not expose it), so the row
         // collapsed to "nwg2 · amneziawg": measured on a live Keenetic, six tunnels named
-        // WgProvider_SiteB … LanAccessTunnel in NDM and told apart by nothing on this page, with
+        // WgProvider_Malta … LanAccessTunnel in NDM and told apart by nothing on this page, with
         // the one adoptable row asking him to guess which tunnel he was about to add. The key stays
         // as the fallback identity for a host that reports one and no name.
         const parts = [v.iface, v.type, v.name || v.public_key].filter(Boolean);

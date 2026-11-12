@@ -16,7 +16,7 @@ import (
 // THEIR devices is leaking.
 // The host octets are deliberately .20/.30/.2 and never .1x: the publish scrub rewrites the literal
 // "192.168.50.1" to "192.168.50.1" (it hides the operator's own LAN), and that is a SUBSTRING rule —
-// it turns "192.168.50.10" into "192.168.50.10" while leaving the "192.168.88.0/24" prefix alone, so
+// it turns "192.168.88.10" into "192.168.50.10" while leaving the "192.168.88.0/24" prefix alone, so
 // every address here fell outside the LAN and this test failed in the published tree only. Found by
 // the scrub-output gate, whose whole purpose is that divergence.
 func TestOnlyLANDevicesAreCalledDevices(t *testing.T) {

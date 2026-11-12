@@ -494,14 +494,14 @@ const liveGlobalsSample = `interface GigabitEthernet1
     ip global 54610
 !
 interface Wireguard0
-    description WgProvider_SiteB
+    description WgProvider_Malta
     ip mtu 1280
     ip global 10922
     wireguard peer cGVlci1wdWJsaWMta2V5LTMyLWJ5dGVzLXNjcnViYmQ=
         endpoint exit.example.net:51820
 !
 interface Wireguard4
-    description WgProvider_SiteC
+    description WgProvider_Poland
     ip global 2730
 !
 `

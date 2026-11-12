@@ -53,7 +53,7 @@ const RULES = path.join(ROOT, 'publish', 'scrub-rules.json');
 // rule that stopped matching.
 // Moved again, deliberately: l5_lansource_test.go stopped containing "192.168.50.1". That literal
 // is rewritten by a SUBSTRING rule, which turned the test's LAN hosts into 192.168.1.x while the
-// prefix they are matched against stayed 192.168.88.0/24 — so the test passed here and failed in the
+// prefix they are matched against stayed the old /24 — so the test passed here and failed in the
 // published tree, which is exactly the divergence this gate exists to catch. Its addresses now
 // avoid the rule, and this hash follows them.
 // Moved again, deliberately: four values were added to the scrub after scripts/check-pii.mjs found
@@ -89,7 +89,11 @@ const RULES = path.join(ROOT, 'publish', 'scrub-rules.json');
 // Moved again with olcRTC's removal: internal/importer/olcrtc_test.go, the only Go file that used the
 // personal meet host as a fixture (four meet.example.com substitutions), was rewritten without it.
 // Nothing new is matched; one file simply stopped needing the rule.
-const EXPECTED_GO_COVERAGE_SHA256 = '07cb1105cdcb89b0e716a231d9d536933690756b421f5026a81f601b69f5de67';
+// Moved again on purpose (2026-11-12): every router model, place and
+// subnets to leave the public tree, so the test router's model name is now scrubbed to "test router"
+// (three rules, "an"/"An" first for the article). The comments, test-case names and fixtures that
+// name it change in the fixture and the assertion together.
+const EXPECTED_GO_COVERAGE_SHA256 = '6910215c645deef2703862fe3a20cfe9554b70bfe4a4670c306d7e045ecc65d0';
 // K5 intentionally retired seven more personal-device-derived Keenetic migration/cutover Go files.
 // Their scrub matches disappeared with the code; pin the reduced subject so any further loss fails.
 const MIN_REWRITTEN_GO_FILES = 108;

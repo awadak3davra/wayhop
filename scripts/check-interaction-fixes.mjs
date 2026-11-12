@@ -2030,7 +2030,7 @@ globalThis.row = healthRowEl;`, rowCtx);
 // "one tool, one exit" was true of three of the four tools listed. Ping and traceroute take the
 // selected egress (-I/-i); the DNS lookup resolves through the router's own resolver whatever is
 // picked, so listing it among them made an answer from the WAN read as an answer from a tunnel.
-// Measured on a live Keenetic with the egress set to WgProvider_SiteB. The daemon now
+// Measured on a live Keenetic with the egress set to WgProvider_Malta. The daemon now
 // says so per run (see TestDNSToolSaysItIgnoresTheExit); the header must not undo that.
 {
   const i = diagnostics.indexOf('Advanced — one tool, one exit');
@@ -2045,7 +2045,7 @@ globalThis.row = healthRowEl;`, rowCtx);
 
 // Scan's report names things the way the operator named them. Two literals in one renderer said
 // otherwise, both measured on a live Keenetic:
-//   • a device with no DHCP lease name rendered as "(192.168.50.11)" — parentheses wrapped around the
+//   • a device with no DHCP lease name rendered as "(192.168.88.11)" — parentheses wrapped around the
 //     only thing present, which reads as a name that failed to load. All three devices Scan found
 //     there are nameless, so every heading was bracketed.
 //   • the exit badge printed the raw outbound tag: "via grp-primary", while the Failover page

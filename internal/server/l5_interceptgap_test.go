@@ -99,8 +99,8 @@ func TestRouterOwnV6IsNotAClient(t *testing.T) {
 	const expanded = "2001:0db8:0003:0000:0000:0000:0a21:24be"
 	mine := map[string]bool{compressed: true, "192.168.50.1": true}
 	conns := []Conn{
-		{Src: expanded, Dst: "94.140.14.14", Dport: 443},       // the router's own DoH, expanded form
-		{Src: "192.168.50.1", Dst: "8.8.8.8", Dport: 443},      // the router again, v4
+		{Src: expanded, Dst: "94.140.14.14", Dport: 443},        // the router's own DoH, expanded form
+		{Src: "192.168.50.1", Dst: "8.8.8.8", Dport: 443},       // the router again, v4
 		{Src: "192.168.88.77", Dst: "94.140.14.14", Dport: 443}, // a real LAN client
 	}
 	found, clients := detectDoHClients(conns, nil, mine)
