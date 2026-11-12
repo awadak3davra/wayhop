@@ -30,6 +30,11 @@ import (
 // applyLockWait bounds how long an Apply waits for a concurrent one before answering 503 BUSY.
 const applyLockWait = 20 * time.Second
 
+// applyDetachedTimeout bounds the part of an Apply that changes the router, which runs detached from
+// the request that asked for it (see runApply). Generous: every adapter command has its own, much
+// shorter, timeout, so this only ends a run that is stuck, and ending it means a rollback.
+const applyDetachedTimeout = 10 * time.Minute
+
 // applyRequest is the lenient POST /api/apply body. Everything is optional; a missing body is
 // {save:false}. Unknown fields are ignored.
 type applyRequest struct {
@@ -267,18 +272,16 @@ func (s *Server) runApply(ctx context.Context, req applyRequest) (*applyResult, 
 	}
 
 	s.setStage("materialize")
-	var kernelPlan *pbr.Plan
+	// materialize compiles the kernel plan once it holds the native plan, which on KeeneticOS names the
+	// device each NDM-created tunnel lives on. The options are this capture's: its access-policy marks
+	// and the flowtable the capture could resolve.
+	var kernelOptions *pbr.Options
 	var offloadWarning string
 	if mode := desiredRoutingMode(desired.Config); mode == "hybrid" || mode == "fast" {
-		kernelOpts := s.pbrCompileOptions(desired.Config)
-		kernelOpts.NDMPolicies = ndmPolicies
-		kernelOpts, offloadWarning = kernelOffloadForHost(kernelOpts, host.Host)
-		kernelPlan, _, err = pbr.Compile(&desired.Profile, kernelOpts)
-		if err != nil {
-			return nil, &applyError{Status: http.StatusBadRequest, Code: applyCodeInvalidConfig, Stage: "kernel",
-				Message: "the kernel routing plan could not be compiled", Detail: err.Error(),
-				Remedy: "Fix the routing lists named in the detail, or switch to tun or mixed mode."}
-		}
+		options := s.pbrCompileOptions(desired.Config)
+		options.NDMPolicies = ndmPolicies
+		options, offloadWarning = kernelOffloadForHost(options, host.Host)
+		kernelOptions = &options
 	}
 	baseline := s.appliedBaseline()
 	var previous *executionMaterializationV1
@@ -295,7 +298,7 @@ func (s *Server) runApply(ctx context.Context, req applyRequest) (*applyResult, 
 		}
 	}
 	m, warnings, err := materialize(materializeInput{
-		desired: desired, host: host, native: nativeCapture, previous: previous, kernelPlan: kernelPlan,
+		desired: desired, host: host, native: nativeCapture, previous: previous, kernelOptions: kernelOptions,
 		ndmPolicies: ndmPolicies,
 	})
 	if err != nil {
@@ -320,8 +323,22 @@ func (s *Server) runApply(ctx context.Context, req applyRequest) (*applyResult, 
 		}
 	}
 
-	// From here on the router may change: mark the record so a crash converges to the committed
-	// state on the next start.
+	// From here on the router may change, and the run no longer belongs to the request that started
+	// it. The request context ends when the client goes away, and an Apply routinely takes its own
+	// client away: it reloads the core or re-creates the tunnel a remote operator's session rides on.
+	// Cancelled between steps it was rolled back, every time, so that change could never be applied
+	// remotely, and a Test never got to arm the window that exists for exactly this. The panel already
+	// follows GET /api/apply/status after a lost answer. Up to here cancelling was free; from here the
+	// run finishes (or fails and rolls back) on its own bound, like the routing switch.
+	if err := context.Cause(ctx); err != nil {
+		rolledBack := true // nothing was touched
+		return nil, &applyError{Status: http.StatusServiceUnavailable, Code: applyCodeBusy, Stage: "check",
+			Message: "the request ended before anything was changed", Detail: err.Error(),
+			Remedy: "Apply again.", RolledBack: &rolledBack}
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), applyDetachedTimeout)
+	defer cancel()
+	// Mark the record so a crash converges to the committed state on the next start.
 	s.setInFlight(req.Save, desired.DesiredRev)
 	// Only this forward run refuses a changed WayHop-created interface; the rollback below gets the
 	// plain ctx and leaves such an interface as it is (withStrictNativePrepare).

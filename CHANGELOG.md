@@ -3,6 +3,141 @@
 All notable changes to WayHop are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.10] — 2026-11-11
+
+**Upgrading on OpenWrt: press Review & Apply once after the update.** 0.5.10 draws the routing plane
+differently, and the plane stored by an earlier version does not pass its check until it is applied
+again. Until then the installed plane keeps working, but after a reboot the router would come up
+without it, and listed traffic would go direct.
+
+### Security
+- **First-run setup is open only for 30 minutes after start, or from the router itself.** Until a
+  password was set, any device on the LAN could choose one, or switch the password off for good, with
+  a single request. Now the setup screen accepts a choice only in the first 30 minutes after the
+  daemon starts, or from the router itself (an SSH tunnel to it); afterwards it says to restart
+  WayHop or reboot the router to reopen it. Once "no password" is chosen, changing it needs a session.
+- **Logins are limited router-wide.** Besides the per-address limit, after 20 failed logins from any
+  mix of addresses within ten minutes every further attempt waits two seconds, and IPv6 clients are
+  counted per /64, so rotating addresses no longer buys more guesses.
+- **A manual list entry with a control character is refused.** On KeeneticOS manual entries are
+  written into dnsmasq's configuration, where a line break inside one added a configuration line
+  nobody reviewed (an upstream resolver, say).
+- **Subscription and feed downloads refuse the router's own addresses.** A source URL pointing at one
+  of the router's interface addresses is no longer fetched.
+- **The OpenWrt apk package installs its files as root's.** Every file it installed was owned by
+  nobody, including the init script and the binary root runs, so any process running as nobody could
+  rewrite them and gain root. Packing now runs as root in its sealed container and refuses to run
+  otherwise. An existing install is corrected by the next package update.
+
+### Added
+- **DNS privacy check.** A unique test lookup shows in the connection table which way DNS really
+  leaves, so the page says who can read lookups from a measurement: the provider, the VPN exit and
+  the resolver, or the resolver alone. Warnings and options follow from that, and every option opens
+  the control that fixes it, already filled in.
+- **Are these resolvers real?** Each resolver is checked on each way out by what only it can do: its
+  operator's fingerprint, DNSSEC, NXDOMAIN, one answer per question, a certificate proof for popular
+  names, and a decoy address where nothing serves DNS. Silence and failures the router could cause
+  itself read as "cannot tell", never as forged. Popular blocked names are not sent past the provider
+  unless asked.
+- **Encrypted DNS quick list.** Nineteen resolvers measured through a chosen way out, fastest first,
+  DoH and DoT separately, with the certificate verified and a real answer read. Use it with one
+  dialog, and a strip shows what is left before devices use it. No operator a state owns, funds or has
+  a way to read is offered, here or in the add-resolver presets: Yandex, AliDNS, DNSPod, DNS4EU and
+  Shecan are gone, and an address can still be typed by hand.
+- **Encrypted resolvers can answer clients.** A new switch gives sing-box a loopback DNS inbound for
+  dnsmasq to forward to. Off, the generated config does not change by one byte. Resolver names reach
+  sing-box through `tls.server_name`, so a pinned address works when its certificate holds only a name.
+- **Client DNS through tunnels, from the panel (Keenetic).** The DNS page now edits the upstream chain
+  of the dnsmasq that answers your devices, and a row can be bound to a connection or failover group
+  (`server=IP@iface`). The chain replaces the upstreams in `/opt/etc/dnsmasq.conf`, which are kept as
+  comments, instead of landing behind them. Each change is reviewed, each tunnel row is tried through
+  a throwaway dnsmasq, and the old files go back if dnsmasq stops answering; Restore original undoes
+  it. If a bound tunnel is deleted and recreated, WayHop restarts dnsmasq, which would otherwise never
+  use it again. The router's own lookups keep using `/etc/resolv.conf`.
+- **The DNS page says who answers your devices.** It now opens with the program holding port 53 and
+  where its lookups go first, and says that the profile's resolvers and rules, Secure defaults
+  included, serve only sing-box's own lookups when dnsmasq holds the port.
+- **TLS 1.0-1.2 cipher-suite links.** VLESS and VMess links now preserve `cs=`, and sing-box configs
+  preserve `cipher_suites`, through import, re-import, generation and export. The option is emitted
+  only for the standard Go TLS client, never for uTLS or Reality; TLS 1.3 suites remain Go's defaults.
+
+### Changed
+- **The panel loads faster.** Its files are served without code comments, so the first visit moves
+  about a quarter less (278 to 204 KB compressed); the page draws before its first requests answer;
+  the routing-list status no longer downloads every rule set to report it; and a folded live
+  connections table is no longer rebuilt every five seconds.
+- **Importing a link is one click.** After a link is read, Save sits at the top; the form for
+  changing what was read is folded under Advanced and opens by itself when something needs a fix.
+- **A new routing list starts with its own entries.** The feed, scope and download fields moved under
+  Advanced (open when one is set), and a list with only manual entries shows no download choice.
+- **Plainer panel.** Speeds are in bits per second everywhere, dates follow the panel's language, the
+  phone menu closes when you pick a page, page heads are one sentence and a row of actions, Escape
+  closes the dialog in front, and the dashboard no longer says "protected" while devices go direct or
+  the tunnel is down. The Russian panel gained more than 260 translations and lost its jargon;
+  Simplified Chinese covers the whole current panel.
+
+### Fixed
+- **A missing tunnel no longer takes the whole routing plane down.** When an Apply found a tunnel
+  device not there yet, it rolled back everything, kill switch included; now that one route is
+  skipped and put back once the device appears.
+- **Startup keeps trying to restore the applied configuration.** A converge that failed at boot was
+  not retried until the next Apply; it now tries again after one and two minutes and then every five.
+- **Closing the browser tab no longer cuts an Apply short.** A started Apply runs to its end (up to
+  ten minutes) instead of stopping halfway when the page goes away.
+- **Device-scoped lists route in hybrid mode.** An IP list limited to some devices and sent to a
+  tunnel the kernel carries was dropped from sing-box but still captured by its TUN, so those devices'
+  TCP to the listed addresses followed the default route. Such lists now stay in sing-box.
+- **Private ranges a list names go through its connection.** 10.0.0.0/8, 172.16.0.0/12,
+  192.168.0.0/16 and fc00::/7 were pinned to the main table ahead of the list rules, so a list that
+  named one of them sent it out through the provider. A range a list names now reaches the list's
+  tunnel, while the router's own LAN routes still win; unlisted private space is unchanged.
+- **The kill switch stays in place during a repeated Apply (OpenWrt).** Re-applying deleted every
+  WayHop rule and route, the kill switch's blocking route included, before adding them back; rules and
+  routes are now installed first and stale ones removed after.
+- **IPv6 of a list whose tunnel has no IPv6 is refused instead of leaking.** Such a list's IPv6 table
+  stayed empty, so its marked IPv6 left by whatever held the IPv6 default route; the table now answers
+  "unreachable", and devices fall back to IPv4 through the list's own tunnel.
+- **A sing-box stuck at full CPU now gets restarted.** On sing-box 1.13 a burst of route changes can
+  overflow the core's route monitor, after which it spins for good: most of a CPU core gone until
+  someone restarts it, with nothing else looking wrong and nothing in any log. The watchdog now checks
+  once a minute, and when the core stays busy for about four minutes with an overflowed route monitor
+  it is not reading, it restarts the core, at most once in 30 minutes. It says so in the system log,
+  through the watchdog's notification URL when one is set, and as `wedge_restarts` in `/api/watchdog`
+  and the support bundle. sing-box 1.14 keeps reading after the same overflow and is not affected.
+- **List feeds follow "Download via".** CIDR and domain feeds, their name lookups and the Routing
+  page's source check ignored it and went over the provider, which saw a router fetch antifilter on
+  every refresh. They now use a socket bound to that connection's link. **If it is down the list keeps
+  what it has and is asked again at the next hourly tick; it never falls to the provider.** A failover
+  group ending in `direct` is how to ask for that fallback. A proxy connection has no link to bind to,
+  so its feeds stay on the provider's path, and the Routing page says so. A list with no choice of its
+  own follows the Rule-set download route.
+- **Keenetic: fast and hybrid routing use the tunnel NDM created.** A list routed through an
+  AmneziaWG connection that KeeneticOS runs itself (`interface WireguardN`, device `nwgN`) had its
+  table seeded with the `wr_` device WayHop's own engine would have created, which does not exist
+  there, so the list's traffic went out through the provider (or nowhere, under a kill switch) while
+  the check still passed. The kernel plane, the list failover, the component downloader, the LAN
+  prefix filter, the DNS page and check, the encrypted-DNS quick list and the Telegram bot's group view
+  now name `nwgN`. Health checks and the compatibility core reach such a tunnel through `nwgN` too.
+- **Keenetic: the check after Apply reads a tunnel's peer settings where the router prints them.** A
+  peer's endpoint, keepalive, allowed IPs and `connect` must now appear inside that peer's group in
+  the running configuration; one printed after the group closed, or only under another peer, used to
+  pass. An AmneziaWG 2.0 I1-I5 value holding a quote or a control character is refused when the
+  tunnel is written.
+- **Keenetic rollback.** A committed interface whose slot now has a different public key is left out
+  of the rollback, so a replacement tunnel is not removed; a native Test revision is rolled back after
+  a reboot instead of being discarded.
+- **OpenWrt rollback and native interfaces.** Committed kernel teardown commands join the rollback,
+  so stale `ip rule` entries left by an earlier configuration are retired. When the router-native plan
+  cannot carry a configuration, Apply now stops and names each native interface with its connection
+  instead of running everything through sing-box and losing track of them; moving AmneziaWG from
+  WayHop's engine to the router's own is refused only when it would actually happen.
+- **The Keep & Save banner goes away.** On a slow link a status request sent before Keep & Save could
+  answer after it and bring the "applied live (not saved)" banner back for good.
+- **Smaller fixes.** A profile restore of `null` no longer erases the profile; an API body with more
+  than one JSON value and a group probe interval under five seconds are refused; native DNS on OpenWrt
+  reads the WAN's servers from dnsmasq's resolv file; the review warns before sing-box fails over a
+  taken DNS port; re-import names the WireGuard settings it cleared and keeps TLS cipher suites.
+
 ## [0.5.9] — 2026-10-31
 
 ### Added

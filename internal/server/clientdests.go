@@ -115,7 +115,7 @@ func (s *Server) lanPrefixes() ([]netip.Prefix, map[string]bool) {
 	tunnels := defaultRouteIfaces()
 	if s != nil && s.store != nil {
 		profile := s.store.Profile()
-		for _, iface := range kernelIfaceByEndpoint(&profile) {
+		for _, iface := range kernelIfaceByEndpoint(&profile, s.appliedKernelDevices()) {
 			if iface != "" {
 				tunnels[iface] = true
 			}

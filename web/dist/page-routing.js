@@ -41,8 +41,9 @@ function listMemoryCard(lists) {
   api.get("/api/pbr/lists/memory").then(r => {
     body.innerHTML = "";
     if (!r || !r.measured) {
-      body.appendChild(el("div", { class: "hint" },
-        t("Not measured: the kernel routing plane is not installed on this router, so these lists hold no kernel sets.")));
+      body.appendChild(el("div", { class: "hint" }, r && r.reason === "nft"
+        ? t("Not measured: nftables does not report how much memory its sets use.")
+        : t("Not measured: the kernel routing plane is not installed on this router, so these lists hold no kernel sets.")));
       return;
     }
     const byID = new Map((r.lists || []).map(e => [e.id, e]));
@@ -166,7 +167,10 @@ function routingRow(rl, idx, total) {
       el("div", { class: "sub" }, src),
       err),
     el("div", { class: "rl-cell", "data-col": t("route via") }, routeSel),
-    el("div", { class: "rl-cell", "data-col": t("download via") }, dlSel),
+    // A list of hand-typed entries downloads nothing, and a second select with the same options as
+    // "route via" beside it read as a second routing choice.
+    el("div", { class: "rl-cell", "data-col": t("download via") }, (rl.source || feed) ? dlSel
+      : el("span", { class: "hint", title: t("Nothing to download: this list holds only what you typed in") }, "—")),
     el("div", { class: "rl-cell rl-traffic", "data-col": t("matched"), "data-rltraffic": rl.id },
       el("span", { class: "rl-tr-none" }, t("checking…"))),
     el("div", { class: "acts" },
@@ -290,7 +294,9 @@ function openRoutingList(rl) {
     srcField.style.display = mode.value === "url" ? "" : "none";
     manField.style.display = mode.value === "manual" || both ? "" : "none";
   }
-  mode.value = rl.source ? "url" : (rl.manual && rl.manual.length ? "manual" : "url");
+  // A new list opens on hand-typed entries: "send this site through the VPN" is the common reason to
+  // make one, and it used to open on a rule-set URL field most people have nothing to put in.
+  mode.value = rl.source ? "url" : "manual";
   mode.onchange = applyMode; applyMode();
 
   // Device scope — which devices this list applies to (everyone, or only chosen device groups).
@@ -360,22 +366,30 @@ function openRoutingList(rl) {
     body.scope_mode = (scopeSel.value === "only" || scopeSel.value === "except") ? scopeSel.value : "";
     if (body.scope_mode) {
       body.scope_groups = $$("input[type=checkbox]:checked", scopeGroupsWrap).map(c => c.value);
-      if (!body.scope_groups.length) return toast(t("Pick at least one device group, or choose All devices"), "err");
+      if (!body.scope_groups.length) { adv.open = true; return toast(t("Pick at least one device group, or choose All devices"), "err"); }
     } else { body.scope_groups = []; }
     if (btn) { if (btn.disabled) return; btn.disabled = true; } // in-flight guard — no duplicate POST from a double-click (mirrors the group editors)
     // An edit is refused, nothing saved, if the list was saved by anything else since it was loaded (QA-152).
     try { await api.post("/api/routing", body, ifMatch(rl)); back.remove(); await loadProfile(); route(); toast(editing ? t("Saved {0}", body.name) : t("Added {0}", body.name), "ok"); }
     catch (e) { if (btn) btn.disabled = false; toast(e.message, "err"); }
   }
+  // Name, entries and where they go are the whole of the common case. The rest (a CIDR feed, a device
+  // scope, the download path) is folded away, and opens by itself for a list that already uses any of
+  // it, so nothing that is set is ever hidden.
+  const adv = el("details", { class: "form-adv" }, el("summary", {}, t("Advanced")),
+    cidrField,
+    scopeField,
+    el("div", { class: "field" }, el("label", {}, "Download the list via"), dlSel,
+      el("div", { class: "hint" }, t("Feeds and rule sets leave through this connection. If it is down the list keeps what it has and tries again, and never falls to your provider, unless this is a failover group ending in direct. A proxy connection has no network link to bind to, so its feeds leave over your provider."))),
+    el("div", { class: "hint" }, "Download-via lets a blocked list source (GitHub) be fetched through a working tunnel."));
+  adv.open = !!(rl.cidr_source || rl.download_via || rl.scope_mode === "only" || rl.scope_mode === "except");
   const body = el("div", {},
     el("div", { class: "field" }, el("label", {}, "Name"), name),
     el("div", { class: "field" }, el("label", {}, "Source"), mode),
-    srcField, manField, cidrField,
+    srcField, manField,
     el("div", { class: "field" }, el("label", {}, "Route matching traffic via"), routeSel),
     fragField,
-    scopeField,
-    el("div", { class: "field" }, el("label", {}, "Download the list via"), dlSel),
-    el("div", { class: "hint" }, "Download-via lets a blocked list source (GitHub) be fetched through a working tunnel."));
+    adv);
   const back = modal({ title: editing ? "Edit routing list" : "New routing list", body,
     footer: [el("button", { class: "btn btn-ghost", onclick: () => back.remove() }, "Cancel"),
     el("button", { class: "btn btn-primary", onclick: (e) => save(e.currentTarget) }, editing ? "Save" : "Add")] });

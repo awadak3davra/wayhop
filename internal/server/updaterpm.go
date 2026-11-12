@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -64,7 +63,7 @@ func (s *Server) handleUpdaterPMRefreshApply(w http.ResponseWriter, r *http.Requ
 	var body struct {
 		Argv []string `json:"argv"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(r.Body, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad request body")
 		return
 	}
@@ -319,7 +318,7 @@ func (s *Server) handleUpdaterPMApply(w http.ResponseWriter, r *http.Request) {
 		Steps [][]string `json:"steps"`
 		Stop  bool       `json:"stop"` // acknowledged: stopping the core is part of what was asked for
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(r.Body, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad request body")
 		return
 	}
@@ -468,6 +467,7 @@ func (s *Server) handleUpdaterPMApply(w http.ResponseWriter, r *http.Request) {
 	// The closing half of the pair above. Together the two lines carry the ordering — stop, then the
 	// package manager, then this — in the daemon's own timestamps.
 	log.Printf("updater: %s %s finished", action, e.ID)
+	s.forgetCapabilities()
 
 	// Replacing the file does not replace the PROCESS. apk unlinks the old inode and writes a new one,
 	// so a running sing-box keeps executing the build that was there before — and the panel would then

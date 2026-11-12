@@ -5,7 +5,7 @@
 **A router web panel for modern VPN and proxy protocols, with failover, selective routing and an Apply that undoes itself.**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-22a06b?style=flat-square)](LICENSE)
-[![Release](https://img.shields.io/badge/release-v0.5.9-0097dc?style=flat-square)](../../releases/latest)
+[![Release](https://img.shields.io/badge/release-v0.5.10-0097dc?style=flat-square)](../../releases/latest)
 [![Go](https://img.shields.io/badge/go-1.22+-00ADD8?style=flat-square&logo=go&logoColor=white)](go.mod)
 [![Platforms](https://img.shields.io/badge/router-OpenWrt%20%C2%B7%20Keenetic%20%C2%B7%20Entware-151c28?style=flat-square)](#supported-platforms-and-cpus)
 [![Arches](https://img.shields.io/badge/arch-mipsle%20%C2%B7%20mips%20%C2%B7%20arm%20%C2%B7%20arm64%20%C2%B7%20amd64-555?style=flat-square)](#supported-platforms-and-cpus)
@@ -510,7 +510,7 @@ One arch by hand:
 
 ```sh
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
-  -ldflags "-s -w -X wayhop/internal/version.Version=0.5.9" \
+  -ldflags "-s -w -X wayhop/internal/version.Version=0.5.10" \
   -o wayhop-arm64 ./cmd/wayhop
 ```
 

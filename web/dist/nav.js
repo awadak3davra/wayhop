@@ -37,5 +37,10 @@
     });
   }
 
+  window.addEventListener("hashchange", function () {
+    if (toggle) toggle.checked = false;
+    syncExpanded();
+  });
+
   syncExpanded(); // initialise from the current state
 })();

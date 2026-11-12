@@ -42,7 +42,7 @@ func TestQA128OffloadDeviceProbeStaysWithOffload(t *testing.T) {
 	}
 	nft, ip := executionTestKernelTools()
 	prev, _, err := materialize(materializeInput{desired: desired, host: ExecutionHostFactsV1{Host: hostOK, KernelNFT: nft, KernelIP: ip},
-		native: &capture, kernelPlan: kp})
+		native: &capture, kernelOptions: &pbr.Options{}})
 	if err != nil || prev.Native == nil {
 		t.Fatalf("setup: previous native materialize: err=%v native=%v", err, prev.Native != nil)
 	}
@@ -90,7 +90,7 @@ func TestQA128OffloadDeviceProbeStaysWithOffload(t *testing.T) {
 	}
 
 	m, warnings, err := materialize(materializeInput{desired: desired, host: ExecutionHostFactsV1{Host: hostDown, KernelNFT: nft, KernelIP: ip},
-		native: &capture, previous: &prev, kernelPlan: kp})
+		native: &capture, previous: &prev, kernelOptions: &pbr.Options{}})
 	if err != nil {
 		t.Fatalf("materialize: %v", err)
 	}

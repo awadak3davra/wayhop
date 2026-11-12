@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,7 +12,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"wayhop/internal/config"
 	"wayhop/internal/model"
 	"wayhop/internal/nativedns"
 	"wayhop/internal/platform"
@@ -94,7 +97,7 @@ func (s *Server) handleSetDNS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var dns *model.DNSSettings
-	if err := json.NewDecoder(r.Body).Decode(&dns); err != nil {
+	if err := decodeJSONBody(r.Body, &dns); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid DNS JSON")
 		return
 	}
@@ -141,34 +144,211 @@ func (s *Server) handleDNSCatalog(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
+type serveClientsStatus struct {
+	Configured bool   `json:"configured"`
+	Listening  bool   `json:"listening"`
+	Port       int    `json:"port"`
+	HeldBy     string `json:"held_by,omitempty"`
+}
+
+// serveClientsFact separates the saved switch from the running listener. The probe is injected so
+// tests need no resolver on the host; the demo reports the configuration rather than pretending it ran one.
+func (s *Server) serveClientsFact(ctx context.Context, probe func(context.Context, string) error) serveClientsStatus {
+	cfg := s.config()
+	prof := s.store.Profile()
+	fact := serveClientsStatus{Port: cfg.Ports.DNS}
+	fact.Configured = prof.DNS != nil && prof.DNS.Enabled && prof.DNS.ServeClients && fact.Port > 0
+	if !fact.Configured {
+		return fact
+	}
+	if cfg.Demo {
+		fact.Listening = true
+		return fact
+	}
+	if run := s.dnsRunner(); run != nil {
+		if out, err := run("netstat", "-lnup"); err == nil {
+			targetPort := ":" + strconv.Itoa(fact.Port)
+			for _, ln := range strings.Split(out, "\n") {
+				f := strings.Fields(ln)
+				if len(f) < 4 {
+					continue
+				}
+				proto := strings.ToLower(f[0])
+				if !strings.HasPrefix(proto, "udp") {
+					continue
+				}
+				var hasPort bool
+				var proc string
+				for _, tok := range f {
+					if strings.HasSuffix(tok, targetPort) {
+						hasPort = true
+					}
+					if i := strings.Index(tok, "/"); i > 0 && proc == "" {
+						proc = tok[i+1:]
+					}
+				}
+				if hasPort && proc != "" {
+					// Ours and listening, even if its resolver cannot be reached this moment: a probe
+					// would call that "not running" and tell the person to Apply again.
+					fact.Listening = strings.HasPrefix(proc, "sing-box")
+					if !fact.Listening {
+						fact.HeldBy = proc
+					}
+					return fact
+				}
+			}
+		}
+	}
+	if probe == nil {
+		probe = nativedns.ProbeResolver
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+	defer cancel()
+	fact.Listening = probe(probeCtx, "127.0.0.1:"+strconv.Itoa(fact.Port)) == nil
+	return fact
+}
+
+// dnsPortHolder names the program that stops a loopback listener binding this port: one holding it on
+// loopback or on every address, over TCP or UDP. "" when nothing does, or when netstat cannot say.
+func dnsPortHolder(run nativedns.Runner, port int) string {
+	if run == nil || port <= 0 {
+		return ""
+	}
+	out, err := run("netstat", "-lnutp")
+	if err != nil {
+		return ""
+	}
+	suffix := ":" + strconv.Itoa(port)
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 5 {
+			continue
+		}
+		proto := strings.ToLower(f[0])
+		if !strings.HasPrefix(proto, "udp") && !strings.HasPrefix(proto, "tcp") {
+			continue
+		}
+		if !strings.HasSuffix(f[3], suffix) {
+			continue
+		}
+		switch strings.TrimSuffix(f[3], suffix) {
+		case "127.0.0.1", "0.0.0.0", "::", "::1", "*", "[::]", "[::1]":
+		default:
+			continue // Bound to another address: both can have the port.
+		}
+		for _, tok := range f[4:] {
+			if i := strings.Index(tok, "/"); i > 0 {
+				if proc := tok[i+1:]; !strings.HasPrefix(proc, "sing-box") {
+					return proc
+				}
+				break
+			}
+		}
+	}
+	return ""
+}
+
+// dnsPortFindings names a DNS port another program already holds. sing-box would not start over it, and
+// the first sign of that used to be a failed Apply in the core's own words. The default port is the mDNS
+// port, so a router running a responder meets this on the first try.
+func (s *Server) dnsPortFindings(cfg config.Config, prof model.Profile) []PlanFinding {
+	port := servedDNSPort(cfg, prof)
+	if port <= 0 || cfg.Demo {
+		return nil
+	}
+	holder := dnsPortHolder(s.dnsRunner(), port)
+	if holder == "" {
+		return nil
+	}
+	return []PlanFinding{{
+		ID: "dns.port_busy", Setting: "dns", Item: holder + " :" + strconv.Itoa(port),
+		Severity: platform.SeverityBlocked, Reason: platform.ReasonSavedValueIncompat, Blocks: platform.BlocksApply,
+	}}
+}
+
+// dnsPlaneFindings names DNS switches this router will not carry, which an Apply otherwise reported as
+// applied. A hunter on an emulated OpenWrt turned both on, Apply said "Applied & saved", and nothing
+// changed for a device: interception is a redirect WayHop renders only into the KeeneticOS kernel plane
+// (hybrid and fast, see interceptEnforced), and on OpenWrt WayHop does not touch dnsmasq, so its resolver
+// listens on loopback where no device asks.
+func (s *Server) dnsPlaneFindings(cfg config.Config, prof model.Profile) []PlanFinding {
+	if cfg.Demo || prof.DNS == nil || !prof.DNS.Enabled {
+		return nil
+	}
+	var out []PlanFinding
+	plat := s.detectedPlatform()
+	if mode := s.routingMode(cfg); prof.DNS.Intercept && !(plat == platform.Keenetic && (mode == "hybrid" || mode == "fast")) {
+		out = append(out, PlanFinding{ID: "dns.intercept.not_installed", Setting: "dns.intercept",
+			Item: "Intercept clients' DNS", Requested: "on", Effective: "not installed",
+			Severity: platform.SeverityDegraded, Reason: platform.ReasonBackendNotWired, Blocks: platform.BlocksNothing})
+	}
+	if port := servedDNSPort(cfg, prof); port > 0 && plat == platform.OpenWrt && !dnsmasqForwardsTo(s.dnsRunner(), port) {
+		out = append(out, PlanFinding{ID: "dns.serve_clients.not_wired", Setting: "dns.serve_clients",
+			Item: "127.0.0.1#" + strconv.Itoa(port), Requested: "on", Effective: "not used by dnsmasq",
+			Severity: platform.SeverityDegraded, Reason: platform.ReasonBackendNotWired, Blocks: platform.BlocksNothing})
+	}
+	return out
+}
+
+// dnsmasqForwardsTo is whether OpenWrt's dnsmasq already names WayHop's loopback resolver, as the
+// finding's remedy asks: then devices do reach it.
+func dnsmasqForwardsTo(run nativedns.Runner, port int) bool {
+	nd, err := nativedns.Adopt(run, "openwrt")
+	if err != nil {
+		return false
+	}
+	for _, r := range nd.Resolvers {
+		if r.Address == "127.0.0.1" && r.Port == port {
+			return true
+		}
+	}
+	return false
+}
+
 // handleGetDNSNative adopts the router's OWN DNS stack (OpenWrt uci https-dns-proxy/dnsmasq, Keenetic
 // dnsmasq.d) into the platform-agnostic NativeDNS, so the panel can show the DNS the device ACTUALLY
-// serves — not just WayHop's sing-box plane. READ-ONLY (native write-back is a later slice). Off a
-// router (dev/demo) it returns available:false. See docs/DNS_NATIVE_INTEGRATION.md (development repository) in the
+// serves — not just WayHop's sing-box plane. READ-ONLY: on KeeneticOS the chain is written by
+// handleDNSChainSet, on OpenWrt not at all yet. Off a router (dev/demo) it returns available:false. See docs/DNS_NATIVE_INTEGRATION.md (development repository) in the
 // development repository.
 func (s *Server) handleGetDNSNative(w http.ResponseWriter, r *http.Request) {
-	platform := detectDNSPlatform()
+	serveClients := s.serveClientsFact(r.Context(), nativedns.ProbeResolver)
+	platform := s.dnsPlatform()
 	if platform == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"available": false})
+		writeJSON(w, http.StatusOK, map[string]any{"available": false, "serve_clients": serveClients})
 		return
 	}
-	nd, err := nativedns.Adopt(dnsExecRunner, platform)
+	run := s.dnsRunner()
+	nd, err := nativedns.Adopt(run, platform)
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"available": false, "platform": platform, "error": err.Error()})
+		writeJSON(w, http.StatusOK, map[string]any{"available": false, "platform": platform, "error": err.Error(), "serve_clients": serveClients})
 		return
 	}
 	// The EFFECTIVE runtime path (who really serves :53, whether LAN DNS is force-redirected through
 	// the router, whether a client can still escape via DoT/DoH). The adopted CONFIG alone cannot answer
 	// the leak question — a box can hold a perfect encrypted upstream chain while every LAN client
 	// bypasses it over its own DoH. Best-effort: off a router this is a low-signal empty result.
-	eff := nativedns.RunEffectivePath(dnsExecRunner)
+	eff := nativedns.RunEffectivePath(run)
+	// A bound upstream's tier depends on whether its interface is a tunnel, which only the profile knows.
+	prof := s.store.Profile()
+	ifaces := kernelIfaceByEndpoint(&prof, s.appliedKernelDevices())
+	tunnels := make(map[string]bool, len(ifaces))
+	for _, iface := range ifaces {
+		tunnels[iface] = true
+	}
+	nd = nd.MarkTunnels(func(iface string) bool { return tunnels[iface] })
 	// Redact secret path/query of any adopted DoH/DoT resolver URL (personal NextDNS/ControlD/AdGuard
 	// tokens ride the URL). The panel only needs to display + preview the plane; the raw URLs stay in
 	// the device config and never need to reach the browser. A write-back of a redacted address is
 	// rejected by ValidateForWrite rather than corrupting the device config.
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"available": true, "platform": platform, "native": nd.Redacted(), "effective": eff,
-	})
+		"answering":     eff.Answering(), // which plane really answers clients: the page leads with this
+		"serve_clients": serveClients,
+	}
+	if platform == "keenetic" {
+		resp["chain"] = s.chainViewOf(nd, &prof)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleDNSNativePlan renders (does NOT apply) the write-back plan for an edited NativeDNS: the uci
@@ -179,7 +359,7 @@ func (s *Server) handleDNSNativePlan(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Native nativedns.NativeDNS `json:"native"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(r.Body, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid native DNS JSON")
 		return
 	}
@@ -225,15 +405,11 @@ func dnsExecRunner(name string, args ...string) (string, error) {
 func dnsFileExists(p string) bool { fi, err := os.Stat(p); return err == nil && !fi.IsDir() }
 func dnsDirExists(p string) bool  { fi, err := os.Stat(p); return err == nil && fi.IsDir() }
 
-// dnsPreset is one provider preset for the add-resolver picker.
+// dnsPreset is one provider preset for the add-resolver picker: globally reachable secure resolvers, all
+// IP-pinned DoH/DoT so no cleartext bootstrap is needed (the certs carry the IP in a SAN), leak-safe as-is.
 //
-//   - Category "" (recommended) = globally-reachable SECURE resolvers, all IP-pinned DoH/DoT so no
-//     cleartext bootstrap is needed (the certs carry the IP in a SAN) — leak-safe as-is.
-//   - Category "local" = COUNTRY-LOCAL resolvers ("geo-allowed, non-blocked"): the resilience
-//     last-resort tier. In a censored region the global secure resolvers get DPI-blocked, so DNS must
-//     fall to a resolver the local network never blocks. Encrypted locals (e.g. AliDNS DoH on its own
-//     IP) stay leak-safe; PLAINTEXT locals are the deliberate availability-over-privacy fallback and are
-//     rejected under leak protection — pick them only for the last tier, or their DoH variant.
+// An operator a state owns, funds or has a way to read is not offered. Yandex, AliDNS, DNSPod and Shecan
+// were here as a country-local last resort; anyone who needs one can still type its address.
 type dnsPreset struct {
 	Name       string `json:"name"`
 	Type       string `json:"type"`
@@ -241,11 +417,9 @@ type dnsPreset struct {
 	ServerPort int    `json:"server_port,omitempty"`
 	Path       string `json:"path,omitempty"`
 	Note       string `json:"note,omitempty"`
-	Category   string `json:"category,omitempty"` // "" = recommended (secure/global); "local" = country-local
 }
 
 var dnsPresets = []dnsPreset{
-	// Recommended — secure, global, IP-pinned (leak-safe as-is).
 	{Name: "Cloudflare (DoH)", Type: "https", Server: "1.1.1.1", Path: "/dns-query"},
 	{Name: "Cloudflare — malware+adult filter (DoH)", Type: "https", Server: "1.1.1.3", Path: "/dns-query", Note: "family filtering, no local lists"},
 	{Name: "Quad9 (DoH, DNSSEC)", Type: "https", Server: "9.9.9.9", Path: "/dns-query"},
@@ -256,12 +430,6 @@ var dnsPresets = []dnsPreset{
 	{Name: "Quad9 (DoT)", Type: "tls", Server: "9.9.9.9"},
 	{Name: "Device resolver (local)", Type: "local", Note: "the on-device https-dns-proxy/dnsmasq behind the :53 hijack"},
 	{Name: "FakeIP (domain routing, TUN only)", Type: "fakeip", Note: "synthetic IPs so domain rules match; requires gateway/TUN mode"},
-	// Country-local — geo-allowed, non-blocked (the resilience last-resort tier for a censored WAN).
-	{Name: "🇷🇺 Yandex (RU)", Type: "udp", Server: "77.88.8.8", Category: "local", Note: "Russia — unblocked over any RU ISP; plaintext geo-fallback"},
-	{Name: "🇷🇺 Yandex Safe (RU)", Type: "udp", Server: "77.88.8.88", Category: "local", Note: "Russia — + malware/fraud filtering"},
-	{Name: "🇨🇳 AliDNS (DoH, CN)", Type: "https", Server: "223.5.5.5", Path: "/dns-query", Category: "local", Note: "China — IP-pinned DoH: encrypted AND unblocked in CN"},
-	{Name: "🇨🇳 DNSPod (CN)", Type: "udp", Server: "119.29.29.29", Category: "local", Note: "China — Tencent, plaintext geo-fallback"},
-	{Name: "🇮🇷 Shecan (IR)", Type: "udp", Server: "178.22.122.100", Category: "local", Note: "Iran — anti-sanction resolver, unblocked in IR"},
 }
 
 var (

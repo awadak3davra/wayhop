@@ -1,5 +1,7 @@
 package nativedns
 
+import "net"
+
 // Runner executes a device command and returns its combined output. Injectable so the adopt logic is
 // pure and testable: on a real router the server passes an exec-backed runner; tests pass a fake that
 // returns captured fixtures.
@@ -19,7 +21,37 @@ func AdoptOpenWrt(run Runner) (NativeDNS, error) {
 	if err != nil {
 		return NativeDNS{}, err // dnsmasq/dhcp IS the DNS plane here — without it there is nothing to adopt
 	}
-	return ReadUCI(hp, dh), nil
+	nd := ReadUCI(hp, dh)
+	nd.Resolvers = append(nd.Resolvers, resolvFileResolvers(dh, nd, run)...)
+	return nd, nil
+}
+
+// resolvFileResolvers are the WAN's servers dnsmasq forwards to from its resolv file, which it reads
+// unless noresolv is set. A stock OpenWrt names no server at all and forwards only to these, so without
+// them the DNS page said "No upstreams detected" about a router that resolved every name (found by a
+// hunter on an emulated OpenWrt 23.05: resolv.conf.auto held 1.1.1.1 and nslookup through dnsmasq worked).
+func resolvFileResolvers(dhcp string, nd NativeDNS, run Runner) []NativeResolver {
+	if nd.NoResolv {
+		return nil
+	}
+	known := map[string]bool{}
+	for _, r := range nd.Resolvers {
+		known[r.Address] = true
+	}
+	read := resolvFileReader(run)
+	var out []NativeResolver
+	dnsmasqForwardersUCI(dhcp, func(file string) []string {
+		ns := read(file)
+		for _, a := range ns {
+			if ip := net.ParseIP(a); ip == nil || ip.IsLoopback() || known[a] {
+				continue
+			}
+			known[a] = true
+			out = append(out, NativeResolver{Kind: KindPlain, Address: a, Tier: tierForKind(KindPlain), Source: "dnsmasq.resolvfile"})
+		}
+		return ns
+	})
+	return out
 }
 
 // AdoptKeenetic reads the live Keenetic DNS stack (the dnsmasq.d upstreams + the running
@@ -44,9 +76,9 @@ func AdoptKeenetic(run Runner) (NativeDNS, error) {
 	// The sentinel between the two reads is what lets the parser tag each upstream with the file it
 	// really came from. A blob of concatenated text cannot say, and every resolver was labelled
 	// "dnsmasq.d server" — including the ones that live in the MAIN config, which is exactly the
-	// distinction that matters: the write-back writes 00-upstream.conf inside the conf-dir and
-	// leaves the main config untouched, so those upstreams are added beside the originals, not
-	// replacing them.
+	// distinction that matters: an upstream there comes before anything in the conf-dir, so a chain
+	// written only into the conf-dir lands behind it. ChainHost.Apply moves those lines aside for that
+	// reason.
 	conf, _ := run("sh", "-c", keeneticDnsmasqRead)
 	ps, _ := run("sh", "-c", "ps 2>/dev/null | grep '[h]ttps-dns-proxy'")
 	return ReadDnsmasqD(conf, ps), nil

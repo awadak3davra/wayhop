@@ -74,6 +74,10 @@ func (pl *Plan) Apply(r Runner, opt Options) error {
 	for _, c := range pl.RenderIP(opt) {
 		name, args := splitCmd(c)
 		if _, err := r.Run("", name, args...); err != nil {
+			// RenderIP's own deletions remove state an earlier plane may have left; absent is normal.
+			if strings.Contains(c, " route del ") {
+				continue
+			}
 			// A per-egress `default dev <iface>` route legitimately fails ONLY when the tunnel iface
 			// is DOWN at apply time (it comes up later; and for a FailClosed kill-switch egress the
 			// blackhole fallback in the SAME table catches the traffic meanwhile). Skip just that

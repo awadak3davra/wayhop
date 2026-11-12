@@ -12,6 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import { execFileSync } from 'node:child_process';
 
 const DIST = 'web/dist';
 // §2.1 set this at 250 KB, and it held for a year. It is raised here for one reason, recorded so the
@@ -267,10 +268,33 @@ const DIST = 'web/dist';
 // switch - without it every lookup there gets NXDOMAIN - and that it needs sing-box 1.14. The type
 // names are untranslated technical labels like the other DNS types, and "Connection" was already
 // translated. The figure keeps the 26 B of headroom.
-const BUDGET = 266 * 1000 + 3657;
+// Raised by 8448 B for the DNS check and the quick list of encrypted resolvers. Both cards live in the
+// route-scoped page-dns.js; what grew is the Russian dictionary, by 313 strings, which every Russian visitor
+// downloads up front (269657 -> 278075 B gzip, measured, all of it ru; the other languages stay pending). The
+// figure keeps the 26 B of headroom.
+const BUDGET = 266 * 1000 + 12105;
 
 const gz = (buf) => zlib.gzipSync(buf, { level: 9 }).length;
-const read = (f) => fs.readFileSync(path.join(DIST, f));
+
+// What is measured is what the daemon serves, not what is in web/dist: the static handler drops
+// comments before it compresses a file (internal/uimin). `go run ./scripts/uiserved` prints every asset
+// in that served form, from the same function the daemon calls, so there is one implementation and
+// this number is the one on the wire. Without Go the check cannot know that number and says so,
+// instead of quietly measuring the source and failing on bytes no visitor downloads.
+let served;
+try {
+  served = JSON.parse(execFileSync('go', ['run', './scripts/uiserved'],
+    { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] }));
+} catch (e) {
+  console.error(`perf budget FAILED: could not get the served assets from \`go run ./scripts/uiserved\` ` +
+    `(Go must be on PATH): ${String(e.stderr || e.message).trim().split('\n').slice(-3).join(' | ')}`);
+  process.exit(1);
+}
+const read = (f) => {
+  const key = f.split(path.sep).join('/');
+  if (!(key in served)) throw new Error(`not embedded: ${key}`);
+  return Buffer.from(served[key], 'utf8');
+};
 
 const html = fs.readFileSync(path.join(DIST, 'index.html'), 'utf8');
 
@@ -305,7 +329,7 @@ let worstLang = null;
 const langDir = path.join(DIST, 'i18n');
 if (fs.existsSync(langDir)) {
   for (const f of fs.readdirSync(langDir).filter((f) => f.endsWith('.js'))) {
-    const size = gz(fs.readFileSync(path.join(langDir, f)));
+    const size = gz(read(path.join('i18n', f)));
     if (!worstLang || size > worstLang[1]) worstLang = [path.join('i18n', f), size];
   }
 }

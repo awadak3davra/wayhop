@@ -408,6 +408,11 @@ func (s *SingBox) Stop() error {
 		default:
 		}
 	}
+	return terminate(cmd, done)
+}
+
+// terminate ends a process that is still running.
+func terminate(cmd *exec.Cmd, done <-chan struct{}) error {
 	// Graceful first: SIGTERM lets sing-box tear down its TUN before we force-kill
 	// it. In TUN-gateway mode sing-box installs kernel routing state (auto_route ip
 	// rules + a route table, the auto_redirect nft table); SIGKILL bypasses its
@@ -440,6 +445,32 @@ func (s *SingBox) Stop() error {
 		return nil // lost the race: process died between the select and Kill
 	}
 	return err
+}
+
+// PID is the supervised process's pid, 0 when none is running.
+func (s *SingBox) PID() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.aliveLocked() || s.cmd.Process == nil {
+		return 0
+	}
+	return s.cmd.Process.Pid
+}
+
+// TerminateWedged ends process pid, the way Stop does, and leaves it desired, so the watchdog's next
+// tick restarts it through StartIfDesiredDead. Reload would not do for the wedge guard: it runs
+// outside applyMu, and the Start half of a Reload could overtake a native-only Stop and resurrect the
+// core, the very race StartIfDesiredDead exists to close. It reports false, having done nothing, when
+// pid is no longer the desired process.
+func (s *SingBox) TerminateWedged(pid int) (bool, error) {
+	s.mu.Lock()
+	if !s.desired || !s.aliveLocked() || s.cmd.Process == nil || s.cmd.Process.Pid != pid {
+		s.mu.Unlock()
+		return false, nil
+	}
+	cmd, done := s.cmd, s.done
+	s.mu.Unlock()
+	return true, terminate(cmd, done)
 }
 
 // Shutdown permanently quiesces the supervisor: it marks the core "closed" so no

@@ -79,7 +79,7 @@ func (s *Server) selfSwitchingGroups() []string {
 	}
 	seen := map[string]bool{}
 	var out []string
-	for _, t := range listFailoverTables(plan, profile, kernelIfaceByEndpoint(profile)) {
+	for _, t := range listFailoverTables(plan, profile, kernelIfaceByEndpoint(profile, s.appliedKernelDevices())) {
 		if !seen[t.Group.ID] {
 			seen[t.Group.ID] = true
 			out = append(out, t.Group.ID)

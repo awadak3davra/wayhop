@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -40,7 +39,7 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var sv serverstore.Server
-	if err := json.NewDecoder(r.Body).Decode(&sv); err != nil {
+	if err := decodeJSONBody(r.Body, &sv); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid server JSON")
 		return
 	}
@@ -120,7 +119,7 @@ func (s *Server) handleServerCheck(w http.ResponseWriter, r *http.Request) {
 		Host string `json:"host"`
 		Port int    `json:"port"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+	if err := decodeJSONBody(r.Body, &b); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -149,7 +148,7 @@ func (s *Server) handleServerScript(w http.ResponseWriter, r *http.Request) {
 		Protocols []string `json:"protocols"`
 		Host      string   `json:"host"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+	if err := decodeJSONBody(r.Body, &b); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -188,7 +187,7 @@ type provisionReq struct {
 // for this request only and never stored.
 func (s *Server) handleServerProvision(w http.ResponseWriter, r *http.Request) {
 	var b provisionReq
-	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+	if err := decodeJSONBody(r.Body, &b); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -492,7 +491,7 @@ func (s *Server) resolveHardenTarget(b *hardenReq) bool {
 // public key, and returns the private key in the job result for download.
 func (s *Server) handleServerHardenKeys(w http.ResponseWriter, r *http.Request) {
 	var b hardenReq
-	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+	if err := decodeJSONBody(r.Body, &b); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -546,7 +545,7 @@ func (s *Server) runHardenKeys(job *initserver.Job, b hardenReq) {
 // UI confirming the key was saved and key-auth works).
 func (s *Server) handleServerLockdown(w http.ResponseWriter, r *http.Request) {
 	var b hardenReq
-	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+	if err := decodeJSONBody(r.Body, &b); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -625,7 +624,7 @@ type serverBinUpdateReq struct {
 // (read-only) and compares the GitHub-managed ones to the latest release.
 func (s *Server) handleServerCheckVersions(w http.ResponseWriter, r *http.Request) {
 	var b hardenReq
-	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+	if err := decodeJSONBody(r.Body, &b); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -715,7 +714,7 @@ func (s *Server) resolveBinaryVersions(ctx context.Context, found map[string]str
 // DESTRUCTIVE (briefly restarts the endpoint) — gated behind an explicit confirm.
 func (s *Server) handleServerUpdateBinary(w http.ResponseWriter, r *http.Request) {
 	var b serverBinUpdateReq
-	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+	if err := decodeJSONBody(r.Body, &b); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}

@@ -604,6 +604,8 @@ func revertDNSField(d *model.DNSSettings, b model.DNSSettings, field string) boo
 		d.Enabled = b.Enabled
 	case "Leak protection":
 		d.LeakProof = b.LeakProof
+	case "Answer clients":
+		d.ServeClients = b.ServeClients
 	case "FakeIP":
 		d.FakeIP = b.FakeIP
 	case "Strategy":

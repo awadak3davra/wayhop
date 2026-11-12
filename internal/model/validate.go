@@ -6,6 +6,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // DisabledRefError marks the validation failures where a LIVE reference points at something that is
@@ -468,6 +469,9 @@ func (p *Profile) Validate() error {
 			rl.DomainSource == "" && len(rl.DomainCache) == 0 {
 			return fmt.Errorf("routing list %q: needs a source URL, a CIDR source, a domain source, or manual entries", rl.ID)
 		}
+		if err := ValidateManualEntries(rl); err != nil {
+			return err
+		}
 		if rl.CIDRSource != "" && !validCIDRSource(rl.CIDRSource) {
 			return fmt.Errorf("routing list %q: cidr_source %q must be https://… , http://… , or asn:N,N", rl.ID, rl.CIDRSource)
 		}
@@ -539,6 +543,21 @@ func (p *Profile) Validate() error {
 	if p.DNS != nil {
 		if err := validateDNS(p.DNS, ids, enabled, p.Endpoints); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// ValidateManualEntries refuses a manual entry with a line break or another control character inside
+// it. On KeeneticOS the entries are written into dnsmasq's configuration
+// (/opt/etc/dnsmasq.d/wayhop-policy.conf), so a line break inside one is a configuration line nobody
+// reviewed: an extra upstream resolver, or a file dnsmasq refuses, leaving the LAN without DNS.
+// Surrounding whitespace is not refused, because every consumer trims it and an entry pasted with a
+// trailing "\r" has always worked; refusing it now would block Apply on a profile that runs.
+func ValidateManualEntries(rl RoutingList) error {
+	for _, entry := range rl.Manual {
+		if strings.IndexFunc(strings.TrimSpace(entry), unicode.IsControl) >= 0 {
+			return fmt.Errorf("routing list %q: manual entry %q contains a line break or another control character", rl.ID, entry)
 		}
 	}
 	return nil

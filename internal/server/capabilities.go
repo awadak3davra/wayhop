@@ -34,7 +34,13 @@ func (s *Server) handleNativeCapabilities(w http.ResponseWriter, r *http.Request
 	} else {
 		runtime.KernelPBRWired = available
 	}
+	caps = withConfiguredCore(caps, runtime.SingboxRunnable)
 	capabilitySet := platform.Evaluate(caps, runtime)
+	// The connection form's Retry asks here. Its answer has to be the one the save checks, or Retry
+	// shows "supported" and the save goes on refusing from the cache.
+	if !s.config().Demo {
+		s.keepCapabilities(capabilitySet)
+	}
 	// caps.Accel is a CAPABILITY ("this SoC has a PPE"). offload_state is what the datapath is
 	// ACTUALLY doing right now, with the reason for any downgrade — a box can advertise hardware
 	// offload while a per-packet policy-routing plane keeps every flow on the slow path. Reporting

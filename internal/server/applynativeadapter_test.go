@@ -31,7 +31,7 @@ func TestExactNativePlatformAdapterDispatchesKeeneticWithoutFallback(t *testing.
 	target := exactKeeneticTestTarget()
 	keenetic.readConfig = exactKeeneticConfigReader(
 		exactKeeneticBaselineConfig,
-		strings.Join(target.Keenetic.Interfaces[0], "\n"),
+		strings.Join(keeneticOSPrinted(target.Keenetic.Interfaces[0]), "\n"),
 		exactKeeneticTargetRunningConfig(target),
 		exactKeeneticTargetRunningConfig(target),
 		exactKeeneticTargetRunningConfig(target),

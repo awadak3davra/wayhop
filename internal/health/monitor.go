@@ -136,11 +136,12 @@ type Monitor struct {
 	// defaults to ifaceBytes/sysfs). Kernel-routed endpoints bypass sing-box and never appear in
 	// Clash /connections, so their throughput is read from the tunnel iface here instead.
 	ifaceBytesFn func(iface string) (rx, tx int64, ok bool)
-	// nativeInterfaces resolves endpoint IDs to the exact interface identities persisted by the
-	// authenticated Apply runtime. Strict native plans may assign wr_* on OpenWrt or WireguardN /
-	// wrtunN on Keenetic; guessing those names from the editable profile reports healthy tunnels as
-	// down and can read counters from the wrong interface. The resolver is replaceable after monitor
-	// startup, so it has its own lock rather than sharing the stats lock across ledger I/O.
+	// nativeInterfaces resolves endpoint IDs to the kernel devices the authenticated Apply runtime
+	// persisted. Strict native plans may assign wr_* on OpenWrt, or on Keenetic nwgN (the device of
+	// NDM's WireguardN, never the NDM name itself: ping -I and sysfs know only the kernel's) and wrtunN;
+	// guessing those names from the editable profile reports healthy tunnels as down and can read
+	// counters from the wrong interface. The resolver is replaceable after monitor startup, so it has
+	// its own lock rather than sharing the stats lock across ledger I/O.
 	interfaceMu      sync.RWMutex
 	nativeInterfaces func() (map[string]string, bool)
 	// plugins resolves a plugin-run exit (ByeDPI) to its process state (plugincause.go).

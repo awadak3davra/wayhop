@@ -230,6 +230,26 @@ func Reimport(have, link model.Endpoint) model.Endpoint {
 	return out
 }
 
+// ClearedWireGuardKnobs names top-level MTU/keepalive values a re-import removed without replacing
+// them. The bulk-import answer includes them so a form-set value never disappears silently (QA-156).
+func ClearedWireGuardKnobs(have, merged model.Endpoint) []string {
+	if merged.Protocol != model.ProtoWireGuard && merged.Protocol != model.ProtoAmneziaWG {
+		return nil
+	}
+	var cleared []string
+	if have.MTU != 0 && merged.MTU == 0 {
+		if _, carried := merged.Params["mtu"]; !carried {
+			cleared = append(cleared, "MTU")
+		}
+	}
+	if have.PersistentKeepalive != 0 && merged.PersistentKeepalive == 0 {
+		if _, carried := merged.Params["persistent_keepalive"]; !carried {
+			cleared = append(cleared, "persistent keepalive")
+		}
+	}
+	return cleared
+}
+
 // untaggedFields reads a link of no believable format as expressing what it carries, with one
 // exception that fails closed: the TLS fields that loosen or shape how the server is checked
 // (insecure, the uTLS fingerprint, ECH) and the pins an import brought are always the link's, so a
@@ -317,8 +337,8 @@ func jsonFields(t *model.TLS) map[string]json.RawMessage {
 	return m
 }
 
-// KeptServerKeyPin reports whether a re-import kept public-key pins the link did not carry: they
-// come from Set up Server or the form, and a server whose key has changed is refused while they stay.
+// KeptServerKeyPin reports whether a re-import kept public-key pins the share link did not carry:
+// they can come from Set up Server, the form, or a sing-box config, and a changed key is refused.
 func KeptServerKeyPin(merged, link model.Endpoint) bool {
 	if merged.TLS == nil {
 		return false

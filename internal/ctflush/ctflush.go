@@ -247,7 +247,9 @@ func (v view) route(m uint32) uint32 {
 }
 
 // privateDst is what pbr pins to the main table ahead of the fwmark rules (render.go privateExcludes):
-// a mark does not move such a flow, so deleting it would only reset it.
+// a mark does not move such a flow, so deleting it would only reset it. The exception is a private
+// destination a zone names (pbr.Plan.UnpinnedPrivate): its mark does route it, so it is judged like
+// any other destination.
 var privateDst = []netip.Prefix{
 	netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("172.16.0.0/12"),
 	netip.MustParsePrefix("192.168.0.0/16"), netip.MustParsePrefix("fc00::/7"),
@@ -260,6 +262,7 @@ type decider struct {
 	old, cur view
 	removed  bool // no plane now
 	opt      Options
+	unpinned []netip.Prefix // private destinations either plan routes by mark
 }
 
 func newDecider(old, cur *pbr.Plan, opt Options) decider {
@@ -273,6 +276,7 @@ func newDecider(old, cur *pbr.Plan, opt Options) decider {
 		d.mask = 0x00ff0000
 	}
 	d.old, d.cur = newView(old, d.mask), newView(cur, d.mask)
+	d.unpinned = append(old.UnpinnedPrivate(), cur.UnpinnedPrivate()...)
 	return d
 }
 
@@ -280,7 +284,8 @@ func newDecider(old, cur *pbr.Plan, opt Options) decider {
 // sends a new flow to the same destination.
 func (d decider) stale(e Entry) bool {
 	e.Src, e.Dst = e.Src.Unmap(), e.Dst.Unmap()
-	if !e.Dst.IsValid() || e.Dst.IsLoopback() || containsAny(privateDst, e.Dst) || containsAny(d.cur.bypass, e.Dst) {
+	if !e.Dst.IsValid() || e.Dst.IsLoopback() || containsAny(d.cur.bypass, e.Dst) ||
+		(containsAny(privateDst, e.Dst) && !containsAny(d.unpinned, e.Dst)) {
 		return false
 	}
 	if d.opt.Local != nil && (d.opt.Local(e.Dst) || (e.Src.IsValid() && d.opt.Local(e.Src))) {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"wayhop/internal/nativeplan"
+	"wayhop/internal/platform"
 )
 
 // The routing switch turns WayHop's routing off and back on without touching its configuration.
@@ -95,6 +96,10 @@ type routingSwitchView struct {
 	Error   string `json:"error,omitempty"`
 	// Restorable says a committed configuration exists for switching on to restore.
 	Restorable bool `json:"restorable"`
+	// ProxyOnly: on this router the routing mode only offers a proxy, so a device that is not set to use
+	// it goes straight out, whatever the default rule says. On OpenWrt that is mixed, which "auto" picks
+	// when the gateway setting is off; on KeeneticOS mixed leaves the routing to the router's own policies.
+	ProxyOnly bool `json:"proxy_only,omitempty"`
 }
 
 func (s *Server) routingOffRecord() *routingOffRecord {
@@ -107,11 +112,13 @@ func (s *Server) routingOffRecord() *routingOffRecord {
 func (s *Server) routingIsOff() bool { return s.routingOffRecord() != nil }
 
 func (s *Server) routingSwitchView() routingSwitchView {
+	cfg := s.config()
+	proxyOnly := !cfg.Demo && desiredRoutingMode(cfg) == "mixed" && s.detectedPlatform() == platform.OpenWrt
 	s.applyState.mu.Lock()
 	defer s.applyState.mu.Unlock()
 	rec := s.stateLocked()
 	v := routingSwitchView{Enabled: rec.RoutingOff == nil,
-		Restorable: rec.Committed != nil && rec.Committed.Materialization.known()}
+		Restorable: rec.Committed != nil && rec.Committed.Materialization.known(), ProxyOnly: proxyOnly}
 	if off := rec.RoutingOff; off != nil {
 		v.Since, v.By, v.Error = off.At, off.By, off.Error
 	}

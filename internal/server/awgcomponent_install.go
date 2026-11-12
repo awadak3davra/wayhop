@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -216,7 +215,7 @@ func (s *Server) handleAWGInstall(w http.ResponseWriter, r *http.Request) {
 		// briefly drops every link on the router. Off unless the operator ticked it.
 		RestartNetwork bool `json:"restart_network"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(r.Body, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad request body")
 		return
 	}

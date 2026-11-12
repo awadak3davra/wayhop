@@ -158,7 +158,7 @@ func (s *Server) downloadPathChoices() []downloadPath {
 		return nil
 	}
 	profile := s.store.Profile()
-	ifaceOf := kernelIfaceByEndpoint(&profile)
+	ifaceOf := kernelIfaceByEndpoint(&profile, s.appliedKernelDevices())
 	out := make([]downloadPath, 0, len(ifaceOf)+len(profile.Groups))
 	for i := range profile.Endpoints {
 		e := &profile.Endpoints[i]

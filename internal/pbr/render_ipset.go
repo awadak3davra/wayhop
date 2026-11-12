@@ -597,6 +597,8 @@ func (pl *Plan) RenderIPScript(opt Options) string {
 		fmt.Fprintf(&b, "ip rule del to %s lookup main priority %d 2>/dev/null || true\n", x.CIDR, x.Priority)
 		fmt.Fprintf(&b, "ip rule add to %s lookup main priority %d\n", x.CIDR, x.Priority)
 	}
+	// Private destinations a zone names explicitly are carved out of that pin (RT-09, unpin.go).
+	b.WriteString(pl.unpinScript(opt, false))
 	for i, e := range pl.nonWanEgresses() {
 		pref := opt.RulePref + i
 		fmt.Fprintf(&b, "ip rule del fwmark %s/%s table %d priority %d 2>/dev/null || true\n", hexMark(e.Mark), mask, e.Table, pref)
@@ -644,6 +646,7 @@ func (pl *Plan) RenderIPScript(opt Options) string {
 			fmt.Fprintf(&b, "ip -6 rule del to %s lookup main priority %d 2>/dev/null || true\n", x.CIDR, x.Priority)
 			fmt.Fprintf(&b, "ip -6 rule add to %s lookup main priority %d\n", x.CIDR, x.Priority)
 		}
+		b.WriteString(pl.unpinScript(opt, true))
 		for i, e := range pl.nonWanEgresses() {
 			pref := opt.RulePref + i
 			fmt.Fprintf(&b, "ip -6 rule del fwmark %s/%s table %d priority %d 2>/dev/null || true\n", hexMark(e.Mark), mask, e.Table, pref)
@@ -722,6 +725,7 @@ func (pl *Plan) RenderTeardownScript(opt Options, io IpsetOptions) string {
 		fmt.Fprintf(&b, "ip rule del fwmark %s/%s table %d priority %d 2>/dev/null || true\n", hexMark(e.Mark), mask, e.Table, pref)
 		fmt.Fprintf(&b, "ip route flush table %d 2>/dev/null || true\n", e.Table)
 	}
+	b.WriteString(pl.unpinTeardownScript(opt, false))
 	for _, x := range privateExcludes(opt) {
 		fmt.Fprintf(&b, "ip rule del to %s lookup main priority %d 2>/dev/null || true\n", x.CIDR, x.Priority)
 	}
@@ -737,6 +741,7 @@ func (pl *Plan) RenderTeardownScript(opt Options, io IpsetOptions) string {
 		for _, ps := range pl.NDMPolicySlots() {
 			fmt.Fprintf(&b, "ip -6 rule del fwmark %s blackhole priority %d 2>/dev/null || true\n", hexMark(ps.Mark), ndmPolicyBackstopPref(opt))
 		}
+		b.WriteString(pl.unpinTeardownScript(opt, true))
 		for _, x := range privateExcludesV6(opt) {
 			fmt.Fprintf(&b, "ip -6 rule del to %s lookup main priority %d 2>/dev/null || true\n", x.CIDR, x.Priority)
 		}

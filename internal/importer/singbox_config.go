@@ -581,6 +581,9 @@ func tlsFromSingbox(ob map[string]any, server string) *model.TLS {
 	if alpn := anyToStringSlice(tl["alpn"]); len(alpn) > 0 {
 		t.ALPN = alpn
 	}
+	if suites := anyToStringSlice(tl["cipher_suites"]); len(suites) > 0 {
+		t.CipherSuites = suites
+	}
 	if utls, ok := tl["utls"].(map[string]any); ok {
 		if fp := sbStr(utls, "fingerprint"); fp != "" {
 			t.Fingerprint = fp

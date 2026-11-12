@@ -261,6 +261,9 @@ func vmessLink(e model.Endpoint) string {
 		if len(e.TLS.ALPN) > 0 {
 			m["alpn"] = strings.Join(e.TLS.ALPN, ",")
 		}
+		if len(e.TLS.CipherSuites) > 0 {
+			m["cs"] = strings.Join(e.TLS.CipherSuites, ",")
+		}
 		if e.TLS.Insecure {
 			m["allowInsecure"] = "true" // round-trip skip-cert-verify (parseVMess reads it)
 			m["insecure"] = "1"         // the spelling v2rayN reads and writes (VmessQRCode)
@@ -483,6 +486,9 @@ func setTLSQuery(q url.Values, t *model.TLS) {
 		}
 		if len(t.ALPN) > 0 {
 			q.Set("alpn", strings.Join(t.ALPN, ","))
+		}
+		if len(t.CipherSuites) > 0 {
+			q.Set("cs", strings.Join(t.CipherSuites, ","))
 		}
 	}
 	setECHQuery(q, t)

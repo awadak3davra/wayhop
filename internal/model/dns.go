@@ -58,11 +58,13 @@ type DNSRule struct {
 // byte-identical to a pre-DNS profile). A non-nil pointer with Enabled==false keeps the config
 // (servers/rules) but suppresses emission.
 type DNSSettings struct {
-	Enabled  bool        `json:"enabled"`
-	Servers  []DNSServer `json:"servers,omitempty"`
-	Rules    []DNSRule   `json:"rules,omitempty"`
-	Final    string      `json:"final,omitempty"`    // default server tag for unmatched queries
-	Strategy string      `json:"strategy,omitempty"` // prefer_ipv4|prefer_ipv6|ipv4_only|ipv6_only
+	Enabled bool `json:"enabled"`
+	// ServeClients exposes the encrypted DNS plane on a loopback inbound for dnsmasq to forward to.
+	ServeClients bool        `json:"serve_clients,omitempty"`
+	Servers      []DNSServer `json:"servers,omitempty"`
+	Rules        []DNSRule   `json:"rules,omitempty"`
+	Final        string      `json:"final,omitempty"`    // default server tag for unmatched queries
+	Strategy     string      `json:"strategy,omitempty"` // prefer_ipv4|prefer_ipv6|ipv4_only|ipv6_only
 	// LeakProof = ENCRYPTED-ONLY: reject plaintext (udp/tcp) servers and forbid a plaintext/local
 	// `final`, so query CONTENT can never reach the ISP in the clear — even on the WAN fallback a DoH
 	// query stays encrypted. It deliberately does NOT force a tunnel detour (that would break graceful
@@ -214,6 +216,8 @@ func (p *Profile) ValidateDNS() error {
 // so Apply fails cleanly with a precise error rather than emitting a config sing-box would fatal.
 // DNS is greenfield (nil for every existing profile), so a strict check here can't brick legacy data.
 func validateDNS(dns *DNSSettings, ids map[string]string, enabled map[string]bool, eps []Endpoint) error {
+	// Turning DNS management off while ServeClients is on must be accepted: undoing "DNS management"
+	// alone reaches this state, and the generator already ignores ServeClients when DNS is disabled.
 	if !validDNSStrategies[dns.Strategy] {
 		return fmt.Errorf("dns: unknown strategy %q", dns.Strategy)
 	}
@@ -293,6 +297,18 @@ func validateDNS(dns *DNSSettings, ids map[string]string, enabled map[string]boo
 			}
 		}
 	}
+	if dns.ServeClients {
+		encrypted := false
+		for i := range dns.Servers {
+			if dns.Servers[i].Enabled && isEncryptedDNSType(dns.Servers[i].Type) {
+				encrypted = true
+				break
+			}
+		}
+		if !encrypted {
+			return fmt.Errorf("dns: serve_clients requires at least one enabled encrypted resolver (https/tls/quic/h3)")
+		}
+	}
 	// A hostname upstream's bootstrap domain_resolver must reference a DEFINED and ENABLED DNS server
 	// tag. The generator emits domain_resolver verbatim and DROPS disabled servers, so a typo'd or
 	// disabled bootstrap tag becomes a dangling reference `sing-box check` FATALs on. Second pass: the
@@ -360,6 +376,16 @@ func validateDNS(dns *DNSSettings, ids map[string]string, enabled map[string]boo
 			}
 		}
 		return fmt.Errorf("dns: %s, so the first resolver %q would answer every name no rule matches, and it only answers names its VPN connection pushes; choose a default resolver that is always kept, or put another resolver first", why, def.Tag)
+	}
+	if dns.ServeClients && dns.Final != "" {
+		if t := serverType[dns.Final]; !isEncryptedDNSType(t) {
+			return fmt.Errorf("dns: serve_clients requires an encrypted final resolver, but %q is %q", dns.Final, t)
+		}
+	}
+	if dns.ServeClients && dns.Final == "" {
+		if def := dns.DefaultServer(false); def != nil && !isEncryptedDNSType(def.Type) {
+			return fmt.Errorf("dns: serve_clients requires an encrypted default resolver, but none is chosen, so the first resolver %q (%s) answers every query no rule matches; choose an encrypted default resolver", def.Tag, def.Type)
+		}
 	}
 	if dns.LeakProof && dns.Final != "" {
 		for i := range dns.Servers {

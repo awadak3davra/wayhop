@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"net/http"
 	"reflect"
 
@@ -25,7 +24,7 @@ func (s *Server) handleChangeSetUndo(w http.ResponseWriter, r *http.Request) {
 		changeset.UndoRequest
 		BaselineRev string `json:"baseline_rev,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(r.Body, &body); err != nil {
 		writeErrNoStore(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}

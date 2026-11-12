@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"wayhop/internal/uimin"
 )
 
 // staticHandler serves the embedded UI with revalidate-on-version caching. The
@@ -87,6 +89,9 @@ func computeUIETag(ui fs.FS) string {
 		return nil
 	})
 	sort.Strings(names)
+	// The gzip representation is the trimmed source (staticGzipCache), so a build that changes only
+	// how it is trimmed must change the tag too, or browsers keep the previous build's bytes.
+	_, _ = h.Write([]byte("uimin " + uimin.Version + "\x00"))
 	for _, name := range names {
 		if b, err := fs.ReadFile(ui, name); err == nil {
 			_, _ = h.Write([]byte(name + "\x00"))

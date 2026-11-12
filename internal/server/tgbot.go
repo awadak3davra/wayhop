@@ -257,7 +257,7 @@ func (b tgBackend) groups(ctx context.Context) []tgbot.Group {
 		}
 		cancel()
 	}
-	ifaceOf := kernelIfaceByEndpoint(&profile)
+	ifaceOf := kernelIfaceByEndpoint(&profile, s.appliedKernelDevices())
 	var out []tgbot.Group
 	for _, g := range profile.Groups {
 		tg := tgbot.Group{ID: g.ID, Name: g.Name, Members: append([]string(nil), g.Members...)}
@@ -496,7 +496,7 @@ func apiServer(base string) string {
 
 func (s *Server) handleTelegramPut(w http.ResponseWriter, r *http.Request) {
 	var in telegramSettingsIn
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := decodeJSONBody(r.Body, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -562,7 +562,7 @@ func (s *Server) checkTelegramVia(via, saved string) string {
 // the body describes, without saving anything.
 func (s *Server) handleTelegramCheck(w http.ResponseWriter, r *http.Request) {
 	var in telegramSettingsIn
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := decodeJSONBody(r.Body, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -603,7 +603,7 @@ func (s *Server) handleTelegramPair(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Role string `json:"role"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&in)
+	_ = decodeJSONBody(r.Body, &in)
 	// With no token there is no bot to send the code to; the panel offered one anyway and said "send
 	// /start CODE to your bot" on a router that had none (QA-034).
 	if s.Telegram().Token == "" {
@@ -673,7 +673,7 @@ func (s *Server) handleTelegramChatPut(w http.ResponseWriter, r *http.Request) {
 		Role string `json:"role"`
 		Lang string `json:"lang"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := decodeJSONBody(r.Body, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -778,7 +778,7 @@ func (s *Server) handleTelegramStrangerAllow(w http.ResponseWriter, r *http.Requ
 	var in struct {
 		Role string `json:"role"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&in)
+	_ = decodeJSONBody(r.Body, &in)
 	var st tgbot.Stranger
 	for _, x := range s.telegram().Gate().Strangers() {
 		if x.ChatID == id {

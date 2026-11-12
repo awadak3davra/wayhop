@@ -243,7 +243,7 @@ func (s *Server) handleNetDiagServices(w http.ResponseWriter, r *http.Request) {
 		Egress string `json:"egress"`
 	}
 	if r.ContentLength != 0 {
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := decodeJSONBody(r.Body, &body); err != nil {
 			writeErr(w, http.StatusBadRequest, "invalid JSON body")
 			return
 		}

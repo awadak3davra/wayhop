@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"wayhop/internal/awg"
 	"wayhop/internal/generator"
 	"wayhop/internal/keenetic"
 	"wayhop/internal/model"
@@ -19,14 +20,16 @@ import (
 // materializeInput is everything one Apply captured before it decides what to install: the desired
 // snapshot, the host facts (captured once, inside applyMu), the native capture (nil when the router
 // has no native plane WayHop drives, or in demo), the previous applied materialization (ownership
-// and retire baseline) and the kernel plan compiled with the server's pbr options.
+// and retire baseline) and the server's pbr options when the routing mode has a kernel plane (nil
+// otherwise). The kernel plan itself is compiled here, after the native plan: on KeeneticOS that plan
+// is what knows the device each NDM-created tunnel lives on.
 type materializeInput struct {
-	desired    DesiredSnapshot
-	host       ExecutionHostFactsV1
-	native     *executionNativeCaptureV1
-	previous   *executionMaterializationV1
-	kernelPlan *pbr.Plan
-	generate   executionGenerator
+	desired       DesiredSnapshot
+	host          ExecutionHostFactsV1
+	native        *executionNativeCaptureV1
+	previous      *executionMaterializationV1
+	kernelOptions *pbr.Options
+	generate      executionGenerator
 	// ndmPolicies is KeeneticOS's access policies by name → mark as this Apply captured them (the demo's
 	// in demo): the core routes a list sent to one by a `direct` outbound carrying that mark.
 	ndmPolicies map[string]uint32
@@ -102,11 +105,31 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 		previousNative = nativeBaselineFromMaterialization(in.previous)
 	}
 	if in.native != nil && !desired.Config.Demo && (gotPlatform == platform.OpenWrt || gotPlatform == platform.Keenetic) {
-		artifact, nativeErr := buildExecutionNativeArtifactFrom(desired, host.Host, *in.native, previousNative,
-			genericPluginDevices(in.previous))
+		artifact, nativeErr := buildExecutionNativeArtifactV1(desired, host.Host, *in.native, previousNative)
 		var move *nativeplan.MoveError
 		switch {
 		case nativeErr == nil:
+			// The planner refuses moving a connection WayHop's engine ran to OpenWrt's own AmneziaWG
+			// (nativeplan.MoveError), but it sees the engine only through the previous NATIVE plan's
+			// engine-plugin decisions. A generic baseline has no native plan, yet its engine plugins ran
+			// AmneziaWG connections on the very device names the native writer gives them
+			// (util.AWGIface): the router applied while its own AmneziaWG was missing, now installed
+			// (QA-043: or while one ByeDPI connection kept the native plan from compiling). Checked
+			// here, on a plan that compiled, rather than fed to the planner: there it would refuse even
+			// when another connection fails the native plan anyway, and that Apply goes to the generic
+			// path again, where the plugin simply keeps running.
+			if gotPlatform == platform.OpenWrt {
+				if moved := enginePluginMoves(in.previous, &artifact.Plan, desired.Profile,
+					artifact.Capture.AWGKernel.generation()); len(moved) != 0 {
+					return executionMaterializationV1{}, nil, newMaterializeError("native",
+						"connections WayHop's AmneziaWG engine ran under the previous Apply would move to OpenWrt's own "+
+							"AmneziaWG in one Apply, on the same device names: "+strings.Join(moved, ", ")+
+							"; the native interface cannot be created while the engine's link holds the name, and retiring "+
+							"the engine afterwards deletes the link by that name, so switch the connection off and apply, "+
+							"then switch it on and apply again, one at a time or all together",
+						"Switch these connections off and apply, then switch them on and apply again.")
+				}
+			}
 			delta, deltaErr := buildExecutionNativeDeltaV1(previousNative, artifact, host.Host.CapabilitySet)
 			if deltaErr != nil {
 				return executionMaterializationV1{}, nil, newMaterializeError("native",
@@ -129,7 +152,32 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 				"Switch this connection off and apply, then switch it on and apply again.")
 		case gotPlatform == platform.OpenWrt:
 			// OpenWrt has a complete generic path (sing-box + engine plugins) that predates the
-			// native one; a profile the native planner cannot express still works through it.
+			// native one; a profile the native planner cannot express still works through it, but
+			// only while WayHop holds no native interface of its own.
+			//
+			// Refused, not handed to that path, while the authenticated baseline holds interfaces a
+			// native Apply created. The generic path runs no native prepare or commit, so nothing
+			// would reconcile them: they stay in /etc/config/network and their firewall zone; an
+			// AmneziaWG connection's engine plugin deletes and re-creates its link under the same
+			// wr_ name netifd runs (and netifd's next reload deletes the plugin's); and the record
+			// this Apply writes carries no native plan, so the next Apply no longer counts them as
+			// WayHop's - it can neither update nor remove them, and lands here again. Reconciling
+			// first instead (removing them through the RemovalPlan before the plugins start) would
+			// turn the executor's make-before-break order around for this one case: a gap with no
+			// tunnel, a rollback that has to re-create the interfaces, and an ordering between
+			// netifd's teardown and the plugin's `ip link add` that only a router can prove. The
+			// refusal is the move refusal's (above), with the same way round: with the named
+			// connections switched off, a native Apply removes their interfaces through the
+			// reconcile that already runs, and the generic path then starts from nothing native.
+			if held := heldNativeInterfaces(previousNative, desired.Profile); len(held) != 0 {
+				return executionMaterializationV1{}, nil, newMaterializeError("native",
+					"router-native tunnels cannot carry this configuration ("+nativeErr.Error()+
+						"), and sing-box cannot take over while OpenWrt still runs the interfaces an earlier Apply created: "+
+						strings.Join(held, ", "),
+					"Fix what the detail names to keep these connections native. To run them through sing-box instead, "+
+						"switch off the connections the detail names and apply, which removes their interfaces, "+
+						"then switch them on and apply again.")
+			}
 			warnings = append(warnings, "router-native tunnels are not used for this configuration ("+
 				nativeErr.Error()+"); the connections run through sing-box and the engine plugins instead")
 		default:
@@ -175,6 +223,31 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 	var plugins []executionPluginSpecV1
 	keeneticNative := nativeMaterialization != nil && nativeMaterialization.Delta.Reconcile.Target != nil &&
 		nativeMaterialization.Delta.Reconcile.Target.Platform == platform.Keenetic
+
+	// The kernel plan routes each list into a table seeded with a device. Compiled from the desired
+	// profile, not the bound one: binding rewrites an NDM-created endpoint as an external interface,
+	// which would change its IPv6 posture along with its name. The native plan supplies only the
+	// device NDM put each of its tunnels on.
+	var kernelPlan *pbr.Plan
+	if in.kernelOptions != nil {
+		options := *in.kernelOptions
+		if keeneticNative {
+			devices, devicesErr := keeneticKernelDevices(nativeMaterialization.Delta.Reconcile.Target)
+			if devicesErr != nil {
+				return executionMaterializationV1{}, nil, newMaterializeError("kernel",
+					"the kernel routing plan cannot name the device of an interface NDM creates: "+devicesErr.Error(), "")
+			}
+			options.Devices = devices
+		}
+		compiled, _, compileErr := pbr.Compile(&desired.Profile, options)
+		if compileErr != nil {
+			return executionMaterializationV1{}, nil, newMaterializeError("kernel",
+				"the kernel routing plan could not be compiled: "+compileErr.Error(),
+				"Fix the routing lists named in the detail, or switch to tun or mixed mode.")
+		}
+		kernelPlan = compiled
+	}
+
 	if keeneticNative {
 		target := nativeMaterialization.Delta.Reconcile.Target
 		if target.Keenetic == nil || len(target.OpenWrt) != 0 {
@@ -209,7 +282,7 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 			compat.NDMPolicies = in.ndmPolicies
 			genProfile := profile
 			if mode == "hybrid" || mode == "fast" {
-				genProfile.RoutingLists = withoutKernelCarriedFeeds(profile.RoutingLists, in.kernelPlan)
+				genProfile.RoutingLists = withoutKernelCarriedFeeds(profile.RoutingLists, kernelPlan)
 			}
 			result, generateErr := in.generate(&genProfile, compat)
 			if generateErr != nil {
@@ -254,7 +327,7 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 			}
 		}
 	} else {
-		opts, optionsErr := executionGeneratorOptions(desired, in.kernelPlan)
+		opts, optionsErr := executionGeneratorOptions(desired, kernelPlan)
 		if optionsErr != nil {
 			return executionMaterializationV1{}, nil, newMaterializeError("kernel",
 				"routing mode "+mode+" needs a kernel routing plan and none could be compiled",
@@ -292,7 +365,7 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 	// Keenetic never executes the OpenWrt nft/ip kernel plane — it has no nftables — but it does
 	// carry the ipset/iptables one, which rides alongside the native NDM plane rather than replacing
 	// it: NDM owns the interfaces, the kernel plane owns which destinations reach them.
-	keeneticKernel := gotPlatform == platform.Keenetic && kernelMode && in.kernelPlan != nil && len(in.kernelPlan.Zones) != 0
+	keeneticKernel := gotPlatform == platform.Keenetic && kernelMode && kernelPlan != nil && len(kernelPlan.Zones) != 0
 	if !keeneticNative && gotPlatform == platform.OpenWrt && kernelMode {
 		kernelAction = ExecutionEnsurePresent
 	} else if keeneticKernel {
@@ -311,7 +384,7 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 
 	kernelArtifact := executionKernelArtifactV1{
 		Action:   kernelAction,
-		Plan:     in.kernelPlan,
+		Plan:     kernelPlan,
 		IP:       []string{},
 		Teardown: []string{},
 		Retire:   []string{},
@@ -335,7 +408,7 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 		ipsetOptions := keeneticPBROptionsFor(host.KernelWANIface, &in.desired.Profile)
 		ipsetOptions.MasqDevices = keeneticUserspaceDevices(nativeMaterialization)
 		ipsetArtifact, err := buildKeeneticKernelIpsetArtifact(
-			in.kernelPlan, exactKernelOptions(), ipsetOptions,
+			kernelPlan, exactKernelOptions(), ipsetOptions,
 			executionKernelIpsetArtifactV1{
 				IpsetTool: host.KernelIpset, IptablesTool: host.KernelIptables,
 				IP6Tool: host.KernelIp6tables, IPTool: host.KernelIP,
@@ -352,11 +425,11 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 	}
 	// The nft rendering is the OpenWrt plane. Keenetic carries the same compiled plan through the
 	// ipset program built above; an artifact holding both would leave the executor free to pick.
-	if in.kernelPlan != nil && !keeneticKernel {
-		kernelArtifact.Nft = []byte(in.kernelPlan.RenderNft())
-		kernelArtifact.IP = append([]string(nil), in.kernelPlan.RenderIP(pbr.Options{})...)
-		kernelArtifact.Offload = []byte(in.kernelPlan.RenderOffload())
-		kernelArtifact.Teardown = append([]string(nil), in.kernelPlan.RenderTeardown(pbr.Options{})...)
+	if kernelPlan != nil && !keeneticKernel {
+		kernelArtifact.Nft = []byte(kernelPlan.RenderNft())
+		kernelArtifact.IP = append([]string(nil), kernelPlan.RenderIP(pbr.Options{})...)
+		kernelArtifact.Offload = []byte(kernelPlan.RenderOffload())
+		kernelArtifact.Teardown = append([]string(nil), kernelPlan.RenderTeardown(pbr.Options{})...)
 	}
 	if kernelAction != ExecutionEnsurePresent {
 		// An absent plane carries no program; only the retire list below may name commands.
@@ -446,6 +519,75 @@ func bindKernelRetire(target *executionKernelArtifactV1, previous *executionMate
 		target.NFTTool = previous.Kernel.NFTTool
 		target.IPTool = previous.Kernel.IPTool
 	}
+}
+
+// heldNativeInterfaces names, sorted by interface, the interfaces the authenticated previous native
+// plan created or manages (nativeOwnershipFrom: the ones only the native reconcile may update or
+// remove), each with the connection it was created for.
+func heldNativeInterfaces(previous *nativeplan.Plan, profile model.Profile) []string {
+	owned := nativeOwnershipFrom(previous)
+	ids := make([]string, 0, len(owned))
+	for id := range owned {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		if owned[ids[i]] != owned[ids[j]] {
+			return owned[ids[i]] < owned[ids[j]]
+		}
+		return ids[i] < ids[j]
+	})
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, profileEndpointLabel(profile, id)+" on "+owned[id])
+	}
+	return out
+}
+
+// enginePluginMoves names, sorted by interface, the connections the target native plan creates or
+// manages under a device name an AmneziaWG engine plugin of the previous materialization ran on: the
+// name the plugin manager gives its link (util.AWGIface), which is the one the native writer gives
+// the interface. Only a previous without a native plan is read here (genericPluginDevices): the engine
+// plugins of a native one are its engine-plugin decisions, whose move the planner already refuses
+// (nativeplan.MoveError). A connection that moves because the router's kernel module now carries its
+// settings says so, as the planner's refusal does (nativeplan.OpenWrtMoveReason).
+func enginePluginMoves(previous *executionMaterializationV1, target *nativeplan.Plan, profile model.Profile,
+	kernel awg.Generation) []string {
+	ran := make(map[string]bool)
+	for _, device := range genericPluginDevices(previous) {
+		ran[device] = true
+	}
+	var moved []nativeplan.EndpointDecision
+	for _, decision := range target.Decisions {
+		switch decision.Path {
+		case nativeplan.PathNativeCreate, nativeplan.PathNativeManage, nativeplan.PathNativeUpdate:
+			if ran[decision.Interface] {
+				moved = append(moved, decision)
+			}
+		}
+	}
+	sort.Slice(moved, func(i, j int) bool { return moved[i].Interface < moved[j].Interface })
+	out := make([]string, 0, len(moved))
+	for _, decision := range moved {
+		label := profileEndpointLabel(profile, decision.EndpointID) + " on " + decision.Interface
+		if e := profile.EndpointByID(decision.EndpointID); e != nil {
+			if why := nativeplan.OpenWrtMoveReason(*e, kernel); why != "" {
+				label += " (" + why + ")"
+			}
+		}
+		out = append(out, label)
+	}
+	return out
+}
+
+// profileEndpointLabel names connection id for an operator-facing message: by name where the profile
+// still has it, else by id, marked as gone.
+func profileEndpointLabel(profile model.Profile, id string) string {
+	for _, endpoint := range profile.Endpoints {
+		if endpoint.ID == id {
+			return endpointLabel(endpoint)
+		}
+	}
+	return id + " (no longer configured)"
 }
 
 // endpointLabel names an endpoint for an operator-facing message.

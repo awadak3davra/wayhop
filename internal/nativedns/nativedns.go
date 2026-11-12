@@ -41,6 +41,9 @@ type NativeResolver struct {
 	// ListenAddr is where an adopted https-dns-proxy instance listens (its listen_addr, else the
 	// package's global one; "" = the package default 127.0.0.1). The write-back points dnsmasq there.
 	ListenAddr string `json:"listen_addr,omitempty"`
+	// Iface is the interface a dnsmasq upstream is bound to (`server=IP@iface`); "" = the router's
+	// ordinary path. Whether that is a tunnel is the routing plane's to say: see MarkTunnels.
+	Iface string `json:"iface,omitempty"`
 }
 
 // NativeDNS is the whole adopted native resolver stack, ordered by preference (the tier order the
@@ -94,6 +97,21 @@ func (nd NativeDNS) Redacted() NativeDNS {
 	copy(out.Resolvers, nd.Resolvers)
 	for i := range out.Resolvers {
 		out.Resolvers[i].Address = RedactAddress(out.Resolvers[i].Address)
+	}
+	return out
+}
+
+// MarkTunnels records which bound upstreams ride a tunnel, which only the routing plane can tell. A
+// plain query bound to a tunnel is encrypted by that tunnel, so it is the hidden tier, not the
+// plaintext last resort its kind would suggest. Resolver slice is cloned, as in Redacted.
+func (nd NativeDNS) MarkTunnels(isTunnel func(iface string) bool) NativeDNS {
+	out := nd
+	out.Resolvers = make([]NativeResolver, len(nd.Resolvers))
+	copy(out.Resolvers, nd.Resolvers)
+	for i := range out.Resolvers {
+		if r := &out.Resolvers[i]; r.Iface != "" && isTunnel(r.Iface) {
+			r.ViaTunnel, r.Tier = true, TierHidden
+		}
 	}
 	return out
 }

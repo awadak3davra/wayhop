@@ -63,7 +63,18 @@ MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" docker run --rm \
   # checks below can tell which build the live path holds.
   cp /w/wayhop-amd64 /w/wayhop-amd64-next && printf "next" >> /w/wayhop-amd64-next
   sh /w/packaging/feed/pack-apk.sh /w/wayhop-amd64-next 1.0.1 1 /w/out2 x86_64
+  # Every path in the package must belong to root: root runs these files at every boot.
+  owners=$(apk adbdump /w/out/apk/x86_64/*.apk | sed -n "s/^ *\(user\|group\): //p" | sort -u | tr "\n" " ")
+  [ "$owners" = "root " ] || { echo "the package installs files owned by: $owners" >&2; exit 1; }
 ' >/dev/null
+
+# A packer run as an ordinary user would ship every file owned by nobody, so it must refuse.
+unprivileged=1000:1000
+if MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" docker run --rm --user "$unprivileged" --tmpfs /tmp:rw,mode=1777 \
+  -v "$(hostpath "$PWD"):/src:ro" -v "$(hostpath "$work"):/w:ro" -w /src "$BUILDER_IMAGE" \
+  sh packaging/feed/pack-apk.sh /w/wayhop-amd64 1.0.0 1 /tmp/out x86_64 >/dev/null 2>&1; then
+  echo "the packer ran as an ordinary user and would ship files owned by nobody" >&2; exit 1
+fi
 
 [ -n "$(find "$work/out" -name '*.apk' | head -n1)" ] || { echo "the packer produced no .apk" >&2; exit 1; }
 

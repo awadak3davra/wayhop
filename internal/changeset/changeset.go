@@ -313,6 +313,9 @@ func diffDNSPlane(base, desired *model.DNSSettings) []Change {
 	if base.LeakProof != desired.LeakProof {
 		out = append(out, mk("Leak protection", boolWord(base.LeakProof), boolWord(desired.LeakProof)))
 	}
+	if base.ServeClients != desired.ServeClients {
+		out = append(out, mk("Answer clients", boolWord(base.ServeClients), boolWord(desired.ServeClients)))
+	}
 	if base.FakeIP != desired.FakeIP {
 		out = append(out, mk("FakeIP", boolWord(base.FakeIP), boolWord(desired.FakeIP)))
 	}
@@ -325,7 +328,7 @@ func diffDNSPlane(base, desired *model.DNSSettings) []Change {
 		// Same count but different content: report the fact, never the addresses (tokens ride URLs).
 		out = append(out, mk("Resolvers", SecretSet, SecretChanged))
 	}
-	if len(base.Rules) != len(desired.Rules) || !sameJSON(base.Rules, desired.Rules) {
+	if (len(base.Rules) > 0 || len(desired.Rules) > 0) && (len(base.Rules) != len(desired.Rules) || !sameJSON(base.Rules, desired.Rules)) {
 		out = append(out, mk("DNS rules", countWord(len(base.Rules), "rule", "rules"), countWord(len(desired.Rules), "rule", "rules")))
 	}
 	if base.Final != desired.Final {

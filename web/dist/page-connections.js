@@ -156,8 +156,10 @@ function exitPanelFor(item) {
   panel.appendChild(depBox);
 
   panel.appendChild(el("div", { class: "insp-acts" },
-    el("button", { class: "btn", "aria-label": "Check config " + (e.name || e.id), onclick: ev => checkEndpointConfig(e, ev.currentTarget) }, "Check config"),
-    el("button", { class: "btn", "aria-label": t("Test") + " " + (e.name || e.id), onclick: ev => testEndpoint(e, ev.currentTarget) }, "Test"),
+    // Two checks that read alike on the button: each says in its tooltip what it does, and the one
+    // that answers "does it work" comes first.
+    el("button", { class: "btn", "aria-label": t("Test") + " " + (e.name || e.id), title: t("Connects through it now and measures the delay"), onclick: ev => testEndpoint(e, ev.currentTarget) }, "Test"),
+    el("button", { class: "btn", "aria-label": "Check config " + (e.name || e.id), title: t("Looks for mistakes in the settings without connecting"), onclick: ev => checkEndpointConfig(e, ev.currentTarget) }, "Check config"),
     el("button", { class: "btn", "aria-label": t("Edit") + " " + (e.name || e.id), onclick: () => openEditEndpoint(e) }, "Edit"),
     el("button", { class: "btn btn-danger", "aria-label": t("Delete") + " " + (e.name || e.id), onclick: () => delEndpoint(e) }, "Delete")));
   return panel;
@@ -178,7 +180,7 @@ function paintExitRow(row, item) {
     // The cause belongs in the panel, where there is room for it and for its suggested fix. In a
     // 260px column it only ever showed a truncated fragment — "No response (timed out or bl".
     else if (h && h.state === "down") { dotCls = "err"; note = t("down"); }
-    else if (h && h.state === "alive") { dotCls = h.latency_ms >= 600 ? "warn" : "ok"; note = (h.latency_ms || "?") + " ms"; }
+    else if (h && h.state === "alive") { dotCls = h.latency_ms >= 600 ? "warn" : "ok"; note = t("{0} ms", h.latency_ms || "?"); }
     else note = t("checking…");
   }
   const dot = row.querySelector(".insp-dot");
@@ -690,10 +692,16 @@ function openAddConnection() {
         if (gen !== parseGen) return; // a newer paste superseded us — discard this parse
         confirm.innerHTML = "";
         const form = manualForm(parsed); // editable confirmation — protocol dropdown overrides the type
+        // A link that parsed is a connection ready to save, so Save sits right under the verdict and
+        // the form (uuid, flow, transport, mux...) is folded away as Advanced. It used to open in full,
+        // which put the one button a pasted link needs below a screen of fields that link had already
+        // filled in. A refusal opens the fold first, so the field the message names is in view.
+        const adv = el("details", { class: "import-adv" }, el("summary", {}, t("Advanced")), form.el);
+        const refuse = (msg) => { adv.open = true; toast(msg, "err"); };
         const saveBtn = el("button", { class: "btn btn-primary", onclick: async (ev) => {
-          const unavailable = form.supportError(); if (unavailable) return toast(unavailable, "err");
-          const invalid = invalidFieldError(form); if (invalid) return toast(invalid, "err");
-          const e = form.collect(); if (needsServer(e) && (!e.server || !e.port)) return toast("Server and port required", "err");
+          const unavailable = form.supportError(); if (unavailable) return refuse(unavailable);
+          const invalid = invalidFieldError(form); if (invalid) return refuse(invalid);
+          const e = form.collect(); if (needsServer(e) && (!e.server || !e.port)) return refuse("Server and port required");
           const b = ev.currentTarget; if (b.disabled) return; b.disabled = true; // guard against double-submit firing two POSTs before done() removes the modal
           // The id is derived from protocol+server+port at import time, and POST /api/endpoints is an
           // UPSERT — so a second account on a host that already has one lands on the same id and
@@ -705,19 +713,23 @@ function openAddConnection() {
           try {
             await api.post("/api/endpoints", e);
             done(replacing ? t("Replaced {0}", replacing.name || replacing.id) : t("Added {0}", e.name || e.id));
-          } catch (err) { b.disabled = false; toast(redactSecrets(err.message), "err"); }
+          } catch (err) { b.disabled = false; adv.open = true; toast(redactSecrets(err.message), "err"); }
         } }, "Save connection");
         const detProto = String(parsed.protocol || "?").toUpperCase();
         const detEng = parsed.engine && parsed.engine !== "singbox" ? parsed.engine : "";
+        const where = parsed.server ? parsed.server + (parsed.port ? ":" + parsed.port : "") : "";
         confirm.appendChild(el("div", { class: "toast info", style: "margin:0 0 12px" },
-          detEng
-            ? t("Detected {0} · {1} engine — review below and fix the type if it's wrong, then save.", detProto, detEng)
-            : t("Detected {0} — review below and fix the type if it's wrong, then save.", detProto)));
-        confirm.appendChild(form.el);
-        confirm.appendChild(el("div", { style: "margin-top:10px" }, saveBtn));
+          el("div", {}, detEng
+            ? t("Detected {0} · {1} engine. Save it, or open Advanced to check the details.", detProto, detEng)
+            : t("Detected {0}. Save it, or open Advanced to check the details.", detProto)),
+          (parsed.name || where) ? el("div", { class: "import-what" }, [parsed.name, where].filter(Boolean).join(" · ")) : null));
+        confirm.appendChild(el("div", { style: "margin-bottom:12px" }, saveBtn));
+        confirm.appendChild(adv);
+        parseBtn.className = "btn"; // one primary action in view: once the link has parsed, it is Save
       } catch (e) {
         if (gen !== parseGen) return; // ...and a superseded parse must not replace a good form with ITS error
         confirm.innerHTML = "";
+        parseBtn.className = "btn btn-primary";
         confirm.appendChild(friendlyImportError(e.message, () => { ta.value = ""; ta.focus(); confirm.innerHTML = ""; }));
       }
     }
@@ -939,7 +951,7 @@ function healthTargetPicker(input, endpointID) {
     // a target the operator is about to pick is exactly the trap this button exists to remove.
     scored.sort((a, b) => (a.ms == null) - (b.ms == null) || (a.ms || 0) - (b.ms || 0));
     fill(scored.map(s => ({ url: s.url,
-      label: (s.ms != null ? s.ms + " ms" : s.failed ? t("not measured") : t("unreachable")) + " · " + s.note })));
+      label: (s.ms != null ? t("{0} ms", s.ms) : s.failed ? t("not measured") : t("unreachable")) + " · " + s.note })));
     const best = scored.find(s => s.ms != null);
     out.textContent = best
       ? t("Fastest through this connection: {0} ({1} ms)", best.url, best.ms)

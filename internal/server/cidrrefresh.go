@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -35,7 +34,8 @@ func (s *Server) handleRoutingRefresh(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ID string `json:"id"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body) // absent or empty: refresh all
+	_ = decodeJSONBody(r.Body, &body) // absent or empty: refresh all
+	s.forgetRoutingProbes()           // the dots painted after a refresh are asked again, not remembered
 	var changed bool
 	var errs []error
 	if body.ID != "" {
@@ -92,9 +92,14 @@ func (s *Server) fetchOne(ctx context.Context, rl model.RoutingList) (cidrs []st
 	if rl.CIDRSource == "" {
 		return nil, false, nil
 	}
-	got, skipped, err := cidrfeed.Fetch(ctx, s.subscriptionFetchClient(), rl.CIDRSource)
+	via := s.feedVia(rl)
+	iface, err := s.feedIface(via)
 	if err != nil {
 		return nil, false, fmt.Errorf("refresh %q: %w", rl.ID, err)
+	}
+	got, skipped, err := cidrfeed.Fetch(ctx, s.listFetchClient(via), rl.CIDRSource)
+	if err != nil {
+		return nil, false, fmt.Errorf("refresh %q: %w", rl.ID, feedFetchError(iface, err))
 	}
 	got, refused := cidrfeed.Screen(got)
 	if len(got) == 0 {
@@ -222,9 +227,14 @@ func (s *Server) fetchDomainsOne(ctx context.Context, rl model.RoutingList) (dom
 	if rl.DomainSource == "" {
 		return nil, false, nil
 	}
-	got, skipped, err := cidrfeed.FetchDomains(ctx, s.subscriptionFetchClient(), rl.DomainSource)
+	via := s.feedVia(rl)
+	iface, err := s.feedIface(via)
 	if err != nil {
 		return nil, false, fmt.Errorf("refresh %q domains: %w", rl.ID, err)
+	}
+	got, skipped, err := cidrfeed.FetchDomains(ctx, s.listFetchClient(via), rl.DomainSource)
+	if err != nil {
+		return nil, false, fmt.Errorf("refresh %q domains: %w", rl.ID, feedFetchError(iface, err))
 	}
 	if len(got) == 0 {
 		return nil, false, fmt.Errorf("refresh %q domains: source returned 0 usable names (%d skipped) — keeping last-good", rl.ID, skipped)
@@ -425,6 +435,11 @@ func (s *Server) cidrRefreshTick(ctx context.Context, due map[string]time.Time, 
 		domains, domainChanged, domainErr := s.fetchDomainsOne(fctx, rl)
 		cancel()
 		due[rl.ID] = now.Add(time.Duration(cidrIntervalHours(rl)) * time.Hour)
+		// A download path that was down says nothing about the feed (see listfeedbind.go): ask again at
+		// the next tick rather than holding an old list for another whole interval.
+		if errors.Is(cidrErr, errFeedPathDown) || errors.Is(domainErr, errFeedPathDown) {
+			due[rl.ID] = now
+		}
 		s.noteFeedRefresh(rl, now, errors.Join(cidrErr, domainErr))
 		for _, err := range []error{cidrErr, domainErr} {
 			if err != nil {

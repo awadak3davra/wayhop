@@ -131,6 +131,17 @@ function handleAuthAPIError(error) {
   return error;
 }
 
+// First-run setup is answered only in the first 30 minutes after WayHop starts (or over an SSH tunnel
+// to the router). Past that, this sentence is the whole setup screen, because it is the only way on.
+function setupWindowClosedText() {
+  return t("Restart WayHop or reboot the router, then open this panel within 30 minutes to set it up.");
+}
+
+function authErrorText(error, fallback) {
+  if (error && error.data && error.data.code === "AUTH_SETUP_WINDOW_CLOSED") return setupWindowClosedText();
+  return (error && error.message) || fallback;
+}
+
 async function authStatus() {
   const response = await fetch("/api/auth/status", { cache: "no-store" });
   if (!response.ok) throw await apiErr(response);
@@ -141,6 +152,8 @@ function showAuthGate(status) {
   if (authGatePromise) return authGatePromise;
   authGatePromise = new Promise(resolve => {
     const setup = !status.configured;
+    // `=== false`: a daemon that predates the setup window does not send the field.
+    const setupClosed = setup && status.setup_window_open === false;
     const title = setup ? "Secure this WayHop panel" : "Sign in to WayHop";
     const description = setup
       ? "Create the first operator account. There is no default password, and router changes stay blocked until this is complete."
@@ -183,7 +196,7 @@ function showAuthGate(status) {
           authGatePromise = null;
           resolve(true);
         } catch (error) {
-          errorBox.textContent = error.message || "The choice could not be saved.";
+          errorBox.textContent = authErrorText(error, "The choice could not be saved.");
           confirm.disabled = false;
         }
       });
@@ -205,7 +218,9 @@ function showAuthGate(status) {
       skipBox);
     const dialog = el("section", { class: "modal auth-card", role: "dialog", "aria-modal": "true", "aria-labelledby": "auth-title" },
       el("div", { class: "modal-head" }, el("h2", { id: "auth-title" }, title)),
-      el("div", { class: "modal-body" }, el("p", { class: "hint auth-intro" }, description), form));
+      setupClosed
+        ? el("div", { class: "modal-body" }, el("p", { class: "hint auth-intro", role: "alert" }, setupWindowClosedText()))
+        : el("div", { class: "modal-body" }, el("p", { class: "hint auth-intro" }, description), form));
     const backdrop = el("div", { class: "modal-backdrop auth-gate" }, dialog);
     document.body.appendChild(backdrop);
     // aria-modal is a promise, not decoration: keyboard and assistive-technology users must not
@@ -266,7 +281,7 @@ function showAuthGate(status) {
         authGatePromise = null;
         resolve(true);
       } catch (error) {
-        errorBox.textContent = error.message || "Authentication failed.";
+        errorBox.textContent = authErrorText(error, "Authentication failed.");
         submit.disabled = false;
       }
     });
@@ -534,10 +549,10 @@ const nameOf = id => (findEndpoint(id) || findGroup(id) || {}).name ||
 /* ---------- formatting ---------- */
 function fmtRate(bps) {
   const bits = (bps || 0) * 8;
-  if (bits >= 1e9) return (bits / 1e9).toFixed(2) + " Gbit/s";
-  if (bits >= 1e6) return (bits / 1e6).toFixed(2) + " Mbit/s";
-  if (bits >= 1e3) return (bits / 1e3).toFixed(2) + " kbit/s";
-  return Math.round(bits) + " bit/s";
+  if (bits >= 1e9) return (bits / 1e9).toFixed(2) + " " + t("Gbit/s");
+  if (bits >= 1e6) return (bits / 1e6).toFixed(2) + " " + t("Mbit/s");
+  if (bits >= 1e3) return (bits / 1e3).toFixed(2) + " " + t("kbit/s");
+  return Math.round(bits) + " " + t("bit/s");
 }
 const fmtTime = ms => new Date(ms).toLocaleTimeString("en-GB");
 
@@ -634,7 +649,8 @@ function detectLang(stored) {
   if (!LANG_RESOLVED.has(memo)) LANG_RESOLVED.set(memo, pick(stored) || pick(navigator.language || "en") || "en");
   return LANG_RESOLVED.get(memo);
 }
-const lang = () => { const v = localStorage.getItem(LANG_KEY); return v && hasDict(v) ? v : detectLang(v); };
+const langResolved = (() => { const v = localStorage.getItem(LANG_KEY); return v && hasDict(v) ? v : detectLang(v); })();
+const lang = () => langResolved;
 function setLang(v) {
   // Reloading in the requested language would silently discard unsaved form edits — the same hazard
   // the SPA nav guard covers for hash navigation. Consult the shared registry first; on cancel,
@@ -889,6 +905,9 @@ async function seedIfaceSeries() {
   let snaps;
   try { snaps = await api.get("/api/system/recent"); } catch (_) { return; }
   if (!Array.isArray(snaps) || snaps.length < 2) return;
+  // The seed now races the dashboard's live polls: a series that already holds a live sample is
+  // left alone, since older history appended after it would run backwards.
+  const live = new Set(Object.keys(ifaceSeries).filter(n => ifaceSeries[n].length));
   const clientNow = Date.now() / 1000, bound = endpointBoundIfaces();
   const lastT = snaps[snaps.length - 1].t;                 // server ms of the newest snapshot
   const toClient = (serverMs) => clientNow + (serverMs - lastT) / 1000; // rebase server time onto the client clock
@@ -898,7 +917,7 @@ async function seedIfaceSeries() {
     if (!(dt > 0 && dt <= 30)) continue;                   // non-consecutive snapshots → skip (same guard as live)
     const pm = {}; (p.ifaces || []).forEach(f => { pm[f.name] = f; });
     (c.ifaces || []).forEach(f => {
-      if (!graphIface(f.name, bound)) return;
+      if (!graphIface(f.name, bound) || live.has(f.name)) return;
       const pf = pm[f.name]; if (!pf) return;
       const down = Math.max(0, (f.rx_bytes - pf.rx_bytes) / dt), up = Math.max(0, (f.tx_bytes - pf.tx_bytes) / dt);
       if (!ifaceSeries[f.name]) { ifaceSeries[f.name] = []; ifaceOrder.push(f.name); }
@@ -912,6 +931,14 @@ async function seedIfaceSeries() {
   // over-reporting the first live sample by that phase gap. Leaving prevIfaces unset lets the first two
   // live /api/system polls establish the baseline with a correct dt (one extra tick before the first
   // live point — the seeded history is already on screen meanwhile).
+}
+// seedIfaceGraph seeds once per page load, from the first dashboard render: only the dashboard draws
+// this graph, so no other landing page waits on /api/system/recent.
+let ifaceSeeded = false;
+function seedIfaceGraph() {
+  if (ifaceSeeded) return;
+  ifaceSeeded = true;
+  seedIfaceSeries().then(() => drawGraph()).catch(() => {});
 }
 // pushOutboundRates feeds the PROXY exits (VLESS/SOCKS/etc. — sing-box outbounds with no kernel
 // interface, so /proc/net/dev can't see them) into the same per-series machinery as the kernel
@@ -1355,8 +1382,12 @@ function dashboardHero(eps, groups) {
 async function renderDashboard(view) {
   // The failover state comes with the profile and health: the hero's first line answers which exit
   // is carrying traffic, and without this it answered from the latency guess alone.
-  await Promise.all([loadProfile(), loadHealth(), loadFailoverState()]);
-  let wd = null; try { wd = await api.get("/api/watchdog"); } catch (_) {}
+  // Not awaited: the graph is drawn when the seed lands.
+  seedIfaceGraph();
+  // /api/watchdog is in the batch: fetched after it, it was one more round trip, and it missed the
+  // boot poll's identical request in flight, which api.get coalesces.
+  const [, , , wd] = await Promise.all([loadProfile(), loadHealth(), loadFailoverState(),
+    api.get("/api/watchdog").catch(() => null)]);
   const eps = state.profile.endpoints;
   const groups = state.profile.groups;
   watchdog = wd;
@@ -1541,6 +1572,9 @@ function computeVerdict() {
     if (isNativeOnly(h)) return { level: "protected", ico: "✓", word: "NATIVE", verdict: t("Native-only mode — sing-box not required"), sub: t("Routed by the kernel plane (fast mode)") };
     return { level: "offline", ico: "○", word: "OFFLINE", verdict: t("Proxy core not running"), sub: "" };
   }
+  // A proxy-only mode routes no device that is not set to use the proxy.
+  if (rs && rs.proxy_only) return { level: "unprotected", ico: "✕", word: "PROXY ONLY",
+    verdict: t("Devices go direct: this routing mode only offers a proxy on the router"), sub: t("Settings, Routing mode") };
   const def = (state.profile.rules || []).find(r => r.default);
 
   // What the DEFAULT does and what happens to ALL traffic are different statements, and both of the
@@ -1587,20 +1621,22 @@ function computeVerdict() {
     const electedEp = findEndpoint((failoverState.elected || {})[g.id] || "");
     if (electedEp) {
       const he = healthMap[electedEp.id] || {};
+      if (he.state === "down") return { level: "degraded", ico: "⚠", word: "DEGRADED", verdict: t("via ") + g.name + t(" — no live member"), sub: g.type + " · " + (electedEp.name || electedEp.id) };
+      if (he.state !== "alive") return { level: "checking", ico: "…", word: "CHECKING", verdict: t("Checking") + " " + g.name + "…", sub: g.type + " · " + (electedEp.name || electedEp.id) };
       return { level: "protected", ico: "✓", word: "PROTECTED", verdict: t("via ") + g.name,
-        sub: g.type + " · " + (electedEp.name || electedEp.id) + (he.latency_ms ? " · " + he.latency_ms + " ms" : "") };
+        sub: g.type + " · " + (electedEp.name || electedEp.id) + (he.latency_ms ? " · " + t("{0} ms", he.latency_ms) : "") };
     }
     if (best) {
       const hb = healthMap[best.ep.id] || {};
       return { level: "protected", ico: "✓", word: "PROTECTED", verdict: t("via ") + g.name,
-        sub: g.type + " · " + t("active member unknown") + " · " + t("fastest: {0}", (best.ep.name || best.ep.id) + (hb.latency_ms ? " " + hb.latency_ms + " ms" : "")) };
+        sub: g.type + " · " + t("active member unknown") + " · " + t("fastest: {0}", (best.ep.name || best.ep.id) + (hb.latency_ms ? " " + t("{0} ms", hb.latency_ms) : "")) };
     }
     if (members.some(m => healthMap[m.id])) return { level: "degraded", ico: "⚠", word: "DEGRADED", verdict: t("via ") + g.name + t(" — no live member"), sub: g.type };
     return { level: "checking", ico: "…", word: "CHECKING", verdict: t("Checking") + " " + g.name + "…", sub: g.type };
   }
   if (ep) {
     const he = healthMap[ep.id];
-    if (he && he.state === "alive") return { level: "protected", ico: "✓", word: "PROTECTED", verdict: t("via ") + (ep.name || ep.id), sub: (ep.protocol || ep.engine || "") + (he.latency_ms ? " · " + he.latency_ms + " ms" : "") };
+    if (he && he.state === "alive") return { level: "protected", ico: "✓", word: "PROTECTED", verdict: t("via ") + (ep.name || ep.id), sub: (ep.protocol || ep.engine || "") + (he.latency_ms ? " · " + t("{0} ms", he.latency_ms) : "") };
     if (he && he.state === "down") return { level: "degraded", ico: "⚠", word: "DEGRADED", verdict: t("via ") + (ep.name || ep.id) + t(" — down"), sub: he.cause || "" };
     return { level: "checking", ico: "…", word: "CHECKING", verdict: t("Checking") + " " + (ep.name || ep.id) + "…", sub: ep.protocol || "" };
   }
@@ -1732,7 +1768,7 @@ function markSystemStale(strip, stale) {
   let note = strip.querySelector(".sys-stale");
   if (!stale) { if (note) note.remove(); return; }
   if (!note) {
-    note = el("div", { class: "sys-stale", role: "status" }, "Not updating — these are the last figures received.");
+    note = el("div", { class: "sys-stale", role: "status" }, t("Not updating — these are the last figures received."));
     strip.appendChild(note);
   }
 }
@@ -1753,7 +1789,7 @@ function paintSystem(si) {
     const ram = strip.querySelector('[data-sys="ram"]');
     if (ram) {
       const rv = ram.querySelector(".sys-v");
-      if (rv) { rv.innerHTML = ""; rv.append(pct + "%", el("small", {}, "  " + Math.round(used) + " / " + Math.round(tot) + " MB")); }
+      if (rv) { rv.innerHTML = ""; rv.append(pct + "%", el("small", {}, "  " + Math.round(used) + " / " + Math.round(tot) + " " + t("MB"))); }
       const fill = ram.querySelector(".sys-bar-fill");
       if (fill) { fill.style.width = Math.min(100, pct) + "%"; fill.style.background = pct >= 88 ? "var(--err)" : pct >= 70 ? "var(--warn)" : "var(--ok)"; }
       ram.title = t("{0} MB free of {1} MB", Math.round(tot - used), Math.round(tot));
@@ -1803,17 +1839,22 @@ function paintThroughput(node, ifaces) {
     // prevented, still breaking between the two readings — either way leaving this tile taller than
     // the four beside it. Scaled to a shared unit the pair reads as a pair and always fits; the exact
     // per-interface figures stay in the tile's title.
-    const U = [[1 << 30, "GB"], [1 << 20, "MB"], [1 << 10, "KB"]];
-    const top = Math.max(w.down, w.up);
-    const [div, unit] = U.find(([d]) => top >= d) || [1, "B"];
+    //
+    // In bits, like the traffic graph and the per-connection tiles on the same page and like the
+    // figure on the provider's contract: this tile alone counted bytes, so "3.4 MB/s" sat beside a
+    // graph reading 27 Mbit/s for the same traffic.
+    const U = [[1e9, "Gbit/s"], [1e6, "Mbit/s"], [1e3, "kbit/s"]];
+    const down = w.down * 8, up = w.up * 8;
+    const top = Math.max(down, up);
+    const [div, unit] = U.find(([d]) => top >= d) || [1, "bit/s"];
     const n = (v) => (v / div >= 100 ? Math.round(v / div) : Math.round((v / div) * 10) / 10);
     node.innerHTML = "";
-    node.append(el("span", { class: "sv-r" }, "↓" + n(w.down)), " ",
-      el("span", { class: "sv-r" }, "↑" + n(w.up)), " ",
-      el("small", { class: "sv-r" }, unit + "/s"));
+    node.append(el("span", { class: "sv-r" }, "↓" + n(down)), " ",
+      el("span", { class: "sv-r" }, "↑" + n(up)), " ",
+      el("small", { class: "sv-r" }, t(unit)));
     const tile = node.closest(".sys-tile");
     if (tile) {
-      const lines = ifaces.map(f => { const r = rate(f.name); return r ? f.name + ": ↓" + fmtBytes(r.down) + "/s ↑" + fmtBytes(r.up) + "/s" : null; }).filter(Boolean);
+      const lines = ifaces.map(f => { const r = rate(f.name); return r ? f.name + ": ↓" + fmtRate(r.down) + " ↑" + fmtRate(r.up) : null; }).filter(Boolean);
       tile.title = lines.join("\n");
     }
   }
@@ -1840,9 +1881,9 @@ function paintIfaceList(ifaces, rate, wanName) {
     slot.innerHTML = "";
     if (!r) return;
     slot.append(
-      el("span", { class: "rx" }, "↓ " + fmtBytes(r.down) + "/s"),
+      el("span", { class: "rx" }, "↓ " + fmtRate(r.down)),
       el("span", { class: "hint", style: "margin:0 7px" }, "·"),
-      el("span", { class: "tx" }, "↑ " + fmtBytes(r.up) + "/s"));
+      el("span", { class: "tx" }, "↑ " + fmtRate(r.up)));
   });
 }
 // ifaceFriendly maps a kernel iface (nwg1) to the name of the endpoint bound to it.
@@ -1856,12 +1897,12 @@ function ifaceFriendly(name) {
 // /connections list (server-capped to the top ~60 by bytes). Refreshed on the health
 // tick; empty / core-down shows a clean empty state.
 function fmtAge(startISO) {
-  const t = Date.parse(startISO || "");
-  if (isNaN(t)) return "";
-  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
-  if (s < 60) return s + "s";
-  if (s < 3600) return Math.floor(s / 60) + "m";
-  return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
+  const started = Date.parse(startISO || "");
+  if (isNaN(started)) return "";
+  const s = Math.max(0, Math.round((Date.now() - started) / 1000));
+  if (s < 60) return t("{0}s", s);
+  if (s < 3600) return t("{0}m", Math.floor(s / 60));
+  return t("{0}h {1}m", Math.floor(s / 3600), Math.floor((s % 3600) / 60));
 }
 // exitLabel maps a conntrack connection's resolved egress tag to a friendly name: "direct"
 // (general WAN) stays as-is; an endpoint OR GROUP id resolves to the name the operator gave it.
@@ -1872,7 +1913,7 @@ function fmtAge(startISO) {
 // "Primary group" — one page, one object, two names, and the one shown against the traffic figure
 // was the internal id.
 function exitLabel(tag) {
-  if (!tag || tag === "direct") return "direct";
+  if (!tag || tag === "direct") return t("direct");
   const e = findEndpoint(tag) || findGroup(tag);
   return (e && e.name) ? e.name : tag;
 }
@@ -1929,12 +1970,12 @@ function groupConnsByIP(rows) {
 function connGroupItem(g) {
   const exits = [...g.exits].map(exitLabel).join(", ");
   const sub = (exits ? t("via {0}", exits) + "  ·  " : "") +
-    "↓" + fmtBytes(g.down) + " ↑" + fmtBytes(g.up) + "  ·  " + (g.conns > 1 ? t("{0} conns", g.conns) : t("{0} conn", g.conns));
+    "↓" + fmtBytes(g.down) + " ↑" + fmtBytes(g.up) + "  ·  " + tn("{0} conn|{0} conns", g.conns);
   const chips = [...g.ports.entries()]
     .sort((a, b) => (parseInt(a[0]) || 0) - (parseInt(b[0]) || 0))
     .map(([key, p]) => el("span", {
       class: "conn-port",
-      title: key + "  ·  " + (p.n > 1 ? t("{0} conns", p.n) : t("{0} conn", p.n)) + "  ·  ↓" + fmtBytes(p.down) + " ↑" + fmtBytes(p.up),
+      title: key + "  ·  " + tn("{0} conn|{0} conns", p.n) + "  ·  ↓" + fmtBytes(p.down) + " ↑" + fmtBytes(p.up),
     }, p.n > 1 ? key + " ×" + p.n : key));
   return el("div", { class: "conn-group" },
     el("div", { class: "conn-item" },
@@ -1960,6 +2001,9 @@ function connectionsCard() {
     chev.textContent = on ? "▾" : "▸";
     head.setAttribute("aria-expanded", on ? "true" : "false");
     try { localStorage.setItem("wr.conns.open", on ? "1" : "0"); } catch (_) {}
+    // The rows a collapsed tick skipped (connRowsWanted).
+    const paint = on && connRowsPending.get(list);
+    if (paint) paint();
   };
   const toggle = () => setOpen(!card.classList.contains("open"));
   head.addEventListener("click", toggle);
@@ -1981,13 +2025,24 @@ function exitsSummary(exits) {
   return Object.entries(exits).sort((a, b) => b[1] - a[1]).slice(0, 3)
     .map(([tag, bytes]) => exitLabel(tag) + " " + fmtBytes(bytes)).join("  ·  ");
 }
+// connRowsWanted says whether this tick should build the rows. The card is collapsed by default, and
+// rebuilding up to 40 groups into a hidden list every 5 s was wasted work, so a collapsed card gets
+// only its summary; the latest repaint is kept and run when the card opens (setOpen).
+const connRowsPending = new WeakMap();
+function connRowsWanted(list, repaint) {
+  const card = list.closest(".conns-card");
+  if (!card || card.classList.contains("open")) { connRowsPending.delete(list); return true; }
+  connRowsPending.set(list, repaint);
+  return false;
+}
 // renderConnList paints the REAL connection table from the /api/conntrack payload, with the
 // live count vs the conntrack limit and a per-exit traffic split in the header.
 function renderConnList(list, data) {
   const sum = document.getElementById("conns-sum");
   const conns = (data && data.conns) || [];
-  list.innerHTML = "";
-  if (!conns.length) { list.appendChild(el("div", { class: "empty" }, t("No active connections"))); if (sum) sum.textContent = ""; return; }
+  const rows = connRowsWanted(list, () => renderConnList(list, data));
+  if (rows) list.innerHTML = "";
+  if (!conns.length) { if (rows) list.appendChild(el("div", { class: "empty" }, t("No active connections"))); if (sum) sum.textContent = ""; return; }
   if (sum) {
     let s = (data.total || conns.length) + " " + t("active");
     if (data.max && data.total != null) s += "  ·  " + t("{0}% of {1}", Math.round((data.total / data.max) * 100), data.max);
@@ -1995,15 +2050,18 @@ function renderConnList(list, data) {
     if (ex) s += "  ·  " + ex;
     sum.textContent = s;
   }
+  if (!rows) return;
   const groups = groupConnsByIP(conns.map(c => ({ ip: c.dst, port: c.dport, proto: c.proto, up: c.up_bytes, down: c.down_bytes, exit: c.exit })));
   groups.slice(0, 40).forEach(g => list.appendChild(connGroupItem(g)));
 }
 // renderConnListClash — demo / off-router fallback (sing-box connections array).
 function renderConnListClash(list, conns) {
   const sum = document.getElementById("conns-sum");
-  list.innerHTML = "";
-  if (!conns.length) { list.appendChild(el("div", { class: "empty" }, t("No active connections"))); if (sum) sum.textContent = ""; return; }
+  const rows = connRowsWanted(list, () => renderConnListClash(list, conns));
+  if (rows) list.innerHTML = "";
+  if (!conns.length) { if (rows) list.appendChild(el("div", { class: "empty" }, t("No active connections"))); if (sum) sum.textContent = ""; return; }
   if (sum) sum.textContent = conns.length + " " + t("active");
+  if (!rows) return;
   const groups = groupConnsByIP(conns.map(c => {
     const m = c.metadata || {};
     return { ip: m.destinationIP || m.host, port: m.destinationPort, proto: "", up: c.upload, down: c.download, exit: (c.chains && c.chains.length) ? c.chains[c.chains.length - 1] : "" };
@@ -2027,7 +2085,7 @@ function paintTopTalkers(list, data) {
     const total = (c.up_bytes || 0) + (c.down_bytes || 0);
     list.appendChild(el("div", { class: "talker" },
       el("div", { class: "talker-row" },
-        el("span", { class: "talker-host", title: c.ip + "  ·  " + t("{0} conns", c.conns || 0) }, c.name || c.ip),
+        el("span", { class: "talker-host", title: c.ip + "  ·  " + tn("{0} conn|{0} conns", c.conns || 0) }, c.name || c.ip),
         el("span", { class: "talker-bytes" }, fmtBytes(total))),
       el("div", { class: "talker-bar" }, el("span", { class: "talker-bar-fill", style: "width:" + Math.max(2, Math.round(total / max * 100)) + "%" }))));
   });
@@ -2075,7 +2133,7 @@ function paintConnections() {
     if (list) renderConnList(list, data);
     if (tlist) paintTopTalkers(tlist, data);
   }).catch(() => {
-    if (list) { list.innerHTML = ""; list.appendChild(el("div", { class: "empty" }, "—")); }
+    if (list) { list.innerHTML = ""; connRowsPending.delete(list); list.appendChild(el("div", { class: "empty" }, "—")); }
     if (tlist) { tlist.innerHTML = ""; tlist.appendChild(el("div", { class: "empty" }, "—")); }
   }).finally(() => { connInFlight = false; });
 }
@@ -2553,7 +2611,7 @@ function failoverMembers(g) {
     chip.appendChild(el("span", { class: "pill " + dotCls, role: "img", "aria-label": alive ? t("alive") : down ? t("down") : t("not yet checked"), title: alive ? "alive" : down ? "down" : "not yet checked" },
       el("span", { class: "dot" }),
       nameOf(id),
-      alive && h.latency_ms ? el("small", { style: "margin-left:6px;color:inherit;opacity:.75" }, h.latency_ms + " ms") : null));
+      alive && h.latency_ms ? el("small", { style: "margin-left:6px;color:inherit;opacity:.75" }, t("{0} ms", h.latency_ms)) : null));
     // "● LIVE" = the member sing-box is ACTUALLY routing through now (authoritative, from the
     // daemon). "✓ BEST" = the client-side lowest-latency guess — shown only when there is no live
     // truth, or when it DIFFERS from LIVE (so the user sees "you'd expect X by latency, but sing-box
@@ -2730,7 +2788,7 @@ async function foRenderLog(box) {
     (logMore && li >= LOG_VISIBLE ? logMore : list).appendChild(el("div", { class: "fo-log-row " + cls },
       el("span", { class: "fo-log-i", "aria-hidden": "true" }, ico),
       el("span", { class: "fo-log-x" }, text),
-      ev.latency_ms ? el("span", { class: "fo-log-l" }, ev.latency_ms + " ms") : null,
+      ev.latency_ms ? el("span", { class: "fo-log-l" }, t("{0} ms", ev.latency_ms)) : null,
       el("span", { class: "fo-log-w" }, fmtWhen(ev.at))));
   });
   box.appendChild(list);
@@ -2750,7 +2808,7 @@ function fmtWhen(ms) {
   if (s < 60) return t("{0}s ago", s);
   if (s < 3600) return t("{0}m ago", Math.floor(s / 60));
   if (s < 86400) return t("{0}h ago", Math.floor(s / 3600));
-  return new Date(ms).toLocaleString();
+  return new Date(ms).toLocaleString(lang());
 }
 
 async function setDefault(g) {
@@ -3170,7 +3228,8 @@ async function paintRoutingTraffic() {
     cell.appendChild(el("span", { class: "rl-tr-u", title: k ? t("packets since the rules were installed") : null },
       k ? t("pkts") : n === 1 ? t("conn") : t("conns")));
     cell.appendChild(el("span", { class: "rl-tr-b" }, fmtBytes((k || s).bytes)));
-    if (s.live) cell.appendChild(el("span", { class: "rl-tr-live", title: t("open right now") }, s.live + " " + t("open")));
+    if (s.live) cell.appendChild(el("span", { class: "rl-tr-live", title: t("open right now") },
+      s.live + " " + (s.live === 1 ? t("conn") : t("conns"))));
   });
 }
 
@@ -3201,8 +3260,9 @@ async function paintRoutingStatus() {
   });
   document.querySelectorAll("[data-rlerr]").forEach(e => {
     const s = byId[e.getAttribute("data-rlerr")];
-    if (s && !s.ok && s.error) { e.textContent = "⚠ " + s.error; e.style.display = ""; }
-    else { e.style.display = "none"; }
+    const say = s && ((!s.ok && s.error) || s.note);
+    e.textContent = say ? "⚠ " + say : "";
+    e.style.display = say ? "" : "none";
   });
 }
 
@@ -3420,6 +3480,7 @@ function modalConfirm(msg, opts) {
     ok.addEventListener("click", () => settle(true));
     cancel.addEventListener("click", () => settle(false));
     const onKey = e => {
+      if (!isTopDialog(back)) return;
       if (e.key === "Escape") { e.preventDefault(); settle(false); return; }
       if (e.key !== "Tab") return;
       // Tab focus-trap: keep focus inside the dialog (matches modal()); without it Tab escapes to the page behind.
@@ -3446,6 +3507,11 @@ function modalConfirm(msg, opts) {
     mo.observe(document.body, { childList: true });
     ok.focus();
   });
+}
+// Only the dialog in front answers keys: one Escape used to close every open dialog.
+function isTopDialog(back) {
+  const open = document.querySelectorAll(".modal-backdrop");
+  return open.length > 0 && open[open.length - 1] === back;
 }
 // focusables returns the modal's tabbable controls, in DOM order, skipping hidden
 // ones — used both for initial focus and for the Tab focus-trap.
@@ -3479,6 +3545,7 @@ function modal({ title, body, footer, fixed }) {
   // Escape closes; Tab is trapped inside the dialog so keyboard focus can't wander
   // onto the (aria-hidden, visually-behind) page — required for a real aria-modal.
   const onKey = e => {
+    if (!isTopDialog(back)) return;
     if (e.key === "Escape") { e.preventDefault(); close(); return; }
     if (e.key !== "Tab") return;
     const items = focusables(m);
@@ -3536,7 +3603,7 @@ async function checkEndpointConfig(e, btn) {
         ? "settings accepted, but sing-box is not installed here so the configuration itself was not checked"
         : r.checked_by === "interface"
           ? "interface " + (r.iface || "?") + " exists — that is all a native connection has to check"
-          : "configuration is valid";
+          : "sing-box accepts it; certificates and the server are checked only when it connects";
       toast((e.name || e.id) + ": " + msg, weak ? "info" : "ok");
     } else toast((e.name || e.id) + ": " + ((r && r.error) || "config invalid"), "err");
   } catch (err) { toast(err.message, "err"); }
@@ -3924,11 +3991,17 @@ async function applyConfig(save) {
  * (POST /api/apply/rollback). Terminal phases are announced as toasts once the window closes.
  */
 let failsafeTimer = null;
+// Bumped by every start and hide. A poll that was already in flight when Keep & Save hid the banner
+// answers with the pre-Keep status; without this check it repainted the banner after the hide, and
+// with the timer gone nothing ever removed it (seen over a 250 ms tunnel to the Keenetic).
+let failsafeGen = 0;
 function startFailsafeBanner() {
   if (failsafeTimer) clearInterval(failsafeTimer);
+  const gen = ++failsafeGen;
   const poll = async () => {
     let st;
     try { st = await api.get("/api/apply/status"); } catch (_) { return; } // a failing poll must not drop the banner — it holds the only controls the user has
+    if (gen !== failsafeGen) return;
     if (!st || typeof st !== "object") return;
     if (!st.pending) {
       hideFailsafeBanner();
@@ -3945,6 +4018,7 @@ function startFailsafeBanner() {
   failsafeTimer = setInterval(poll, 1500);
 }
 function hideFailsafeBanner() {
+  failsafeGen++;
   const b = $("#failsafe-banner");
   if (!b) { if (failsafeTimer) { clearInterval(failsafeTimer); failsafeTimer = null; } return; }
   b.style.display = "none"; b.innerHTML = "";
@@ -4029,17 +4103,16 @@ async function renderDNS(view) {
   dnsState.servers = dnsState.servers || [];
   dnsState.rules = dnsState.rules || [];
 
-  view.appendChild(el("div", { class: "block-head" },
-    el("div", {},
-      el("div", { class: "desc" }, t("Encrypted, split, failover-aware DNS: hides your lookups from the ISP while a tunnel is up, and gracefully falls back to encrypted DoH over the raw WAN when every VPN is down — so DNS never goes dark."))),
-    el("div", { class: "side" },
-      dnsFilterBox(view),
-      el("button", { class: "btn", title: t("Preview the generated sing-box dns block"), onclick: previewDNS }, t("Preview {0}", "dns{}")),
-      el("button", { class: "btn btn-primary", title: t("One-click encrypted DoH via the tunnel + local for in-country, leak-proof"), onclick: applyDNSSecureDefaults }, t("Secure defaults")))));
+  const secureDefaults = (cls) => el("button", { class: cls, title: t("One-click encrypted DoH via the tunnel + local for in-country, leak-proof"), onclick: applyDNSSecureDefaults }, t("Secure defaults"));
+  view.appendChild(el("div", { class: "block-head dns-head" },
+    el("div", { class: "desc" }, t("Hides your lookups from the provider and keeps DNS working when a tunnel goes down.")),
+    el("div", { class: "side" }, dnsFilterBox(view))));
 
   if (!configured) {
-    view.appendChild(el("div", { class: "card" }, el("div", { class: "hint" },
-      t("DNS is not managed by WayHop yet — sing-box uses its default resolver. Click “Secure defaults” for one-click encrypted, failover-aware DNS, or add resolvers manually."))));
+    view.appendChild(el("div", { class: "card dns-unmanaged" },
+      el("div", { class: "hint" },
+        t("DNS is not managed by WayHop yet — sing-box uses its default resolver. Click “Secure defaults” for one-click encrypted, failover-aware DNS, or add resolvers manually.")),
+      el("div", { class: "acts" }, secureDefaults("btn btn-primary"))));
   }
 
   // One read serves both the query path and the adopted-stack card. It is also what decides whether
@@ -4047,41 +4120,55 @@ async function renderDNS(view) {
   let nat = null;
   try { nat = await api.get("/api/dns/native"); } catch (_) { nat = null; }
 
-  // The path leads the page. Everything below it is the controls that shape it, which is only worth
-  // reading once you can see what you are shaping.
+  // The measured check leads; the plane notice and the controls below explain what it measured.
+  view.appendChild(dnsCheckCard(view));
+  view.appendChild(dnsFastCard(view, nat));
+  const plane = dnsPlaneNotice(nat);
+  if (plane) view.appendChild(plane);
+  // The path leads the controls that shape it, which are only worth reading once its shape is known.
   if (configured || dnsState.servers.length) view.appendChild(dnsQueryPath(nat, !!(resp && resp.tun)));
 
   // The router's OWN native DNS stack (dnsmasq + DoH), if WayHop is running on a router that has one —
-  // a read-only "adopted" view so there's no hidden second config. Editing lands with native write-back.
+  // an adopted view so there's no hidden second config, and on KeeneticOS the editor of its upstreams.
   if (nat && nat.available && nat.native) view.appendChild(dnsNativeCard(nat));
 
   // Global toggles + strategy.
-  const g = el("div", { class: "card" });
+  const g = el("div", { class: "card", id: "dns-toggles" });
   g.appendChild(el("div", { class: "card-head" }, el("div", { class: "card-title" }, t("Settings"))));
-  g.appendChild(dnsToggleRow(t("Enable DNS management"), "enabled", t("Emit a dns block. Off keeps sing-box's default resolver (today's behaviour).")));
-  g.appendChild(dnsToggleRow(t("Leak protection (encrypted-only)"), "leak_proof", t("Reject plaintext resolvers and require an encrypted default — the ISP can never read your queries, even on the WAN fallback.")));
+  const togs = el("div", { class: "dns-tog-grid" });
+  g.appendChild(togs);
+  togs.appendChild(dnsToggleRow(t("Enable DNS management"), "enabled", t("Off: sing-box keeps its own default resolver.")));
+  togs.appendChild(dnsToggleRow(t("Leak protection (encrypted-only)"), "leak_proof", t("Only encrypted resolvers are allowed, so the provider cannot read lookups even without a tunnel.")));
+  const serveClientsRow = dnsToggleRow(t("Answer clients through these encrypted resolvers"), "serve_clients",
+    t("Home devices get answers through these resolvers after Apply. On a router with a chain, add WayHop's resolver to it, with the tunnel rows behind."));
+  serveClientsRow.id = "dns-serve-clients";
+  togs.appendChild(serveClientsRow);
+  togs.appendChild(dnsToggleRow(t("FakeIP domain routing"), "fakeip", t("Synthetic IPs so domain rules match reliably. Requires gateway/TUN mode; ignored in fast/mixed mode.")));
   // The page states, at the top of the query path, that a device with its own resolver walks past
   // every row below it — and until now could do nothing about it. These two are that answer, and they
   // are two clicks: the first catches plain DNS, the second makes a hardcoded ENCRYPTED resolver fall
   // back to plain DNS so the first one catches it too.
-  g.appendChild(dnsToggleRow(t("Intercept clients' DNS"), "intercept",
-    t("Answer every client's plain DNS from this router, whatever server they were configured with — so a device with a hardcoded 8.8.8.8 obeys the rules above instead of bypassing them.")));
-  g.appendChild(dnsToggleRow(t("Break hardcoded encrypted resolvers"), "intercept_reject_encrypted",
-    t("Refuse DoT and the well-known public DoH addresses (Cloudflare, Google, Quad9, OpenDNS, AdGuard, Yandex) so those clients fall back to plain DNS and are intercepted. DoH to any other host is ordinary HTTPS and cannot be caught."),
-    { key: "intercept", reason: t("Turn on the row above first: on its own this refuses those resolvers and nothing catches the plain queries they fall back to.") }));
-  g.appendChild(dnsToggleRow(t("FakeIP domain routing"), "fakeip", t("Synthetic IPs so domain rules match reliably. Requires gateway/TUN mode; ignored in fast/mixed mode.")));
-  const strat = el("select", {}, ...["prefer_ipv4", "ipv4_only", "prefer_ipv6", "ipv6_only"].map(s => el("option", { value: s }, s)));
+  togs.appendChild(dnsToggleRow(t("Intercept clients' DNS"), "intercept",
+    t("Answers every device's plain DNS here, so one with a hardcoded 8.8.8.8 follows your rules too.")));
+  togs.appendChild(dnsToggleRow(t("Break hardcoded encrypted resolvers"), "intercept_reject_encrypted",
+    t("Refuses DoT and well-known DoH addresses, so such devices fall back to plain DNS and get intercepted. DoH to other hosts cannot be caught."),
+    { key: "intercept", reason: t("Turn on interception first: without it, nothing catches the plain lookups these devices fall back to.") }));
+  const stratWords = { prefer_ipv4: t("Prefer IPv4"), ipv4_only: t("IPv4 only"), prefer_ipv6: t("Prefer IPv6"), ipv6_only: t("IPv6 only") };
+  const strat = el("select", { id: "dns-strategy" }, ...Object.keys(stratWords).map(s => el("option", { value: s }, stratWords[s])));
   strat.value = dnsState.strategy || "prefer_ipv4";
-  strat.onchange = () => { dnsState.strategy = strat.value; saveDNS(t("strategy → {0}", strat.value)); };
-  g.appendChild(el("div", { class: "field", style: "margin-top:14px;margin-bottom:0" }, el("label", {}, t("IP strategy")), strat,
-    el("div", { class: "hint" }, t("ipv4_only suppresses AAAA — pick it when your tunnels are IPv4-only to stop v6 DNS leaks."))));
+  strat.onchange = () => { dnsState.strategy = strat.value; saveDNS(t("strategy → {0}", stratWords[strat.value])); };
+  togs.appendChild(el("div", { class: "field dns-tog-field" }, el("label", { for: "dns-strategy" }, t("IP strategy")), strat,
+    el("div", { class: "hint" }, t("IPv4 only suits tunnels without IPv6: DNS cannot leak over v6 then."))));
   view.appendChild(g);
 
   // Resolvers (with the default-resolver picker as a footer, so it's one coherent card).
-  const sc = el("div", { class: "card" });
+  const sc = el("div", { class: "card", id: "dns-resolvers" });
   sc.appendChild(el("div", { class: "card-head" },
     el("div", { class: "card-title" }, t("Resolvers")),
-    el("div", { class: "acts" }, el("button", { class: "btn btn-sm", onclick: () => openDNSServer(null) }, t("+ Add resolver")))));
+    el("div", { class: "acts" },
+      el("button", { class: "btn btn-sm", title: t("Preview the generated sing-box dns block"), onclick: previewDNS }, t("Preview {0}", "dns{}")),
+      configured ? secureDefaults("btn btn-sm") : null,
+      el("button", { class: "btn btn-sm", onclick: () => openDNSServer(null) }, t("+ Add resolver")))));
   if (!dnsState.servers.length) sc.appendChild(emptyState(t("No resolvers"), t("Add an encrypted resolver (DoH/DoT), or apply the secure defaults.")));
   else {
     dnsState.servers.forEach((s, i) => sc.appendChild(dnsServerRow(s, i)));
@@ -4099,46 +4186,8 @@ async function renderDNS(view) {
   // different answer, so the rules now live in the path and are edited there.
 
   view.appendChild(dnsLeakWidget());
-}
-
-
-
-// dnsNativeCard renders the router's ADOPTED native DNS stack (read-only) — the resolvers the device
-// actually serves, in tier order — so WayHop reflects the router's reality, not a hidden second config.
-const DNS_TIER_LABEL = { 1: "via VPN", 2: "WAN-encrypted", 3: "geo-fallback" };
-function dnsNativeCard(nat) {
-  const nd = nat.native || {};
-  const rows = nd.resolvers || [];
-  const card = el("div", { class: "card" });
-  card.appendChild(el("div", { class: "card-head" },
-    el("div", { class: "card-title" }, t("Router's native DNS")),
-    el("div", { class: "acts" },
-      rows.length ? el("button", { class: "btn btn-sm", title: t("Show the uci/dnsmasq commands that would write this back to the router (not run automatically)"), onclick: () => openNativePlan(nat) }, t("Preview write-back")) : null,
-      nd.strict_order ? el("span", { class: "pill muted" }, t("strict-order")) : null,
-      el("span", { class: "pill ok" }, t("adopted") + " · " + (nat.platform || "")))));
-  card.appendChild(el("div", { class: "hint", style: "margin-bottom:8px" },
-    t("The DNS your router actually serves (dnsmasq + DoH). Preview the write-back to see the exact router commands; applying them is a manual, gated step.")));
-  if (!rows.length) {
-    card.appendChild(el("div", { class: "hint" }, t("No upstreams detected.")));
-    return card;
-  }
-  // A read-only view of somebody else's stack, so it leads with what it establishes and discloses
-  // the row-by-row detail. On the test test router this card was 679px — the tallest thing on the page
-  // and the reason DNS opened past two screens with a real router's configuration, while the demo,
-  // which adopts nothing, never showed it at all.
-  const enc = rows.filter(rz => /doh|dot/i.test(rz.kind || "")).length;
-  const tunnelled = rows.filter(rz => rz.via_tunnel).length;
-  const bits = [
-    rows.length === 1 ? t("1 upstream") : t("{0} upstreams", rows.length),
-    enc ? t("{0} encrypted", enc) : t("none encrypted"),
-  ];
-  if (tunnelled) bits.push(t("{0} via a tunnel", tunnelled));
-  card.appendChild(el("div", { class: "dns-native-sum" }, bits.join(" · ")));
-  const det = el("details", { class: "dns-native-det" },
-    el("summary", { class: "hint" }, t("Show each upstream")));
-  rows.forEach(rz => det.appendChild(dnsNativeRow(rz)));
-  card.appendChild(det);
-  return card;
+  // Built last: it lists only the cards this router has.
+  view.firstElementChild.after(dnsPageNav(view));
 }
 
 
@@ -4381,19 +4430,19 @@ function paintPill(span, e) {
   // The remaining states (alive-fast / alive-slow / idle) are otherwise a bare colored dot —
   // convey them to assistive tech via role=img + aria-label, not colour alone (WCAG 1.4.1/1.1.1).
   let cls = "muted", label = t("not yet checked");
-  if (h && h.state === "alive") { cls = h.latency_ms >= 600 ? "warn" : "ok"; span.title = h.latency_ms + " ms"; label = t("alive") + " · " + h.latency_ms + " ms"; }
+  if (h && h.state === "alive") { cls = h.latency_ms >= 600 ? "warn" : "ok"; span.title = t("{0} ms", h.latency_ms); label = t("alive") + " · " + t("{0} ms", h.latency_ms); }
   span.className = "pill " + cls + " pill--dot";
   span.setAttribute("role", "img");
   span.setAttribute("aria-label", label);
   span.append(el("span", { class: "dot" }));
 }
 function fmtUptime(s) {
-  if (!s) return "0s";
+  if (!s) return t("{0}s", 0);
   const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
-  if (d) return d + "d " + h + "h";
-  if (h) return h + "h " + m + "m";
-  if (m) return m + "m";
-  return s + "s";
+  if (d) return t("{0}d {1}h", d, h);
+  if (h) return t("{0}h {1}m", h, m);
+  if (m) return t("{0}m", m);
+  return t("{0}s", s);
 }
 function statsLine(e) {
   const div = el("div", { class: "stats", "data-stats": e.id });
@@ -4401,10 +4450,10 @@ function statsLine(e) {
   return div;
 }
 function fmtBytes(b) {
-  if (!b) return "0 B";
+  if (!b) return "0 " + t("B");
   const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0, n = b;
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-  return n.toFixed(i ? 1 : 0) + " " + u[i];
+  return n.toFixed(i ? 1 : 0) + " " + t(u[i]);
 }
 function paintStats(div, e) {
   const h = healthMap[e.id];
@@ -4426,7 +4475,7 @@ function paintStats(div, e) {
   };
   const parts = [];
   const ping = h.avg_latency_ms || h.latency_ms;
-  if (h.state === "alive" && ping) parts.push(part("ping", ping + " ms"));
+  if (h.state === "alive" && ping) parts.push(part("ping", t("{0} ms", ping)));
   if (h.state !== "unknown") parts.push(part("uptime", h.success_rate + "%"));
   // External (kernel-iface) endpoints show their REAL iface throughput inline via .conn-rate
   // (paintIfaceList from /api/system), so skip the Clash-attributed rate here — for an external it
@@ -4453,10 +4502,10 @@ function paintCause(d, e) {
   d.innerHTML = "";
   if (!h || h.state !== "down") return;
   const head = h.handshake === "failed" ? t("Handshake not received — ") : t("Down — ");
-  d.appendChild(el("div", { style: "color:var(--err)" }, "⚠ " + head + (h.cause || "no response")));
+  d.appendChild(el("div", { style: "color:var(--err)" }, "⚠ " + head + t(h.cause || "no response")));
   // Show the suggested fix inline (it used to hide behind a "details" toast link) so a
   // down tunnel reads as a one-glance diagnostic with actionable guidance right there.
-  if (h.cause_fix) d.appendChild(el("div", { class: "cause-fix" }, "↳ " + h.cause_fix));
+  if (h.cause_fix) d.appendChild(el("div", { class: "cause-fix" }, "↳ " + t(h.cause_fix)));
 }
 // refreshPills repaints on every ~5 s health tick. The set of [data-*] elements only
 // changes when the page DOM is rebuilt (route() bumps pillGen), so the six full-tree
@@ -4534,7 +4583,7 @@ function markHealthStale(stale) {
   if (!stale) { if (note) note.remove(); return; }
   if (note) return;
   note = el("div", { class: "health-stale", id: "health-stale", role: "status" },
-    "The router stopped answering health checks. The states shown are the last ones confirmed.");
+    t("The router stopped answering health checks. The states shown are the last ones confirmed."));
   const bar = document.querySelector(".topbar");
   if (bar && bar.parentNode) bar.parentNode.insertBefore(note, bar.nextSibling);
   else document.body.insertBefore(note, document.body.firstChild);
@@ -4580,7 +4629,7 @@ async function testEndpoint(e, btn) {
   if (btn) { btn.setAttribute("disabled", "true"); btn.textContent = t("Testing…"); }
   try {
     const h = await api.post("/api/health/test/" + encodeURIComponent(e.id), {});
-    if (h && h.id) { healthMap[h.id] = h; refreshPills(); toast((e.name || e.id) + ": " + (h.state === "alive" ? h.latency_ms + " ms" : h.state), h.state === "alive" ? "ok" : h.state === "down" ? "err" : "info"); }
+    if (h && h.id) { healthMap[h.id] = h; refreshPills(); toast((e.name || e.id) + ": " + (h.state === "alive" ? t("{0} ms", h.latency_ms) : h.state), h.state === "alive" ? "ok" : h.state === "down" ? "err" : "info"); }
   } catch (err) { toast(err.message, "err"); }
   finally { if (btn) { btn.removeAttribute("disabled"); btn.textContent = label; } }
 }
@@ -5034,7 +5083,7 @@ function askCard() {
     // answer's value in the callback; otherwise changing the input and then clicking an old chip
     // silently runs the NEW text under the OLD answer's controls.
     const c = askClassify(rawValue == null ? input.value : rawValue);
-    if (!c) return;
+    if (!c) return input.focus();
     const kind = forceKind || c.kind;
     if (kind === "unknown") {
       feed.prepend(askEntry(c.value, "unknown", null));
@@ -5329,7 +5378,7 @@ function renderReach(out, r) {
   out.appendChild(el("div", { class: "row-between", style: "margin-bottom:8px" },
     el("div", { class: "card-title" }, t("Reachability via {0}", r.name || r.egress)),
     el("span", { class: "pill " + (ok ? "ok" : "err") }, el("span", { class: "dot" }),
-      ok ? (r.latency_ms + " ms") : "unreachable")));
+      ok ? t("{0} ms", r.latency_ms) : "unreachable")));
   out.appendChild(el("div", { class: "hint", style: "word-break:break-all" }, t("GET {0}", r.url) + (r.err ? "  —  " + r.err : "")));
 }
 
@@ -5366,7 +5415,7 @@ function renderReachMatrix(out, r) {
       // by band plus an aria-label, without disturbing the tabular-nums right-alignment or sort.
       const glyph = band === "moderate" ? "~" : band === "slow" ? "!" : ""; // fast = no glyph (baseline); fixed cue width keeps numbers aligned
       const latCue = ms == null ? null : el("span", { class: "lat-cue", "aria-hidden": "true", style: "display:inline-block;width:1.1em;text-align:center" }, glyph);
-      const latText = ok ? (ms + " ms") : "—";
+      const latText = ok ? t("{0} ms", ms) : "—";
       const latAria = ms == null ? latText : (ms + " ms, " + band);
       return el("tr", {},
         el("td", { "data-label": t("Exit") }, x.name || x.egress),
@@ -5750,6 +5799,7 @@ function settingsIndex(view, defaults) {
     // the fact that it matched.
     r.hay = (r.name + " " + r.card + " " + r.section + " " + (r.meta.cfg || "") + " "
       + (r.node.textContent || "")).toLowerCase().replace(/\s+/g, " ");
+    r.hay += " " + t(r.section).toLowerCase(); // Its heading is on screen, so it can be searched for in the page's language.
     // The row shows the name once, in its key column, so the field's own <label> is hidden. A hidden
     // label is not announced, which would leave the control with no accessible name at all — the
     // exact defect the button-name gate exists to prevent, arriving through the back door. Name the
@@ -5800,6 +5850,7 @@ function settingsIndex(view, defaults) {
   const facetBar = el("div", { class: "sx-facets" });
   const active = new Set();
   const list = el("div", { class: "sx-list" });
+  const sectionHeads = new Map();
 
   const apply = () => {
     const q = search.value.trim().toLowerCase();
@@ -5814,6 +5865,9 @@ function settingsIndex(view, defaults) {
       r.el.style.display = ok ? "" : "none";
       if (ok) shown++;
     });
+    sectionHeads.forEach((head, section) => {
+      head.style.display = rows.some(r => r.section === section && r.el.style.display !== "none") ? "" : "none";
+    });
     const untracked = rows.filter(r => !r.tracked && !r.browser && !r.group).length;
     count.textContent = t("{0} of {1} settings", shown, rows.length)
       + (active.has("nondefault") && untracked
@@ -5822,7 +5876,7 @@ function settingsIndex(view, defaults) {
 
   SETTING_FACETS.forEach(([key, label, hint]) => {
     const b = el("button", { class: "btn btn-sm sx-facet", title: hint,
-      "aria-pressed": "false", "aria-label": t("Filter: {0}", label) }, label);
+      "aria-pressed": "false", "aria-label": t("Filter: {0}", t(label)) }, label);
     b.addEventListener("click", () => {
       if (active.has(key)) { active.delete(key); b.classList.remove("on"); b.setAttribute("aria-pressed", "false"); }
       else { active.add(key); b.classList.add("on"); b.setAttribute("aria-pressed", "true"); }
@@ -5841,12 +5895,19 @@ function settingsIndex(view, defaults) {
     // three lines tall, and twenty-four of those is three screens — the density the index exists to
     // undo. The section is kept because search matches on it and because "which card was this in"
     // is how anyone who knew the old page will look for it.
+    const where = r.card && r.card !== r.name && r.card !== r.section ? r.card : "";
     r.el = el("div", { class: "sx-row" + (r.group ? " group" : "") },
       el("div", { class: "sx-key" },
         el("span", { class: "sx-name" }, r.name),
-        el("span", { class: "sx-where" }, r.section + (r.card && r.card !== r.name ? " · " + r.card : "")),
+        where ? el("span", { class: "sx-where" }, where) : null,
         chips),
       el("div", { class: "sx-ctl" }, r.node));
+    // The section stands over its rows, not repeated in each.
+    if (!sectionHeads.has(r.section)) {
+      const head = el("div", { class: "sx-section" }, t(r.section));
+      sectionHeads.set(r.section, head);
+      list.appendChild(head);
+    }
     list.appendChild(r.el);
   });
 
@@ -6597,14 +6658,19 @@ async function init() {
   if (ab) ab.addEventListener("click", () => openReviewChanges());
   window.addEventListener("hashchange", onHashChange);
   await ensureAuthenticated();
+  // Render first, prime beside it: awaiting the primers below in series kept #view empty, not even
+  // the skeleton, for three round trips on every cold load. A page's own loads now overlap them, and
+  // api.get coalesces the shared URLs. The graph seed is the dashboard's own (seedIfaceGraph).
+  i18nObserve();
+  translateChrome();
+  route();
   // Cold-load: fetch the authoritative pending state NOW, whatever the first page is.
   // Without this the Apply banner only appeared after some page happened to call
   // loadProfile() — a reload landing on Diagnostics/Settings showed no banner while
   // changes were in fact pending. refreshApplyState() swallows transient errors itself.
-  await refreshApplyState();
-  try { await loadHealth(); } catch (_) {}
+  refreshApplyState();
+  loadHealth().catch(() => {});
   checkFailsafe(); // re-arm the rollback countdown if a reload landed mid-Apply-window
-  try { await seedIfaceSeries(); drawGraph(); } catch (_) {} // pre-fill the per-iface graph with recent RAM history
   pollHealth();
   // Polling is gated to keep the router idle: nothing fires while the tab is hidden, and per-tunnel
   // health polls only where pills/stats are shown. The graph is redrawn by the 5s health tick (which
@@ -6631,9 +6697,6 @@ async function init() {
     if (!applyInFlight) refreshApplyState();
     if (onHealth()) pollHealth();
   });
-  i18nObserve();
-  translateChrome();
-  route();
 }
 init();
 
@@ -6719,7 +6782,7 @@ function fmtAppliedAt(v) {
   let d;
   if (typeof v === "number") d = new Date(v < 1e12 ? v * 1000 : v);
   else { const p = Date.parse(String(v)); if (!isFinite(p)) return String(v); d = new Date(p); }
-  return isFinite(d.getTime()) ? d.toLocaleString() : "";
+  return isFinite(d.getTime()) ? d.toLocaleString(lang()) : "";
 }
 
 // reviewedPlan is the plan the user actually saw; Apply sends its `rev` back so the server can say
@@ -6869,7 +6932,8 @@ async function openReviewChanges(opts) {
     if (count) headline = tn("{0} pending change|{0} pending changes", count);
     else if (plan.nothing_configured && !pending) headline = t("Nothing is configured yet — add a connection or a routing list first.");
     else if (pending) headline = t("Changes are pending, but there is no applied baseline to compare against yet.");
-    else headline = t("No pending changes — the router matches your saved configuration.");
+    else headline = hard.length ? t("No pending changes, but the saved configuration cannot run here.")
+      : t("No pending changes — the router matches your saved configuration.");
     summary.appendChild(el("strong", {}, headline));
     // The server's verdict when it gave one (blocked / warning / ready); derived from the findings
     // otherwise. A hard blocker always reads as Blocked whatever the field says.
@@ -7183,35 +7247,26 @@ function foSwitchesItself(g, isDefault) {
   return !!isDefault && (g.type === "urltest" || g.type === "fallback");
 }
 
-// foGroupNeedsCore mirrors the backend's groupIsNativelyRoutable: an adopted tunnel (engine
-// "external") or a kernel-native one needs no proxy core, because the route IS the datapath. A
-// member that is anything else — a VLESS/plugin endpoint, or a nested group that is not an endpoint
-// here — is what pulls the core in.
-function foGroupNeedsCore(g) {
+// foGroupNeedsCore mirrors the backend's groupIsNativelyRoutable: an adopted tunnel or an AmneziaWG one is
+// the route itself. Any other member, or a nested group, pulls the core in. With proxy, only a proxy
+// member counts: a WireGuard one is a native interface too (nativeIface), though its engine reads singbox.
+function foGroupNeedsCore(g, proxy) {
   return (g.members || []).some(id => {
     const e = findEndpoint(id);
-    if (!e) return true;
-    return e.engine !== "external" && e.engine !== "amneziawg";
+    return !e || !["external", "amneziawg"].includes(e.engine) && !(proxy && e.engine === "singbox" && e.protocol === "wireguard");
   });
 }
 
-// foRunNote answers, before the chain says anything else, whether ANY of it is happening.
-//
-// This used to open by stating that a group is a proxy-core object on every platform, because a
-// single group moved the whole Keenetic policy into the compatibility core. That is no longer true:
-// needsCompatibilityRouting was relaxed so a group whose members are all native tunnels compiles to
-// the `ip global` ladder and needs no core at all (keenetic/backend.go, groupIsNativelyRoutable).
-// The body below was corrected then; this rationale was not, and a stale reason above live text is
-// how the text drifts back. What survives from it is the shape of the bug it was written for: the
-// chain was drawn identically whether or not anything was running, so a group that could not even be
-// applied still showed a confident "EXPECTED … FALLS TO … THEN".
+// foRunNote answers, before the chain says anything else, whether ANY of it is happening: the chain
+// was drawn the same whether or not anything ran, so a group that could not even be applied showed a
+// confident "EXPECTED … FALLS TO … THEN". A group of native tunnels needs no core (groupIsNativelyRoutable).
 function foRunNote(g) {
   const sb = (state.health && state.health.singbox) || {};
   // Only a group that actually depends on the core is affected by its absence. A group of adopted or
   // kernel-native tunnels is routed by the router itself — WayHop compiles it to the elected member's
   // interface and moves that route — so reporting a missing core there was reporting someone else's
   // problem as this group's.
-  if (foGroupNeedsCore(g)) {
+  if (foGroupNeedsCore(g, 1)) {
     if (sb.available === false) {
       return { cls: "err", text: t("Not running: a member of this group is a proxy connection, and the proxy core (sing-box) is not installed.") };
     }
@@ -7363,7 +7418,7 @@ function foChainCard(g, defRule) {
       el("span", { class: "insp-dot " + dotCls, "aria-hidden": "true" }),
       el("span", { class: "fo-hop-r" }, role),
       el("span", { class: "fo-hop-n" }, nameOf(id)),
-      el("span", { class: "fo-hop-l" }, down ? t("down") : h.latency_ms ? h.latency_ms + " ms" : t("checking…")));
+      el("span", { class: "fo-hop-l" }, down ? t("down") : h.latency_ms ? t("{0} ms", h.latency_ms) : t("checking…")));
     if (hopMore && mi >= HOPS_VISIBLE) hopMore.appendChild(hop); else track.appendChild(hop);
   });
   if (hopMore) track.appendChild(hopMore);

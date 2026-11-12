@@ -94,6 +94,22 @@ func TestStaleNft(t *testing.T) {
 	})
 }
 
+// RT-09: a private destination a zone names is routed by its mark (pbr carves it out of the private
+// pin), so a flow to it that the plan moves is stale like any other; private space no zone names is
+// still pinned to main and left alone.
+func TestStaleListedPrivateDestination(t *testing.T) {
+	k1 := pbr.Egress{Tag: "awg1", Kind: pbr.EgressInterface, Mark: 0x20000, Table: 151}
+	k2 := pbr.Egress{Tag: "awg2", Kind: pbr.EgressInterface, Mark: 0x30000, Table: 152}
+	w := pbr.Egress{Tag: "direct", Kind: pbr.EgressWAN}
+	old := plan([]pbr.Egress{w, k1, k2}, pbr.Zone{Name: "office", EgressTag: "awg2", Mark: 0x30000, V4: []string{"10.40.0.0/16"}})
+	cur := plan([]pbr.Egress{w, k1, k2}, pbr.Zone{Name: "office", EgressTag: "awg1", Mark: 0x20000, V4: []string{"10.40.0.0/16"}})
+	checkStale(t, newDecider(old, cur, Options{}), []staleCase{
+		{"listed private range moved to another exit", entry("10.40.1.1", 0x30000), true},
+		{"listed private range already on its exit", entry("10.40.1.1", 0x20000), false},
+		{"private range no zone names", entry("10.20.31.1", 0x30000), false},
+	})
+}
+
 // Hybrid: an unmarked flow may be the TUN's (redirected to sing-box) and cannot follow a destination
 // that now goes to a kernel exit; one the plan sends to the WAN is left to sing-box.
 func TestStaleNftHybrid(t *testing.T) {

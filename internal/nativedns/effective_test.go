@@ -91,3 +91,71 @@ func TestDetectEffectivePath_EmptyIsSafe(t *testing.T) {
 		t.Errorf("empty inputs must yield an empty path, got %+v", ep)
 	}
 }
+
+func TestRunEffectivePath_Hijack53Gaps(t *testing.T) {
+	ipAddr := "1: lo    inet 127.0.0.1/8 scope host lo\n" +
+		"2: br0    inet 192.168.77.1/24 brd 192.168.1.255 scope global br0\n" +
+		"3: br1    inet 192.168.2.1/24 brd 192.168.2.255 scope global br1\n"
+
+	t.Run("rule bound to br0 gives gap br1", func(t *testing.T) {
+		run := func(name string, args ...string) (string, error) {
+			switch name {
+			case "iptables":
+				if len(args) >= 3 && args[1] == "nat" {
+					return "-A PREROUTING -i br0 -p udp -m udp --dport 53 -j REDIRECT --to-ports 53\n", nil
+				}
+				return "", nil
+			case "ip":
+				return ipAddr, nil
+			default:
+				return "", nil
+			}
+		}
+		ep := RunEffectivePath(run)
+		if len(ep.Hijack53Gaps) != 1 || ep.Hijack53Gaps[0] != "br1" {
+			t.Fatalf("want Hijack53Gaps [br1], got %v", ep.Hijack53Gaps)
+		}
+	})
+
+	t.Run("rule with no interface gives no gap", func(t *testing.T) {
+		run := func(name string, args ...string) (string, error) {
+			switch name {
+			case "iptables":
+				if len(args) >= 3 && args[1] == "nat" {
+					return "-A PREROUTING -p udp -m udp --dport 53 -j REDIRECT --to-ports 53\n", nil
+				}
+				return "", nil
+			case "ip":
+				return ipAddr, nil
+			default:
+				return "", nil
+			}
+		}
+		ep := RunEffectivePath(run)
+		if len(ep.Hijack53Gaps) != 0 {
+			t.Fatalf("want no Hijack53Gaps, got %v", ep.Hijack53Gaps)
+		}
+	})
+}
+
+// The shape a real Keenetic has: its own redirects name every bridge but only for lookups addressed to
+// the router, and WayHop's interception covers one bridge.
+func TestHijack53GapsIgnoreRedirectsForTheRoutersOwnAddress(t *testing.T) {
+	nat := "-A PREROUTING -i br0 -p udp -m udp --dport 53 -j REDIRECT --to-ports 53\n" +
+		"-A _NDM_HOTSPOT_DNSREDIR -d 192.168.78.1/32 -i br0 -p udp -m mark --mark 0xffffaaa -m udp --dport 53 -j REDIRECT --to-ports 41100\n" +
+		"-A _NDM_HOTSPOT_DNSREDIR -d 10.1.30.1/32 -i br1 -p udp -m mark --mark 0xffffaaa -m udp --dport 53 -j REDIRECT --to-ports 41100\n"
+	addrs := "37: br0    inet 192.168.78.1/24 scope global br0\n38: br1    inet 10.1.30.1/24 scope global br1\n"
+	got := detectHijack53Gaps(readBypassRules(nat, nat).routes[GapPlain53], addrs, nil, false, "")
+	if len(got) != 1 || got[0] != "br1" {
+		t.Errorf("gaps = %v, want br1 alone", got)
+	}
+}
+
+func TestHijack53GapsSkipTheBridgeFacingTheProvider(t *testing.T) {
+	addrs := "3: br-wan    inet 10.0.0.2/24 scope global br-wan\n4: br-lan    inet 192.168.77.1/24 scope global br-lan\n"
+	nat := "-A PREROUTING -i br-lan -p udp -m udp --dport 53 -j REDIRECT --to-ports 53\n"
+	got := detectHijack53Gaps(readBypassRules(nat, nat).routes[GapPlain53], addrs, nil, false, "default via 10.0.0.1 dev br-wan")
+	if len(got) != 0 {
+		t.Errorf("gaps = %v, want none", got)
+	}
+}

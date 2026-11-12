@@ -14,6 +14,10 @@ HARDEN="$HERE/../harden-state.sh"
 [ -f "$INIT" ] || { echo "pack-apk: init not found: $INIT" >&2; exit 1; }
 [ -f "$HARDEN" ] || { echo "pack-apk: state hardener not found: $HARDEN" >&2; exit 1; }
 command -v apk >/dev/null 2>&1 || { echo "pack-apk: apk-tools v3 not found (run inside alpine)" >&2; exit 1; }
+# apk mkpkg records the owner of every staged file and has no option to override it. Packed as an ordinary
+# user, a router installs the init script and the binary root runs as nobody's, and anything running as
+# nobody (https-dns-proxy does) can rewrite them and get root.
+[ "$(id -u)" = 0 ] || { echo "pack-apk: run as root, or the package installs its files owned by nobody" >&2; exit 1; }
 
 KEEP="$HERE/../openwrt/wayhop.keep"
 [ -f "$KEEP" ] || { echo "pack-apk: keep file not found: $KEEP" >&2; exit 1; }

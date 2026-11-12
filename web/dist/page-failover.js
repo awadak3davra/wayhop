@@ -30,7 +30,7 @@ function memberPicker(rows) {
     if (e.member) { note = t(e.member); } // a member that is not a connection (QA-149): what it is
     else if (!e.enabled) { note = t("off"); }
     else if (h && h.state === "down") { dotCls = "err"; note = t("down"); }
-    else if (h && h.state === "alive") { dotCls = h.latency_ms >= 600 ? "warn" : "ok"; note = (h.latency_ms || "?") + " ms"; }
+    else if (h && h.state === "alive") { dotCls = h.latency_ms >= 600 ? "warn" : "ok"; note = t("{0} ms", h.latency_ms || "?"); }
     else { note = t("checking…"); }
     const row = el("label", { class: "check member-row" }, cb,
       el("span", { class: "insp-dot " + dotCls, "aria-hidden": "true" }),

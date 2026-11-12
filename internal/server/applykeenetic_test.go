@@ -196,13 +196,36 @@ func exactKeeneticConfigReader(configs ...string) keeneticConfigReadFunc {
 	}
 }
 
-func exactKeeneticTargetRunningConfig(target nativeplan.Plan) string {
-	lines := []string{}
-	for _, block := range target.Keenetic.Interfaces {
-		lines = append(lines, block...)
+// keeneticOSPrinted renders blocks the way KeeneticOS's running-config prints them (measured
+// read-only on the test Keenetic, 2026-11-05): the header at the margin, its commands one level in, a
+// peer's commands a level deeper with `!` closing the peer group, `!` closing the interface, and no
+// `wireguard private-key` or `preshared-key` line at all. These fixtures used to echo each block
+// verbatim, which is how a check that no real router could pass went green.
+func keeneticOSPrinted(blocks ...[]string) []string {
+	var out []string
+	for _, block := range blocks {
+		out = append(out, block[0])
+		peer := false
+		for _, command := range block[1:] {
+			nested := strings.HasPrefix(command, exactKeeneticPeerIndent)
+			if peer && !nested {
+				out = append(out, "    !")
+				peer = false
+			}
+			trimmed := strings.TrimSpace(command)
+			if strings.HasPrefix(trimmed, "wireguard private-key ") || strings.HasPrefix(trimmed, "preshared-key ") {
+				continue
+			}
+			peer = peer || strings.HasPrefix(command, exactKeeneticPeerCommand)
+			out = append(out, "    "+command)
+		}
+		out = append(out, "!")
 	}
-	lines = append(lines, target.Keenetic.Routes...)
-	return strings.Join(lines, "\n")
+	return out
+}
+
+func exactKeeneticTargetRunningConfig(target nativeplan.Plan) string {
+	return strings.Join(append(keeneticOSPrinted(target.Keenetic.Interfaces...), target.Keenetic.Routes...), "\n")
 }
 
 func TestExactKeeneticAdapterRequiresConfigSnapshotBeforeMutation(t *testing.T) {
@@ -242,7 +265,7 @@ func TestExactKeeneticAdapterPreparesUnsavedThenCommitsAndSaves(t *testing.T) {
 	target := exactKeeneticTestTarget()
 	adapter.readConfig = exactKeeneticConfigReader(
 		exactKeeneticBaselineConfig,
-		strings.Join(target.Keenetic.Interfaces[0], "\n"),
+		strings.Join(keeneticOSPrinted(target.Keenetic.Interfaces[0]), "\n"),
 		exactKeeneticTargetRunningConfig(target),
 		exactKeeneticTargetRunningConfig(target),
 	)
@@ -293,7 +316,7 @@ func TestExactKeeneticAdapterPrepareCreatesOnlyMissingColdBootInterface(t *testi
 		EndpointID: "second", Path: nativeplan.PathNativeCreate, Interface: "Wireguard11",
 	})
 	adapter.readConfig = exactKeeneticConfigReader(
-		strings.Join(existing, "\n"), exactKeeneticTargetRunningConfig(target))
+		strings.Join(keeneticOSPrinted(existing), "\n"), exactKeeneticTargetRunningConfig(target))
 	if err := adapter.prepare(context.Background(), target); err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +394,8 @@ func TestExactKeeneticAdapterPersistDriftLeavesTargetRunning(t *testing.T) {
 	adapter, _ := newExactKeeneticNativeAdapter(runner)
 	target := exactKeeneticTestTarget()
 	verified := exactKeeneticTargetRunningConfig(target)
-	drifted := strings.Replace(verified, "\nup\n", "\n", 1)
+	// The running config is printed the KeeneticOS way, so the interface's `up` sits one level in.
+	drifted := strings.Replace(verified, "\n    up\n", "\n", 1)
 	if drifted == verified {
 		t.Fatal("setup: the running config has no `up` line to drop")
 	}
@@ -461,7 +485,7 @@ func TestExactKeeneticAdapterVerifiesLiveStateBeforeSave(t *testing.T) {
 	runner := &exactKeeneticRecordRunner{}
 	adapter, _ := newExactKeeneticNativeAdapter(runner)
 	target := exactKeeneticTestTarget()
-	adapter.readConfig = exactKeeneticConfigReader(strings.Join(target.Keenetic.Interfaces[0], "\n"))
+	adapter.readConfig = exactKeeneticConfigReader(strings.Join(keeneticOSPrinted(target.Keenetic.Interfaces[0]), "\n"))
 	err := adapter.commit(context.Background(), exactKeeneticReconciliation(target, nil))
 	if !errors.Is(err, errExactKeeneticApply) {
 		t.Fatalf("pre-save verification error = %v", err)
@@ -528,7 +552,7 @@ func TestVerifyExactKeeneticRunningConfigIgnoresNDMContextSeparators(t *testing.
 	target := exactKeeneticTestTarget()
 	target.Keenetic.Interfaces[0] = []string{
 		"interface Wireguard10", "description wayhop", "wireguard peer AAAA=",
-		"endpoint 192.0.2.10:443", "allow-ips 0.0.0.0 0.0.0.0", "connect", "up",
+		"    endpoint 192.0.2.10:443", "    allow-ips 0.0.0.0 0.0.0.0", "    connect", "up",
 	}
 	running := `interface Wireguard10
     description wayhop

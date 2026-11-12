@@ -327,8 +327,11 @@ input[type=checkbox]:focus-visible, input[type=radio]:focus-visible, a:focus-vis
 .hero-pill.hero-err { color:var(--err); background:var(--err-tint); }
 .hero-pill.hero-muted { color:var(--ink-2); background:var(--card-2); }
 .hero-text { min-width:0; }
-.hero-verdict { font-size:var(--fs-xl); font-weight:650; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.hero-verdict { font-size:var(--fs-xl); font-weight:650; overflow-wrap:anywhere; }
 .hero-sub { margin-top:2px; }
+details.form-adv, details.import-adv { margin-top:var(--sp-3); border-top:1px solid var(--divider); padding-top:var(--sp-2); }
+details.form-adv > summary, details.import-adv > summary { cursor:pointer; color:var(--ink-2); font-size:var(--fs-small); padding:4px 0 8px; }
+.import-what { margin-top:4px; color:var(--ink-2); overflow-wrap:anywhere; }
 .hero-ip { margin-top:4px; font-size:var(--fs-small); color:var(--ink-2); }
 .hero-ip b { color:var(--ink); font-family:ui-monospace,Menlo,Consolas,monospace; font-weight:600; }
 .dashboard-hero .hero-text { flex:1 1 260px; }
@@ -684,6 +687,7 @@ input[type=checkbox], input[type=radio] { accent-color:var(--accent); }
 /* Section header — echoes a panel block-header: prominent title + muted
    description + right-aligned side actions. */
 .block-head { display:flex; align-items:flex-start; justify-content:space-between; gap:var(--sp-4); margin-bottom:var(--sp-4); }
+.block-head > :first-child { flex:1 1 360px; min-width:0; }
 .block-head .ttl { font-size:var(--fs-xl); font-weight:650; color:var(--ink); letter-spacing:var(--ls-tight); }
 .block-head .desc { font-size:var(--fs-control); color:var(--ink-2); margin-top:4px; max-width:64ch; line-height:1.45; }
 /* flex-wrap because the cluster is flex:none and its buttons do not shrink: four of them fit one
@@ -795,12 +799,14 @@ input[type=checkbox], input[type=radio] { accent-color:var(--accent); }
    which is what the first attempt at this did — leaves the row's other five children to auto-place
    into implicit columns: measured at 1200px, both `via` selects came out about 50px wide showing
    "Direv" for "Direct", and Delete was chopped to "lete" and thrown onto its own line. `grid-column:3`
-   is what stacks them into the one real column, and the `::before` labels are what replaces the
+   is what stacks them into the real columns, and the `::before` labels are what replaces the
    column names now that the header is gone. Keep this set in step with the 760px block below. */
 @media (max-width:1280px) {
   .rlhead { display:none; }
-  .rlrow { grid-template-columns:28px 46px 1fr; row-gap:8px; }
-  .rl-list, .rl-cell, .rlrow .acts { grid-column:3; }
+  .rlrow { grid-template-columns:28px 46px minmax(0,1fr) minmax(0,1fr); row-gap:8px; }
+  .rl-list, .rl-traffic, .rlrow .acts { grid-column:3 / -1; }
+  .rl-list + .rl-cell { grid-column:3; }
+  .rl-list + .rl-cell + .rl-cell { grid-column:4; }
   .rl-cell::before { content:attr(data-col); display:block; font-size:var(--fs-caption); text-transform:uppercase; letter-spacing:.5px; color:var(--ink-3); margin-bottom:3px; }
   .rlrow .acts { justify-content:flex-start; }
 }
@@ -818,6 +824,12 @@ input[type=checkbox], input[type=radio] { accent-color:var(--accent); }
 .rlrow .acts { display:flex; gap:6px; align-items:center; justify-content:flex-end; }
 .rl-ta { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:var(--fs-small); }
 /* ---------- DNS section (dedicated layout: tidy, column-aligned, no inline-style hacks) ---------- */
+.dns-tog-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr)); gap:var(--sp-5) var(--sp-6,32px); align-items:start; }
+.dns-tog-grid .dns-tog { padding:0; border-bottom:0; }
+.dns-tog-grid .dns-tog .top label { font-weight:600; cursor:pointer; }
+.dns-tog-grid .dns-tog .hint { max-width:none; }
+.dns-tog-field { margin:0; }
+.dns-row-path { margin-top:3px; font-size:var(--fs-small); }
 .dns-tog { padding:11px 0; border-bottom:1px solid var(--divider); }
 .dns-tog:last-child { border-bottom:none; }
 .dns-tog .top { display:flex; align-items:center; justify-content:space-between; gap:16px; }
@@ -831,7 +843,7 @@ input[type=checkbox], input[type=radio] { accent-color:var(--accent); }
    gate against the OpenWrt to produce rows that disagreed. Source labels are config identifiers with
    no length bound, so the track is sized from the container and the label truncates (with the full
    text on the element's title) rather than being allowed to set the layout. */
-.dns-row { display:grid; grid-template-columns:64px minmax(0,1fr) minmax(120px,.24fr); gap:14px; align-items:center; padding:13px 0; border-bottom:1px solid var(--divider); }
+.dns-row { display:grid; grid-template-columns:96px minmax(0,1fr) minmax(120px,.24fr); gap:14px; align-items:center; padding:13px 0; border-bottom:1px solid var(--divider); }
 .dns-row .acts { min-width:0; }
 /* Scoped: .pill is flex:0 0 auto globally (AUD-112) so a chip keeps its natural width. Here it is the
    thing being bounded, so it may shrink — in this row only. */
@@ -853,6 +865,9 @@ input[type=checkbox], input[type=radio] { accent-color:var(--accent); }
 .nt-row .nt-acts { display:flex; align-items:center; justify-content:flex-end; gap:var(--sp-2); min-width:0; }
 .nt-row .nt-acts .btn { flex:0 0 140px; justify-content:center; }
 .dns-row:last-child { border-bottom:none; }
+.dns-chain-row { grid-template-columns:40px minmax(0,1fr) minmax(0,1fr) auto; }
+.dns-chain-row input, .dns-chain-via select { width:100%; }
+.dns-chain-acts { display:flex; gap:8px; justify-content:flex-end; margin-top:12px; flex-wrap:wrap; }
 .dns-row .badge { justify-self:start; white-space:nowrap; }
 .dns-row .main { min-width:0; }
 .dns-row .name { font-size:var(--fs-lg); font-weight:600; display:flex; align-items:center; gap:9px; min-width:0; }
@@ -865,7 +880,7 @@ input[type=checkbox], input[type=radio] { accent-color:var(--accent); }
 .dns-rule .match .m { font-size:var(--fs-small); color:var(--ink-2); overflow-wrap:anywhere; }
 .dns-rule .via { display:flex; align-items:center; gap:8px; white-space:nowrap; }
 @media (max-width:640px) {
-  .dns-row { grid-template-columns:64px minmax(0,1fr); }
+  .dns-row { grid-template-columns:minmax(0,1fr); gap:6px; }
   .dns-row .acts { grid-column:1 / -1; justify-content:flex-start; margin-top:2px; }
   /* minmax(0,1fr) to match this rule's own desktop template above, which already writes
      minmax(0,1fr) for its flexible track — a bare fr here would give that track an automatic minimum
@@ -946,8 +961,10 @@ input[type=checkbox], input[type=radio] { accent-color:var(--accent); }
 /* narrow screens: hide the header, stack each row, and label the dropdowns inline */
 @media (max-width:760px) {
   .rlhead { display:none; }
-  .rlrow { grid-template-columns:28px 46px 1fr; row-gap:8px; }
-  .rl-list, .rl-cell, .rlrow .acts { grid-column:3; }
+  .rlrow { grid-template-columns:28px 46px minmax(0,1fr); row-gap:8px; }
+  .rl-list { grid-column:3; }
+  .rl-list + .rl-cell, .rl-list + .rl-cell + .rl-cell, .rl-traffic, .rlrow .acts { grid-column:1 / -1; }
+  .rlrow .acts { flex-wrap:wrap; }
   .rl-cell::before { content:attr(data-col); display:block; font-size:var(--fs-caption); text-transform:uppercase; letter-spacing:.5px; color:var(--ink-3); margin-bottom:3px; }
   .rlrow .acts { justify-content:flex-start; }
 }
@@ -1405,7 +1422,7 @@ body[data-health-stale] [data-health] { opacity:.55; }
 .ord { display:inline-flex; align-items:center; gap:2px; margin-right:8px; }
 .ord-n { min-width:20px; padding:1px 5px; border-radius:5px; background:var(--divider);
   color:var(--ink-2); font-size:11px; font-weight:700; text-align:center; font-variant-numeric:tabular-nums; }
-.ord-btn { padding:2px 7px; line-height:1.1; font-size:13px; }
+.ord-btn { min-width:28px; padding:2px 7px; line-height:1.1; font-size:13px; }
 .ord-btn[disabled] { opacity:.35; cursor:default; }
 .dns-rule .ord { margin-right:10px; }
 
@@ -1746,6 +1763,7 @@ body[data-health-stale] [data-health] { opacity:.55; }
 .upd-state { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
 .upd-unchecked { font-style:italic; }
 .upd-acts { display:flex; gap:6px; justify-content:flex-end; }
+.upd-acts .btn { white-space:nowrap; }
 .upd-detail:empty { display:none; }
 .upd-detail { margin-top:8px; display:flex; flex-direction:column; gap:6px; }
 .upd-err { color:var(--err); }
@@ -1832,6 +1850,13 @@ body[data-health-stale] [data-health] { opacity:.55; }
   position:sticky; top:var(--topbar-h); z-index:3; background:var(--bg); padding-bottom:var(--sp-2); }
 .sx-search { flex:1 1 260px; min-width:0; }
 .sx-facets { display:flex; gap:6px; flex-wrap:wrap; }
+/* A phone gets one line of actions: the main one first, the rest a sideways scroll away. */
+@media (max-width:760px) {
+  .block-head .side:not(:has(.dns-filter)), .sx-facets { flex-wrap:nowrap; overflow-x:auto; scrollbar-width:none; padding-bottom:2px; }
+  .block-head .side::-webkit-scrollbar, .sx-facets::-webkit-scrollbar { display:none; }
+  .block-head .side:not(:has(.dns-filter)) > *, .sx-facets > * { flex:none; }
+  .block-head .side > .btn-primary { order:-1; }
+}
 .sx-facet.on { background:var(--accent-tint); border-color:var(--accent); color:var(--accent-light); }
 .sx-count { margin-bottom:var(--sp-3); }
 /* The list used to scroll inside itself so the search field and the facet toggles stayed put. That put a
@@ -1845,6 +1870,8 @@ body[data-health-stale] [data-health] { opacity:.55; }
   padding:5px var(--sp-3); border-bottom:1px solid var(--divider); align-items:center; }
 .sx-row:last-child { border-bottom:0; }
 .sx-row.group { background:var(--card-2); }
+.sx-section { padding:var(--sp-4) var(--sp-3) var(--sp-2); border-bottom:1px solid var(--divider); color:var(--ink-3);
+  font-size:var(--fs-caption); font-weight:650; letter-spacing:var(--ls-caps); text-transform:uppercase; }
 .sx-key { min-width:0; display:flex; align-items:baseline; gap:7px; flex-wrap:wrap; }
 .sx-name { font-size:var(--fs-control); font-weight:600; }
 .sx-row.group { align-items:start; padding:8px var(--sp-3); }
@@ -2115,7 +2142,228 @@ svg.ico { display:block; }
 .dns-filter { margin:0; min-width:15rem; }
 .dns-filter input { width:100%; }
 
+/* DNS check: the ladder is the one strong visual device; measurements stay quiet and tabular. */
+.dns-check-section { margin-top:var(--sp-5); padding-top:var(--sp-4); border-top:1px solid var(--divider); }
+.dns-check-section:first-child { margin-top:0; padding-top:0; border-top:0; }
+.dns-check-heading { margin:0 0 var(--sp-2); font-size:var(--fs-lg); line-height:1.3; }
+.dns-check-subheading { margin:var(--sp-4) 0 var(--sp-2); font-size:var(--fs-control); color:var(--ink-2); }
+.dns-check-ladder { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:var(--sp-2); margin:var(--sp-3) 0; }
+.dns-check-rung { min-width:0; padding:var(--sp-3); border:1px solid var(--divider); border-top-width:3px;
+  border-radius:var(--radius-sm); background:var(--card-2); }
+.dns-check-rung.current { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
+.dns-check-rung.current.err { border-color:var(--err); box-shadow:0 0 0 1px var(--err); }
+.dns-check-rung.current.warn { border-color:var(--warn); box-shadow:0 0 0 1px var(--warn); }
+.dns-check-rung.current.ok { border-color:var(--ok); box-shadow:0 0 0 1px var(--ok); }
+.dns-check-rung.unknown { border-style:dashed; background:transparent; }
+.dns-check-rung-title { margin-bottom:var(--sp-1); font-size:var(--fs-control); font-weight:650; overflow-wrap:anywhere; }
+.dns-check-rung .pill { margin-top:var(--sp-2); background:transparent; border:1px solid currentColor; }
+.dns-check-exposure { color:var(--ink-2); font-size:var(--fs-control); }
+.dns-check-table { width:100%; margin-top:var(--sp-2); border-collapse:collapse; table-layout:fixed; }
+.dns-check-table th, .dns-check-table td { padding:var(--sp-2); border-bottom:1px solid var(--divider);
+  text-align:left; vertical-align:top; overflow-wrap:anywhere; }
+.dns-check-table th { color:var(--ink-3); font-size:var(--fs-caption); text-transform:uppercase; letter-spacing:var(--ls-caps); }
+.dns-check-table td { font-size:var(--fs-control); }
+.dns-check-address { font-family:var(--mono); }
+.dns-check-result.err { background:var(--err-tint); }
+.dns-check-probes-row td { padding:var(--sp-3); background:var(--card-2); }
+.dns-check-probe { padding:var(--sp-2) 0; border-top:1px solid var(--divider); }
+.dns-check-probe-head, .dns-check-interception-head, .dns-check-option-title { display:flex; align-items:center; gap:var(--sp-2); flex-wrap:wrap; }
+.dns-check-raw, .dns-check-detail { display:block; margin-top:var(--sp-1); overflow-wrap:anywhere; }
+.dns-check-warning { padding:var(--sp-3) 0; border-bottom:1px solid var(--divider); }
+.dns-check-warning:last-child { border-bottom:0; }
+.dns-check-option { display:flex; align-items:flex-start; justify-content:space-between; gap:var(--sp-4);
+  padding:var(--sp-3); margin-top:var(--sp-2); border:1px solid var(--divider); border-radius:var(--radius-sm); }
+.dns-check-option.recommended { border-left:3px solid var(--accent); }
+.dns-check-option-main { min-width:0; }
+.dns-check-option-title { margin-bottom:var(--sp-1); font-weight:650; }
+.dns-check-option > .acts { flex:0 0 auto; }
+.dns-check-action-note:empty { display:none; }
+.dns-check-controls { display:flex; align-items:flex-end; gap:var(--sp-3); flex-wrap:wrap; margin:var(--sp-3) 0; }
+.dns-check-controls > .check { flex:1 1 100%; }
+.dns-check-controls > .acts { padding-bottom:var(--sp-4); }
+.dns-check-extra { flex:1 1 280px; max-width:620px; }
+.dns-check-extra textarea { width:100%; resize:vertical; }
+.dns-check-interception { padding:var(--sp-2) 0; border-bottom:1px solid var(--divider); }
+.dns-check-unmeasured, .dns-check-own { margin-top:var(--sp-2); }
+.dns-check-footer { display:flex; align-items:center; gap:var(--sp-3); flex-wrap:wrap; margin-top:var(--sp-5);
+  padding-top:var(--sp-3); border-top:1px solid var(--divider); }
+.dns-check-scenario { flex-direction:row; align-items:center; gap:var(--sp-2); margin:0 0 0 auto; }
+.dns-nav { position:sticky; top:var(--topbar-h); z-index:30; display:flex; gap:var(--sp-1); margin:0 -28px var(--sp-3); padding:var(--sp-2) 28px;
+  overflow-x:auto; scrollbar-width:none; background:var(--bg); box-shadow:0 1px 0 var(--divider); }
+.dns-nav::-webkit-scrollbar { display:none; }
+.dns-nav-item { flex:none; min-height:32px; padding:0 var(--sp-3); border:0; border-radius:999px; background:none; color:var(--ink-2);
+  font:inherit; font-size:var(--fs-small); font-weight:600; cursor:pointer; transition:background var(--t) linear, color var(--t) linear; }
+.dns-nav-item:hover { background:var(--card-2); color:var(--ink); }
+.dns-nav-item[aria-current] { background:var(--accent-tint); color:var(--ink); }
+.dns-nav ~ [id^="dns-"] { scroll-margin-top:calc(var(--topbar-h) + 60px); }
+@media (max-width:760px) {
+  .dns-nav { position:static; margin:0 0 var(--sp-3); padding:0; box-shadow:none; background:none; }
+  .dns-nav-item { min-height:40px; }
+  .dns-nav ~ [id^="dns-"] { scroll-margin-top:110px; }
+}
+.dns-head { align-items:center; }
+.dns-head .desc { margin-top:0; }
+.dns-unmanaged { display:flex; align-items:center; justify-content:space-between; gap:var(--sp-3); flex-wrap:wrap; }
+.dns-verdict-head { display:flex; align-items:center; justify-content:space-between; gap:var(--sp-2) var(--sp-3); flex-wrap:wrap; }
+.dns-verdict-head .dns-check-heading { margin:0; }
+.dns-check-stamp { display:flex; align-items:center; gap:var(--sp-2); flex-wrap:wrap; color:var(--ink-3); font-size:var(--fs-small); }
+.dns-check-none { margin-top:var(--sp-3); }
+.dns-level-bar { display:none; }
+.dns-check-section.dns-fold { margin-top:0; padding-top:0; }
+.dns-check-section.dns-check-section.dns-fold:first-of-type { margin-top:var(--sp-4); }
+.dns-fold-head { display:flex; align-items:center; gap:0 var(--sp-3); flex-wrap:wrap; }
+.dns-fold-toggle { flex:1 1 220px; min-width:0; min-height:44px; display:flex; align-items:center; gap:var(--sp-2);
+  padding:var(--sp-2) 0; background:none; border:0; color:var(--ink); font:inherit; text-align:left; cursor:pointer; }
+.dns-fold-chev { flex:none; width:16px; text-align:center; font-size:var(--fs-lg); line-height:1; color:var(--ink-3); transition:transform .15s ease; }
+.dns-fold-toggle[aria-expanded="true"] .dns-fold-chev { transform:rotate(90deg); }
+.dns-fold-text { display:flex; align-items:center; gap:2px var(--sp-2); flex-wrap:wrap; min-width:0; }
+.dns-fold-title { font-size:var(--fs-control); font-weight:650; }
+.dns-fold-toggle:hover .dns-fold-title { color:var(--accent); }
+.dns-fold-sum { display:inline-flex; align-items:center; gap:var(--sp-1); flex-wrap:wrap; min-width:0; color:var(--ink-3); font-size:var(--fs-small); overflow-wrap:anywhere; }
+.dns-fold-body { padding:0 0 var(--sp-4) var(--sp-4); }
+@media (prefers-reduced-motion:reduce) { .dns-fold-chev { transition:none; } }
+.dns-check-target { animation:dns-check-highlight 1.8s ease-out; }
+@keyframes dns-check-highlight { 0%,45% { box-shadow:0 0 0 4px var(--accent-glow); } 100% { box-shadow:none; } }
+@media (max-width:760px) {
+  .dns-check-ladder { grid-template-columns:minmax(0,1fr); }
+  .dns-check-rung:not(.current) { display:none; }
+  .dns-check-exposure { display:none; }
+  .dns-level-bar { display:flex; gap:4px; margin-top:var(--sp-3); }
+  .dns-level-bar i { flex:1 1 0; height:4px; border-radius:2px; background:var(--divider); }
+  .dns-level-bar.err i.on { background:var(--err); }
+  .dns-level-bar.warn i.on { background:var(--warn); }
+  .dns-level-bar.ok i.on { background:var(--ok); }
+  .dns-fold-body { padding-left:0; }
+  .dns-check-rung .pill { display:none; }
+  .dns-head .dns-filter { width:100%; }
+  .dns-check-option { flex-direction:column; }
+  .dns-check-option > .acts { width:100%; }
+  .dns-check-scenario { margin-left:0; }
+}
+@media (max-width:640px) {
+  .dns-check-table thead { display:none; }
+  .dns-check-table, .dns-check-table tbody, .dns-check-table tr, .dns-check-table td { display:block; width:100%; }
+  .dns-check-table tr { padding:var(--sp-2) 0; border-bottom:1px solid var(--divider); }
+  .dns-check-table td { display:grid; grid-template-columns:minmax(82px,.42fr) minmax(0,1fr); gap:var(--sp-2);
+    padding:var(--sp-1) 0; border:0; }
+  .dns-check-table td::before { content:attr(data-label); color:var(--ink-3); font-size:var(--fs-caption); text-transform:uppercase; }
+  .dns-check-table .dns-check-probes-row td { display:block; padding:var(--sp-3); }
+  .dns-check-table .dns-check-probes-row td::before { content:none; }
+}
+@media (max-width:480px) { .dns-check-ladder { grid-template-columns:1fr; } }
+@media (prefers-reduced-motion:reduce) { .dns-check-target { animation:none; } }
+
+/* Encrypted resolver quick list: speed is the visual column, certificate state stays in words too. */
+.dns-fast-head { align-items:flex-start; }
+.dns-fast-controls { flex-wrap:wrap; justify-content:flex-end; }
+.dns-fast-via { display:flex; align-items:center; gap:var(--sp-2); min-width:0; color:var(--ink-2); font-size:var(--fs-small); }
+.dns-fast-via select { width:min(220px,32vw); min-width:0; }
+.dns-fast-progress { height:2px; margin:calc(-1 * var(--sp-2)) 0 var(--sp-3); overflow:hidden; background:var(--card-2); }
+.dns-fast-progress[hidden] { display:none; }
+.dns-fast-progress-fill { display:block; height:100%; background:var(--accent); transition:width .25s ease; }
+.dns-fast-progress-fill.indeterminate { animation:dns-fast-progress 1.2s ease-in-out infinite; transform-origin:left; }
+@keyframes dns-fast-progress { 0%,100% { transform:scaleX(.12); } 50% { transform:scaleX(1); } }
+.dns-fast-summary { margin-top:0; }
+.dns-fast-provider:empty { display:none; }
+.dns-fast-steps { display:flex; gap:var(--sp-3); margin:var(--sp-3) 0; padding:var(--sp-2) 0; border-top:1px solid var(--divider); border-bottom:1px solid var(--divider); }
+.dns-fast-step { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:var(--sp-2); flex:1 1 0; min-width:0; }
+.dns-fast-step-number { display:grid; place-items:center; width:22px; height:22px; border-radius:50%; background:var(--card-2); color:var(--ink-2); font-size:var(--fs-caption); }
+.dns-fast-step.done .dns-fast-step-number { background:var(--ok-tint); color:var(--ok); }
+.dns-fast-step-title { display:block; font-size:var(--fs-control); font-weight:650; }
+.dns-fast-step .hint { margin-top:1px; overflow-wrap:anywhere; }
+.dns-fast-step-note:empty { display:none; }
+.dns-fast-filters { display:flex; flex-wrap:wrap; gap:6px; margin:var(--sp-3) 0; }
+@media (max-width:760px) {
+  .dns-fast-filters { flex-wrap:nowrap; overflow-x:auto; scrollbar-width:none; }
+  .dns-fast-filters::-webkit-scrollbar { display:none; }
+  .dns-fast-filters > * { flex:none; }
+}
+.dns-fast-filter { display:inline-flex; align-items:center; gap:7px; }
+.dns-fast-filter.on { border-color:var(--accent); background:var(--accent-tint); color:var(--accent-light); }
+.dns-fast-count { color:var(--ink-3); font-variant-numeric:tabular-nums; }
+.dns-fast-host-note, .dns-fast-empty { margin-bottom:var(--sp-2); }
+.dns-fast-list { min-width:0; }
+.dns-fast-row { display:grid; grid-template-columns:12px minmax(170px,1fr) 84px minmax(116px,.62fr) minmax(112px,.58fr) 62px;
+  gap:var(--sp-2); align-items:center; padding:10px 0; border-bottom:1px solid var(--divider); min-width:0; }
+.dns-fast-row { cursor:pointer; }
+.dns-fast-row:hover .dns-fast-name { color:var(--accent); }
+.dns-fast-details { cursor:auto; }
+.dns-fast-row.unmeasured { grid-template-columns:12px minmax(0,1fr); }
+.dns-fast-dot { display:block; width:9px; height:9px; border-radius:50%; background:var(--ink-3); }
+.dns-fast-dot.ok { background:var(--ok); }
+.dns-fast-dot.err { background:var(--err); }
+.dns-fast-name-cell { display:flex; align-items:center; gap:4px; min-width:0; }
+.dns-fast-main { flex:1 1 auto; min-width:0; }
+.dns-fast-name-line, .dns-fast-sub { display:flex; align-items:center; flex-wrap:wrap; gap:3px 7px; min-width:0; }
+.dns-fast-name { min-height:30px; max-width:100%; padding:2px 0; border:0; background:transparent; color:var(--ink);
+  cursor:pointer; font:inherit; font-weight:650; text-align:left; overflow-wrap:anywhere; }
+.dns-fast-name:hover { color:var(--accent-light); }
+.dns-fast-name:focus-visible, .dns-fast-chevron:focus-visible { outline:none; box-shadow:0 0 0 3px var(--accent-tint); border-radius:var(--radius-sm); }
+.dns-fast-chevron { flex:0 0 32px; min-height:32px; padding:0; border:0; border-radius:var(--radius-sm); background:transparent; color:var(--ink-2); cursor:pointer; font-size:var(--fs-lg); }
+.dns-fast-chevron:hover { background:var(--card-2); color:var(--ink); }
+.dns-fast-sub { color:var(--ink-2); font-size:var(--fs-small); }
+.dns-fast-sub .pill { padding:1px 6px; }
+.dns-fast-ping { min-width:0; font-variant-numeric:tabular-nums; }
+.dns-fast-ms { font-size:var(--fs-lg); font-weight:700; }
+.dns-fast-ms-unit { margin-left:3px; color:var(--ink-2); font-size:var(--fs-caption); }
+.dns-fast-ping-track { display:block; width:64px; max-width:100%; height:2px; margin-top:4px; background:var(--card-2); }
+.dns-fast-ping-bar { display:block; height:100%; background:var(--accent); }
+.dns-fast-transports { display:flex; flex-wrap:wrap; gap:4px; min-width:0; }
+.dns-fast-transport { display:inline-flex; align-items:center; gap:2px; padding:2px 6px; border:1px solid var(--divider); border-radius:var(--radius-pill);
+  color:var(--ink-2); font-size:var(--fs-caption); font-variant-numeric:tabular-nums; white-space:nowrap; }
+.dns-fast-transport.best { border-color:var(--accent); background:var(--accent-tint); color:var(--accent-light); }
+.dns-fast-transport.failed { border-color:transparent; background:var(--card-2); color:var(--ink-3); }
+.dns-fast-detail-transports { display:none; }
+.dns-fast-trust { display:flex; flex-direction:column; align-items:flex-start; gap:3px; min-width:0; font-size:var(--fs-small); }
+.dns-fast-cert { color:var(--ok); }
+.dns-fast-dnssec { color:var(--ink-2); font-size:var(--fs-caption); }
+.dns-fast-action { display:flex; justify-content:flex-end; }
+.dns-fast-details { grid-column:1 / -1; margin-top:2px; padding:var(--sp-3); background:var(--card-2); border-radius:var(--radius-sm); overflow-wrap:anywhere; }
+.dns-fast-detail-grid { display:grid; grid-template-columns:max-content minmax(0,1fr); gap:5px var(--sp-3); font-size:var(--fs-small); }
+.dns-fast-detail-label { color:var(--ink-3); }
+.dns-fast-address { font-family:var(--mono); }
+.dns-fast-transport-details { margin-top:var(--sp-3); padding-top:var(--sp-2); border-top:1px solid var(--divider); }
+.dns-fast-transport-detail { display:grid; grid-template-columns:42px minmax(130px,1fr) auto auto; gap:var(--sp-2); padding:4px 0; font-size:var(--fs-small); }
+.dns-fast-detail-proto { font-weight:650; }
+.dns-fast-separator { margin-top:var(--sp-3); }
+.dns-fast-group-title { font-size:var(--fs-control); font-weight:650; }
+.dns-fast-bad-group { padding-top:var(--sp-3); border-top:1px solid var(--err); color:var(--err); }
+.dns-fast-bad-group .dns-fast-row { color:var(--ink); }
+.dns-fast-silent-group { padding-top:var(--sp-2); border-top:1px solid var(--divider); color:var(--ink-2); }
+.dns-fast-silent-group > summary { display:flex; align-items:center; gap:var(--sp-2); min-height:40px; cursor:pointer; }
+.dns-fast-silent-group .dns-fast-row { color:var(--ink); }
+.dns-fast-clock { margin-top:var(--sp-3); padding:var(--sp-3); border-left:3px solid var(--err); background:var(--err-tint); }
+.dns-fast-use-summary { display:flex; align-items:center; flex-wrap:wrap; gap:var(--sp-2); margin-bottom:var(--sp-4); font-size:var(--fs-lg); font-weight:650; }
+.dns-fast-use-error:empty { display:none; }
+@media (max-width:760px) {
+  .dns-fast-controls { width:100%; justify-content:flex-start; }
+  .dns-fast-via { flex:1 1 220px; }
+  .dns-fast-via select { flex:1 1 auto; width:auto; max-width:none; }
+  .dns-fast-steps { flex-direction:column; }
+  .dns-fast-row { grid-template-columns:12px minmax(0,1fr) auto; gap:6px var(--sp-2); padding:12px 0; }
+  .dns-fast-row > .dns-fast-dot { grid-column:1; grid-row:1; align-self:start; margin-top:12px; }
+  .dns-fast-name-cell { grid-column:2 / -1; grid-row:1; }
+  .dns-fast-row > .dns-fast-ping { grid-column:2; grid-row:2; }
+  .dns-fast-row > .dns-fast-transports, .dns-fast-row > .dns-fast-trust { display:none; }
+  .dns-fast-row > .dns-fast-action { grid-column:3; grid-row:2; }
+  .dns-fast-row > .dns-fast-details { grid-column:1 / -1; }
+  .dns-fast-row.unmeasured .dns-fast-name-cell { grid-column:2 / -1; }
+  .dns-fast-detail-transports { display:flex; margin-top:var(--sp-3); }
+  .dns-fast-transport-detail { display:flex; flex-wrap:wrap; gap:4px var(--sp-3); }
+  .dns-fast-detail-proto { flex-basis:34px; }
+  .dns-fast-name, .dns-fast-chevron { min-height:40px; }
+  .dns-fast-chevron { flex-basis:40px; }
+}
+@media (max-width:480px) {
+  .dns-fast-controls .btn { flex:1 1 100%; }
+  .dns-fast-filter { min-height:38px; }
+  .dns-fast-detail-grid { grid-template-columns:1fr; gap:2px; }
+  .dns-fast-detail-label { margin-top:6px; }
+}
+@media (prefers-reduced-motion:reduce) { .dns-fast-progress-fill { animation:none; transition:none; } }
+
 /* ---------- Telegram bot card in Settings; the manager's styles load with page-telegram.js ---------- */
 .tg-card { display:flex; align-items:center; justify-content:space-between; gap:var(--sp-3); flex-wrap:wrap; }
 .tg-card-line { display:flex; align-items:center; gap:var(--sp-2); flex-wrap:wrap; min-width:0; }
 .tg-card-text { margin-top:0; }
+.dns-fast-more { display: block; margin: 12px auto 4px; }

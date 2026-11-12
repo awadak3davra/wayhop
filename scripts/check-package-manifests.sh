@@ -131,6 +131,7 @@ fi
 # packers carry a build-time guard; losing it would not fail anything until a user lost their setup.
 want pack-ipk.sh 'ipk: refuses a payload containing the config tree'  'REFUSING to build'
 want pack-apk.sh 'apk: refuses a payload containing the config tree'  'REFUSING to build'
+want pack-apk.sh 'apk: refuses to pack files that would install owned by nobody' 'owned by nobody'
 
 # --- post-install seeds only what is absent, at 0600 --------------------------------------------
 for p in postinst postinst.apk postinst.entware; do

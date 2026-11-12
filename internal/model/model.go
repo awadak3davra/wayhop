@@ -61,12 +61,15 @@ const (
 
 // TLS holds transport security settings (plain TLS, Reality, uTLS fingerprint).
 type TLS struct {
-	Enabled     bool     `json:"enabled,omitempty"`
-	Type        string   `json:"type,omitempty"` // "tls" | "reality"
-	SNI         string   `json:"sni,omitempty"`
-	ALPN        []string `json:"alpn,omitempty"`
-	Insecure    bool     `json:"insecure,omitempty"`
-	Fingerprint string   `json:"fingerprint,omitempty"` // uTLS, e.g. "chrome"
+	Enabled bool     `json:"enabled,omitempty"`
+	Type    string   `json:"type,omitempty"` // "tls" | "reality"
+	SNI     string   `json:"sni,omitempty"`
+	ALPN    []string `json:"alpn,omitempty"`
+	// CipherSuites restricts TLS 1.0-1.2 suites (share-link cs= / sing-box cipher_suites). TLS 1.3
+	// suites are fixed by Go and are intentionally not represented here.
+	CipherSuites []string `json:"cipher_suites,omitempty"`
+	Insecure     bool     `json:"insecure,omitempty"`
+	Fingerprint  string   `json:"fingerprint,omitempty"` // uTLS, e.g. "chrome"
 	// Reality
 	PublicKey string `json:"public_key,omitempty"`
 	ShortID   string `json:"short_id,omitempty"`
@@ -349,7 +352,7 @@ type RoutingList struct {
 	Format       string   `json:"format,omitempty"`        // "binary" (.srs) | "source" (.json) | "" (infer from URL)
 	Manual       []string `json:"manual,omitempty"`        // user-entered domains/IPs (inline rule-set)
 	Outbound     string   `json:"outbound"`                // route matched traffic here: endpoint/group id | "direct" | "block"
-	DownloadVia  string   `json:"download_via,omitempty"`  // outbound used to FETCH the URL (sing-box download_detour); "" = direct
+	DownloadVia  string   `json:"download_via,omitempty"`  // outbound used to FETCH the URL (sing-box download_detour) and the CIDR and domain feeds (a socket bound to its link; see server/listfeedbind.go); "" = direct
 	RefreshHours int      `json:"refresh_hours,omitempty"` // remote update_interval in hours; 0 = default (24h); also the CIDRSource auto-refresh cadence
 	Enabled      bool     `json:"enabled"`
 	// CIDRSource auto-populates this list's KERNEL CIDRs from a feed so a hybrid/fast

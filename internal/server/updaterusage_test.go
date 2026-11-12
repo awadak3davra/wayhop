@@ -92,3 +92,18 @@ func TestCoreDependents(t *testing.T) {
 		}
 	})
 }
+
+// The core carries routing it needs no connection for: named, so its removal is not offered as harmless.
+func TestRoutesThroughCore(t *testing.T) {
+	wg := model.Profile{Endpoints: []model.Endpoint{{ID: "wg", Protocol: model.ProtoWireGuard, Enabled: true}}}
+	if !routesThroughCore(wg, true) {
+		t.Fatal("an enabled connection on a datapath that needs the core")
+	}
+	if routesThroughCore(wg, false) {
+		t.Fatal("a native-only datapath does not need the core")
+	}
+	wg.Endpoints[0].Enabled = false
+	if routesThroughCore(wg, true) || routesThroughCore(model.Profile{}, true) {
+		t.Fatal("a profile with no enabled connection routes nothing")
+	}
+}

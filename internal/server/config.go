@@ -277,7 +277,7 @@ func (s *Server) gateRoutingMode(ctx context.Context, old, next config.Config) (
 // that would not start (config.Validate). old is the saved config (see keepSavedBridge).
 func decodeConfigBody(r *http.Request, old config.Config) (*config.Config, error) {
 	var in config.Config
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := decodeJSONBody(r.Body, &in); err != nil {
 		return nil, fmt.Errorf("invalid JSON body")
 	}
 	keepSavedBridge(&in, old)
@@ -470,7 +470,7 @@ func (s *Server) handleConfigExport(w http.ResponseWriter, r *http.Request) {
 // backup doesn't wipe secrets. Most changes need a restart.
 func (s *Server) handleConfigImport(w http.ResponseWriter, r *http.Request) {
 	var in config.Config
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := decodeJSONBody(r.Body, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}

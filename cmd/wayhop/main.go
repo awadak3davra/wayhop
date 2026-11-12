@@ -236,6 +236,7 @@ func main() {
 	go srv.BackupLoop(ctx)              // scheduled local whole-setup backup when Backup.AutoHours>0 (opt-in, off by default)
 	go srv.SampleInterfacesLoop(ctx)    // RAM-only per-iface counter history so a fresh dashboard seeds recent throughput (no flash writes)
 	go srv.CIDRRefreshLoop(ctx)         // updates the saved routing-list caches only; activation is Apply
+	go srv.NativeDNSChainGuardLoop(ctx) // restarts dnsmasq when a tunnel its upstream chain binds to was recreated
 	srv.StartTelegram(ctx)              // the Telegram bot, when enabled in Settings (off by default)
 	go srv.AutoUpdateLoop(ctx)          // opt-in binary update, serialized with Apply
 	// The Telegram bridge (tg-ws-proxy) on the LAN, when enabled (off by default); the shutdown below

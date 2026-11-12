@@ -292,6 +292,13 @@ func applyNativeConnectionBindings(profile *model.Profile, plan *nativeplan.Plan
 	if profile == nil || plan == nil {
 		return errExecutionInvalidCapture
 	}
+	// A natively created endpoint becomes an external interface the core binds its outbound to, and
+	// bind_interface takes a kernel device: OpenWrt's wr_* interface is one, NDM's WireguardN is not -
+	// the kernel calls it nwgN.
+	devices, err := keeneticKernelDevices(plan)
+	if err != nil {
+		return errExecutionInvalidCapture
+	}
 	decisions := make(map[string]nativeplan.EndpointDecision, len(plan.Decisions))
 	for _, decision := range plan.Decisions {
 		if decision.EndpointID == "" {
@@ -318,11 +325,15 @@ func applyNativeConnectionBindings(profile *model.Profile, plan *nativeplan.Plan
 			if decision.Interface == "" || strings.TrimSpace(decision.Interface) != decision.Interface {
 				return errExecutionInvalidCapture
 			}
+			device := decision.Interface
+			if kernel := devices[endpoint.ID]; kernel != "" {
+				device = kernel
+			}
 			params := make(map[string]any, len(endpoint.Params)+1)
 			for key, value := range endpoint.Params {
 				params[key] = value
 			}
-			params["interface"] = decision.Interface
+			params["interface"] = device
 			endpoint.Engine = model.EngineExternal
 			endpoint.Params = params
 		case nativeplan.PathNativeAdopt:
@@ -413,7 +424,7 @@ func executionGeneratorOptions(
 ) (generator.Options, error) {
 	mode := desiredRoutingMode(desired.Config)
 	opts := generator.Options{
-		MixedPort: desired.Config.Ports.Mixed, ProbePort: desired.Config.Ports.Probe(),
+		MixedPort: desired.Config.Ports.Mixed, DNSPort: desired.Config.Ports.DNS, ProbePort: desired.Config.Ports.Probe(),
 		ClashAddr: desired.Inputs.ClashAddr, ClashSecret: desired.Config.Clash.Secret,
 		TunEnabled: mode == "tun" || mode == "hybrid",
 		TunMTU:     desired.Config.GatewayMTU, TunAddr: desired.Config.GatewayAddr,
@@ -459,7 +470,7 @@ func executionGeneratorOptions(
 
 func executionKeeneticCompatibilityOptions(desired DesiredSnapshot) generator.Options {
 	return generator.Options{
-		MixedPort: desired.Config.Ports.Mixed, ProbePort: desired.Config.Ports.Probe(),
+		MixedPort: desired.Config.Ports.Mixed, DNSPort: desired.Config.Ports.DNS, ProbePort: desired.Config.Ports.Probe(),
 		ClashAddr: desired.Inputs.ClashAddr, ClashSecret: desired.Config.Clash.Secret,
 		TunEnabled: true,
 		TunMTU:     desired.Config.GatewayMTU, TunAddr: desired.Config.GatewayAddr,

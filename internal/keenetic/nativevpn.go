@@ -48,9 +48,11 @@ func ndmLine(s string) string {
 
 // ascBase is the positional order of the AWG 1.x obfuscation params on KeeneticOS's
 // `wireguard asc` command (the 9-arg form validated live on the reference router). ascExt are the
-// AWG-2.0 additions (S3/S4 + the I1-I5 hex magic headers), appended only when present.
-// ⚠️ The exact KeeneticOS arg ORDER for the 2.0 extension still needs device validation;
-// the 9-arg base is confirmed.
+// AWG-2.0 additions (S3/S4 + the I1-I5 magic headers), appended only when present. The 9-arg base
+// is confirmed. The device prints the 2.0 form as 11 bare arguments then five quoted strings when the
+// headers are unset (measured read-only on the test Keenetic, 2026-11-05, and on a KeeneticOS 5.1.8
+// router, QA-124); that S3/S4 and I1-I5 sit in those slots in this order is still not proven
+// (wgasc.go keeps the tail uninterpreted).
 var ascBase = []string{"jc", "jmin", "jmax", "s1", "s2", "h1", "h2", "h3", "h4"}
 var ascExt = []string{"s3", "s4", "i1", "i2", "i3", "i4", "i5"}
 
@@ -75,8 +77,8 @@ type WireguardOpts struct {
 // `interface WireguardN` from a WayHop AmneziaWG/WireGuard endpoint — the heart of the
 // native-first backend (the router runs the tunnel in-kernel, leveraging HW crypto, instead
 // of a userspace sing-box/awg-quick tunnel). The lines mirror the live running-config
-// structure validated on the reference router; the apply layer submits them over RCI `/rci/parse`.
-// PURE — no device I/O. Returns an error for a non-WG/AWG endpoint or missing keys.
+// structure validated on the reference router; the strict apply layer sends them to NDM one command per
+// `ndmc -c`. PURE — no device I/O. Returns an error for a non-WG/AWG endpoint or missing keys.
 func WireguardCommands(e model.Endpoint, o WireguardOpts) ([]string, error) {
 	isAWG := e.Engine == model.EngineAmneziaWG
 	isWG := e.Engine == model.EngineSingBox && e.Protocol == model.ProtoWireGuard
@@ -108,6 +110,16 @@ func WireguardCommands(e model.Endpoint, o WireguardOpts) ([]string, error) {
 	if e.Server == "" || e.Port == 0 {
 		return nil, fmt.Errorf("endpoint %q: missing server/port", e.ID)
 	}
+	// `wireguard asc` carries a set I1-I5 with spaces as a quoted string (see ascArgs), so a value
+	// holding a quote or a control character cannot be written faithfully. Refused rather than altered
+	// (ndmQuote would drop the quote, ndmLine cut the line at the control character): a changed I value
+	// is a tunnel the server never answers.
+	for _, k := range ascExt {
+		if v := numStr(p[k]); strings.HasPrefix(k, "i") &&
+			strings.ContainsFunc(v, func(r rune) bool { return r == '"' || r < 0x20 || r == 0x7f }) {
+			return nil, fmt.Errorf("endpoint %q: %s holds a quote or control character, which `wireguard asc` cannot carry", e.ID, k)
+		}
+	}
 	name := e.Name
 	if name == "" {
 		name = e.ID
@@ -118,8 +130,8 @@ func WireguardCommands(e model.Endpoint, o WireguardOpts) ([]string, error) {
 	}
 
 	var c []string
-	// Every NDM command is a single line, and the apply layer submits the block to the line-based
-	// /rci/parse. Truncate each line at the first ASCII control char so NO interpolated value —
+	// Every NDM command is a single line, and the apply layer sends each one to NDM as one command.
+	// Truncate each line at the first ASCII control char so NO interpolated value —
 	// the endpoint description/name, server, mtu/keepalive, asc hex, or a key — can embed a newline
 	// and inject an extra RCI command. One choke point covers every field (wgKey still canonicalizes
 	// the key bytes; this is the belt for all the rest).
@@ -174,6 +186,11 @@ func WireguardCommands(e model.Endpoint, o WireguardOpts) ([]string, error) {
 		add("wireguard asc " + asc)
 	}
 	add("wireguard peer " + wgKey(peer))
+	// The four-space indent below is structure, not layout: it marks the lines that belong to this peer,
+	// as running-config prints them one level deeper. The strict apply layer sends one command per
+	// `ndmc -c` and rebuilds `interface WireguardN wireguard peer <key> endpoint …` from it, and its
+	// validator accepts exactly this one level, so the indent must stay four spaces.
+	//
 	// net.JoinHostPort brackets an IPv6 literal ([2001:db8::1]:51820) — a bare `server:port`
 	// concatenation makes the port indistinguishable from the address, which KeeneticOS (and the
 	// module's own splitEndpoint, which uses net.SplitHostPort) mis-parses so the tunnel never dials.

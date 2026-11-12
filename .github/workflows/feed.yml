@@ -272,7 +272,9 @@ jobs:
           set -euo pipefail
           command -v docker >/dev/null 2>&1 || { echo "::error::docker is required for the supported apk feed"; exit 1; }
           docker info >/dev/null 2>&1 || { echo "::error::docker daemon unavailable — apk feed was not built"; exit 1; }
-          docker run --rm --network none --read-only --user "$(id -u):$(id -g)" \
+          # Root inside this network-less, read-only container: apk mkpkg records the owner of each
+          # staged file, so a package packed as the runner user installs them owned by nobody.
+          docker run --rm --network none --read-only --env HOST_OWNER="$(id -u):$(id -g)" \
             --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=256m \
             --env WAYHOP_BASE_VERSION --env WAYHOP_PACKAGE_RELEASE \
             -v "$PWD:/w:ro" -v "$PWD/feed:/out" -w /w "$APK_TOOLS_IMAGE" sh -euc '
@@ -294,6 +296,7 @@ jobs:
               # intentionally unsigned at this stage; only the isolated next step receives a key.
               ( cd "$d" && apk --allow-untrusted mkndx -o packages.adb ./*.apk )
             done
+            chown -R "$HOST_OWNER" /out
           '
           sh packaging/feed/verify-apk-feed.sh feed packaging/feed/arch-map.txt --require-index
 

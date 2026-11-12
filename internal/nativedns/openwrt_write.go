@@ -211,6 +211,10 @@ func ValidateForWrite(nd NativeDNS) error {
 		if r.Kind == KindDoH && !strings.HasPrefix(r.Address, "https://") {
 			return fmt.Errorf("resolver %d: DoH address must be an https:// URL, got %q", i, r.Address)
 		}
+		// The binding is written after `@` in a config line, so it gets the same treatment as the address.
+		if r.Iface != "" && !ValidIfaceName(r.Iface) {
+			return fmt.Errorf("resolver %d: %q is not an interface name", i, r.Iface)
+		}
 		// listen_addr comes back from the client too and RenderUCI writes it into dnsmasq's server list.
 		if r.ListenAddr != "" && net.ParseIP(r.ListenAddr) == nil {
 			return fmt.Errorf("resolver %d: listen_addr %q is not an IP address", i, r.ListenAddr)
@@ -229,12 +233,15 @@ func uciSetBool(key string, v bool) string {
 // serverRef writes a resolver as a dnsmasq server entry. The port goes before a binding the address
 // carries ("IP@wan" with port 53 is "IP#53@wan"), the inverse of splitServerRef.
 func serverRef(r NativeResolver) string {
+	addr, bind := r.Address, ""
+	if i := strings.IndexByte(addr, '@'); i >= 0 {
+		addr, bind = addr[:i], addr[i:]
+	}
+	if r.Iface != "" {
+		bind = "@" + r.Iface
+	}
 	if r.Port > 0 {
-		addr, bind := r.Address, ""
-		if i := strings.IndexByte(addr, '@'); i >= 0 {
-			addr, bind = addr[:i], addr[i:]
-		}
 		return fmt.Sprintf("%s#%d%s", addr, r.Port, bind)
 	}
-	return r.Address
+	return addr + bind
 }

@@ -3,17 +3,93 @@ package server
 import (
 	"context"
 	"log"
+	"net/http"
 	"os/exec"
 	"sync/atomic"
 	"time"
 
 	"wayhop/internal/failsafe"
+	"wayhop/internal/generator"
+	"wayhop/internal/model"
 	"wayhop/internal/netdiag"
 )
+
+// failSafeReachURL is what the fail-safe fetches through the default exit: the same no-content page
+// groups test their members with, so it adds no new place the router talks to.
+const failSafeReachURL = "http://cp.cloudflare.com/generate_204"
 
 // armFailSafe starts the rollback window after a Test (unsaved) Apply of live: it pings the
 // configured target, restores the committed configuration if connectivity is lost, and (only when
 // opted in, on-device) reboots as a last resort. Caller holds applyMu.
+// failSafeHealth judges one fail-safe check from the ping and, where the default route is a tunnel the
+// core carries, a request sent out through it.
+//
+// The ping alone often leaves outside the core: ICMP is not captured, and the target may be pinned to
+// the WAN. Measured on an emulated OpenWrt in hybrid mode, the default route through a WireGuard whose
+// server never answered: devices had neither HTTP nor DNS, the ping answered all window long, and the
+// window closed with the household offline and "live, not saved" on the banner.
+func failSafeHealth(p netdiag.PingResult, coreExpected bool, exitTag string, reach func(string) (ok, ran bool)) failsafe.Health {
+	if !p.Ran {
+		// The probe never produced a measurement — no ping binary on this PATH, an invalid
+		// target, a timeout. Reporting that as lost connectivity would roll the configuration
+		// back and then reboot a router whose internet is fine. Say nothing was learned; the
+		// window holds and the user still has Keep and Roll back.
+		log.Printf("fail-safe: connectivity check could not run (%s) — holding, not counting this as a failure", p.Output)
+		return failsafe.HealthUnknown
+	}
+	if !p.Ok {
+		return failsafe.HealthDown
+	}
+	if exitTag != "" && coreExpected && reach != nil {
+		// Only a request that went out and got nothing counts. One that could not be sent (no probe
+		// inbound in a config applied before it existed) says nothing, as a ping that never ran.
+		if ok, ran := reach(exitTag); ran && !ok {
+			log.Printf("fail-safe: the ping answered, but nothing came back through the default exit %s", exitTag)
+			return failsafe.HealthDown
+		}
+	}
+	return failsafe.HealthUp
+}
+
+// failSafeDefaultExit is the exit the profile's default rule sends traffic to, when that is a tunnel or
+// a group; "" for the provider's line and for a block, which a request through it cannot judge.
+func failSafeDefaultExit(p model.Profile) string {
+	for _, r := range p.Rules {
+		if !r.Default {
+			continue
+		}
+		switch r.Outbound {
+		case "", model.OutboundDirect, model.OutboundBlock:
+			return ""
+		}
+		return r.Outbound
+	}
+	return ""
+}
+
+// reachThroughExit fetches a no-content page through one exit of the running core, the way a device's
+// request would leave. ran is false when the core's config has no probe inbound or no user for the exit.
+func (s *Server) reachThroughExit(tag string) (ok, ran bool) {
+	probe, have := runningProbeInbound(s.config().SingBox.Config)
+	if !have {
+		return false, false
+	}
+	pw, have := probe.users[generator.ProbeUser(tag)]
+	if !have {
+		return false, false
+	}
+	c, _, _, why := probeCoreClient(tag, pw, probe.port, true)
+	if c == nil || why != "" {
+		return false, false
+	}
+	resp, err := c.Get(failSafeReachURL)
+	if err != nil {
+		return false, true
+	}
+	resp.Body.Close()
+	return resp.StatusCode < http.StatusInternalServerError, true
+}
+
 func (s *Server) armFailSafe(live *appliedRevision) {
 	if s.failsafe == nil {
 		return
@@ -49,6 +125,12 @@ func (s *Server) armFailSafe(live *appliedRevision) {
 	if s.failSafePingOf != nil {
 		ping = s.failSafePingOf
 	}
+	reach := s.reachThroughExit
+	if s.failSafeReachOf != nil {
+		reach = s.failSafeReachOf
+	}
+	// Where the household's traffic goes by default in the configuration this window tests.
+	exitTag := failSafeDefaultExit(s.store.Profile())
 	check := func() failsafe.Health {
 		// The routing brain must be up for a bare ping to mean anything: the ping target is often
 		// statically routed OUTSIDE sing-box (1.1.1.1 pinned to a kernel interface for DoH), so a ping
@@ -59,19 +141,7 @@ func (s *Server) armFailSafe(live *appliedRevision) {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
-		p := ping(ctx, target, 2)
-		if !p.Ran {
-			// The probe never produced a measurement — no ping binary on this PATH, an invalid
-			// target, a timeout. Reporting that as lost connectivity would roll the configuration
-			// back and then reboot a router whose internet is fine. Say nothing was learned; the
-			// window holds and the user still has Keep and Roll back.
-			log.Printf("fail-safe: connectivity check could not run (%s) — holding, not counting this as a failure", p.Output)
-			return failsafe.HealthUnknown
-		}
-		if p.Ok {
-			return failsafe.HealthUp
-		}
-		return failsafe.HealthDown
+		return failSafeHealth(ping(ctx, target, 2), coreExpected(), exitTag, reach)
 	}
 	rollback := func() error {
 		// Serialize against Apply/confirm/converge under applyMu. DEADLOCK-SAFE: this closure runs

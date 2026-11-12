@@ -2,7 +2,10 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -23,8 +26,8 @@ func applyboot_kernelMaterialization() executionMaterializationV1 {
 	return *m
 }
 
-// A Keenetic reboot is the one case where the Test is gone with the boot: NDM starts from
-// startup-config, which a Test never writes. There the unsaved window is simply discarded.
+// A Keenetic reboot with no native revision is the case where the Test is gone with the boot: NDM
+// starts from startup-config, which an ordinary Test never writes. The unsaved window is discarded.
 func TestStartApply_DiscardsAnUnsavedWindowFromThePreviousLife(t *testing.T) {
 	s, fake := applytest_server(t)
 	s.platformOf = func() platform.Platform { return platform.Keenetic }
@@ -56,6 +59,25 @@ func TestStartApply_DiscardsAnUnsavedWindowFromThePreviousLife(t *testing.T) {
 	// The record now lives beside the startup config, whatever it was read from before.
 	if s.applyStateFile() != filepath.Join(s.applyStateDir, applyStateFileName) {
 		t.Errorf("record path = %q", s.applyStateFile())
+	}
+}
+
+// QA-145: the routing switch can save a Test's native tunnels into startup-config. A reboot must not
+// discard their record as though every Test had vanished; boot rolls that native state back.
+func TestLiveNeedsRollbackOnBoot_KeepsNativeStateForRollback(t *testing.T) {
+	s, _ := applytest_server(t)
+	s.platformOf = func() platform.Platform { return platform.Keenetic }
+	s.bootIDOf = func() string { return "boot-after" }
+	m := applyboot_kernelMaterialization()
+	m.Native = &executionNativeMaterializationV1{Delta: executionNativeDeltaV1{
+		SchemaVersion: executionNativeDeltaSchemaV1,
+		Reconcile: nativeplan.Reconciliation{
+			Platform: platform.Keenetic, Target: &nativeplan.Plan{Platform: platform.Keenetic},
+		},
+	}}
+	live := &appliedRevision{Rev: "tested", BootID: "boot-before", Materialization: m}
+	if !s.liveNeedsRollbackOnBoot(live) {
+		t.Fatal("a native revision was discarded across a Keenetic reboot instead of being rolled back")
 	}
 }
 
@@ -366,7 +388,7 @@ func TestCurrentNativeInterfaceBindings(t *testing.T) {
 	}
 	m := applytest_materialization(ExecutionEnsureAbsent, ExecutionEnsureAbsent, ExecutionEnsureAbsent, true)
 	m.Native.Delta.Reconcile.Target.Decisions = []nativeplan.EndpointDecision{
-		{EndpointID: "wg1", Path: nativeplan.PathNativeCreate, Interface: "Wireguard10"},
+		{EndpointID: "wg1", Path: nativeplan.PathNativeCreate, Interface: "wr_0a1b2c3d"},
 		{EndpointID: "proxy", Path: nativeplan.PathCompatibility},
 	}
 	s.recordApplied(true, &appliedRevision{Rev: "c", At: 1, Materialization: *m})
@@ -375,10 +397,86 @@ func TestCurrentNativeInterfaceBindings(t *testing.T) {
 	if !known {
 		t.Fatal("an applied native plan is the authoritative mapping")
 	}
-	if bindings["wg1"] != "Wireguard10" {
-		t.Errorf("bindings = %v, want the assigned NDM interface", bindings)
+	if bindings["wg1"] != "wr_0a1b2c3d" {
+		t.Errorf("bindings = %v, want the interface OpenWrt runs it on", bindings)
 	}
 	if _, ok := bindings["proxy"]; ok {
 		t.Error("a compatibility endpoint has no kernel interface of its own")
+	}
+}
+
+// SRV-02: boot converge made two attempts 30 s apart and then only logged. Nothing else starts the
+// core, the plugins or the native plane, so a router whose first half minute was not enough (NDM still
+// settling, a tunnel device not up, no network yet) stayed without its VPN until somebody pressed
+// Apply, and nobody was told. It now keeps retrying with a backoff and reports the failure and the
+// recovery once each.
+func TestConvergeOnBoot_KeepsRetryingAfterTheTwoBootAttempts(t *testing.T) {
+	oldRetry, oldBackoff := applyConvergeRetry, applyConvergeBackoff
+	applyConvergeRetry = 10 * time.Millisecond
+	applyConvergeBackoff = []time.Duration{10 * time.Millisecond, 20 * time.Millisecond}
+	t.Cleanup(func() { applyConvergeRetry, applyConvergeBackoff = oldRetry, oldBackoff })
+
+	alerts := make(chan string, 8)
+	hook := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Text string `json:"text"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		alerts <- body.Text
+	}))
+	defer hook.Close()
+
+	s, fake := applytest_server(t)
+	s.allowInternalFetch = true // the webhook is a loopback httptest server
+	s.cfg.Watchdog.NotifyURL = hook.URL
+	s.recordApplied(true, &appliedRevision{Rev: "committed", At: 1, Materialization: applyboot_kernelMaterialization()})
+
+	// The core cannot start for the first four attempts: both of boot's and two of the retries.
+	const failing = 4
+	var mu sync.Mutex
+	attempts := 0
+	ops := *s.execOps
+	inner := ops.core
+	ops.core = func(ctx context.Context, artifact executionCoreArtifactV1) error {
+		mu.Lock()
+		attempts++
+		n := attempts
+		mu.Unlock()
+		if n <= failing {
+			return errors.New("network not up yet")
+		}
+		return inner(ctx, artifact)
+	}
+	s.execOps = &ops
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.convergeOnBoot(ctx) // returns after boot's two attempts, as before
+
+	deadline := time.Now().Add(10 * time.Second)
+	for s.kernelPlaneObserved() != kernelPlanePresent {
+		if time.Now().After(deadline) {
+			mu.Lock()
+			defer mu.Unlock()
+			t.Fatalf("the router was never converged: %d attempts, ops %v", attempts, fake.snapshot())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for i, want := range []string{"could not be restored", "was restored"} {
+		select {
+		case msg := <-alerts:
+			if !strings.Contains(msg, want) {
+				t.Errorf("alert %d = %q, want it to say %q", i+1, msg, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("alert %d (%q) was never sent", i+1, want)
+		}
+	}
+	// It stops once converged: no attempt after the one that worked.
+	time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts != failing+1 {
+		t.Errorf("attempts = %d, want %d", attempts, failing+1)
 	}
 }

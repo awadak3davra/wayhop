@@ -50,3 +50,20 @@ func TestBlockInternalDial(t *testing.T) {
 		}
 	}
 }
+
+// SEC-04: the router's own public addresses (its WAN address, a global IPv6 on an interface) pass the
+// internal-range predicate, but a connection to them never crosses the WAN firewall, so a feed that
+// redirects there would reach the panel, LuCI or NDM.
+func TestBlockInternalDialRefusesTheRoutersOwnAddresses(t *testing.T) {
+	withLocalAddrs(t, "203.0.113.7", "2001:db8:7::1")
+	for _, addr := range []string{"203.0.113.7:8088", "[::ffff:203.0.113.7]:80", "[2001:db8:7::1]:443"} {
+		if err := blockInternalDial("tcp", addr, nil); err == nil {
+			t.Errorf("%s is this router's own address: the guard must refuse it", addr)
+		}
+	}
+	for _, addr := range []string{"203.0.113.8:443", "[2001:db8:7::2]:443"} {
+		if err := blockInternalDial("tcp", addr, nil); err != nil {
+			t.Errorf("%s is not a local address: got %v", addr, err)
+		}
+	}
+}

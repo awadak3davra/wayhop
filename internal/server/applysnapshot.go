@@ -41,6 +41,7 @@ type DesiredInputsV1 struct {
 	GatewayAddr string `json:"gateway_addr"`
 
 	MixedPort   int    `json:"mixed_port"`
+	DNSPort     int    `json:"dns_port,omitempty"`
 	ClashAddr   string `json:"clash_addr"`
 	ClashSecret string `json:"clash_secret"`
 
@@ -146,6 +147,16 @@ func newDesiredSnapshot(cfg config.Config, profile model.Profile, profileGen uin
 	}, nil
 }
 
+// servedDNSPort is the DNS port as far as the generated config is concerned. Only a plane answering
+// clients uses it; zero otherwise keeps saved revisions as they were, so an update raises no unapplied
+// changes nobody made.
+func servedDNSPort(cfg config.Config, p model.Profile) int {
+	if p.DNS != nil && p.DNS.Enabled && p.DNS.ServeClients {
+		return cfg.Ports.DNS
+	}
+	return 0
+}
+
 func desiredInputsV1(cfg config.Config, profile model.Profile) DesiredInputsV1 {
 	return DesiredInputsV1{
 		Profile: desiredProfileInputsV1(profile),
@@ -161,6 +172,7 @@ func desiredInputsV1(cfg config.Config, profile model.Profile) DesiredInputsV1 {
 		GatewayAddr: cfg.GatewayAddr,
 
 		MixedPort:   cfg.Ports.Mixed,
+		DNSPort:     servedDNSPort(cfg, profile),
 		ClashAddr:   managedClashAddress(cfg),
 		ClashSecret: cfg.Clash.Secret,
 

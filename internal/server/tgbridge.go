@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -348,7 +347,7 @@ type tgBridgeIn struct {
 
 func (s *Server) handleTelegramBridgePut(w http.ResponseWriter, r *http.Request) {
 	var in tgBridgeIn
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := decodeJSONBody(r.Body, &in); err != nil {
 		writeErrNoStore(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -120,12 +121,9 @@ func (adapter *exactKernelAdapter) apply(
 		}
 		return nil
 	}
-	if _, err := adapter.runner.Run(ctx, string(artifact.Nft), "nft", "-f", "-"); err != nil {
-		return fmt.Errorf("%w: nft load: %v", errExactKernelArtifact, err)
-	}
 	rollback := func(primary error) error {
-		// The request may have been canceled after nft accepted the new table. Cleanup must not be
-		// skipped merely because the client disconnected, but it remains strictly bounded.
+		// The request may have been canceled after the first command changed the router. Cleanup must
+		// not be skipped merely because the client disconnected, but it remains strictly bounded.
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), exactKernelRollbackTimeout)
 		defer cancel()
 		if rollbackErr := adapter.teardown(cleanupCtx, artifact.Teardown); rollbackErr != nil {
@@ -133,23 +131,57 @@ func (adapter *exactKernelAdapter) apply(
 		}
 		return primary
 	}
-	// RenderTeardown starts with deletion of the nft table just installed. During replacement only
-	// the remaining ip-rule/route deletions run here; the nft program itself flushes/replaces its
-	// own table atomically.
-	for _, command := range artifact.Teardown[1:] {
+	// The plane converges in place, make-before-break (RT-01). Nothing of the running plane is deleted
+	// before the new one is complete: a deleted rule or a flushed table, the kill-switch blackhole
+	// included, sent every packet marked for it out of the WAN until the matching add ran.
+	//
+	// 1. Rules and routes first, while the running nft table still marks as before: an add the kernel
+	//    already holds is accepted, a replace overwrites. An egress whose mark (and so table) moves
+	//    finds its new rule, route and blackhole in place before the nft load sends it there.
+	// 2. The nft program, which replaces its own table atomically.
+	// 3. Only then the deletions: the RenderIP lines that remove stale state from a table the plane
+	//    keeps, and the retire list of rules and tables the new plane no longer names.
+	var cleanups []string
+	for _, command := range artifact.IP {
+		if err := context.Cause(ctx); err != nil {
+			return rollback(err)
+		}
+		if exactKernelIPCleanupCommand(command) {
+			cleanups = append(cleanups, command)
+			continue
+		}
+		if err := adapter.runCommand(ctx, command); err != nil {
+			if exactKernelRuleAlreadyPresent(command, err) {
+				continue
+			}
+			if exactKernelDeviceRouteMissingDevice(command, err) {
+				// The tunnel device is not there yet (boot before the endpoint resolves, amneziawg-go
+				// being relaunched). Rolling back here deletes the nft table and the kill-switch
+				// blackhole with every other egress's rules, which is the fail-open this plane exists
+				// to prevent. Only this route is skipped: the blackhole in the same table still
+				// installs, and restoreLostTableRoutes seeds the route once the device is up.
+				log.Printf("apply: kernel plane: %q skipped, the device does not exist yet: %v", command, err)
+				continue
+			}
+			return rollback(fmt.Errorf("%w: route install: %v", errExactKernelArtifact, err))
+		}
+	}
+	if err := context.Cause(ctx); err != nil {
+		return rollback(err)
+	}
+	if _, err := adapter.runner.Run(ctx, string(artifact.Nft), "nft", "-f", "-"); err != nil {
+		// nft rejects a program as a whole, so the running table still marks as before; what step 1
+		// changed is at most which tunnel a renumbered egress's table points at, and no blackhole was
+		// removed. A rollback here would delete that running table and hand everything to the WAN; the
+		// failed Apply re-runs its baseline over this instead.
+		return fmt.Errorf("%w: nft load: %v", errExactKernelArtifact, err)
+	}
+	for _, command := range cleanups {
 		if err := context.Cause(ctx); err != nil {
 			return rollback(err)
 		}
 		if err := adapter.runCommand(ctx, command); err != nil && !exactKernelAlreadyAbsent(command, err) {
 			return rollback(fmt.Errorf("%w: stale route cleanup: %v", errExactKernelArtifact, err))
-		}
-	}
-	for _, command := range artifact.IP {
-		if err := context.Cause(ctx); err != nil {
-			return rollback(err)
-		}
-		if err := adapter.runCommand(ctx, command); err != nil {
-			return rollback(fmt.Errorf("%w: route install: %v", errExactKernelArtifact, err))
 		}
 	}
 	for _, command := range artifact.Retire {
@@ -365,6 +397,48 @@ func exactKernelAlreadyAbsent(command string, err error) bool {
 		}
 	}
 	return false
+}
+
+// exactKernelDeviceRouteMissingDevice reports whether err is the one install failure that is not a
+// fault of the plane: a per-egress `ip [-6] route replace default dev <iface> table <n>` answered
+// with the device being absent. Any other command, and any other error on that command, stays fatal.
+func exactKernelDeviceRouteMissingDevice(command string, err error) bool {
+	if err == nil || errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	name, args, ok := exactKernelCommand(command)
+	if !ok || name != executionToolIP {
+		return false
+	}
+	if len(args) != 0 && args[0] == "-6" {
+		args = args[1:]
+	}
+	if len(args) != 7 || !slices.Equal(args[:4], []string{"route", "replace", "default", "dev"}) || args[5] != "table" {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "cannot find device") || strings.Contains(message, "no such device")
+}
+
+// exactKernelRuleAlreadyPresent reports whether err is an `ip [-6] rule add` refused because the
+// identical rule is installed (RTNETLINK EEXIST, kernel 4.18+ with NLM_F_EXCL, which iproute2 and
+// BusyBox both send). That is the converged state a re-apply asks for, not a fault. Any other command,
+// and any other error, stays fatal.
+func exactKernelRuleAlreadyPresent(command string, err error) bool {
+	if err == nil || errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	name, args, ok := exactKernelCommand(command)
+	if !ok || name != executionToolIP {
+		return false
+	}
+	if len(args) != 0 && args[0] == "-6" {
+		args = args[1:]
+	}
+	if len(args) < 2 || args[0] != "rule" || args[1] != "add" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "file exists")
 }
 
 func exactKernelIPCleanupCommand(command string) bool {

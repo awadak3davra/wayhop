@@ -632,3 +632,76 @@ func TestRunApply_OverAFailedApplyRetiresWhatTheCommittedOneLeft(t *testing.T) {
 		})
 	}
 }
+
+// SRV-03: the forward run used the HTTP request context. An Apply that reloads the core or re-creates
+// the tunnel the operator's own session rides on drops that connection; net/http then cancels the
+// context, the next step refused to start and the whole Apply was rolled back, on every retry. Once
+// the router may change, the run is detached from the request and finishes on its own bound.
+func TestRunApply_ALostClientDoesNotAbortTheRunMidWay(t *testing.T) {
+	s, fake := applytest_server(t)
+	apply_seedVLESS(t, s)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ops := *s.execOps
+	core, kernel := ops.core, ops.kernel
+	ops.core = func(c context.Context, artifact executionCoreArtifactV1) error {
+		err := core(c, artifact)
+		cancel() // the core reload took the panel's connection with it
+		return err
+	}
+	var kernelCtxErr error
+	kernelBounded := false
+	ops.kernel = func(c context.Context, target executionKernelArtifactV1, previous *executionKernelArtifactV1) error {
+		kernelCtxErr = context.Cause(c)
+		_, kernelBounded = c.Deadline()
+		return kernel(c, target, previous)
+	}
+	s.execOps = &ops
+
+	res, aerr := s.runApply(ctx, applyRequest{Save: true})
+	if aerr != nil {
+		t.Fatalf("the Apply was aborted when its client went away: %v (ops %v)", aerr.body(), fake.snapshot())
+	}
+	if kernelCtxErr != nil {
+		t.Errorf("the step after the disconnect ran on a cancelled context: %v", kernelCtxErr)
+	}
+	if !kernelBounded {
+		t.Error("the detached run must still be bounded by a deadline")
+	}
+	if committed := s.committedRevision(); committed == nil || committed.Rev != res.Rev {
+		t.Fatalf("the Apply must be committed: %+v", committed)
+	}
+	if rec, _ := s.applyStateSnapshot(); rec.InFlight != nil || !rec.Last.OK {
+		t.Errorf("record = %+v, want a finished, successful Apply", rec)
+	}
+}
+
+// Before anything is changed a cancelled request still stops the Apply: cancelling there is free.
+func TestRunApply_ARequestCancelledBeforeAnyChangeTouchesNothing(t *testing.T) {
+	s, fake := applytest_server(t)
+	apply_seedVLESS(t, s)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ops := *s.execOps
+	check := ops.checkCore
+	ops.checkCore = func(c context.Context, config []byte) error {
+		err := check(c, config)
+		cancel()
+		return err
+	}
+	s.execOps = &ops
+
+	if _, aerr := s.runApply(ctx, applyRequest{Save: true}); aerr == nil {
+		t.Fatal("an Apply whose request ended before the first change went ahead")
+	} else if aerr.RolledBack == nil || !*aerr.RolledBack {
+		t.Errorf("the refusal must say nothing was changed: %+v", aerr.body())
+	}
+	if got := strings.Join(fake.snapshot(), ","); got != "checkCore" {
+		t.Errorf("ops = %v, want only the config check", got)
+	}
+	if rec, _ := s.applyStateSnapshot(); rec.InFlight != nil || s.committedRevision() != nil {
+		t.Errorf("nothing may be recorded: %+v", rec)
+	}
+}

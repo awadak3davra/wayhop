@@ -334,6 +334,59 @@ func TestWireguardCommands_BareV6AllowIPs(t *testing.T) {
 	}
 }
 
+// NDM keeps an interface's IPv6 address under `ipv6 address <addr>/<len>` and prints it after the
+// MSS clamp, before the WireGuard settings (measured read-only on the test Keenetic, 2026-11-05); `ip
+// address` carries the IPv4 one only.
+func TestWireguardCommands_IPv6AddressUsesNDMsOwnCommand(t *testing.T) {
+	e := awgEndpoint()
+	e.Params["local_address"] = []string{"10.0.0.2/32", "fd00::2/64"}
+	cmds, err := WireguardCommands(e, WireguardOpts{Index: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mss, v6, key := idx(cmds, "ip tcp adjust-mss pmtu"), idx(cmds, "ipv6 address "), idx(cmds, "wireguard private-key ")
+	if v6 < 0 || cmds[v6] != "ipv6 address fd00::2/64" || mss > v6 || v6 > key {
+		t.Errorf("IPv6 address line wrong or out of place:\n%s", strings.Join(cmds, "\n"))
+	}
+	for _, c := range cmds {
+		if strings.HasPrefix(c, "ip address ") && strings.Contains(c, ":") {
+			t.Errorf("an IPv6 address was written under `ip address`: %q", c)
+		}
+	}
+}
+
+// The 2.0 tail the way the device prints it when the magic headers are unset (measured read-only on
+// the test Keenetic, 2026-11-05): eleven bare arguments, then five empty quoted strings. A bare "0" in an
+// I slot, which this used to write, is not what NDM prints for an unset one.
+func TestWireguardCommands_AWG2UnsetHeadersAreEmptyQuotedStrings(t *testing.T) {
+	e := awgEndpoint()
+	e.Params["s3"], e.Params["s4"] = 25, 40
+	cmds, err := WireguardCommands(e, WireguardOpts{Index: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := idx(cmds, "wireguard asc ")
+	if at < 0 || !strings.HasSuffix(cmds[at], ` 25 40 "" "" "" "" ""`) || len(strings.Fields(cmds[at])) != 2+16 {
+		t.Errorf("asc line wrong:\n%s", strings.Join(cmds, "\n"))
+	}
+}
+
+// A magic header with spaces goes out as a quoted string (QA-125), so one holding a quote or a
+// control character cannot be carried as it is. It is refused rather than changed (the quote used to
+// be dropped, the control character cut the line): a different header is a tunnel the server never
+// answers.
+func TestWireguardCommands_RefusesAMagicHeaderNDMCannotQuote(t *testing.T) {
+	for name, value := range map[string]string{
+		"quote": `0x11"0x22`, "newline": "0x11\nup", "nul": "0x11\x00", "delete": "0x11\x7f",
+	} {
+		e := awgEndpoint()
+		e.Params["i1"] = value
+		if _, err := WireguardCommands(e, WireguardOpts{Index: 5}); err == nil || !strings.Contains(err.Error(), "i1") {
+			t.Errorf("%s: err = %v, want a refusal naming i1", name, err)
+		}
+	}
+}
+
 // AWGGeneration is what `wireguard asc` carries, not a label: every setting of that generation or
 // older lands in its positional slot, and every newer one is refused by name rather than left out.
 func TestAWGGenerationIsWhatAscWrites(t *testing.T) {

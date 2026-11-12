@@ -165,16 +165,22 @@ func TestReimport_WireGuardValuesWinWhereverTheyLive(t *testing.T) {
 		delete(e.Params, "mtu")
 		delete(e.Params, "persistent_keepalive")
 	}
-	_, out := reimportOf(t, conf("MTU = 1420", "PersistentKeepalive = 25"), conf("MTU = 1280", ""), moved)
+	have, out := reimportOf(t, conf("MTU = 1420", "PersistentKeepalive = 25"), conf("MTU = 1280", ""), moved)
 	if out.MTU != 0 || out.Params["mtu"] != 1280 || out.PersistentKeepalive != 0 || out.Params["persistent_keepalive"] != nil {
 		t.Errorf(".conf: MTU %d/%v keepalive %d/%v, want the .conf's 1280 and no keepalive",
 			out.MTU, out.Params["mtu"], out.PersistentKeepalive, out.Params["persistent_keepalive"])
 	}
+	if got := ClearedWireGuardKnobs(have, out); !reflect.DeepEqual(got, []string{"persistent keepalive"}) {
+		t.Errorf(".conf cleared values = %v, want only persistent keepalive", got)
+	}
 	const wg = "wireguard://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA%3D@203.0.113.61:51820?publickey=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQ%3D&address=10.0.0.2/32"
-	_, out = reimportOf(t, wg+"&mtu=1420&keepalive=25#W", wg+"&mtu=1280#W", moved)
+	have, out = reimportOf(t, wg+"&mtu=1420&keepalive=25#W", wg+"&mtu=1280#W", moved)
 	if out.MTU != 0 || out.Params["mtu"] != 1280 || out.PersistentKeepalive != 0 || out.Params["persistent_keepalive"] != nil {
 		t.Errorf("wg://: MTU %d/%v keepalive %d/%v, want the link's 1280 and no keepalive",
 			out.MTU, out.Params["mtu"], out.PersistentKeepalive, out.Params["persistent_keepalive"])
+	}
+	if got := ClearedWireGuardKnobs(have, out); !reflect.DeepEqual(got, []string{"persistent keepalive"}) {
+		t.Errorf("wg:// cleared values = %v, want only persistent keepalive", got)
 	}
 }
 

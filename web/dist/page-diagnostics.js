@@ -502,7 +502,7 @@ async function renderDiagnostics(view) {
   const traceOut = el("div", { style: "margin-top:12px" });
   async function runTrace() {
     const d = (traceIn.value || "").trim();
-    if (!d) return;
+    if (!d) return traceIn.focus();
     traceOut.innerHTML = ""; traceOut.appendChild(el("div", { class: "hint" }, t("tracing…")));
     try {
       const r = await api.get("/api/diagnostics/trace?domain=" + encodeURIComponent(d));

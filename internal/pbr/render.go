@@ -468,9 +468,15 @@ const failClosedMetric = 1000
 // dropped while the tunnel was up (QA-096; measured in WSL: blackhole 1000 listed before dev 1024).
 const failClosedMetricV6 = 2048
 
-// RenderIP returns the idempotent `ip rule`/`ip route` (and symmetric `ip -6 rule`/
-// `ip -6 route` when the plan marks v6) commands to install the plan.
-// WAN-marked traffic (the bypass) needs no rule — it falls through to the main table.
+// RenderIP returns the `ip rule`/`ip route` (and symmetric `ip -6 rule`/`ip -6 route` when the
+// plan marks v6) commands to install the plan. WAN-marked traffic (the bypass) needs no rule — it
+// falls through to the main table.
+//
+// The list converges a router that already carries an earlier plane in place, with nothing deleted
+// first (RT-01): routes are `replace`d, an `ip rule add` the kernel answers with "File exists" is
+// already installed (the executor accepts that), and the only state a replace cannot overwrite, a
+// kill-switch blackhole left in a table whose egress no longer has one, is removed by its own `del`.
+// Rules and tables the new plan no longer names are retired after the install.
 func (pl *Plan) RenderIP(opt Options) []string {
 	opt.withDefaults()
 	v6 := pl.hasV6()
@@ -482,6 +488,10 @@ func (pl *Plan) RenderIP(opt Options) []string {
 		for _, x := range privateExcludesV6(opt) {
 			cmds = append(cmds, fmt.Sprintf("ip -6 rule add to %s lookup main priority %d", x.CIDR, x.Priority))
 		}
+	}
+	cmds = append(cmds, pl.unpinCommands(opt, false, "add")...)
+	if v6 {
+		cmds = append(cmds, pl.unpinCommands(opt, true, "add")...)
 	}
 	for i, e := range pl.nonWanEgresses() {
 		pref := opt.RulePref + i
@@ -508,6 +518,15 @@ func (pl *Plan) RenderIP(opt Options) []string {
 				cmds = append(cmds, fmt.Sprintf("ip route replace blackhole default metric %d table %d", failClosedMetric, e.Table))
 				if v6 {
 					cmds = append(cmds, fmt.Sprintf("ip -6 route replace blackhole default metric %d table %d", failClosedMetricV6, e.Table))
+				}
+			} else {
+				// No kill switch on this egress. The table is no longer flushed before the install, so a
+				// blackhole an earlier plane put here (its kill switch since turned off, or another egress
+				// that held this table) would keep dropping the traffic the operator now wants to fall
+				// back to the WAN. Usually absent; the executor accepts that.
+				cmds = append(cmds, fmt.Sprintf("ip route del blackhole default metric %d table %d", failClosedMetric, e.Table))
+				if v6 {
+					cmds = append(cmds, fmt.Sprintf("ip -6 route del blackhole default metric %d table %d", failClosedMetricV6, e.Table))
 				}
 			}
 		case EgressBlackhole:
@@ -539,6 +558,10 @@ func (pl *Plan) ipTeardown(opt Options) []string {
 		if v6 {
 			cmds = append(cmds, fmt.Sprintf("ip -6 route flush table %d", e.Table))
 		}
+	}
+	cmds = append(cmds, pl.unpinCommands(opt, false, "del")...)
+	if v6 {
+		cmds = append(cmds, pl.unpinCommands(opt, true, "del")...)
 	}
 	for _, x := range privateExcludes(opt) {
 		cmds = append(cmds, fmt.Sprintf("ip rule del to %s lookup main priority %d", x.CIDR, x.Priority))

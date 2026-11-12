@@ -18,9 +18,10 @@ type EffectivePath struct {
 	// Upstreams are the router's own resolv.conf nameservers: where the router's programs look names
 	// up, not where its forwarder sends LAN queries. On OpenWrt they are the stub pointing at the
 	// local dnsmasq, so Loops is judged from dnsmasq's configuration instead (see forwarderLoops).
-	Upstreams  []string `json:"upstreams,omitempty"`
-	Hijack53   bool     `json:"hijack53"`              // a nat REDIRECT/DNAT forces LAN :53 to a local resolver
-	Hijack53To string   `json:"hijack53_to,omitempty"` // the port/target the :53 redirect sends to
+	Upstreams    []string `json:"upstreams,omitempty"`
+	Hijack53     bool     `json:"hijack53"`              // a nat REDIRECT/DNAT forces LAN :53 to a local resolver
+	Hijack53To   string   `json:"hijack53_to,omitempty"` // the port/target the :53 redirect sends to
+	Hijack53Gaps []string `json:"hijack53_gaps,omitempty"`
 	// The two encrypted escape hatches, reported separately because only one of them is closable by
 	// port number. A rule on :853 stops DoT. DoH rides ordinary HTTPS on :443, so constraining it
 	// means naming the resolvers (an address set); a port rule cannot do it without breaking the web.
@@ -55,6 +56,73 @@ type EffectivePath struct {
 	// happened: it sends someone chasing a problem that may not exist, and teaches them to distrust
 	// the detector.
 	RulesUnknown bool `json:"rules_unknown,omitempty"`
+}
+
+// Planes that can answer a LAN client's lookup.
+const (
+	PlaneNative  = "native"  // the router's own resolver holds :53, and its upstreams decide where lookups go
+	PlaneCore    = "core"    // sing-box holds :53, so the profile's DNS plane answers clients
+	PlaneUnknown = "unknown" // nothing could be read about who holds :53
+)
+
+// Answering names the plane that answers clients on this router, as measured.
+//
+// The DNS page edits sing-box's resolvers and rules and reads as though they answer the LAN. They do
+// not, unless sing-box holds :53: the generator emits no DNS inbound and no hijack-dns, so with dnsmasq
+// on the port the profile's encrypted resolvers serve only sing-box's own lookups. Measured on a live
+// Keenetic: dns_secure in the profile, while every client query left in plaintext through dnsmasq.
+type Answering struct {
+	Plane   string `json:"plane"`
+	Process string `json:"process,omitempty"` // who holds :53, when netstat could say
+}
+
+// Answering reads the plane from the :53 listeners.
+func (ep EffectivePath) Answering() Answering {
+	native := ""
+	for _, l := range ep.Listeners {
+		switch {
+		case strings.HasPrefix(l.Process, "sing-box"):
+			return Answering{Plane: PlaneCore, Process: l.Process}
+		case l.Process != "" && native == "":
+			native = l.Process
+		}
+	}
+	if native == "" {
+		return Answering{Plane: PlaneUnknown}
+	}
+	return Answering{Plane: PlaneNative, Process: native}
+}
+
+// ListenerProbeAddr is the address to ask a :53 listener on: loopback when it listens there or on every
+// address, else the address it holds. "" when nothing listens on UDP.
+func ListenerProbeAddr(listeners []DNSListener) string {
+	other := ""
+	for _, l := range listeners {
+		if l.Proto != "udp" {
+			continue
+		}
+		host, port, err := net.SplitHostPort(l.Addr)
+		if err != nil {
+			if i := strings.LastIndex(l.Addr, ":"); i >= 0 { // netstat's ":::53" is no host:port
+				host, port = l.Addr[:i], l.Addr[i+1:]
+			} else {
+				continue
+			}
+		}
+		switch host {
+		case "0.0.0.0", "*", "", "127.0.0.1":
+			return net.JoinHostPort("127.0.0.1", port)
+		case "::", "::1", ":":
+			if other == "" {
+				other = net.JoinHostPort("::1", port)
+			}
+		default:
+			if other == "" || strings.HasPrefix(other, "[::1]") {
+				other = net.JoinHostPort(host, port)
+			}
+		}
+	}
+	return other
 }
 
 // DNSListener is one process listening on :53.
@@ -333,8 +401,9 @@ func RunEffectivePath(run Runner) EffectivePath {
 	listeners, _ := run("netstat", "-tulnp")
 	natRules, natErr := run("iptables", "-t", "nat", "-S")
 	filterRules, filErr := run("iptables", "-S")
-	addrs, _ := run("ip", "-o", "addr")
+	addrs, addrErr := run("ip", "-o", "addr")
 	ep := DetectEffectivePath(resolvConf, listeners, natRules, natRules+"\n"+filterRules)
+	v4 := readBypassRules(natRules, natRules+"\n"+filterRules)
 	// iptables told us nothing. Before declaring the firewall unreadable, try nftables: on an fw4
 	// OpenWrt there may be no iptables binary at all, and the ruleset is perfectly readable the
 	// other way. Only when BOTH fail is the firewall genuinely unknown.
@@ -362,13 +431,79 @@ func RunEffectivePath(run Runner) EffectivePath {
 	} else {
 		// IPv6 is judged on the iptables path only. nft's inet tables carry both families in one
 		// rule, and that path is reached only when there is no iptables to read.
-		checkIPv6(&ep, run, readBypassRules(natRules, natRules+"\n"+filterRules), addrs)
+		checkIPv6(&ep, run, v4, addrs)
+	}
+	// The bindings are read from iptables, so a router answered by nftables has none to compare.
+	if !ep.RulesUnknown && !rulesUnreadable(natRules, natErr, filterRules, filErr) {
+		defaultRoute, _ := run("ip", "route", "show", "default")
+		ep.Hijack53Gaps = detectHijack53Gaps(v4.routes[GapPlain53], addrs, addrErr, ep.RulesUnknown, defaultRoute)
 	}
 	// Loops are judged from where dnsmasq forwards. Ownership comes from the live address list: a
 	// listener bound to 0.0.0.0 proves the router serves DNS but not WHICH addresses it owns, so
 	// without it an upstream pointing at the router's own LAN IP would go unnoticed.
 	ep.Loops = forwarderLoops(run, ep.Listeners, parseOwnAddrs(addrs))
 	return ep
+}
+
+func routeUsesDev(routes, iface string) bool {
+	f := strings.Fields(routes)
+	for i := 0; i+1 < len(f); i++ {
+		if f[i] == "dev" && f[i+1] == iface {
+			return true
+		}
+	}
+	return false
+}
+
+// detectHijack53Gaps lists candidate LAN bridge interfaces (br* holding a private IPv4 address)
+// that no :53 redirect/DNAT rule sees. Empty when rules could not be read or address listing failed.
+func detectHijack53Gaps(routes routeRules, addrs string, addrErr error, rulesUnknown bool, defaultRoute string) []string {
+	if rulesUnknown || (addrErr != nil && strings.TrimSpace(addrs) == "") {
+		return nil
+	}
+	var candidates []string
+	seen := map[string]bool{}
+	for _, ln := range strings.Split(addrs, "\n") {
+		f := strings.Fields(ln)
+		if len(f) < 4 {
+			continue
+		}
+		iface := f[1]
+		if j := strings.IndexByte(iface, ':'); j >= 0 {
+			iface = iface[:j]
+		}
+		if j := strings.IndexByte(iface, '@'); j >= 0 {
+			iface = iface[:j]
+		}
+		// A bridge carrying the default route faces the provider, whatever its address looks like.
+		if !strings.HasPrefix(iface, "br") || seen[iface] || routeUsesDev(defaultRoute, iface) {
+			continue
+		}
+		for i := 2; i+1 < len(f); i++ {
+			if f[i] != "inet" {
+				continue
+			}
+			addr := f[i+1]
+			if j := strings.IndexByte(addr, '/'); j >= 0 {
+				addr = addr[:j]
+			}
+			ip := net.ParseIP(addr)
+			if ip != nil && ip.To4() != nil && ip.IsPrivate() {
+				seen[iface] = true
+				candidates = append(candidates, iface)
+				break
+			}
+		}
+	}
+	var gaps []string
+	for _, iface := range candidates {
+		// Only a rule catching every packet counts. NDM's own redirects name every bridge, but only for
+		// lookups addressed to the router, which is not interception.
+		if _, plain := routes.on(iface); !plain {
+			gaps = append(gaps, iface)
+		}
+	}
+	return gaps
 }
 
 // checkIPv6 holds the IPv4 verdict to IPv6 where the LAN can use it: on an interface with a

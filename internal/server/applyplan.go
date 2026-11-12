@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -215,6 +214,24 @@ func (s *Server) capabilitySet(ctx context.Context, refresh bool) platform.Capab
 	return s.caps.set
 }
 
+// forgetCapabilities drops the cached evaluation, so the next reader probes the host. An engine installed
+// or removed from Components changes what a connection save may accept, and the cache used to hold the
+// old answer for up to five minutes: a save right after installing sing-box was refused as "the sing-box
+// core is not installed" while the page said it was.
+func (s *Server) forgetCapabilities() {
+	s.caps.mu.Lock()
+	s.caps.set.ProbedAt = time.Time{}
+	s.caps.mu.Unlock()
+}
+
+// keepCapabilities stores an evaluation made outside capabilitySet, so the save gate reads what the
+// panel was just shown.
+func (s *Server) keepCapabilities(set platform.CapabilitySet) {
+	s.caps.mu.Lock()
+	s.caps.set = set
+	s.caps.mu.Unlock()
+}
+
 // runtimeFacts gathers the observations the pure evaluator cannot make for itself. It is asked when
 // the capability set is probed, so it probes the kernel-PBR plane afresh and keeps the answer for
 // every other reader (QA-129).
@@ -238,9 +255,9 @@ func (s *Server) runtimeFacts(ctx context.Context) platform.RuntimeFacts {
 		}
 	}
 
-	// Native DNS: reading is implemented for both supported platforms; write-back is NOT, and
-	// conflating them would put a control on screen that edits the router's own DNS with nothing
-	// behind it. Kept explicit so enabling write-back later is a deliberate edit here.
+	// Native DNS: reading is implemented for both supported platforms; Apply writes neither. On
+	// KeeneticOS the DNS page sets the upstream chain outside Apply, with its own trial, verification
+	// and rollback (nativedns/chain.go), so a plan that needed Apply to write it would still be refused.
 	switch platform.Detect() {
 	case platform.OpenWrt, platform.Keenetic:
 		rt.NativeDNSRead = true
@@ -261,12 +278,20 @@ func (s *Server) detectedPlatform() platform.Platform {
 
 // planCapabilities are the raw platform facts preflight judges the configuration against, with the
 // same accelerator override the apply path uses so both read one source of truth.
-func (s *Server) planCapabilities() platform.Capabilities {
+func (s *Server) planCapabilities(capset platform.CapabilitySet) platform.Capabilities {
 	caps := platform.DetectCapabilities()
 	if s.config().Demo {
 		caps = platform.DemoCapabilities()
 	}
 	caps.Accel = s.noteAccel(caps.Accel)
+	return withConfiguredCore(caps, capset.Usable(platform.CapEngineSingbox))
+}
+
+// withConfiguredCore counts the configured core as present. The PATH probe misses it where the updater
+// installs it (/opt/sbin on OpenWrt is not on the daemon's PATH), and the review then told the user to
+// install a sing-box that was running.
+func withConfiguredCore(caps platform.Capabilities, runnable bool) platform.Capabilities {
+	caps.SingboxPresent = caps.SingboxPresent || runnable
 	return caps
 }
 
@@ -435,7 +460,7 @@ func (s *Server) rawFindings(ctx context.Context, desired DesiredSnapshot, capse
 	}
 	// Preflight (routing mode / offload / protocols / DNS-path coherence) against the same host
 	// facts the apply path uses.
-	raw = append(raw, evaluatePlanFindings(capset, s.preflightFor(cfg, prof, s.planCapabilities(), s.offloadObservation(ctx).State))...)
+	raw = append(raw, evaluatePlanFindings(capset, s.preflightFor(cfg, prof, s.planCapabilities(capset), s.offloadObservation(ctx).State))...)
 	// The core is required by this datapath but cannot run: nothing else in the plan matters then.
 	coreRuns := s.datapathRequiresCore(cfg, prof)
 	if coreRuns && !capset.Usable(platform.CapEngineSingbox) {
@@ -448,6 +473,8 @@ func (s *Server) rawFindings(ctx context.Context, desired DesiredSnapshot, capse
 	}
 	raw = append(raw, s.endpointFindings(prof, capset)...)
 	raw = append(raw, unfetchedFeedFindings(&prof)...)
+	raw = append(raw, s.dnsPortFindings(cfg, prof)...)
+	raw = append(raw, s.dnsPlaneFindings(cfg, prof)...)
 	raw = append(raw, tlsFragmentFindings(&prof, desiredRoutingMode(cfg))...)
 	raw = append(raw, coreInlineSizeFindings(&prof, desiredRoutingMode(cfg))...)
 	raw = append(raw, coreOverrideFindings(cfg.CoreOverride, coreRuns, generator.DaemonUse{
@@ -759,7 +786,8 @@ func (s *Server) openWrtUserspaceMoves(prof model.Profile, capset platform.Capab
 		// A generic previous (no native plan) is not read here, although its AmneziaWG ran on
 		// WayHop's engine: the review cannot tell whether this Apply's native plan will compile at
 		// all, and a profile that stays generic moves nothing, so a blocker here could stop every
-		// Apply. The planner refuses the real move (genericPluginDevices), naming the same remedy.
+		// Apply. materialize refuses the real move on a plan that compiled (enginePluginMoves), naming
+		// the same remedy.
 		return moves
 	}
 	was := make(map[string]nativeplan.Path, len(previous.Decisions))
@@ -1506,6 +1534,18 @@ func findingTemplate(f PlanFinding) (code, title, detail, remedy string) {
 		return "PROFILE_INVALID", "The configuration is invalid",
 			"At least one enabled configuration object is incomplete or inconsistent.",
 			"Correct or disable the affected object, then review again."
+	case f.ID == "dns.port_busy":
+		return "DNS_PORT_BUSY", "The DNS port is taken",
+			"Answering devices needs this port on the router, and another program already holds it, so sing-box would not start.",
+			"Choose another DNS port in Settings, or switch off answering devices on the DNS page."
+	case f.ID == "dns.intercept.not_installed":
+		return "DNS_INTERCEPT_NOT_INSTALLED", "DNS interception is not installed here",
+			"WayHop installs the redirect only on KeeneticOS in hybrid or fast mode. Here a device with its own resolver still bypasses the router.",
+			"Redirect the LAN's port 53 to the router in its firewall, or switch interception off."
+	case f.ID == "dns.serve_clients.not_wired":
+		return "DNS_SERVE_CLIENTS_NOT_WIRED", "Devices do not ask WayHop's resolver",
+			"WayHop answers on the address shown, but it does not change dnsmasq on OpenWrt, so devices keep the router's own upstreams.",
+			"In DHCP and DNS, forward to the address shown and ignore the resolv file, or switch answering devices off."
 	case f.ID == "endpoint.credential":
 		return "Connection has no credential", "Connection cannot authenticate",
 			"An enabled connection is missing the secret its protocol authenticates with.",
@@ -2187,7 +2227,7 @@ func (s *Server) handleApplyAck(w http.ResponseWriter, r *http.Request) {
 		IDs   []string `json:"ids"`
 		Acked *bool    `json:"acked"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(r.Body, &body); err != nil {
 		writeErrNoStore(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}

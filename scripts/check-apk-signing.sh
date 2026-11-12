@@ -40,13 +40,14 @@ printf '#!/bin/sh\nexit 0\n' > "$work/dummy"
 chmod +x "$work/dummy"
 
 MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" docker run --rm --network none --read-only \
-  --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=64m \
+  --env HOST_OWNER="$(id -u):$(id -g)" --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=64m \
   -v "$(hostpath "$PWD"):/src:ro" \
   -v "$(hostpath "$work"):/w" -w /src "$APK_IMAGE" sh -euc '
   sh packaging/feed/pack-apk.sh /w/dummy 1.0.0 1 /w/feed x86_64
   cd /w/feed/apk/x86_64
   apk --allow-untrusted mkndx -o packages.adb ./*.apk
   cp packages.adb unsigned.adb
+  chown -R "$HOST_OWNER" /w
 ' >/dev/null
 
 dir="$work/feed/apk/x86_64"

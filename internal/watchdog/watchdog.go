@@ -52,6 +52,10 @@ type Stats struct {
 	LastRestart string `json:"last_restart,omitempty"` // RFC3339 UTC
 	LastError   string `json:"last_error,omitempty"`   // last restart error, if any
 	BackoffMS   int64  `json:"backoff_ms,omitempty"`   // current backoff window
+	// WedgeRestarts counts the live but stuck processes the wedge guard stopped (wedge.go). Each is
+	// also in Restarts, because the crash path is what brings the process back.
+	WedgeRestarts int    `json:"wedge_restarts,omitempty"`
+	LastWedge     string `json:"last_wedge,omitempty"` // RFC3339 UTC
 }
 
 // Watchdog supervises one Supervisor on a fixed tick.
@@ -71,13 +75,17 @@ type Watchdog struct {
 	// timing tests rely on; New() installs a real source for production.
 	rng func(n int64) int64
 
-	mu          sync.Mutex
-	restarts    int
-	failed      int
-	lastRestart time.Time
-	lastErr     string
-	backoff     time.Duration
-	nextAttempt time.Time
+	wedge wedgeGuard // see wedge.go
+
+	mu            sync.Mutex
+	restarts      int
+	failed        int
+	lastRestart   time.Time
+	lastErr       string
+	backoff       time.Duration
+	nextAttempt   time.Time
+	wedgeRestarts int
+	lastWedge     time.Time
 }
 
 // New builds a watchdog with router-friendly defaults (3s tick, 1s→60s backoff).
@@ -96,6 +104,7 @@ func New(name string, sup Supervisor) *Watchdog {
 			}
 			return rand.Int63n(n)
 		},
+		wedge: wedgeGuard{ticks: readCPUTicks, queues: readNetlinkQueues},
 	}
 }
 
@@ -152,6 +161,7 @@ func (w *Watchdog) tick() {
 			w.nextAttempt = time.Time{}
 		}
 		w.mu.Unlock()
+		w.checkWedge(now)
 		return
 	}
 
@@ -207,11 +217,15 @@ func (w *Watchdog) tick() {
 
 	if w.notify != nil {
 		msg := fmt.Sprintf("%s crashed — restart #%d (next backoff %s)", w.name, n, backoff)
+		if w.wedge.reason != "" {
+			msg = fmt.Sprintf("%s was wedged and has been restarted, restart #%d: %s", w.name, n, w.wedge.reason)
+		}
 		if err != nil {
 			msg = fmt.Sprintf("%s crashed — restart #%d FAILED: %v", w.name, n, err)
 		}
 		w.notify(msg)
 	}
+	w.wedge.reason = ""
 }
 
 // restart performs the crash-restart action and reports whether it turned out to
@@ -258,6 +272,10 @@ func (w *Watchdog) Stats() Stats {
 	}
 	if !w.lastRestart.IsZero() {
 		st.LastRestart = w.lastRestart.UTC().Format(time.RFC3339)
+	}
+	st.WedgeRestarts = w.wedgeRestarts
+	if !w.lastWedge.IsZero() {
+		st.LastWedge = w.lastWedge.UTC().Format(time.RFC3339)
 	}
 	return st
 }

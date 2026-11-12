@@ -154,6 +154,17 @@ type Options struct {
 	// name absent here is warned about and not kernel-routed. Empty off KeeneticOS, so no other plane
 	// can produce such a zone.
 	NDMPolicies map[string]uint32
+
+	// Devices names, per endpoint ID, the kernel device the router really carries an endpoint on
+	// when that is not the name KernelIface derives. KeeneticOS is the case: an AmneziaWG endpoint
+	// NDM creates as `interface WireguardN` lives on device nwgN, and the wr_* name derived from its
+	// id is a device only WayHop's own AmneziaWG engine creates: a table seeded with it stays empty.
+	// Nil (OpenWrt, whose native interfaces carry the derived wr_* name on purpose) leaves every
+	// device as derived, so the plan is byte-identical.
+	//
+	// It only RENAMES a device (see KernelDevice): an endpoint KernelIface does not route stays
+	// unrouted, so the kernel/proxy partition the generator shares with Compile does not move.
+	Devices map[string]string
 }
 
 func (o *Options) withDefaults() {
@@ -182,6 +193,20 @@ func (o *Options) withDefaults() {
 // generator's hybrid-split classifier uses the IDENTICAL kernel/proxy test as Compile
 // (no drift: the two planes must partition the same set of outbounds).
 func KernelIface(e *model.Endpoint) string { return kernelIface(e) }
+
+// KernelDevice is KernelIface with the router's own device names applied (see Options.Devices):
+// the device an endpoint's kernel-routed traffic actually leaves through. It is "" exactly when
+// KernelIface is "", so it can rename a device but never make a proxy endpoint kernel-routed.
+func KernelDevice(e *model.Endpoint, devices map[string]string) string {
+	derived := kernelIface(e)
+	if derived == "" {
+		return ""
+	}
+	if device := devices[e.ID]; device != "" {
+		return device
+	}
+	return derived
+}
 
 // kernelIface returns the kernel interface name an endpoint routes out through, or ""
 // if the endpoint is not a kernel-plane (interface-backed) engine.
@@ -275,6 +300,21 @@ func Compile(p *model.Profile, opt Options) (*Plan, []Warning, error) {
 	if p == nil {
 		return nil, nil, fmt.Errorf("nil profile")
 	}
+	// A device name is rendered unquoted into shell (`ip route add default dev <name>`, run by the
+	// Keenetic plane's sh) and into nft, so it gets the same real-interface-name test as the offload
+	// devices. Refused, not skipped: dropping a name would fall back to the derived device, which is
+	// the empty table this option exists to prevent.
+	deviceIDs := make([]string, 0, len(opt.Devices))
+	for id := range opt.Devices {
+		deviceIDs = append(deviceIDs, id)
+	}
+	sort.Strings(deviceIDs)
+	for _, id := range deviceIDs {
+		if !validOffloadDev.MatchString(opt.Devices[id]) {
+			return nil, nil, fmt.Errorf("endpoint %q: kernel device %q is not an interface name", id, opt.Devices[id])
+		}
+	}
+	device := func(e *model.Endpoint) string { return KernelDevice(e, opt.Devices) }
 	plan := &Plan{Table: opt.Table, Mask: opt.MarkMask, Zones: []Zone{}}
 	var warns []Warning
 	warn := func(scope, msg string) { warns = append(warns, Warning{Scope: scope, Msg: msg}) }
@@ -295,7 +335,7 @@ func Compile(p *model.Profile, opt Options) (*Plan, []Warning, error) {
 			return "", "", false
 		}
 		if e := p.EndpointByID(tag); e != nil {
-			if ifc := kernelIface(e); ifc != "" {
+			if ifc := device(e); ifc != "" {
 				return EgressInterface, ifc, true
 			}
 			warn(scope, "outbound "+tag+" is a proxy endpoint (userspace plane) — not kernel-routed")
@@ -316,7 +356,7 @@ func Compile(p *model.Profile, opt Options) (*Plan, []Warning, error) {
 				seen[grp.ID] = true
 				for _, m := range grp.Members {
 					if me := p.EndpointByID(m); me != nil {
-						if ifc := kernelIface(me); ifc != "" {
+						if ifc := device(me); ifc != "" {
 							return ifc
 						}
 						continue
@@ -632,7 +672,7 @@ func Compile(p *model.Profile, opt Options) (*Plan, []Warning, error) {
 	// tunnel, iface in Params) AND EngineAmneziaWG (WR's own wr-* device): forwarded LAN
 	// packets leave with their RFC1918 source, so without a MASQUERADE the tunnel peer has no
 	// return route and every LAN client on that zone is black-holed. Drive the masq set off
-	// the SAME kernelIface() test that builds the egress zones so the two never diverge.
+	// the SAME device() resolution that builds the egress zones so the two never diverge.
 	{
 		seen := map[string]bool{}
 		for i := range p.Endpoints {
@@ -640,7 +680,7 @@ func Compile(p *model.Profile, opt Options) (*Plan, []Warning, error) {
 			if !e.Enabled {
 				continue
 			}
-			if ifc := kernelIface(e); ifc != "" && !seen[ifc] {
+			if ifc := device(e); ifc != "" && !seen[ifc] {
 				seen[ifc] = true
 				plan.MasqIfaces = append(plan.MasqIfaces, ifc)
 			}

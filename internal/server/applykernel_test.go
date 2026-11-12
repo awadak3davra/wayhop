@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -83,9 +84,21 @@ func TestExactKernelAdapterConsumesCapturedArtifactInOrder(t *testing.T) {
 	if err := adapter.apply(context.Background(), artifact); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"nft -f -"}
-	want = append(want, artifact.Teardown[1:]...)
-	want = append(want, artifact.IP...)
+	// Rules and routes, then the nft program, then the deletions; nothing of the running plane is
+	// removed before the new one is complete (RT-01).
+	var want, cleanups []string
+	for _, command := range artifact.IP {
+		if exactKernelIPCleanupCommand(command) {
+			cleanups = append(cleanups, command)
+		} else {
+			want = append(want, command)
+		}
+	}
+	if len(cleanups) == 0 {
+		t.Fatal("fixture has no in-place cleanup command")
+	}
+	want = append(want, "nft -f -")
+	want = append(want, cleanups...)
 	if len(artifact.Offload) != 0 {
 		want = append(want, "nft -f -")
 	}
@@ -94,9 +107,64 @@ func TestExactKernelAdapterConsumesCapturedArtifactInOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(runner.calls, want) || runner.stdin[0] != string(artifact.Nft) ||
+	nftAt := slices.Index(runner.calls, "nft -f -")
+	if !reflect.DeepEqual(runner.calls, want) || nftAt < 0 || runner.stdin[nftAt] != string(artifact.Nft) ||
 		runner.stdin[len(runner.stdin)-1] != proof {
-		t.Fatalf("calls = %#v\nstdin[0] = %q\nwant calls = %#v", runner.calls, runner.stdin[0], want)
+		t.Fatalf("calls = %#v\nwant calls = %#v", runner.calls, want)
+	}
+}
+
+// RT-01: a re-apply over the running plane converges in place. The kernel answers every rule the
+// plane already holds with "File exists" and every stale-state delete with "No such process"; the
+// apply must accept both, and must never delete a rule or flush a table it keeps, the kill-switch
+// blackhole above all, so no marked packet can fall through to the main table (the WAN) meanwhile.
+func TestExactKernelAdapterReapplyConvergesInPlace(t *testing.T) {
+	artifact := exactKernelTestArtifact()
+	artifact.Plan.Egresses[1].FailClosed = true
+	artifact.Plan.Zones[0].V4 = append(artifact.Plan.Zones[0].V4, "10.77.0.0/16") // a listed private range (RT-09 rules)
+	artifact.Nft = []byte(artifact.Plan.RenderNft())
+	artifact.IP = artifact.Plan.RenderIP(pbr.Options{})
+	artifact.Offload = []byte(artifact.Plan.RenderOffload())
+	artifact.Teardown = artifact.Plan.RenderTeardown(pbr.Options{})
+	exists := errors.New("exit status 2: RTNETLINK answers: File exists")
+	runner := &exactKernelRecordRunner{fail: map[string]error{" rule add ": exists}}
+	adapter, _ := newExactKernelAdapter(runner)
+	if err := adapter.apply(context.Background(), artifact); err != nil {
+		t.Fatalf("re-apply over the installed plane failed: %v\ncalls = %#v", err, runner.calls)
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(call, " del ") || strings.Contains(call, " flush ") || strings.HasPrefix(call, "nft delete") {
+			t.Fatalf("re-apply removed part of the running plane: %q\ncalls = %#v", call, runner.calls)
+		}
+	}
+	blackhole := "ip route replace blackhole default metric 1000 table 100"
+	if b, n := slices.Index(runner.calls, blackhole), slices.Index(runner.calls, "nft -f -"); b < 0 || n < 0 || b > n {
+		t.Fatalf("the kill-switch blackhole must be in place before the nft load (blackhole %d, nft %d): %#v", b, n, runner.calls)
+	}
+
+	// Turning the kill switch off: the blackhole is removed by its own delete, after the nft load, and
+	// "already gone" is the normal answer.
+	off := exactKernelTestArtifact()
+	del := "ip route del blackhole default metric 1000 table 100"
+	if !slices.Contains(off.IP, del) {
+		t.Fatalf("fixture without kill switch renders no stale-blackhole delete: %#v", off.IP)
+	}
+	runner = &exactKernelRecordRunner{fail: map[string]error{
+		" rule add ": exists, del: errors.New("exit status 2: RTNETLINK answers: No such process"),
+	}}
+	adapter, _ = newExactKernelAdapter(runner)
+	if err := adapter.apply(context.Background(), off); err != nil {
+		t.Fatalf("an absent stale blackhole failed the apply: %v", err)
+	}
+	if d, n := slices.Index(runner.calls, del), slices.Index(runner.calls, "nft -f -"); d < 0 || d < n {
+		t.Fatalf("the stale-blackhole delete must run after the nft load (del %d, nft %d): %#v", d, n, runner.calls)
+	}
+
+	// "File exists" is accepted only for a rule add; on a route it is still a fault.
+	if !exactKernelRuleAlreadyPresent("ip -6 rule add fwmark 0x1/0xff table 100 priority 150", exists) ||
+		exactKernelRuleAlreadyPresent("ip route add default dev awg0 table 100", exists) ||
+		exactKernelRuleAlreadyPresent("ip rule add fwmark 0x1/0xff table 100 priority 150", errors.New("Operation not permitted")) {
+		t.Fatal("exactKernelRuleAlreadyPresent accepts the wrong command or error")
 	}
 }
 
@@ -284,5 +352,64 @@ func TestExactKernelAlreadyAbsentNeverHidesMissingExecutable(t *testing.T) {
 	}
 	if exactKernelAlreadyAbsent("ip rule add fwmark 0x1", busyBoxMissing) {
 		t.Fatal("an add failure was treated as an idempotent cleanup miss")
+	}
+}
+
+// SRV-01: a tunnel device that does not exist yet (boot before the endpoint resolves, amneziawg-go
+// being relaunched) fails only its own `default dev` route. The adapter used to answer that with the
+// full teardown, deleting the nft table and the kill-switch blackhole of the same table: marked
+// traffic then left by the WAN until the device came up.
+func TestExactKernelAdapterKeepsThePlaneWhenATunnelDeviceIsMissing(t *testing.T) {
+	artifact := exactKernelTestArtifact()
+	artifact.Plan.Egresses[1].FailClosed = true
+	artifact.Nft = []byte(artifact.Plan.RenderNft())
+	artifact.IP = artifact.Plan.RenderIP(pbr.Options{})
+	artifact.Offload = []byte(artifact.Plan.RenderOffload())
+	artifact.Teardown = artifact.Plan.RenderTeardown(pbr.Options{})
+	const route = "ip route replace default dev awg0 table 100"
+	blackhole := ""
+	for _, command := range artifact.IP {
+		if strings.Contains(command, "route replace blackhole default") && strings.HasSuffix(command, "table 100") {
+			blackhole = command
+		}
+	}
+	if !slices.Contains(artifact.IP, route) || blackhole == "" {
+		t.Fatalf("fixture has no device route with a kill-switch blackhole: %#v", artifact.IP)
+	}
+
+	runner := &exactKernelRecordRunner{fail: map[string]error{
+		route: errors.New(`exit status 1: Cannot find device "awg0"`),
+	}}
+	adapter, _ := newExactKernelAdapter(runner)
+	if err := adapter.apply(context.Background(), artifact); err != nil {
+		t.Fatalf("a missing tunnel device failed the whole plane: %v", err)
+	}
+	if slices.Contains(runner.calls, artifact.Teardown[0]) {
+		t.Fatalf("the nft table was deleted for one missing device: %#v", runner.calls)
+	}
+	if !slices.Contains(runner.calls, blackhole) {
+		t.Fatalf("the kill-switch blackhole was not installed: %#v", runner.calls)
+	}
+	proof, err := exactKernelProofProgram(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runner.stdin[len(runner.stdin)-1] != proof {
+		t.Fatal("the plane was not completed with its proof marker")
+	}
+
+	// Any other failure of that line, and that failure on any other line, is still a fault.
+	for command, failure := range map[string]error{
+		route:     errors.New("exit status 2: RTNETLINK answers: Operation not permitted"),
+		blackhole: errors.New(`exit status 1: Cannot find device "awg0"`),
+	} {
+		runner := &exactKernelRecordRunner{fail: map[string]error{command: failure}}
+		adapter, _ := newExactKernelAdapter(runner)
+		if err := adapter.apply(context.Background(), artifact); err == nil {
+			t.Fatalf("%q failing with %v was tolerated", command, failure)
+		}
+		if !slices.Contains(runner.calls, artifact.Teardown[0]) {
+			t.Fatalf("%q failing with %v did not roll the plane back", command, failure)
+		}
 	}
 }

@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"net"
 	"net/http"
 	"strconv"
@@ -33,7 +32,7 @@ func (s *Server) handleProbeTLS(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Host string `json:"host"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(r.Body, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}

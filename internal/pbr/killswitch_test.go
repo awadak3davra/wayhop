@@ -57,8 +57,13 @@ func TestKillSwitchFailClosed(t *testing.T) {
 	}
 
 	planOff, cmdsOff := build(false)
-	if strings.Contains(cmdsOff, "blackhole default metric") {
+	if strings.Contains(cmdsOff, "replace blackhole default metric") {
 		t.Errorf("a group without kill_switch must not render a blackhole fallback:\n%s", cmdsOff)
+	}
+	// RT-01: the install no longer flushes the table first, so it removes a blackhole an earlier
+	// kill-switched plane left there itself.
+	if !strings.Contains(cmdsOff, "ip route del blackhole default metric 1000 table") {
+		t.Errorf("a group without kill_switch must remove a stale blackhole fallback:\n%s", cmdsOff)
 	}
 	if strings.Contains(planOff.RenderIPScript(Options{}), "blackhole default metric") {
 		t.Errorf("ipset plane without kill_switch must not render a blackhole fallback")

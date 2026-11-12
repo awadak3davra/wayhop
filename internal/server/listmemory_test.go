@@ -1,8 +1,12 @@
 package server
 
 import (
+	"net/http"
 	"reflect"
+	"strings"
 	"testing"
+
+	"wayhop/internal/platform"
 )
 
 // The real shape, taken from a live router: the firmware keeps a dozen sets of its own
@@ -97,5 +101,17 @@ func TestParseIpsetSizesKeepsSetNames(t *testing.T) {
 	got := parseIpsetSizes(ipsetTerseFixture, want)
 	if len(got) != 1 || !reflect.DeepEqual([]string{got[0].set}, []string{"wr_list_cidr_telegram_4"}) {
 		t.Fatalf("set name lost: %+v", got)
+	}
+}
+
+// OpenWrt holds the sets in nftables: not measured, and saying why, not "the plane is not installed".
+func TestListMemoryOnOpenWrtSaysNftables(t *testing.T) {
+	s := opshandlers_server(t)
+	s.cfg.Demo = false
+	s.platformOf = func() platform.Platform { return platform.OpenWrt }
+	w := tgDo(t, s, http.MethodGet, "/api/pbr/lists/memory", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"reason":"nft"`) ||
+		!strings.Contains(w.Body.String(), `"measured":false`) {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
 }

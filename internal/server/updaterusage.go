@@ -84,3 +84,20 @@ func encryptedDNSTags(prof model.Profile) []string {
 	sort.Strings(out)
 	return out
 }
+
+// routesThroughCore is whether the core carries this profile's routing itself, with no connection or
+// DNS server that needs it on its own account: a routing mode other than fast, a domain rule, a default
+// through a tunnel. Seen on an emulated OpenWrt: a profile of WireGuard connections in a failover group
+// could not be applied without sing-box, while its row said "Nothing in this profile uses it. Removing
+// it frees the space and changes no routing". A profile with no enabled connection routes nothing.
+func routesThroughCore(prof model.Profile, datapathNeedsCore bool) bool {
+	if !datapathNeedsCore {
+		return false
+	}
+	for _, e := range prof.Endpoints {
+		if e.Enabled {
+			return true
+		}
+	}
+	return false
+}

@@ -48,7 +48,7 @@ func TestTargetsPreferAuthenticatedNativeInterfaceBindings(t *testing.T) {
 	m.SetNativeInterfaceResolver(func() (map[string]string, bool) {
 		return map[string]string{
 			"openwrt-wg":   "wr_12345678",
-			"keenetic-awg": "Wireguard12",
+			"keenetic-awg": "nwg12",
 		}, true
 	})
 	byID := map[string]target{}
@@ -58,8 +58,8 @@ func TestTargetsPreferAuthenticatedNativeInterfaceBindings(t *testing.T) {
 	if got := byID["openwrt-wg"].iface; got != "wr_12345678" {
 		t.Errorf("OpenWrt native WG iface = %q, want authenticated wr_* identity", got)
 	}
-	if got := byID["keenetic-awg"].iface; got != "Wireguard12" {
-		t.Errorf("Keenetic native AWG iface = %q, want authenticated NDM identity", got)
+	if got := byID["keenetic-awg"].iface; got != "nwg12" {
+		t.Errorf("Keenetic native AWG iface = %q, want the authenticated kernel device", got)
 	}
 	if got := byID["proxy"].iface; got != "" {
 		t.Errorf("OpenWrt compatibility endpoint invented iface %q", got)

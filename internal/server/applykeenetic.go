@@ -41,9 +41,10 @@ const (
 	exactKeeneticNDMCTimeout     = 20 * time.Second
 	exactKeeneticNDMCOutputLimit = 1 << 20
 	exactKeeneticCompatibilityIF = "wrtun0"
+	exactKeeneticPeerCommand     = "wireguard peer "
 	// exactKeeneticPeerIndent is the one indentation a command may carry: what keenetic.
 	// WireguardCommands puts before a peer's own settings, which belong to the `wireguard peer` line
-	// above them (validExactKeeneticCommands).
+	// above them (flattenExactKeeneticBatch).
 	exactKeeneticPeerIndent = "    "
 )
 
@@ -64,8 +65,13 @@ func newExactKeeneticNDMCRunner() *exactKeeneticNDMCRunner {
 }
 
 func (runner *exactKeeneticNDMCRunner) ParseBatch(ctx context.Context, commands []string) ([]byte, error) {
-	if runner == nil || runner.run == nil || len(commands) == 0 ||
-		len(commands) > exactKeeneticMaxCommands || !validExactKeeneticCommands(commands, false) {
+	if runner == nil || runner.run == nil {
+		return nil, errExactKeeneticPlan
+	}
+	// Every line is checked and flattened before the first one runs, so a batch the transport cannot
+	// carry is refused whole instead of failing halfway through the router.
+	lines, ok := flattenExactKeeneticBatch(commands)
+	if !ok {
 		return nil, errExactKeeneticPlan
 	}
 	if err := context.Cause(ctx); err != nil {
@@ -80,30 +86,11 @@ func (runner *exactKeeneticNDMCRunner) ParseBatch(ctx context.Context, commands 
 	//
 	// `-c` accepts exactly one command, so a block has to be flattened: KeeneticOS takes the full
 	// path in one line (`interface Wireguard0 description …` is accepted and saved), which is how the
-	// context that the interactive session used to provide is carried instead.
-	//
-	// A peer's own settings are one context deeper: the compiler indents them under `wireguard peer
-	// <key>` (keenetic.WireguardCommands), so on one line each carries that peer's full path, `interface
-	// WireguardN wireguard peer <key> endpoint …`. Prefixing only the interface would hand NDM
-	// `interface WireguardN endpoint …`, a command the interface context does not have (QA-121).
+	// context that the interactive session used to provide is carried instead. How a block nests,
+	// including a peer's own settings one context deeper (QA-121), is flattenExactKeeneticBatch's
+	// business.
 	var out strings.Builder
-	prefix, peer := "", ""
-	for _, command := range commands {
-		line := command
-		switch {
-		case strings.HasPrefix(command, "interface "):
-			prefix, peer = command, ""
-		case strings.HasPrefix(command, exactKeeneticPeerIndent):
-			if peer == "" {
-				return nil, errExactKeeneticPlan
-			}
-			line = peer + " " + strings.TrimPrefix(command, exactKeeneticPeerIndent)
-		case prefix != "":
-			line, peer = prefix+" "+command, ""
-			if strings.HasPrefix(command, "wireguard peer ") {
-				peer = line
-			}
-		}
+	for _, line := range lines {
 		output, err := runner.run(ctx, "", exactKeeneticNDMCPath, "-c", line)
 		if err != nil || exactKeeneticSemanticFailure(output) {
 			return nil, errExactKeeneticApply
@@ -538,16 +525,25 @@ func (adapter *exactKeeneticNativeAdapter) leftAsIs(plan *keenetic.Plan) map[str
 	return adapter.left[exactKeeneticPlanKey(plan)]
 }
 
+// ndmSectionLine is one line of an `interface` section of running-config, whitespace-normalized,
+// and whether it sits a level below the section's own commands (inside a `wireguard peer` group).
+type ndmSectionLine struct {
+	nested bool
+	text   string
+}
+
 // ndmInterfaceSection returns the lines the running config prints inside the section header opens,
 // normalized and without NDM's `!` context separators, and whether that section exists. A section
-// runs to the `!` that closes it at the left margin, or to the next interface header.
-func ndmInterfaceSection(running, header string) ([]string, bool) {
+// runs to the `!` that closes it at the left margin, or to the next interface header. NDM prints a
+// section's commands one level in and a peer's commands a level deeper; depth is read against the
+// section's first line, so the width of the indent does not matter.
+func ndmInterfaceSection(running, header string) ([]ndmSectionLine, bool) {
 	want := normalizeNDMCommand(header)
 	if want == "" {
 		return nil, false
 	}
-	var section []string
-	found := false
+	var section []ndmSectionLine
+	found, base := false, -1
 	for _, raw := range strings.Split(running, "\n") {
 		normalized := normalizeNDMCommand(raw)
 		margin := raw != "" && raw[0] != ' ' && raw[0] != '\t'
@@ -558,20 +554,28 @@ func ndmInterfaceSection(running, header string) ([]string, bool) {
 		if margin && (normalized == "!" || strings.HasPrefix(normalized, "interface ")) {
 			break
 		}
-		if normalized != "" && normalized != "!" {
-			section = append(section, normalized)
+		if normalized == "" || normalized == "!" {
+			continue
 		}
+		indent := len(raw) - len(strings.TrimLeft(raw, " \t"))
+		if base < 0 {
+			base = indent
+		}
+		section = append(section, ndmSectionLine{nested: indent > base, text: normalized})
 	}
 	return section, found
 }
 
-// verifyExactKeeneticInterfaceBlock holds a block to its own lines, in their order, inside the
-// section its header opens. Lines printed between them do not count against it: NDM prints settings
-// of its own, and on an interface that outlives an Apply the operator may have attached more in
-// KeeneticOS (an `ip access-group`, between `ip mtu` and `ip tcp`). Requiring the block as one
-// unbroken run of lines failed such an interface, and the failure path then deleted it.
+// verifyExactKeeneticInterfaceBlock holds a block to its own lines, in their order and at their
+// depth, inside the section its header opens, and every peer line inside the group its `wireguard
+// peer` line opened. Lines printed between them do not count against it: NDM prints settings of its
+// own, and on an interface that outlives an Apply the operator may have attached more in KeeneticOS
+// (an `ip access-group`, between `ip mtu` and `ip tcp`). Requiring the block as one unbroken run of
+// lines failed such an interface, and the failure path then deleted it. A line that is missing,
+// reordered or moved out of its peer still fails: with the indentation normalized away, a peer's
+// `connect` printed after its group closed, or found only under another peer, used to pass.
 //
-// A secret is never expected back (exactKeeneticSecretLine): `show running-config` does not print it.
+// A secret is never expected back (exactKeeneticPrintedLine): `show running-config` does not print it.
 //
 // skipGlobal leaves the block's `ip global` line out. That value belongs to the ladder wherever one
 // governs the interface, and the ladder is verified by reading the priority back, not as a line of
@@ -584,35 +588,54 @@ func verifyExactKeeneticInterfaceBlock(block []string, running string, skipGloba
 	if !ok {
 		return false
 	}
-	expected := make([]string, 0, len(block)-1)
+	expected := make([]ndmSectionLine, 0, len(block)-1)
 	for _, command := range block[1:] {
-		normalized := normalizeNDMCommand(command)
-		if normalized == "" {
+		want, printed := exactKeeneticPrintedLine(command, skipGlobal)
+		if want.text == "" {
 			return false
 		}
-		if (skipGlobal && strings.HasPrefix(normalized, "ip global ")) || exactKeeneticSecretLine(normalized) {
-			continue
+		if printed {
+			expected = append(expected, want)
 		}
-		expected = append(expected, normalized)
 	}
 	next := 0
 	for _, line := range section {
-		if next < len(expected) && line == expected[next] {
+		if next == len(expected) {
+			break
+		}
+		if line == expected[next] {
 			next++
+			continue
+		}
+		// A peer's line is looked for only inside its peer group: reaching a line of the interface
+		// itself means the group ended without it.
+		if expected[next].nested && !line.nested {
+			return false
 		}
 	}
 	return next == len(expected)
 }
 
-// exactKeeneticSecretLine names the block lines that carry a key (normalized form). KeeneticOS
-// keeps them out of `show running-config`: KeeneticOS 5.1.8 prints no `wireguard private-key`
-// for any of its five WireGuard interfaces. It prints no `preshared-key` under any peer either;
-// whether any of them has one cannot be told from that, so a pre-shared key is treated the same
-// way. Expecting a key back failed every new tunnel after it was created (and the failure path then
+// exactKeeneticPrintedLine is a block command as running-config shows it (normalized, at its depth),
+// or false for a line NDM never prints back. KeeneticOS keeps the keys out of `show running-config`:
+// KeeneticOS 5.1.8 prints no `wireguard private-key` for any of its five WireGuard interfaces, and the
+// test Keenetic none for its six (2026-11-05). Neither prints a `preshared-key` under any peer;
+// whether any of them has one cannot be told from that, so a pre-shared key is treated the same way.
+// Expecting a key back failed every new tunnel after it was created (and the failure path then
 // deleted it) and read every kept one as changed. Nothing can verify a key by reading the
-// configuration; the block that carries it is still sent whole.
-func exactKeeneticSecretLine(normalized string) bool {
-	return strings.HasPrefix(normalized, "wireguard private-key ") || strings.HasPrefix(normalized, "preshared-key ")
+// configuration (the key is checked against `show interface` instead); the block that carries it is
+// still sent whole. Each is left out only at its own depth: the private key on the interface, the
+// pre-shared key under its peer.
+func exactKeeneticPrintedLine(command string, skipGlobal bool) (ndmSectionLine, bool) {
+	sub, nested := strings.CutPrefix(command, exactKeeneticPeerIndent)
+	line := ndmSectionLine{nested: nested, text: normalizeNDMCommand(sub)}
+	switch {
+	case !nested && strings.HasPrefix(line.text, "wireguard private-key "),
+		nested && strings.HasPrefix(line.text, "preshared-key "),
+		!nested && skipGlobal && strings.HasPrefix(line.text, "ip global "):
+		return line, false
+	}
+	return line, true
 }
 
 // commit removes only the authenticated obsolete command identities and optionally persists the
@@ -1142,7 +1165,7 @@ func validExactKeeneticTarget(target nativeplan.Plan) bool {
 	for _, block := range plan.Interfaces {
 		commandCount += len(block)
 		if len(block) < 2 || !strings.HasPrefix(block[0], "interface Wireguard") ||
-			block[len(block)-1] != "up" || blocks[block[0]] || !validExactKeeneticCommands(block, false) {
+			block[len(block)-1] != "up" || blocks[block[0]] || !validExactKeeneticInterfaceBlock(block) {
 			return false
 		}
 		blocks[block[0]] = true
@@ -1182,37 +1205,110 @@ func validExactKeeneticTarget(target nativeplan.Plan) bool {
 	return true
 }
 
+// validExactKeeneticInterfaceBlock holds a block to the transport's rules (flattenExactKeeneticBatch)
+// and to one interface: the first line opens its context and no later line switches to another.
+func validExactKeeneticInterfaceBlock(block []string) bool {
+	if _, ok := flattenExactKeeneticBatch(block); !ok {
+		return false
+	}
+	for _, command := range block[1:] {
+		if strings.HasPrefix(command, "interface ") {
+			return false
+		}
+	}
+	return true
+}
+
+// flattenExactKeeneticBatch checks one batch for the ndmc transport and renders each command as the
+// single full-path line `ndmc -c` takes (see ParseBatch). It is the one place that knows how a block
+// nests:
+//
+//   - `interface X` opens the context every following line is sent under;
+//   - a line indented by exactly four spaces belongs to the `wireguard peer <key>` line above it and is
+//     sent as `interface X wireguard peer <key> endpoint …`;
+//   - any other line closes the peer.
+//
+// The indent is keenetic.WireguardCommands' own, and it is accepted here rather than dropped by the
+// writer because it is the only thing in the list that says which lines belong to the peer: without
+// it `endpoint …` flattens to `interface X endpoint …`, a command NDM does not have, unless this code
+// learned NDM's grammar to put the peer back. It costs the verification nothing, since running-config
+// prints the same lines one level deeper and both sides are compared with whitespace normalized away.
+// The validator used to refuse any leading whitespace, so the block the compiler writes for an
+// interface WayHop creates could never pass the exact adapter. (The one-level path form was verified
+// on a device; the peer form is the same rule one level deeper and has not been run on one yet.)
+//
+// So the indent is allowed exactly where it carries that meaning: one level of four spaces, under a
+// peer, inside an interface. A tab, any other width, trailing whitespace or an indented line with no
+// peer above it is refused, and \r, \n and \x00 still are anywhere, so no value can smuggle in a second
+// command. Duplicates are judged on the flattened line, which is the command NDM actually receives.
+func flattenExactKeeneticBatch(commands []string) ([]string, bool) {
+	if len(commands) == 0 || len(commands) > exactKeeneticMaxCommands {
+		return nil, false
+	}
+	lines := make([]string, 0, len(commands))
+	seen := make(map[string]bool, len(commands))
+	iface, peer := "", ""
+	for _, command := range commands {
+		if command == "" || len(command) > exactKeeneticMaxCommandBytes ||
+			strings.ContainsAny(command, "\r\n\x00") {
+			return nil, false
+		}
+		line := command
+		if sub, nested := strings.CutPrefix(command, exactKeeneticPeerIndent); nested {
+			if peer == "" || sub == "" || strings.TrimSpace(sub) != sub {
+				return nil, false
+			}
+			line = peer + " " + sub
+		} else {
+			if strings.TrimSpace(command) != command {
+				return nil, false
+			}
+			peer = ""
+			switch {
+			case strings.HasPrefix(command, "interface "):
+				iface = command
+			case iface != "":
+				line = iface + " " + command
+				if strings.HasPrefix(command, exactKeeneticPeerCommand) {
+					peer = line
+				}
+			}
+		}
+		// The flattened line is what ndmc gets, so it is the one held to the transport's limit; checking
+		// only the parts let a block pass here and fail at the runner after earlier lines had run.
+		if len(line) > exactKeeneticMaxCommandBytes || seen[line] {
+			return nil, false
+		}
+		seen[line] = true
+		lines = append(lines, line)
+	}
+	return lines, true
+}
+
 func validExactKeeneticTeardown(commands []string) bool {
 	return len(commands) <= exactKeeneticMaxCommands && validExactKeeneticCommands(commands, true)
 }
 
-// validExactKeeneticCommands is the shape every NDM command must have before it is submitted: one
-// bounded line (a control character would smuggle a second command into the line-based transport),
-// no duplicates, only `no …` in a teardown, and no padding. Padding matters twice over: the ndmc
-// runner reads `interface …` at the start of a line as the context every following line is flattened
-// under, and verification compares commands with whitespace collapsed, so a padded command would be
-// submitted one way and verified as another.
-//
-// The single exception is the indentation keenetic.WireguardCommands emits for a peer's own settings
-// (`    endpoint …`, `    allow-ips …`, `    connect`): exactly exactKeeneticPeerIndent, on a line
-// directly under the `wireguard peer` line of an interface block or under a sibling. Refusing it
-// refused every native WireGuard block the compiler produces (QA-121); anything else indented is
-// still refused.
+// validExactKeeneticCommands is the shape every NDM command must have before it is submitted: what
+// the transport can carry (flattenExactKeeneticBatch: one bounded line, since a control character
+// would smuggle a second command into it; no duplicates; no padding, since the runner reads
+// `interface …` at the start of a line as the context every following line is flattened under and
+// verification compares commands with whitespace collapsed), and only `no …` in a teardown. The single
+// indentation allowed is the one keenetic.WireguardCommands emits for a peer's own settings, directly
+// under the `wireguard peer` line of an interface block or under a sibling; refusing it refused every
+// native WireGuard block the compiler produces (QA-121). An empty list is valid: a plan may carry no
+// routes and a run may have nothing to tear down.
 func validExactKeeneticCommands(commands []string, teardown bool) bool {
-	seen := make(map[string]bool, len(commands))
-	block, peer := false, false
+	if len(commands) == 0 {
+		return true
+	}
+	if _, ok := flattenExactKeeneticBatch(commands); !ok {
+		return false
+	}
 	for _, command := range commands {
-		line, indented := strings.CutPrefix(command, exactKeeneticPeerIndent)
-		if command == "" || line == "" || len(command) > exactKeeneticMaxCommandBytes ||
-			strings.TrimSpace(line) != line || strings.ContainsAny(command, "\r\n\x00") ||
-			seen[command] || (teardown && !strings.HasPrefix(command, "no ")) || (indented && !peer) {
+		if teardown && !strings.HasPrefix(command, "no ") {
 			return false
 		}
-		seen[command] = true
-		if strings.HasPrefix(command, "interface ") {
-			block = true
-		}
-		peer = indented || (block && strings.HasPrefix(command, "wireguard peer "))
 	}
 	return true
 }

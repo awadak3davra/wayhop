@@ -43,6 +43,7 @@ func ReadDnsmasqD(dnsmasqConf, httpsDNSProxyArgs string) NativeDNS {
 				continue
 			}
 			host, port := splitServerRef(v)
+			host, iface := splitServerIface(host)
 			if host == "127.0.0.1" {
 				if url, ok := dohByPort[port]; ok { // a local DoH proxy on that port
 					nd.Resolvers = append(nd.Resolvers, NativeResolver{
@@ -66,11 +67,22 @@ func ReadDnsmasqD(dnsmasqConf, httpsDNSProxyArgs string) NativeDNS {
 			}
 			nd.Resolvers = append(nd.Resolvers, NativeResolver{
 				Kind: KindPlain, Address: host, Port: atoiSafe(port), ViaTunnel: private,
-				Tier: tier, Source: src,
+				Tier: tier, Source: src, Iface: iface,
 			})
 		}
 	}
 	return nd
+}
+
+// splitServerIface separates a binding to an interface from a server ref's host ("1.1.1.1@nwg1"). The
+// other forms dnsmasq takes after `@` (a source address, a source port) stay on the host, so they read
+// as what they are and go back out unchanged.
+func splitServerIface(host string) (string, string) {
+	addr, bind, ok := strings.Cut(host, "@")
+	if !ok || net.ParseIP(bind) != nil || !ValidIfaceName(bind) {
+		return host, ""
+	}
+	return addr, bind
 }
 
 // parseHTTPSDNSProxyPorts extracts the listen-port → first resolver_url mapping from a single

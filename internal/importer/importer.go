@@ -208,14 +208,14 @@ func finalize(e *model.Endpoint, err error) (*model.Endpoint, error) {
 // and vmessPins bring, and the transport transportFromQuery sets. No share link sets a top-level
 // knob, multiplex included.
 var (
-	linkTLSFields = []string{"enabled", "type", "sni", "alpn", "insecure", "fingerprint", "public_key", "short_id", "ech"}
+	linkTLSFields = []string{"enabled", "type", "sni", "alpn", "cipher_suites", "insecure", "fingerprint", "public_key", "short_id", "ech"}
 	// hysteria2Query and parseTUIC set no uTLS fingerprint and no Reality fields.
 	quicLinkTLSFields = []string{"enabled", "type", "sni", "alpn", "insecure", "ech"}
 
 	vlessLinkFields = sourceFields{params: []string{"uuid", "flow", "packet_encoding", model.ParamVerifyCertName, model.ParamFinalMask},
 		tls: linkTLSFields, pins: true, transport: true}
 	vmessLinkFields = sourceFields{params: []string{"uuid", "alter_id", "security", model.ParamVerifyCertName, model.ParamFinalMask},
-		tls: []string{"enabled", "type", "sni", "alpn", "insecure", "fingerprint"}, pins: true, transport: true}
+		tls: []string{"enabled", "type", "sni", "alpn", "cipher_suites", "insecure", "fingerprint"}, pins: true, transport: true}
 	trojanLinkFields = sourceFields{params: []string{"password", model.ParamVerifyCertName, model.ParamFinalMask},
 		tls: linkTLSFields, pins: true, transport: true}
 	anytlsLinkFields = sourceFields{params: []string{"password", model.ParamVerifyCertName, model.ParamFinalMask},
@@ -539,7 +539,7 @@ func parseVMess(raw string) (*model.Endpoint, error) {
 		// endpoint with a self-signed cert silently failed certificate verification.
 		// v2rayN's own VMess JSON spells it "insecure", "1" or "0" (VmessQRCode), and reads
 		// nothing else, so both are read.
-		e.TLS = &model.TLS{Enabled: true, Type: "tls", SNI: util.FirstNonEmpty(asString(m["sni"]), firstScalar(m["host"]), e.Server), Fingerprint: asString(m["fp"]), ALPN: asStringList(m["alpn"]), Insecure: truthy(asString(m["allowInsecure"])) || truthy(asString(m["insecure"]))}
+		e.TLS = &model.TLS{Enabled: true, Type: "tls", SNI: util.FirstNonEmpty(asString(m["sni"]), firstScalar(m["host"]), e.Server), Fingerprint: asString(m["fp"]), ALPN: asStringList(m["alpn"]), CipherSuites: asStringList(m["cs"]), Insecure: truthy(asString(m["allowInsecure"])) || truthy(asString(m["insecure"]))}
 		if err := vmessPins(e, m); err != nil {
 			return nil, fmt.Errorf("vmess: %w", err)
 		}
@@ -937,10 +937,11 @@ func tlsFromQuery(q url.Values, defaultOn bool, server string) *model.TLS {
 			// host, not the IP — an SNI-routed frontend rejects a wrong/IP SNI with
 			// "tls: unrecognized name" (passes `sing-box check`, fails at runtime).
 			// Matches the vmess path and v2rayN's documented "SNI defaults to host".
-			SNI:         util.FirstNonEmpty(q.Get("sni"), q.Get("host"), server),
-			Fingerprint: q.Get("fp"),
-			Insecure:    insecureFromQuery(q),
-			ALPN:        splitCSV(q.Get("alpn")),
+			SNI:          util.FirstNonEmpty(q.Get("sni"), q.Get("host"), server),
+			Fingerprint:  q.Get("fp"),
+			Insecure:     insecureFromQuery(q),
+			ALPN:         splitCSV(q.Get("alpn")),
+			CipherSuites: splitCSV(q.Get("cs")),
 			// Encrypted Client Hello: Xray's ech= (vless, trojan; v2rayN writes it for anytls too).
 			ECH: settleECH(echFromLink(q.Get("ech")), "tls"),
 		}

@@ -15,9 +15,12 @@ import (
 	"wayhop/internal/clash"
 	"wayhop/internal/config"
 	"wayhop/internal/core"
+	"wayhop/internal/dnscheck"
 	"wayhop/internal/failsafe"
 	"wayhop/internal/health"
 	"wayhop/internal/initserver"
+	"wayhop/internal/model"
+	"wayhop/internal/nativedns"
 	"wayhop/internal/netdiag"
 	"wayhop/internal/netvpn"
 	"wayhop/internal/pbr"
@@ -72,6 +75,10 @@ type Server struct {
 	// deferred, not deleted — it is preserved in the development repository, outside the Go build and
 	// outside this published tree. deferred_features_test.go is the tripwire that keeps it out: it
 	// asserts the routes 404 and the IPTV assets are not embedded.
+	// routingProbes holds each routing list source's last reachability answer (handleRoutingStatus).
+	routingProbeMu sync.Mutex
+	routingProbes  map[string]routingProbe
+
 	cfgMu   sync.Mutex // serializes all s.cfg field writes + Save() + reads
 	applyMu sync.Mutex // serializes Apply, confirm, rollback, boot converge and the reconcile loop
 	// speedMu lets one throughput test run at a time, the panel's and the Telegram bot's alike: two
@@ -102,6 +109,9 @@ type Server struct {
 	// failSafePingOf is nil in production (netdiag.Ping); tests answer for the fail-safe window's
 	// connectivity ping, which would otherwise measure the developer host's own internet.
 	failSafePingOf func(ctx context.Context, host string, count int) netdiag.PingResult
+	// failSafeReachOf is nil in production (a request through the core's probe inbound); tests answer
+	// whether the fail-safe's request through the default exit came back.
+	failSafeReachOf func(tag string) (ok, ran bool)
 	// applyStage / applyInProgress publish the running Apply's step for GET /api/apply/status.
 	applyStage      atomic.Value
 	applyInProgress atomic.Bool
@@ -112,6 +122,35 @@ type Server struct {
 	// hostProbeOf is nil in production (the real host probe); tests inject one so an Apply neither
 	// shells out to the developer host nor is limited to the platform it happens to run on.
 	hostProbeOf func(context.Context, DesiredSnapshot) (hostProbeV1, error)
+	// dnsPlatformOf, dnsRunnerOf, chainHostOf and ifindexOf are nil in production (the real router's DNS
+	// stack); tests inject them, because a dnsmasq and its tunnels cannot be arranged on the test host.
+	dnsPlatformOf func() string
+	dnsRunnerOf   nativedns.Runner
+	chainHostOf   func() nativedns.ChainHost
+	ifindexOf     func(string) int
+	// The DNS check keeps one in-memory job. Its host operations are seams so tests never turn the
+	// development machine into a router or send probes off it.
+	dnsCheckMu            sync.Mutex
+	dnsCheckRunning       bool
+	dnsCheckCancel        context.CancelFunc
+	dnsCheckProgress      dnscheck.Progress
+	dnsCheckReport        *dnscheck.Report
+	dnsCheckNetOf         func() dnscheck.Net
+	dnsCheckProbeOf       func(context.Context, string, []byte) error
+	dnsCheckWaitOf        func(context.Context, time.Duration) error
+	dnsCheckRandomOf      func() string
+	dnsCheckWANOf         func() (string, error)
+	dnsCheckIfaceExistsOf func(string) bool
+	// The encrypted-resolver quick list has one running job and a finished report per via. Its network
+	// and election seams keep handler tests on fakes rather than the development host's routes.
+	dnsFastMu           sync.Mutex
+	dnsFastRunning      bool
+	dnsFastCancel       context.CancelFunc
+	dnsFastProgress     dnscheck.Progress
+	dnsFastReports      map[string]*dnscheck.FastReport
+	dnsFastNetOf        func() dnscheck.FastNet
+	dnsFastMeasureOf    dnsFastMeasureFunc
+	dnsFastGroupIfaceOf func(*model.Profile, *model.Group) (string, error)
 	// binaryPresentOf is nil in production (the real engine-binary lookup); tests inject one because
 	// the lookup ends in exec.LookPath, so a developer who happens to have `awg` installed would turn
 	// every test about a missing-engine finding into a silent skip.
@@ -365,6 +404,13 @@ func (s *Server) Handler() http.Handler {
 	s.route(mux, authRouteProtected, "GET /api/dns/catalog", s.handleDNSCatalog)
 	s.route(mux, authRouteProtected, "GET /api/dns/native", s.handleGetDNSNative)
 	s.route(mux, authRouteProtected, "POST /api/dns/native/plan", s.handleDNSNativePlan)
+	s.route(mux, authRouteProtected, "POST /api/dns/native/chain/plan", s.handleDNSChainPlan)
+	s.route(mux, authRouteProtected, "POST /api/dns/native/chain", s.handleDNSChainSet)
+	s.route(mux, authRouteProtected, "POST /api/dns/native/chain/restore", s.handleDNSChainRestore)
+	s.route(mux, authRouteProtected, "GET /api/dns/check", s.handleDNSCheckState)
+	s.route(mux, authRouteProtected, "POST /api/dns/check", s.handleDNSCheckStart)
+	s.route(mux, authRouteProtected, "GET /api/dns/fast", s.handleDNSFastState)
+	s.route(mux, authRouteProtected, "POST /api/dns/fast", s.handleDNSFastStart)
 
 	s.route(mux, authRouteProtected, "POST /api/generate", s.handleGenerate)
 	s.route(mux, authRouteProtected, "POST /api/endpoints/{id}/check", s.handleEndpointCheck) // per-connection config validation

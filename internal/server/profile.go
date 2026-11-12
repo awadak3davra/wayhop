@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -36,7 +37,7 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Link string `json:"link"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(r.Body, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -160,11 +161,23 @@ func liteProfileOf(p model.Profile, checkedAt func(id string) int64) liteProfile
 // for the daemon config — together they let a user back up + restore or migrate a full WayHop
 // setup. POST /api/profile.
 func (s *Server) handleRestoreProfile(w http.ResponseWriter, r *http.Request) {
-	var p model.Profile
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+	var raw json.RawMessage
+	if err := decodeJSONBody(r.Body, &raw); err != nil {
 		if writeBodyTooLarge(w, err, "the profile") {
 			return
 		}
+		writeErr(w, http.StatusBadRequest, "invalid profile JSON")
+		return
+	}
+	// A body of null decodes into an empty profile without an error, and replacing the profile with it
+	// erased every connection, group, rule, list and DNS setting with a 200 "restored" (found by an API
+	// hunter on an emulated OpenWrt). A restore is a profile object or nothing.
+	if t := bytes.TrimSpace(raw); len(t) == 0 || t[0] != '{' {
+		writeErr(w, http.StatusBadRequest, "invalid profile JSON: the body must be a profile object")
+		return
+	}
+	var p model.Profile
+	if err := json.Unmarshal(raw, &p); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid profile JSON")
 		return
 	}
@@ -181,7 +194,7 @@ func (s *Server) handleRestoreProfile(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUpsertEndpoint(w http.ResponseWriter, r *http.Request) {
 	rev := profileRevOf(r)
 	var e model.Endpoint
-	if err := json.NewDecoder(r.Body).Decode(&e); err != nil {
+	if err := decodeJSONBody(r.Body, &e); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid endpoint JSON")
 		return
 	}
@@ -232,6 +245,11 @@ func (s *Server) handlePatchEndpoint(w http.ResponseWriter, r *http.Request) {
 func (s *Server) saveEndpoint(ctx context.Context, e model.Endpoint, q url.Values, rev store.Rev) (int, any) {
 	fail := func(code int, msg string) (int, any) { return code, map[string]any{"error": msg} }
 	e.Import = "" // a parse's format, never stored (model.Endpoint.Import)
+	// Asked first: an empty id read as a disabled exit further down, and the answer was a 409 naming
+	// every list that downloads directly as its dependents.
+	if strings.TrimSpace(e.ID) == "" {
+		return fail(http.StatusBadRequest, "endpoint id is required")
+	}
 	if code, msg := s.gateEndpoint(ctx, e); code != 0 {
 		return fail(code, msg)
 	}
@@ -514,8 +532,14 @@ func (s *Server) handleDeleteEndpoint(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUpsertGroup(w http.ResponseWriter, r *http.Request) {
 	rev := profileRevOf(r)
 	var g model.Group
-	if err := json.NewDecoder(r.Body).Decode(&g); err != nil {
+	if err := decodeJSONBody(r.Body, &g); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid group JSON")
+		return
+	}
+	// The form asks for five seconds at least. A hunter on an emulated OpenWrt typed 1, the server kept
+	// it, and the card promised a probe through every member every second.
+	if g.Test != nil && g.Test.Interval != 0 && g.Test.Interval < minGroupProbeInterval {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("the probe interval must be at least %d seconds", minGroupProbeInterval))
 		return
 	}
 	saved, err := s.store.UpsertGroupAt(g, rev)
@@ -552,7 +576,7 @@ func (s *Server) handleDeleteGroup(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUpsertRule(w http.ResponseWriter, r *http.Request) {
 	var ru model.Rule
-	if err := json.NewDecoder(r.Body).Decode(&ru); err != nil {
+	if err := decodeJSONBody(r.Body, &ru); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid rule JSON")
 		return
 	}
@@ -577,7 +601,7 @@ func (s *Server) handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUpsertRoutingList(w http.ResponseWriter, r *http.Request) {
 	rev := profileRevOf(r)
 	var rl model.RoutingList
-	if err := json.NewDecoder(r.Body).Decode(&rl); err != nil {
+	if err := decodeJSONBody(r.Body, &rl); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid routing list JSON")
 		return
 	}
@@ -586,6 +610,12 @@ func (s *Server) handleUpsertRoutingList(w http.ResponseWriter, r *http.Request)
 	// legacy values; new writes are rejected here.
 	if !model.ValidRefreshHours(rl) {
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("refresh_hours must be 0 (default 24h) or %d–%d hours for a CIDR-source list (flash protection)", model.MinCIDRRefreshHours, model.MaxCIDRRefreshHours))
+		return
+	}
+	// Refused when typed, not only at the next Apply: the store keeps an invalid draft, and an entry
+	// with a line break in it would otherwise be saved and only block Apply later.
+	if err := model.ValidateManualEntries(rl); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	saved, err := s.store.UpsertRoutingListAt(rl, rev)
@@ -667,7 +697,7 @@ func (s *Server) handleDeleteRoutingList(w http.ResponseWriter, r *http.Request)
 // Validates the members at the boundary (400) so a malformed group can never brick Apply.
 func (s *Server) handleUpsertDeviceGroup(w http.ResponseWriter, r *http.Request) {
 	var g model.DeviceGroup
-	if err := json.NewDecoder(r.Body).Decode(&g); err != nil {
+	if err := decodeJSONBody(r.Body, &g); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid device group JSON")
 		return
 	}
@@ -758,10 +788,55 @@ func (s *Server) handleRoutingCatalog(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
+// routingProbe is one list source's last reachability answer.
+type routingProbe struct {
+	at     time.Time
+	status int
+	ok     bool
+	err    string
+}
+
+// routingProbeTTL is how long an answer stands in for a new request. The Dashboard and the Routing
+// page both ask on every render, and a source that answered a minute ago has not usefully changed.
+// "Refresh sources" forgets the answers, so the dots after it are fresh.
+const routingProbeTTL = time.Minute
+
+func (s *Server) routingProbe(key string, now time.Time) (routingProbe, bool) {
+	s.routingProbeMu.Lock()
+	defer s.routingProbeMu.Unlock()
+	p, ok := s.routingProbes[key]
+	if !ok || now.Sub(p.at) >= routingProbeTTL {
+		return routingProbe{}, false
+	}
+	return p, true
+}
+
+func (s *Server) rememberRoutingProbe(key string, p routingProbe) {
+	s.routingProbeMu.Lock()
+	defer s.routingProbeMu.Unlock()
+	if s.routingProbes == nil {
+		s.routingProbes = map[string]routingProbe{}
+	}
+	// Keys carry the list's source and path, so an edited list leaves its old key behind. Sweep what
+	// has expired here, where the map is already held, so it cannot grow with edits.
+	for k, old := range s.routingProbes {
+		if p.at.Sub(old.at) >= routingProbeTTL {
+			delete(s.routingProbes, k)
+		}
+	}
+	s.routingProbes[key] = p
+}
+
+func (s *Server) forgetRoutingProbes() {
+	s.routingProbeMu.Lock()
+	s.routingProbes = nil
+	s.routingProbeMu.Unlock()
+}
+
 // handleRoutingStatus reports, per routing list, whether its remote rule-set source
-// is reachable/downloadable — the signal the Routing UI shows as a green/red dot +
+// is reachable — the signal the Routing UI shows as a green/red dot +
 // error code under each list. Manual (no-source) lists are always ok. Probes run
-// concurrently and reuse the SSRF-guarded fetch client.
+// concurrently and reuse the SSRF-guarded fetch client; an answer is kept for routingProbeTTL.
 func (s *Server) handleRoutingStatus(w http.ResponseWriter, r *http.Request) {
 	prof := s.store.Profile()
 	type st struct {
@@ -769,9 +844,11 @@ func (s *Server) handleRoutingStatus(w http.ResponseWriter, r *http.Request) {
 		OK     bool   `json:"ok"`
 		Status int    `json:"status,omitempty"`
 		Error  string `json:"error,omitempty"`
+		// Note states where the list's feeds leave when it is not where the row's dropdown reads: held
+		// back by a path that is down, or on the provider because the outbound has no link to bind to.
+		Note string `json:"note,omitempty"`
 	}
 	res := make([]st, len(prof.RoutingLists))
-	client := s.subscriptionFetchClient()
 	// Bound concurrent source fetches: a profile with many auto-refresh lists would
 	// otherwise open one HTTP connection per list at once (each a 12s download),
 	// spiking connections/FDs on a low-memory router. Slightly tighter than the exit
@@ -779,16 +856,39 @@ func (s *Server) handleRoutingStatus(w http.ResponseWriter, r *http.Request) {
 	sem := make(chan struct{}, 6)
 	var wg sync.WaitGroup
 	for i, rl := range prof.RoutingLists {
+		note := feedPathNote(s, rl)
 		if rl.Source == "" {
-			res[i] = st{ID: rl.ID, OK: true} // manual list — nothing to download
+			res[i] = st{ID: rl.ID, OK: true, Note: note} // manual list — nothing to download
 			continue
 		}
+		// This probe asks the same host the list downloads from, so it takes the same path: opening the
+		// Routing page must not name the source to the provider while the list itself goes by tunnel.
+		via := s.feedVia(rl)
+		client := s.listFetchClient(via)
 		wg.Add(1)
 		go func(i int, id, src string) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			cur := st{ID: id}
+			cur := st{ID: id, Note: note}
+			if _, err := s.feedIface(via); err != nil {
+				cur.Error = redactSubscriptionError(err.Error())
+				res[i] = cur
+				return
+			}
+			probeKey := id + "\x00" + src + "\x00" + via
+			if p, ok := s.routingProbe(probeKey, time.Now()); ok {
+				cur.Status, cur.OK, cur.Error = p.status, p.ok, p.err
+				res[i] = cur
+				return
+			}
+			defer func() {
+				// Only an answer the source gave is kept. A request cut short because the panel
+				// navigated away says nothing about the source.
+				if r.Context().Err() == nil {
+					s.rememberRoutingProbe(probeKey, routingProbe{at: time.Now(), status: cur.Status, ok: cur.OK, err: cur.Error})
+				}
+			}()
 			ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 			defer cancel()
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, src, nil)
@@ -804,7 +904,9 @@ func (s *Server) handleRoutingStatus(w http.ResponseWriter, r *http.Request) {
 				res[i] = cur
 				return
 			}
-			_, _ = io.Copy(io.Discard, resp.Body)
+			// The status line is the whole answer. The body used to be read to the end, so every
+			// visit to the Dashboard or to Routing downloaded every rule set in full (megabytes,
+			// through the tunnel, up to 12 s each) to colour a dot.
 			resp.Body.Close()
 			cur.Status = resp.StatusCode
 			cur.OK = resp.StatusCode >= 200 && resp.StatusCode < 400
@@ -1076,7 +1178,7 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 		HWIDMode string `json:"hwid_mode"`
 		HWID     string `json:"hwid"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(r.Body, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -1273,6 +1375,13 @@ func blockInternalDial(_, address string, _ syscall.RawConn) error {
 	if isInternalDialIP(ip) {
 		return fmt.Errorf("refusing to fetch from internal address %s", ip)
 	}
+	// The router's own addresses. Its WAN address is public, so the predicate passes it, yet a
+	// connection the router opens to itself never crosses its WAN firewall: a feed answering with a
+	// redirect to http://<WAN address>:8088/ would reach this panel, LuCI or NDM. Read at dial time
+	// like the IP itself, so an address that arrived with a new lease is covered.
+	if _, own := localAddrs()[normalizeHost(ip.String())]; own {
+		return fmt.Errorf("refusing to fetch from this router's own address %s", ip)
+	}
 	return nil
 }
 
@@ -1281,7 +1390,7 @@ func (s *Server) handleBulkEndpoints(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Endpoints []model.Endpoint `json:"endpoints"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(r.Body, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -1315,21 +1424,27 @@ func (s *Server) bulkImport(ctx context.Context, existing, incoming []model.Endp
 	for i := range existing {
 		byID[existing[i].ID] = &existing[i]
 	}
-	// A public-key pin kept from the stored connection is said once here: it came from Set up Server or
-	// the form, no link carries one, and a server whose key changed is refused while it stays - which
-	// is what an operator re-importing a link to fix a failing exit needs to know.
+	// A public-key pin kept from the stored connection is said once here: it came from Set up Server,
+	// the form, or an imported sing-box config, no share link carries one, and a server whose key
+	// changed is refused while it stays - which an operator re-importing to fix an exit needs to know.
 	linkOf := make(map[string]model.Endpoint, len(incoming))
 	for _, e := range incoming {
 		linkOf[e.ID] = e
 	}
-	keyPinNotes := make([]string, 0)
+	importNotes := make([]string, 0)
 	added, updated, unchanged := 0, 0, 0
 	kept := eps[:0]
 	for _, e := range eps {
 		have, ok := byID[e.ID]
 		if ok && e.ID != "" && importer.KeptServerKeyPin(e, linkOf[e.ID]) {
-			keyPinNotes = append(keyPinNotes, e.Name+" ("+string(e.Protocol)+"): kept: server public-key pin. Set up "+
-				"Server or the connection form added it and no link carries one; if the server's key changed, remove it in the connection's form.")
+			importNotes = append(importNotes, e.Name+" ("+string(e.Protocol)+"): kept: server public-key pin. Set up "+
+				"Server, the connection form, or an imported sing-box config added it and no share link carries one; if the server's key changed, remove it in the connection's form.")
+		}
+		if ok && e.ID != "" {
+			if cleared := importer.ClearedWireGuardKnobs(*have, e); len(cleared) > 0 {
+				importNotes = append(importNotes, e.Name+" ("+string(e.Protocol)+"): cleared by the re-import: "+
+					strings.Join(cleared, ", ")+". The incoming link omits them.")
+			}
 		}
 		switch {
 		case !ok || e.ID == "":
@@ -1356,7 +1471,7 @@ func (s *Server) bulkImport(ctx context.Context, existing, incoming []model.Endp
 	//
 	// Unknown is different and refuses the batch: the host has not finished answering, so disabling
 	// would be a guess in one direction and enabling a guess in the other.
-	gated, notes := make([]string, 0), keyPinNotes
+	gated, notes := make([]string, 0), importNotes
 	for i := range eps {
 		code, msg := s.gateEndpoint(ctx, eps[i])
 		switch code {
@@ -1627,6 +1742,7 @@ func (s *Server) genOptionsWithPlan(p *model.Profile, c config.Config) (generato
 	mode := s.routingMode(c)
 	opts := generator.Options{
 		MixedPort:   c.Ports.Mixed,
+		DNSPort:     c.Ports.DNS,
 		ProbePort:   c.Ports.Probe(),
 		ClashAddr:   managedClashAddress(c),
 		ClashSecret: c.Clash.Secret,
@@ -1818,7 +1934,7 @@ func (s *Server) handleRoutingReorder(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		IDs []string `json:"ids"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(r.Body, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid reorder JSON")
 		return
 	}
@@ -1833,3 +1949,6 @@ func (s *Server) handleRoutingReorder(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ids": out})
 }
+
+// minGroupProbeInterval is the shortest probe interval a group may ask for, in seconds.
+const minGroupProbeInterval = 5

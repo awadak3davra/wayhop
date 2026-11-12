@@ -503,8 +503,8 @@ func Evaluate(caps Capabilities, rt RuntimeFacts) CapabilitySet {
 	addBool(CapDNSNativeRead, rt.NativeDNSRead,
 		"reading the router's own DNS configuration is not implemented for this platform", "", BlocksNothing)
 	addBool(CapDNSNativeWrite, rt.NativeDNSWrite,
-		"writing back to the router's own DNS configuration is not implemented for this platform, "+
-			"so no control may offer it", "", BlocksApply)
+		"Apply does not write the router's own DNS configuration. On KeeneticOS the DNS page sets the "+
+			"upstream chain itself, with its own rollback", "", BlocksApply)
 
 	// ---- router-native connection authority -------------------------------------------------
 	// Keep carry/adopt/create/manage/remove separate. A loaded kernel module or an existing NDM

@@ -2082,22 +2082,33 @@ globalThis.row = healthRowEl;`, rowCtx);
 }
 
 
-// The write-back preview says what it does NOT touch. The plan renders 00-upstream.conf inside the
-// conf-dir and dnsmasq merges that directory into the main config, so an upstream already present
-// there gains a second copy instead of being replaced — together with a second strict-order and
-// no-resolv. Measured on a live Keenetic: the plan proposes exactly the four directives the operator's
-// /opt/etc/dnsmasq.conf already carries. The count comes from the reader's provenance tag, which is
-// why this could not be asked before every upstream stopped claiming to come from the conf-dir.
+// A chain written beside the main config's upstreams landed behind them: measured on a live Keenetic,
+// server=1.1.1.1 in /opt/etc/dnsmasq.conf answered every lookup in plaintext while the panel could only
+// preview a file in the conf-dir. So KeeneticOS now writes the chain, and the page must say what that
+// write moves aside before it happens. The profile's DNS plane reads as though it answers clients, so
+// the page must also lead with who really does.
 {
-  check(dns.includes('function mainConfUpstreams(nat)'),
-    'the preview can count upstreams that came from the main config');
-  check(dns.includes('startsWith("dnsmasq.conf")'),
-    "and it asks the reader provenance tag rather than guessing");
-  const at = dns.indexOf('mainConfUpstreams(nat) && r.platform !== "openwrt"');
-  check(at > 0, 'the caveat is shown only when there is a collision, and only on the platform that has one');
-  const contentAt = dns.indexOf('t("dnsmasq.d content")');
-  check(at > 0 && contentAt > at,
-    'and it appears above the content it qualifies, not under it');
+  check(dns.includes('function dnsPlaneNotice(nat)'), 'the DNS page can say who answers clients');
+  check(app.indexOf('dnsPlaneNotice(nat)') > 0 && app.indexOf('dnsPlaneNotice(nat)') < app.indexOf('dnsQueryPath(nat,'),
+    'and it says so above the query path, not under it');
+  check(dns.includes('nat.answering.process'), 'the query path names the program that really answers devices');
+  check(dns.includes('function dnsChainEditor(card, chain'), 'KeeneticOS gets an editor, not a preview');
+  check(!dns.includes('function mainConfUpstreams(nat)'), 'the old caveat about a second copy is gone with that write');
+  const review = dns.indexOf('api.post("/api/dns/native/chain/plan"');
+  const write = dns.indexOf('api.post("/api/dns/native/chain", body)');
+  check(review > 0 && write > review, 'the daemon reviews the chain before anything is written');
+  check(dns.includes('plan.moved') && dns.indexOf('plan.moved') < write, 'and the review names what leaves the main config');
+  check(dns.includes('rep.rolled_back'), 'a failed write says whether the router was put back');
+  check(dns.includes('"@" + r.iface'), 'a binding the profile does not know stays offered, so an edit cannot drop it');
+}
+
+
+// A list's feeds follow its download path, so the Routing page has to say when they cannot: held back by
+// a path that is down, or on the provider because the connection has no link to bind to.
+{
+  check(app.includes('(!s.ok && s.error) || s.note'), 'the Routing row shows the note about where its feed leaves');
+  const routing = fs.readFileSync('web/dist/page-routing.js', 'utf8');
+  check(routing.includes('never falls to your provider'), 'and the list form states the fallback rule');
 }
 
 
@@ -3701,6 +3712,308 @@ const oneLine = (src, name) => (src.match(new RegExp(`^const ${name} = .*;$`, 'm
   check(/r\.added \?\? r\.saved/.test(bulkSrc) && /tn\(", \{0\} updated\|, \{0\} updated", r\.updated\)/.test(bulkSrc) &&
     /tn\(", \{0\} unchanged\|, \{0\} unchanged", r\.unchanged\)/.test(bulkSrc),
     'a subscription import says how many were added, updated and unchanged');
+}
+
+// K3: the DNS check page is a renderer for report.go's CLOSED code contract. A new daemon code must
+// get a sentence deliberately, not disappear because the page forgot one member of an enum.
+{
+  const report = fs.readFileSync('internal/dnscheck/report.go', 'utf8');
+  const mapFor = {
+    Status: 'DNS_CHECK_STATUS_TEXT', Path: 'DNS_CHECK_PATH_TEXT', Verdict: 'DNS_CHECK_VERDICT_TEXT',
+    Probe: 'DNS_CHECK_PROBE_TEXT', Code: 'DNS_CHECK_CODE_TEXT', Exposure: 'DNS_CHECK_EXPOSURE_TEXT',
+    Level: 'DNS_CHECK_LEVEL_TEXT', Severity: 'DNS_CHECK_SEVERITY_TEXT', Warn: 'DNS_CHECK_WARN_TEXT',
+    Opt: 'DNS_CHECK_OPTION_TEXT',
+  };
+  const keysFor = (name) => {
+    const start = dns.indexOf(`const ${name} = {`);
+    const end = start < 0 ? -1 : dns.indexOf('\n};', start);
+    check(start >= 0 && end > start, `the DNS page declares its ${name} sentence map`);
+    if (start < 0 || end < 0) return new Set();
+    const keys = new Set();
+    const block = dns.slice(start, end);
+    const re = /^\s*(?:"([^"]+)"|([A-Za-z_][\w]*))\s*:/gm;
+    let m;
+    while ((m = re.exec(block)) !== null) keys.add(m[1] || m[2]);
+    return keys;
+  };
+  const maps = Object.fromEntries(Object.values(mapFor).map(name => [name, keysFor(name)]));
+  const re = /^\s*((Status|Path|Verdict|Probe|Code|Exposure|Level|Severity|Warn|Opt)[A-Za-z0-9]+)\s+(?:[A-Za-z][A-Za-z0-9]*\s+)?=\s*"([^"]+)"/gm;
+  let m;
+  let constants = 0;
+  while ((m = re.exec(report)) !== null) {
+    constants++;
+    const map = mapFor[m[2]];
+    check(!!map && maps[map].has(m[3]), `report.go ${m[1]} (${m[3]}) has a sentence in the DNS page`);
+  }
+  check(constants >= 70, 'the report-code sweep really read the Go constants', `constants=${constants}`);
+}
+
+// Execute the shipped DNS renderer against empty and future reports. These use only local fakes: no
+// resolver, router, browser or host network condition can make the cases disappear.
+{
+  const fmt = (s, ...args) => String(s).replace(/\{(\d)\}/g, (_, i) => args[i]);
+  const checkEl = (tag, attrs = {}, ...children) => {
+    const node = tinyEl(tag, attrs, ...children.flat().filter(c => c != null && c !== false));
+    node.dataset = {};
+    node.isConnected = true;
+    node.classList = { add() {}, remove() {} };
+    let text = '';
+    Object.defineProperty(node, 'textContent', {
+      get() { return text; },
+      set(value) { text = String(value); this.children = []; },
+    });
+    return node;
+  };
+  const textOf = (node) => {
+    if (node == null || typeof node === 'boolean') return '';
+    if (typeof node !== 'object') return String(node);
+    return (node.textContent || '') + ' ' + (node.children || []).map(textOf).join(' ');
+  };
+  const timers = new Map();
+  let nextTimer = 0;
+  const posts = [];
+  const gets = [];
+  const context = vm.createContext({
+    el: checkEl, t: fmt, L: (s) => s,
+    document: { getElementById: () => null },
+    window: { addEventListener() {} },
+    setTimeout: (fn, ms) => { const id = ++nextTimer; timers.set(id, { fn, ms }); return id; },
+    clearTimeout: (id) => { timers.delete(id); },
+    api: {
+      get: async (path) => { gets.push(path); return {}; },
+      post: async (path, body) => { posts.push({ path, body }); return {}; },
+    },
+    toast() {}, route() {},
+  });
+  vm.runInContext(dns, context);
+  const session = { id: 41, canaries: false, extraNames: '', state: { running: false }, starting: false };
+  const empty = context.dnsCheckReport(session, { scenarios: null }, {
+    level: 'unknown', full: true, path: { measured: true, upstreams: null, flows: null, own_resolv_conf: null },
+    interception: null, resolvers: null, encrypted: null, warnings: null, options: null, finished_at: '',
+  });
+  const emptyText = textOf(empty);
+  for (const sentence of ['No upstreams were reported.', 'No DNS flows were measured.', 'No warnings were reported.',
+    'No changes are suggested by this report.', 'No interception results were returned.',
+    'No resolver results were returned.', 'No encrypted transport results were returned.', 'Check time not reported.']) {
+    check(emptyText.includes(sentence), `the DNS check renders its empty state: ${sentence}`);
+  }
+  let runButton = null;
+  let canaryBox = null;
+  walk(empty, (node) => {
+    if (node.tag === 'button' && node.children.includes('Check resolvers')) runButton = node;
+    if (node.tag === 'input' && node.attrs.id === 'dns-check-canaries') canaryBox = node;
+  });
+  check(runButton && runButton.attrs.disabled == null, 'Check resolvers is really enabled when no check is running');
+  check(canaryBox && canaryBox.checked === false, 'provider-visible popular-name checks are opt-in and off by default');
+  const unmeasured = context.dnsCheckReport(session, { scenarios: [] }, {
+    level: 'provider_plain', full: false,
+    path: { measured: false, exposure: 'provider', upstreams: [], flows: [{ server: '192.0.2.1' }] },
+    warnings: [], options: [], interception: [], resolvers: [], encrypted: [],
+  });
+  const unmeasuredText = textOf(unmeasured);
+  check(unmeasuredText.includes('Read from settings, not measured.') && !unmeasuredText.includes('No DNS flows were measured.'),
+    'an unmeasured path never draws a flow table, even if stale flow data arrives');
+  check(unmeasuredText.includes('Resolver identity has not been checked yet.') && unmeasuredText.includes('Encrypted transports are tested by Check resolvers.'),
+    'empty path-only results say what has not run rather than implying a clean full check');
+
+  const future = context.dnsCheckReport(session, { scenarios: [] }, {
+    level: 'future_level', full: true, path: { measured: true, exposure: 'future_exposure', upstreams: [], flows: [] },
+    warnings: [{ id: 'future_warning', severity: 'future_severity', facts: ['fact'] }],
+    options: [{ id: 'future_option', action: { kind: 'future_action' } }],
+    interception: [{ path: {}, status: 'future_status', code: 'future_code' }],
+    resolvers: [{ address: '192.0.2.53', path: { kind: 'future_path' }, verdict: 'future_verdict',
+      probes: [{ id: 'future_probe', status: 'future_status', code: 'future_code', detail: 'raw-detail' }] }],
+    encrypted: [{ address: '192.0.2.53', path: {}, status: 'future_status', proto: 'future_proto' }],
+  });
+  const futureText = textOf(future);
+  for (const code of ['future_level', 'future_exposure', 'future_warning', 'future_severity', 'future_option',
+    'future_action', 'future_path', 'future_verdict', 'future_probe', 'future_status', 'future_code', 'raw-detail']) {
+    check(futureText.includes(code), `a newer daemon's ${code} remains visible instead of blanking the card`);
+  }
+  const noData = context.dnsCheckStatusPill('no_data');
+  check(noData.attrs.class.includes('muted') && !noData.attrs.class.includes('err') && !noData.attrs.class.includes('warn'),
+    'no_data is neutral, not a resolver failure', noData.attrs.class);
+  const forged = context.dnsCheckVerdict('forged');
+  check(forged.cls === 'err' && forged.pill.attrs.class.includes('err'),
+    'forged is an error, never merely a warning', forged.pill.attrs.class);
+  const note = checkEl('div');
+  context.dnsCheckOpenSection('dns-serve-clients', note);
+  check(note.textContent.includes('not available'), 'a missing serve-clients section produces a note, not an exception');
+  const chain = functionSource(dns, 'dnsCheckOpenChain');
+  check(chain.includes('api.get("/api/dns/native")') && !chain.includes('api.post('),
+    'a chain option only reads and opens the existing editor; it writes nothing itself');
+
+  // Opening the route twice must replace, not multiply, the one-second poller.
+  await (async () => {
+    context.dnsCheckCard({});
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    check(gets[0] === '/api/dns/check' && posts[0] && posts[0].path === '/api/dns/check' && posts[0].body.full === false,
+      'an empty initial state starts the path-only check');
+    check(timers.size === 1 && [...timers.values()][0].ms === 1000, 'the started check has one one-second poller', `timers=${timers.size}`);
+    const live = vm.runInContext('dnsCheckSession', context);
+    live.canaries = true;
+    live.extraNames = 'one.test\ntwo.test';
+    await context.dnsCheckStart(live, true);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    check(posts[1] && posts[1].body.full === true && posts[1].body.canaries_on_wan === true
+      && JSON.stringify(posts[1].body.extra_names) === '["one.test","two.test"]',
+      'Check resolvers sends the opt-in and the extra names in the documented request', JSON.stringify(posts[1]));
+    live.extraNames = Array.from({ length: 11 }, (_, i) => `name-${i}.test`).join('\n');
+    await context.dnsCheckStart(live, true);
+    check(posts.length === 2 && live.error.includes('10'), 'more than ten extra names is refused locally without starting a check');
+    context.dnsCheckCard({});
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    check(timers.size === 1, 'a second DNS render never leaves two pollers running', `timers=${timers.size}`);
+    context.dnsCheckStop();
+    check(timers.size === 0, 'leaving the DNS route stops its poller', `timers=${timers.size}`);
+  })().catch(e => check(false, 'the DNS poller lifecycle could not be exercised', e.message));
+}
+
+// K6: Encrypted resolver quick list (Fast*)
+{
+  const fast = fs.readFileSync('internal/dnscheck/fast.go', 'utf8');
+  const keysFor = (name) => {
+    const start = dns.indexOf(`const ${name} = {`);
+    const end = start < 0 ? -1 : dns.indexOf('\n};', start);
+    check(start >= 0 && end > start, `the DNS page declares its ${name} map`);
+    if (start < 0 || end < 0) return new Set();
+    const keys = new Set();
+    const block = dns.slice(start, end);
+    const re = /^\s*(?:"([^"]+)"|([A-Za-z_][\w]*))\s*:/gm;
+    let m;
+    while ((m = re.exec(block)) !== null) keys.add(m[1] || m[2]);
+    return keys;
+  };
+  const statusKeys = keysFor('DNS_FAST_STATUS_TEXT');
+  const filterKeys = keysFor('DNS_FAST_FILTER_TEXT');
+
+  // Fast* status constants in fast.go
+  const reStatus = /^\s*(Fast[A-Z][A-Za-z0-9]*)\s*=\s*"([^"]+)"/gm;
+  let sm;
+  let statusConstants = 0;
+  while ((sm = reStatus.exec(fast)) !== null) {
+    statusConstants++;
+    check(statusKeys.has(sm[2]), `fast.go ${sm[1]} (${sm[2]}) has text in DNS_FAST_STATUS_TEXT`);
+  }
+  check(statusConstants >= 6, 'the Fast* status sweep read the Go constants', `constants=${statusConstants}`);
+
+  // Filter words: every filter value present in fast.go (FastCatalog and comment) has text in DNS_FAST_FILTER_TEXT
+  const reFilter = /Filter:\s*"([^"]+)"/g;
+  let fm;
+  const catalogFilters = new Set();
+  while ((fm = reFilter.exec(fast)) !== null) {
+    catalogFilters.add(fm[1]);
+  }
+  for (const filter of catalogFilters) {
+    check(filterKeys.has(filter), `fast.go filter "${filter}" has text in DNS_FAST_FILTER_TEXT`);
+  }
+  check(catalogFilters.size >= 4, 'the catalog filter sweep found all filters', `filters=${catalogFilters.size}`);
+
+  // An unknown status or filter from a newer daemon shows raw and does not throw
+  const checkTextSrc = functionSource(dns, 'dnsCheckText');
+  const rawCtx = vm.createContext({ L: (s) => s, t: (s) => s });
+  vm.runInContext(`${checkTextSrc}
+const DNS_FAST_STATUS_TEXT = { ok: "Answered" };
+const DNS_FAST_FILTER_TEXT = { none: "No filtering" };
+globalThis.statusRaw = dnsCheckText(DNS_FAST_STATUS_TEXT, "future_status");
+globalThis.filterRaw = dnsCheckText(DNS_FAST_FILTER_TEXT, "future_filter");`, rawCtx);
+  check(rawCtx.statusRaw === 'future_status', 'an unknown Fast status shows raw without throwing');
+  check(rawCtx.filterRaw === 'future_filter', 'an unknown Fast filter shows raw without throwing');
+
+  // The Use dialog does not write without going through saveDNS
+  const useSrc = functionSource(dns, 'dnsFastUse');
+  check(useSrc.includes('saveDNS('), 'the Use dialog delegates writes to saveDNS');
+  check(!useSrc.includes('api.post(') && !useSrc.includes('api.put(') && !useSrc.includes('api.patch('),
+    'the Use dialog does not write to the API directly, keeping revision handling and toasts intact');
+  check(useSrc.includes('await dnsSaveChain'), 'the Use dialog waits on in-flight chain saves before mutating dnsState');
+
+  // Exercise the Use dialog save handler: delegates to saveDNS, mutates dnsState as specified, leaves open on error
+  await (async () => {
+    const fmt = (s, ...args) => String(s).replace(/\{(\d)\}/g, (_, i) => args[i]);
+    const mockEl = (tag, attrs = {}, ...children) => {
+      const node = { tag, attrs, children: children.flat().filter(c => c != null && c !== false) };
+      node.dataset = {};
+      node.isConnected = true;
+      node.classList = { add() {}, remove() {} };
+      node.setAttribute = (k, v) => { attrs[k] = v; };
+      let text = '';
+      Object.defineProperty(node, 'textContent', {
+        get() { return text; },
+        set(v) { text = String(v); this.children = []; },
+      });
+      return node;
+    };
+
+    let modalOpts = null;
+    const fakeModal = {
+      closed: false,
+      close() { this.closed = true; },
+      classList: { add() {}, remove() {} },
+      isConnected: true,
+    };
+    let savedMsg = null, savedQuiet = null;
+    let apiCalls = 0;
+    let saveSucceeds = true;
+
+    const useCtx = vm.createContext({
+      el: mockEl, t: fmt, L: (s) => s,
+      dnsFastList: (v) => Array.isArray(v) ? v : [],
+      routingOutboundSelect: () => mockEl('select', { value: 'direct' }),
+      modal: (opts) => { modalOpts = opts; return fakeModal; },
+      dnsSaveChain: Promise.resolve(),
+      dnsState: { enabled: false, servers: [] },
+      saveDNS: async (msg, quiet) => {
+        savedMsg = msg; savedQuiet = quiet;
+        return saveSucceeds;
+      },
+      api: {
+        post: async () => { apiCalls++; return {}; },
+        put: async () => { apiCalls++; return {}; },
+        patch: async () => { apiCalls++; return {}; },
+      },
+      window: { addEventListener() {} },
+    });
+
+    vm.runInContext(functionSource(dns, 'dnsFastUse'), useCtx);
+    useCtx.dnsFastUse(
+      { via: 'direct' },
+      { id: 'cloudflare', name: 'Cloudflare', ip: '1.1.1.1', host: 'one.one.one.one' },
+      { best: 'dot', ms: 53, transports: [{ proto: 'dot', status: 'ok', ms: 53 }] }
+    );
+
+    check(modalOpts && Array.isArray(modalOpts.footer) && modalOpts.footer.length === 2,
+      'the Use dialog creates Cancel and Use resolver action buttons');
+    const saveBtn = modalOpts.footer[1];
+    check(saveBtn && saveBtn.tag === 'button' && typeof saveBtn.onclick === 'function',
+      'the Use dialog save button is wired with an onclick handler');
+
+    // Click save with successful saveDNS
+    await saveBtn.onclick();
+    check(savedMsg === 'Resolver saved' && savedQuiet === true,
+      'the Use dialog saves via saveDNS("Resolver saved", true)', `msg=${savedMsg}`);
+    check(apiCalls === 0, 'the Use dialog invokes zero direct API calls');
+    check(fakeModal.closed === true, 'the Use dialog closes after a successful save');
+    check(useCtx.dnsState.enabled === true && useCtx.dnsState.final === 'fast_cloudflare' && useCtx.dnsState.serve_clients === true,
+      'the Use dialog configures dnsState.enabled, final, and serve_clients');
+    const srv = (useCtx.dnsState.servers || [])[0];
+    check(srv && srv.tag === 'fast_cloudflare' && srv.type === 'tls' && srv.server === '1.1.1.1' && srv.sni === 'one.one.one.one',
+      'the Use dialog sets the fast_ server with TLS transport');
+
+    // On failed save: dnsState is reverted and dialog stays open
+    saveSucceeds = false;
+    fakeModal.closed = false;
+    const priorState = useCtx.dnsState;
+    saveBtn.disabled = false;
+    useCtx.dnsFastUse(
+      { via: 'direct' },
+      { id: 'quad9', name: 'Quad9', ip: '9.9.9.9', host: 'dns.quad9.net' },
+      { best: 'dot', ms: 62, transports: [{ proto: 'dot', status: 'ok', ms: 62 }] }
+    );
+    const saveBtn2 = modalOpts.footer[1];
+    await saveBtn2.onclick();
+    check(fakeModal.closed === false, 'the Use dialog stays open when saveDNS fails');
+    check(useCtx.dnsState === priorState, 'the Use dialog restores prior dnsState when saveDNS fails');
+  })().catch(e => check(false, 'the Use dialog save flow could not be exercised', e.message));
 }
 
 if (failures.length) {

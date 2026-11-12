@@ -220,10 +220,48 @@ func TestBulkEndpoints_ReimportSaysItKeptAServerKeyPin(t *testing.T) {
 	}
 	m := post()
 	notes, _ := m["notes"].([]any)
-	if m["unchanged"] != float64(1) || len(notes) != 1 || !strings.Contains(notes[0].(string), "kept: server public-key pin") {
-		t.Fatalf("re-import answered %v, want unchanged and a note that the server key pin was kept", m)
+	if m["unchanged"] != float64(1) || len(notes) != 1 ||
+		!strings.Contains(notes[0].(string), "kept: server public-key pin") ||
+		!strings.Contains(notes[0].(string), "sing-box config") {
+		t.Fatalf("re-import answered %v, want unchanged and a kept-pin note naming every source", m)
 	}
 	if p := s.store.Profile(); len(p.Endpoints[0].TLS.PinPubKeySHA256) != 1 {
 		t.Error("the server key pin was not kept")
+	}
+}
+
+// QA-156: a link that omits MTU and keepalive still clears them, but the answer names the loss.
+func TestBulkEndpoints_ReimportSaysItClearedWireGuardKnobs(t *testing.T) {
+	s, _ := sharehandlers_server(t)
+	const base = "wireguard://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA%3D@203.0.113.61:51820?publickey=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQ%3D&address=10.0.0.2/32"
+	post := func(extra string) map[string]any {
+		t.Helper()
+		e, err := importer.Parse(base + extra + "#W")
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := json.Marshal(map[string]any{"endpoints": []model.Endpoint{*e}})
+		w := profilehandlers_post(s.handleBulkEndpoints, string(body))
+		var m map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &m); err != nil || w.Code != 200 {
+			t.Fatalf("bulk import: %d %s", w.Code, w.Body.String())
+		}
+		return m
+	}
+	post("&mtu=1420&keepalive=25")
+	p := s.store.Profile()
+	e := p.Endpoints[0]
+	e.MTU, e.PersistentKeepalive = 1420, 25
+	delete(e.Params, "mtu")
+	delete(e.Params, "persistent_keepalive")
+	if err := s.store.UpsertEndpoint(e); err != nil {
+		t.Fatal(err)
+	}
+
+	m := post("")
+	notes, _ := m["notes"].([]any)
+	if m["updated"] != float64(1) || len(notes) != 1 ||
+		!strings.Contains(notes[0].(string), "cleared by the re-import: MTU, persistent keepalive") {
+		t.Fatalf("re-import answered %v, want one update and a note naming both cleared values", m)
 	}
 }

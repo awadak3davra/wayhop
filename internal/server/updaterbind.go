@@ -2,7 +2,6 @@ package server
 
 import (
 	"wayhop/internal/model"
-	"wayhop/internal/pbr"
 )
 
 // updaterbind.go points component downloads at an interface the operator chose.
@@ -49,7 +48,7 @@ func (s *Server) outboundIface(tag string) string {
 		if !e.Enabled {
 			return ""
 		}
-		return pbr.KernelIface(e)
+		return s.kernelDeviceOf(e)
 	}
 	// A group takes the member the rest of the kernel plane routes through: the operator's order,
 	// first HEALTHY member that has an interface to bind to — the same election, over the same map,
@@ -57,7 +56,7 @@ func (s *Server) outboundIface(tag string) string {
 	// setting exists to avoid, and a group whose members are all down resolves to the ordinary path
 	// rather than to a link that cannot carry anything.
 	if g := profile.GroupByID(tag); g != nil {
-		if iface, ok := s.electHealthyMember(*g, kernelIfaceByEndpoint(&profile)); ok {
+		if iface, ok := s.electHealthyMember(*g, kernelIfaceByEndpoint(&profile, s.appliedKernelDevices())); ok {
 			return iface
 		}
 	}

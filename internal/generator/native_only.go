@@ -172,6 +172,10 @@ func DatapathNativeOnly(p *model.Profile, routingMode string) bool {
 	if !ProfileNativeOnly(p) {
 		return false
 	}
+	// With no sing-box running, nothing can ever listen on that port.
+	if p.DNS != nil && p.DNS.Enabled && p.DNS.ServeClients {
+		return false
+	}
 	// (2) Only fast mode is TUN-less with a kernel-native default; everything else keeps
 	// (or asks for) a sing-box datapath.
 	if routingMode != "fast" {

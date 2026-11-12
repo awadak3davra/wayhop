@@ -1035,12 +1035,18 @@ function serviceInstalledStep(demo) {
 // why, so its Install reads as an offer rather than a fix. Only a router whose own AmneziaWG is
 // already the newest generation gets the prose below and no button.
 //
+// ByeDPI's ciadpi gets its row the same way, once a connection here runs on it or it is installed. The
+// ByeDPI form says the connection "needs the ByeDPI component", and the review asks to install ciadpi,
+// yet no row offered it: a hunter on an emulated OpenWrt installed it only by calling the API. One the
+// package manager owns stays prose, as below.
+//
 // A router service (the Telegram bridge, server/tgbridge.go) always gets its row: it carries no
 // connection, so nothing here could say whether one needs it, and its Settings card sends the
 // operator to this page to install it. Its row reads as optional (engineRow), not as a gap.
 function componentsToShow(engines) {
   return (engines || []).filter(e => e.role === "core" || e.role === "service" ||
-    (e.awg && (e.awg.needed || e.awg.optional || (e.installed || {}).present)));
+    (e.awg && (e.awg.needed || e.awg.optional || (e.installed || {}).present)) ||
+    (e.role === "socks-plugin" && !e.native_managed && ((e.used_by || []).length || (e.installed || {}).present)));
 }
 
 // kernelCarriedNote states what this router already carries itself, without offering to install it.
@@ -1296,7 +1302,7 @@ function awgPathLabel(path) {
 }
 
 function awgFootprintLine(f) {
-  const mb = n => (n / 1048576).toFixed(1) + " MB";
+  const mb = n => (n / 1048576).toFixed(1) + " " + t("MB");
   let line = f.form === "compressed"
     ? t("Kept compressed: {0} on flash; it is unpacked into RAM when it starts ({1}).", mb(f.flash_bytes),
       f.ram_bytes ? mb(f.ram_bytes) : t("not unpacked yet"))

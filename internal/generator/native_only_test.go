@@ -544,6 +544,29 @@ func TestDatapathNativeOnly(t *testing.T) {
 			mode: "fast",
 			want: false,
 		},
+		// With ServeClients enabled, sing-box must run to listen on the client DNS port.
+		{
+			name: "fast-serve-clients-forces-singbox",
+			p: &model.Profile{
+				Endpoints: []model.Endpoint{
+					ep("x1", model.EngineExternal, "", true),
+				},
+				DNS: &model.DNSSettings{Enabled: true, ServeClients: true},
+			},
+			mode: "fast",
+			want: false,
+		},
+		{
+			name: "fast-serve-clients-disabled-dns-stays-native",
+			p: &model.Profile{
+				Endpoints: []model.Endpoint{
+					ep("x1", model.EngineExternal, "", true),
+				},
+				DNS: &model.DNSSettings{Enabled: false, ServeClients: true},
+			},
+			mode: "fast",
+			want: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

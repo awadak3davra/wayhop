@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -58,6 +57,9 @@ func (s *Server) handleUpdaterEngines(w http.ResponseWriter, r *http.Request) {
 	// that answer is identical for every engine in the list.
 	prof := s.store.Profile()
 	coreUsers := coreDependents(prof, caps)
+	if len(coreUsers) == 0 && routesThroughCore(prof, s.datapathRequiresCore(s.config(), prof)) {
+		coreUsers = []string{"routing"}
+	}
 	out := make([]item, 0, len(updater.Engines))
 	for _, e := range updater.Engines {
 		pkg := s.updater.EnginePackageStatus(ctx, e)
@@ -275,7 +277,7 @@ func (s *Server) handleUpdaterInstall(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Version string `json:"version"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	_ = decodeJSONBody(r.Body, &body)
 	if body.Version == "" {
 		writeErr(w, http.StatusBadRequest, "version required")
 		return
@@ -306,6 +308,7 @@ func (s *Server) handleUpdaterInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setUpdErr(e.ID, "") // a successful install clears any prior failure reason
+	s.forgetCapabilities()
 	// If we updated the running primary core, reload it — UNDER applyMu so it can't
 	// interleave with handleApply's / the fail-safe's Stop+Start+Reload. Reload drops the
 	// core's lock between Stop and Start, so two concurrent reloads could each spawn a
@@ -407,7 +410,7 @@ func (s *Server) handleUpdaterUninstall(w http.ResponseWriter, r *http.Request) 
 	var body struct {
 		Stop bool `json:"stop"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	_ = decodeJSONBody(r.Body, &body)
 	// Hold applyMu across the WHOLE stop→delete, not just the stop. handleApply takes the same lock
 	// end-to-end; the old code released it right after Stop(), leaving a window in which a concurrent
 	// Apply could take the lock, restart the core onto the very binary about to be unlinked, and this
@@ -585,7 +588,7 @@ func (s *Server) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Version string `json:"version"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	_ = decodeJSONBody(r.Body, &body)
 	code, out := s.selfInstall(r.Context(), body.Version)
 	writeJSON(w, code, out)
 }
@@ -640,7 +643,7 @@ func (s *Server) handleSelfAuto(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Enabled bool `json:"enabled"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(r.Body, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad body")
 		return
 	}

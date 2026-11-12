@@ -107,8 +107,8 @@ func offlineCompanionReleases(prefix, arch string) []Release {
 	}
 	name := prefix + offlineCompanionVersion + "-linux-" + token + ".gz"
 	return companionReleases([]Release{{
-		Tag:    "v0.5.9",
-		Name:   "WayHop v0.5.9",
+		Tag:    "v0.5.10",
+		Name:   "WayHop v0.5.10",
 		Assets: []Asset{{Name: name, URL: "https://example.invalid/" + name, Size: offlineCompanionAssetSize}},
 	}}, prefix)
 }

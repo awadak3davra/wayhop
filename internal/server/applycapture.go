@@ -257,6 +257,20 @@ func (s *Server) captureExecutionNative(
 		}
 		capture.NDMPolicies = keenetic.PolicyMarks(policies)
 	}
+	if err == nil && platform.Platform(host.Host.Platform) == platform.Keenetic {
+		readInterfaces := readKeeneticInterfaces
+		if s != nil && s.keeneticInterfacesReader != nil {
+			readInterfaces = s.keeneticInterfacesReader
+		}
+		// A failed listing leaves the old by-name fallback in place; it must not turn a working Apply
+		// into a refusal. Where the listing exists, ownershipBaseline uses it to reject slot reuse.
+		if listing, listErr := readInterfaces(ctx); listErr == nil {
+			capture.ndmPublicKeys = make(map[string]string)
+			for _, status := range netvpn.ParseNDMInterfaceStatus(listing) {
+				capture.ndmPublicKeys["interface "+status.Name] = status.PublicKey
+			}
+		}
+	}
 	if err == nil && s != nil && platform.Platform(host.Host.Platform) == platform.OpenWrt {
 		// In the same host pass: the UCI writer's generation is part of what the plan is compiled
 		// against, like the UCI itself.

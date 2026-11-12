@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"wayhop/internal/pbr"
+	"wayhop/internal/platform"
 )
 
 // listmemory.go answers "what do these lists cost this router" — in kernel memory, per list.
@@ -38,6 +39,13 @@ type listMemoryEntry struct {
 // A list with no entry is one the kernel does not hold a set for — not a list costing zero. The page
 // words those differently, so they are ABSENT here rather than reported as 0.
 func (s *Server) handlePBRListMemory(w http.ResponseWriter, r *http.Request) {
+	// OpenWrt keeps the sets in nftables, which reports no memory per set, and `ipset` is not there.
+	// The page read that as "the kernel routing plane is not installed" beside an installed, verified
+	// plane holding both lists' sets (a hunter on an emulated 25.12). Say which it is.
+	if s.detectedPlatform() == platform.OpenWrt && !s.config().Demo {
+		writeJSON(w, http.StatusOK, map[string]any{"measured": false, "lists": nil, "reason": "nft"})
+		return
+	}
 	profile := s.store.Profile()
 	ids := make([]string, 0, len(profile.RoutingLists))
 	for i := range profile.RoutingLists {

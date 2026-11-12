@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"wayhop/internal/atomicfile"
@@ -37,6 +38,11 @@ var applyReconcileSettle = 3 * time.Second
 // applyConvergeRetry is how long boot converge waits before its one retry. A var so tests need not
 // wait.
 var applyConvergeRetry = 30 * time.Second
+
+// applyConvergeBackoff is the wait before each further converge attempt once the two at boot have
+// failed; the last value repeats for as long as the committed state is unchanged and routing is on.
+// A var so tests need not wait.
+var applyConvergeBackoff = []time.Duration{time.Minute, 2 * time.Minute, 5 * time.Minute}
 
 func (s *Server) markKernelPlane(state int32) { s.kernelPlaneState.Store(state) }
 
@@ -140,7 +146,9 @@ func (s *Server) removeStaleCoreTemps() {
 
 // convergeOnBoot re-executes the committed materialization: the adapters are idempotent (NDM blocks
 // already present are skipped, UCI is diffed, the kernel plane reinstalled, the core started when
-// the record says so). Failures are logged and retried once; they never stop the daemon.
+// the record says so). Failures are logged and retried once; they never stop the daemon. When both
+// attempts fail it returns, so the reconcile loop starts as before, and convergeRetryLoop keeps
+// trying in the background.
 func (s *Server) convergeOnBoot(ctx context.Context) {
 	// Routing switched off: boot must not put back what the operator removed. It re-asserts the off
 	// state instead (a daemon that died half way through the switch finishes it here).
@@ -164,6 +172,7 @@ func (s *Server) convergeOnBoot(ctx context.Context) {
 	if s.config().Demo || materializationIsDemo(&committed.Materialization) {
 		return
 	}
+	var lastErr error
 	for attempt := 1; attempt <= 2; attempt++ {
 		if ctx.Err() != nil {
 			return
@@ -172,6 +181,7 @@ func (s *Server) convergeOnBoot(ctx context.Context) {
 		if done {
 			return
 		}
+		lastErr = err
 		log.Printf("apply: converge to %s failed (attempt %d): %v", committed.Rev, attempt, err)
 		if attempt == 1 {
 			select {
@@ -181,6 +191,43 @@ func (s *Server) convergeOnBoot(ctx context.Context) {
 			}
 		}
 	}
+	if ctx.Err() != nil {
+		return
+	}
+	go s.convergeRetryLoop(ctx, committed, lastErr)
+}
+
+// convergeRetryLoop keeps converging to the committed revision after boot gave up on it. Nothing else
+// does: the reconcile loop re-asserts the kernel plane alone, and the watchdog restarts only a core
+// that was started once, so a converge that failed before its core step (NDM still settling, a tunnel
+// device not up, the network not there yet) left the router without sing-box and the plugins until
+// somebody pressed Apply. Each attempt is convergeOnBootOnce, which re-reads the record under applyMu
+// and stands down for good once routing is switched off or an Apply, Test or Roll back has replaced
+// what boot was converging to. One alert says it is failing and one that it recovered.
+func (s *Server) convergeRetryLoop(ctx context.Context, committed *appliedRevision, lastErr error) {
+	detail := ""
+	if lastErr != nil {
+		detail = ": " + outputTail(lastErr.Error(), 300)
+	}
+	s.alert("⚠️ WayHop: the applied configuration could not be restored after the start" + detail +
+		" — WayHop keeps retrying; until it succeeds the VPN routing may be down.")
+	for attempt := 3; ; attempt++ {
+		wait := applyConvergeBackoff[min(attempt-3, len(applyConvergeBackoff)-1)]
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+		converged := false // set under applyMu: a done attempt either converged or stood down
+		done, err := s.convergeOnBootOnceNoting(ctx, committed, &converged)
+		if done {
+			if converged {
+				s.alert("WayHop: the applied configuration was restored (attempt " + strconv.Itoa(attempt) + ").")
+			}
+			return
+		}
+		log.Printf("apply: converge to %s failed (attempt %d): %v", committed.Rev, attempt, err)
+	}
 }
 
 // convergeOnBootOnce is one attempt of convergeOnBoot. Like rollbackLiveOnBootOnce it re-reads the
@@ -189,6 +236,12 @@ func (s *Server) convergeOnBoot(ctx context.Context) {
 // the retry, which put the core and the kernel plane back or ran the old core config under the new
 // record (QA-139).
 func (s *Server) convergeOnBootOnce(ctx context.Context, committed *appliedRevision) (bool, error) {
+	return s.convergeOnBootOnceNoting(ctx, committed, nil)
+}
+
+// convergeOnBootOnceNoting is convergeOnBootOnce that also sets *converged when the attempt really
+// converged, which done alone does not say: it is true for an attempt that stood down as well.
+func (s *Server) convergeOnBootOnceNoting(ctx context.Context, committed *appliedRevision, converged *bool) (bool, error) {
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()
 	if s.routingIsOff() || s.committedRevision() != committed || s.liveRevision() != nil {
@@ -197,6 +250,9 @@ func (s *Server) convergeOnBootOnce(ctx context.Context, committed *appliedRevis
 	}
 	if err := s.convergeLocked(ctx, committed); err != nil {
 		return false, err
+	}
+	if converged != nil {
+		*converged = true
 	}
 	log.Printf("apply: converged to the committed configuration %s", committed.Rev)
 	if s.bootDroppedPlan != nil {
@@ -212,20 +268,24 @@ func (s *Server) convergeOnBootOnce(ctx context.Context, committed *appliedRevis
 // the Test was committed to flash as it was made, so after a reboot the committed plan's preflight
 // found the Test's values, refused at native prepare — before the core step, so no sing-box — and
 // the Test's own interfaces stayed as unrecorded orphans. A daemon restart, on any platform, leaves
-// all of the Test running. Only a Keenetic reboot loses it all (NDM starts from startup-config, which
-// a Test never writes, and the kernel plane and core do not survive), and there a teardown would name
-// interfaces that no longer exist: the discard stays right. Without both boot ids that case cannot
-// be told from a restart, and it keeps the discard it always had.
+// all of the Test running. A Keenetic reboot loses the core and kernel plane, but NDM starts from
+// startup-config, which the routing switch may have saved with the Test's native tunnels still in it
+// (QA-145). A native revision therefore rolls back even across that reboot; without one, the usual
+// boot-id check decides, and without both ids the discard stays as it was.
 func (s *Server) liveNeedsRollbackOnBoot(live *appliedRevision) bool {
 	if live == nil || !live.Materialization.known() || materializationIsDemo(&live.Materialization) ||
 		s.config().Demo || s.routingIsOff() {
 		return false
 	}
 	keenetic := s.detectedPlatform() == platform.Keenetic
-	if target := live.Materialization.nativeTarget(); target != nil {
+	target := live.Materialization.nativeTarget()
+	if target != nil {
 		keenetic = keenetic || target.Platform == platform.Keenetic
 	}
 	if !keenetic {
+		return true
+	}
+	if target != nil {
 		return true
 	}
 	now := s.bootID()
@@ -236,6 +296,7 @@ func (s *Server) liveNeedsRollbackOnBoot(live *appliedRevision) bool {
 // rollback would have, retried once like converge. Only a rollback that worked drops the live state:
 // after a failure the record still names what is left to undo, and Roll back retries it.
 func (s *Server) rollbackLiveOnBoot(ctx context.Context, live *appliedRevision) {
+	var lastErr error
 	for attempt := 1; attempt <= 2; attempt++ {
 		if ctx.Err() != nil {
 			return
@@ -244,6 +305,7 @@ func (s *Server) rollbackLiveOnBoot(ctx context.Context, live *appliedRevision) 
 		if done {
 			return
 		}
+		lastErr = err
 		log.Printf("apply: rolling back the unsaved state %s failed (attempt %d): %v", live.Rev, attempt, err)
 		if attempt == 1 {
 			select {
@@ -253,6 +315,13 @@ func (s *Server) rollbackLiveOnBoot(ctx context.Context, live *appliedRevision) 
 			}
 		}
 	}
+	if ctx.Err() != nil || lastErr == nil {
+		return
+	}
+	// Not retried further on its own: a rollback removes things, and the record already names what is
+	// left for Roll back to undo. But somebody has to be told that it is waiting.
+	s.alert("⚠️ WayHop: the unsaved Test configuration left from before the restart could not be rolled back: " +
+		outputTail(lastErr.Error(), 300) + " — open the panel and press Roll back.")
 }
 
 func (s *Server) rollbackLiveOnBootOnce(ctx context.Context, live *appliedRevision) (bool, error) {
@@ -399,10 +468,13 @@ func (s *Server) reconcileKernelPlane(ctx context.Context) {
 	log.Printf("apply: kernel routing plane reinstalled")
 }
 
-// currentNativeInterfaceBindings maps endpoint id → the router-native interface the applied plan
-// gave it (wr_* on OpenWrt, WireguardN/wrtunN on Keenetic), so health and traffic attribution use
-// the real names instead of guesses derived from the editable profile. known=false means no native
-// plan is applied; callers then keep the profile-derived behavior.
+// currentNativeInterfaceBindings maps endpoint id → the device the applied plan runs it on (wr_* on
+// OpenWrt; on Keenetic nwgN for a tunnel NDM created as WireguardN, the adopted link, the engine's
+// wr_* or a compatibility wrtunN), so health and traffic attribution use the real names instead of
+// guesses derived from the editable profile. The monitor pings through the device and reads its
+// counters from sysfs, which know the kernel's name only: NDM's WireguardN is never a device.
+// known=false means no native plan is applied, or the record cannot name a device; callers then keep
+// the profile-derived behavior.
 func (s *Server) currentNativeInterfaceBindings() (map[string]string, bool) {
 	base := s.appliedBaseline()
 	if base == nil {
@@ -410,6 +482,10 @@ func (s *Server) currentNativeInterfaceBindings() (map[string]string, bool) {
 	}
 	plan := base.Materialization.nativeTarget()
 	if plan == nil {
+		return nil, false
+	}
+	devices, err := keeneticKernelDevices(plan)
+	if err != nil {
 		return nil, false
 	}
 	bindings := make(map[string]string)
@@ -423,11 +499,15 @@ func (s *Server) currentNativeInterfaceBindings() (map[string]string, bool) {
 		if decision.Interface == "" {
 			continue
 		}
-		if seenInterfaces[decision.Interface] {
+		device := decision.Interface
+		if kernel := devices[decision.EndpointID]; kernel != "" {
+			device = kernel
+		}
+		if seenInterfaces[device] {
 			return nil, false
 		}
-		seenInterfaces[decision.Interface] = true
-		bindings[decision.EndpointID] = decision.Interface
+		seenInterfaces[device] = true
+		bindings[decision.EndpointID] = device
 	}
 	return bindings, true
 }

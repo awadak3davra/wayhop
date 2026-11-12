@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"net/http"
 	"regexp"
 	"sort"
@@ -120,7 +119,7 @@ func (s *Server) handleDiagnosticsAnalyze(w http.ResponseWriter, r *http.Request
 	var body struct {
 		Text string `json:"text"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(r.Body, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}

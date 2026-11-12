@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -24,7 +23,7 @@ func (s *Server) handleSpeedtest(w http.ResponseWriter, r *http.Request) {
 		Bytes int    `json:"bytes"`
 		ID    string `json:"id"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	_ = decodeJSONBody(r.Body, &body)
 	if !s.speedMu.TryLock() {
 		writeErr(w, http.StatusConflict, errSpeedBusy.Error())
 		return

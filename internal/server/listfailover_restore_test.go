@@ -49,11 +49,12 @@ type fakeTables struct {
 	show    map[bool]string
 	readErr map[bool]error
 	up      map[string]bool
+	noV6    map[string]bool // devices with no IPv6 at all; nil leaves the io's v6 check unset
 	writes  []string
 }
 
 func (f *fakeTables) io() *routeTableIO {
-	return &routeTableIO{
+	io := &routeTableIO{
 		read: func(_ context.Context, v6 bool) (string, error) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
@@ -71,6 +72,16 @@ func (f *fakeTables) io() *routeTableIO {
 		},
 		up: func(iface string) bool { return f.up[iface] },
 	}
+	if f.noV6 != nil {
+		io.v6 = func(iface string) bool { return !f.noV6[iface] }
+		io.refuse = func(_ context.Context, table int) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			f.writes = append(f.writes, fmt.Sprintf("v6 unreachable %d", table))
+			return nil
+		}
+	}
+	return io
 }
 
 func restoreServer(t *testing.T, plan *pbr.Plan, tables *fakeTables) *Server {
@@ -217,5 +228,58 @@ func TestListFailoverTickWritesNothingOnAnUnreadableTable(t *testing.T) {
 	s.listFailoverTick(context.Background())
 	if !reflect.DeepEqual(tables.writes, []string{"v4 wr_u 1001"}) {
 		t.Fatalf("with the tables readable the lost route was not restored: %v", tables.writes)
+	}
+}
+
+// A list whose device carries no IPv6 (amneziawg-go's awg1 on KeeneticOS) cannot get a v6 route
+// through it. The table used to stay empty and the list's IPv6 fell through to the main table, out of
+// whatever tunnel held the v6 default there. Now the table answers unreachable, so clients use IPv4
+// through the list's own device; the refusal is logged once, not every tick.
+func TestRestoreRefusesIPv6OnADeviceWithoutIt(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	tables := &fakeTables{up: map[string]bool{"wr_u": true}, noV6: map[string]bool{"wr_u": true}}
+	s := restoreServer(t, restorePlan(true), tables)
+	s.listFailoverTick(context.Background())
+	if want := []string{"v4 wr_u 1001", "v6 unreachable 1001"}; !reflect.DeepEqual(tables.writes, want) {
+		t.Fatalf("writes %v, want %v", tables.writes, want)
+	}
+	s.listFailoverTick(context.Background())
+	if n := strings.Count(buf.String(), "wr_u carries no IPv6"); n != 1 {
+		t.Errorf("the refusal was logged %d times:\n%s", n, buf.String())
+	}
+	if strings.Contains(buf.String(), "cannot restore") {
+		t.Errorf("a device with no IPv6 was still asked for a v6 route:\n%s", buf.String())
+	}
+	// The device gains IPv6: the restore writes the route, which takes the unreachable's slot.
+	tables.noV6 = map[string]bool{}
+	s.routeTables = tables.io()
+	tables.writes = nil
+	s.listFailoverTick(context.Background())
+	if want := []string{"v4 wr_u 1001", "v6 wr_u 1001"}; !reflect.DeepEqual(tables.writes, want) {
+		t.Errorf("after the device gained IPv6: writes %v, want %v", tables.writes, want)
+	}
+}
+
+func TestLinkCarriesIPv6(t *testing.T) {
+	dir := t.TempDir()
+	defer func(old string) { ipv6ConfDir = old }(ipv6ConfDir)
+	ipv6ConfDir = dir
+	if !linkCarriesIPv6("awg1") {
+		t.Error("with no IPv6 config at all the device must be assumed to carry it")
+	}
+	for name, val := range map[string]string{"all": "0\n", "nwg1": "0\n", "off0": "1\n"} {
+		if err := os.MkdirAll(filepath.Join(dir, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name, "disable_ipv6"), []byte(val), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, want := range map[string]bool{"nwg1": true, "off0": false, "awg1": false, "../all": true} {
+		if got := linkCarriesIPv6(name); got != want {
+			t.Errorf("linkCarriesIPv6(%q) = %v, want %v", name, got, want)
+		}
 	}
 }

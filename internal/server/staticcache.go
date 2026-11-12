@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"wayhop/internal/uimin"
 )
 
 // staticGzipCache serves the embedded UI assets PRE-COMPRESSED, compressing each file at most once
@@ -50,6 +52,12 @@ func (c *staticGzipCache) get(name string) (body []byte, ok bool) {
 	}
 
 	raw, err := fs.ReadFile(c.ui, name)
+	if err == nil {
+		// Comments are a third of the panel's source and no browser reads them. They are dropped here,
+		// once, on the way into the cache; a client that refuses gzip takes the file server's path and
+		// gets the source as written, which is the same program.
+		raw = uimin.Minify(name, raw)
+	}
 	if err != nil || len(raw) < gzipMinBytes || !gzipCompressible(contentTypeFor(name)) {
 		c.mu.Lock()
 		c.m[name] = nil // remember the negative answer so we do not re-stat on every request

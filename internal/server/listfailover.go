@@ -2,10 +2,13 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -141,6 +144,12 @@ func (s *Server) listFailoverTick(ctx context.Context) {
 			if !read || tables[target.Table] == target.Elected {
 				continue
 			}
+			if v6 && !io.carriesIPv6(target.Elected) {
+				// The elected member has no IPv6 at all: a route through it cannot exist, and the
+				// previous member's (or none) would send the list's IPv6 somewhere else. Refuse it.
+				s.noteTableV6Refused(tableRestore{Table: target.Table, Iface: target.Elected}, io.refuseV6(ctx, target.Table))
+				continue
+			}
 			err := io.write(ctx, v6, target.Elected, target.Table)
 			// A refusal is not a switch: the table still holds what it held, and claiming otherwise in
 			// the log would make the page report a move that did not happen.
@@ -203,6 +212,10 @@ func (s *Server) restoreLostTableRoutes(ctx context.Context, plan *pbr.Plan, pro
 			continue
 		}
 		for _, lost := range lostTableRoutes(plan, profile, tables, io.up) {
+			if v6 && !io.carriesIPv6(lost.Iface) {
+				s.noteTableV6Refused(lost, io.refuseV6(ctx, lost.Table))
+				continue
+			}
 			err := io.write(ctx, v6, lost.Iface, lost.Table)
 			s.noteTableRestore(v6, lost, err)
 		}
@@ -263,19 +276,90 @@ func (s *Server) noteTableRestore(v6 bool, lost tableRestore, err error) {
 	}
 }
 
+// noteTableV6Refused logs, once per change like noteTableRestore and under the same key, that a
+// table's IPv6 is refused because its device carries none, or that refusing it failed.
+func (s *Server) noteTableV6Refused(lost tableRestore, err error) {
+	key := fmt.Sprintf("IPv6/%d", lost.Table)
+	msg := "refused: no IPv6 on " + lost.Iface
+	if err != nil {
+		msg = err.Error()
+	}
+	s.listFailoverErrMu.Lock()
+	defer s.listFailoverErrMu.Unlock()
+	if s.tableRestoreErr == nil {
+		s.tableRestoreErr = map[string]string{}
+	}
+	if s.tableRestoreErr[key] == msg {
+		return
+	}
+	s.tableRestoreErr[key] = msg
+	if err != nil {
+		log.Printf("list routing: %s carries no IPv6 and table %d could not be told to refuse it, so its list's IPv6 may leave by another exit: %v", lost.Iface, lost.Table, err)
+		return
+	}
+	log.Printf("list routing: %s carries no IPv6, so table %d answers IPv6 with unreachable and its list's clients use IPv4 through %s", lost.Iface, lost.Table, lost.Iface)
+}
+
 // routeTableIO is how the list-routing loop reads and writes table defaults and asks whether a
 // device is up: iproute2 and the kernel's own interface list in production, a fake in tests.
 type routeTableIO struct {
 	read  func(ctx context.Context, v6 bool) (string, error)
 	write func(ctx context.Context, v6 bool, iface string, table int) error
 	up    func(iface string) bool
+	// v6 says whether a device can hold an IPv6 route at all, and refuse installs the route that
+	// answers "unreachable" in its place. A nil v6 means every device can.
+	v6     func(iface string) bool
+	refuse func(ctx context.Context, table int) error
+}
+
+func (io routeTableIO) carriesIPv6(iface string) bool { return io.v6 == nil || io.v6(iface) }
+
+func (io routeTableIO) refuseV6(ctx context.Context, table int) error {
+	if io.refuse == nil {
+		return errors.New("no way to refuse IPv6 here")
+	}
+	return io.refuse(ctx, table)
 }
 
 func (s *Server) tableIO() routeTableIO {
 	if s.routeTables != nil {
 		return *s.routeTables
 	}
-	return routeTableIO{read: readTableRoutes, write: writeTableDefault, up: linkIsUp}
+	return routeTableIO{read: readTableRoutes, write: writeTableDefault, up: linkIsUp, v6: linkCarriesIPv6, refuse: writeTableUnreachableV6}
+}
+
+// ipv6ConfDir is the kernel's per-device IPv6 settings; a variable so a test can stand in for it.
+var ipv6ConfDir = "/proc/sys/net/ipv6/conf"
+
+// linkCarriesIPv6 is false for a device the kernel set up no IPv6 for. On KeeneticOS that is
+// amneziawg-go's awg1: it has no /proc/sys/net/ipv6/conf/awg1, every `ip -6 route … dev awg1` fails,
+// and the list's v6 table stayed empty, so its marked IPv6 fell through to the main table and left by
+// whatever tunnel held the v6 default there (another provider's WireGuard, on a live Keenetic) - a list exit
+// nobody chose. A kernel with no IPv6 config at all says nothing either way: true keeps the write.
+func linkCarriesIPv6(name string) bool {
+	if name == "" || strings.ContainsAny(name, "/") || name == "." || name == ".." {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join(ipv6ConfDir, "all")); err != nil {
+		return true
+	}
+	b, err := os.ReadFile(filepath.Join(ipv6ConfDir, name, "disable_ipv6"))
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(b)) != "1"
+}
+
+// writeTableUnreachableV6 makes a table answer IPv6 with "no route", so a client gives up on IPv6 at
+// once and uses IPv4, which this table's device does carry. It takes the device route's own slot
+// (metric 1024, no metric given): the restore's `replace default dev` takes it back the moment the
+// device gains IPv6, and the kill switch's blackhole sits below at its own metric, untouched.
+func writeTableUnreachableV6(ctx context.Context, table int) error {
+	ctx, cancel := context.WithTimeout(ctx, listFailoverTimeout)
+	defer cancel()
+	_, err := runHostCommandBounded(ctx, listFailoverTimeout, kernelCounterOutputLimit,
+		applyHostCommandWaitDelay, "ip", familyArgs(true, "route", "replace", "unreachable", "default", "table", fmt.Sprint(table))...)
+	return err
 }
 
 func readTableRoutes(ctx context.Context, v6 bool) (string, error) {
@@ -338,7 +422,7 @@ func (s *Server) kernelElectableMembers() map[string][]string {
 	if err != nil || plan == nil {
 		return nil
 	}
-	ifaceOf := kernelIfaceByEndpoint(&profile)
+	ifaceOf := kernelIfaceByEndpoint(&profile, s.appliedKernelDevices())
 	out := map[string][]string{}
 	for _, egress := range plan.Egresses {
 		if egress.Kind != pbr.EgressInterface || egress.Table == 0 {
@@ -433,7 +517,7 @@ func (s *Server) listFailoverTargetsFrom(plan *pbr.Plan, profile *model.Profile,
 	// actually uses, and a list routed through a group uses the GROUP tag — so the members, which are
 	// exactly what this loop chooses between, had no entry at all. Measured on the router with the
 	// elected tunnel down: the table stayed empty for 72 seconds while every other member was alive.
-	ifaceOf := kernelIfaceByEndpoint(profile)
+	ifaceOf := kernelIfaceByEndpoint(profile, s.appliedKernelDevices())
 	var out []listFailoverTarget
 	for _, owned := range listFailoverTables(plan, profile, ifaceOf) {
 		elected, ok := s.electHealthyMember(owned.Group, ifaceOf)
@@ -496,16 +580,19 @@ func (s *Server) electHealthyMember(group model.Group, ifaceOf map[string]string
 
 // kernelIfaceByEndpoint maps each endpoint to the kernel link it binds to, through the COMPILER's own
 // resolver, skipping the ones that have none — a proxy endpoint is carried by an engine, not a link.
+// devices is the router's own naming (Server.appliedKernelDevices): on KeeneticOS a tunnel NDM created
+// is NDM's nwgN, not the wr_* name derived for WayHop's own devices, and electing the derived name
+// writes `ip route replace default dev wr_… table N`, which the kernel refuses.
 //
 // One definition because two callers elect over it: this loop, which repoints a routing list's table
 // at a healthy member, and the component downloader, which binds its socket to one. They were the
 // same fold written twice, and a second copy is a second answer to "which link is this endpoint" the
 // day one of them learns about a new engine kind.
-func kernelIfaceByEndpoint(p *model.Profile) map[string]string {
+func kernelIfaceByEndpoint(p *model.Profile, devices map[string]string) map[string]string {
 	out := make(map[string]string, len(p.Endpoints))
 	for i := range p.Endpoints {
 		e := &p.Endpoints[i]
-		if iface := pbr.KernelIface(e); iface != "" {
+		if iface := pbr.KernelDevice(e, devices); iface != "" {
 			out[e.ID] = iface
 		}
 	}

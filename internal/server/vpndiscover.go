@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"net"
 	"net/http"
 	"strings"
@@ -213,7 +212,7 @@ func (s *Server) handleVPNAdopt(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Iface string `json:"iface"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(r.Body, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}

@@ -83,7 +83,7 @@ func (s *Server) handleBackupExport(w http.ResponseWriter, r *http.Request) {
 // lock the operator out (mirrors the handleConfigReset carve-out).
 func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 	var bundle backupBundle
-	if err := json.NewDecoder(r.Body).Decode(&bundle); err != nil {
+	if err := decodeJSONBody(r.Body, &bundle); err != nil {
 		if writeBodyTooLarge(w, err, "the backup") {
 			return
 		}

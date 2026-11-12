@@ -110,7 +110,8 @@ var clashFields = sourceFields{params: []string{"uuid", "alter_id", "security", 
 	"hop_interval_max",
 	model.ParamQUICDisablePMTUD, "private_key", "peer_public_key", "pre_shared_key", "local_address", "reserved",
 	"mtu", "persistent_keepalive", "psk", "version", "network", "obfs_host", "obfs_mode", "reuse"},
-	tls: linkTLSFields, pins: true, transport: true, multiplex: true}
+	tls:  []string{"enabled", "type", "sni", "alpn", "insecure", "fingerprint", "public_key", "short_id", "ech"},
+	pins: true, transport: true, multiplex: true}
 
 // parseClash is ParseClash with its notes: what a proxy carried that the endpoint keeps differently
 // or not at all (a multiplex setting sing-box has no field for), one line per proxy and setting.

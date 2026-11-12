@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"net/http"
 	"strings"
 )
@@ -21,7 +20,7 @@ func (s *Server) handleDriftIgnore(w http.ResponseWriter, r *http.Request) {
 		EndpointID string `json:"endpoint_id"`
 		Ignore     *bool  `json:"ignore"` // pointer so an omitted field is an error, not a silent un-ignore
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(r.Body, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid body: "+err.Error())
 		return
 	}

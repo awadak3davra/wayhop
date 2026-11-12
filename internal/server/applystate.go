@@ -49,7 +49,8 @@ type appliedRevision struct {
 	Materialization executionMaterializationV1 `json:"materialization"`
 	// BootID is the kernel boot a Test (live) revision was applied in, empty when it could not be read.
 	// The next process compares it to its own to tell a daemon restart, which leaves the Test running,
-	// from a reboot, which on Keenetic leaves none of it (see liveNeedsRollbackOnBoot).
+	// from a reboot. On Keenetic only a native revision can survive that reboot in startup-config;
+	// liveNeedsRollbackOnBoot rolls it back rather than relying on the boot-id comparison alone.
 	BootID string `json:"boot_id,omitempty"`
 }
 

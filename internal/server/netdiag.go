@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -23,7 +22,7 @@ func (s *Server) handleNetDiag(w http.ResponseWriter, r *http.Request) {
 		Target string `json:"target"`
 		Egress string `json:"egress"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(r.Body, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -277,7 +276,7 @@ func (s *Server) handleNetDiagAll(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Target string `json:"target"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(r.Body, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}

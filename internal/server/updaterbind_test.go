@@ -88,7 +88,7 @@ func TestKernelIfaceByEndpointKeepsOnlyBindableEndpoints(t *testing.T) {
 		Groups: []model.Group{{ID: "grp", Name: "Main", Type: model.GroupFallback,
 			Members: []string{"vless-de", "external-nwg3"}}},
 	}
-	got := kernelIfaceByEndpoint(&profile)
+	got := kernelIfaceByEndpoint(&profile, nil)
 	// A disabled endpoint keeps its link here: the map answers "which link is this endpoint", and
 	// whether it may be USED is the election's question, decided by health. Validation already stops a
 	// disabled endpoint from being a group member.

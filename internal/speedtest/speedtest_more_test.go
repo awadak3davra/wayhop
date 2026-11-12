@@ -487,8 +487,8 @@ func TestBudgetBoundsEachTransfer(t *testing.T) {
 	if err != nil || n <= 0 || n >= 400*1024 || dur < tr.Budget || time.Since(start) > 2*time.Second {
 		t.Fatalf("download: %d bytes in %v, err %v", n, dur, err)
 	}
-	sent, dur, err := tr.upload(context.Background(), cl, 1<<40)
-	if err != nil || sent <= 0 || sent >= 1<<40 || dur < tr.Budget || dur > 5*time.Second {
+	sent, dur, err := tr.upload(context.Background(), cl, math.MaxInt32)
+	if err != nil || sent <= 0 || sent >= math.MaxInt32 || dur < tr.Budget || dur > 5*time.Second {
 		t.Fatalf("upload: %d bytes in %v, err %v", sent, dur, err)
 	}
 }
@@ -529,7 +529,7 @@ func TestBudgetBoundsTheWaitForAnAnswer(t *testing.T) {
 		{"latency", func() error { _, err := tr.latency(ctx, cl); return err }, time.Second},
 		{"download", func() error { _, _, err := tr.download(ctx, cl, 1_000_000); return err }, time.Second},
 		{"download body", func() error { _, _, err := tr.download(ctx, cl, 7); return err }, time.Second},
-		{"upload", func() error { _, _, err := tr.upload(ctx, cl, 1<<40); return err }, 2 * time.Second},
+		{"upload", func() error { _, _, err := tr.upload(ctx, cl, math.MaxInt32); return err }, 2 * time.Second},
 	} {
 		start := time.Now()
 		err := c.run()

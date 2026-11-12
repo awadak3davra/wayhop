@@ -65,6 +65,9 @@ type executionNativeCaptureV1 struct {
 	// ndmPresent is Keenetic-only: the interface headers and route identities the running config
 	// carried, for ownershipBaseline. Unexported, so never recorded with the artifact.
 	ndmPresent map[string]bool
+	// ndmPublicKeys is the matching `show interface` view. A committed block whose derived public key
+	// differs now belongs to somebody else's replacement tunnel, not to the rollback union (QA-146).
+	ndmPublicKeys map[string]string
 }
 
 // executionNativeArtifactV1 is the compiled native plan plus the capture it was compiled from. It is
@@ -92,19 +95,6 @@ func buildExecutionNativeArtifactV1(
 	capture executionNativeCaptureV1,
 	previous *nativeplan.Plan,
 ) (executionNativeArtifactV1, error) {
-	return buildExecutionNativeArtifactFrom(desired, host, capture, previous, nil)
-}
-
-// buildExecutionNativeArtifactFrom is buildExecutionNativeArtifactV1 with the AmneziaWG devices a
-// previous materialization WITHOUT a native plan ran on WayHop's own engine (genericPluginDevices),
-// which previous cannot carry: it is nil then.
-func buildExecutionNativeArtifactFrom(
-	desired DesiredSnapshot,
-	host HostSnapshotV1,
-	capture executionNativeCaptureV1,
-	previous *nativeplan.Plan,
-	genericPlugins map[string]string,
-) (executionNativeArtifactV1, error) {
 	if desired.SchemaVersion != DesiredSnapshotSchemaV1 || host.SchemaVersion != HostSnapshotSchemaV1 ||
 		(host.Platform == string(platform.OpenWrt) && capture.FirewallZone != desired.Config.NativeFirewallZone) ||
 		(host.Platform == string(platform.Keenetic) &&
@@ -122,7 +112,7 @@ func buildExecutionNativeArtifactFrom(
 		DomainsViaDNSMasq:   capture.DomainsViaDNSMasq,
 		OwnedInterfaces:     nativeOwnershipFrom(previous),
 		KeeneticOwnedBlocks: nativeplan.KeeneticOwnedBlocks(previous),
-		PluginDevices:       mergeNativeInterfaces(nativePluginDevicesFrom(previous), genericPlugins),
+		PluginDevices:       nativePluginDevicesFrom(previous),
 		OccupiedInterfaces:  cloneNativeInterfaceSet(capture.OccupiedInterfaces),
 		GlobalPriorities:    cloneNativePriorities(capture.GlobalPriorities),
 		ListsViaIpset:       capture.ListsViaIpset,
@@ -185,7 +175,10 @@ func nativePluginDevicesFrom(previous *nativeplan.Plan) map[string]string {
 // its native plan could not be compiled (QA-043: one ByeDPI connection did that). The router's own
 // AmneziaWG creates the same device name, so taking such an endpoint native is the move the planner
 // refuses within one Apply (nativeplan.MoveError); with no native previous it went unseen, and the
-// new interface came up while the old plugin still held the link.
+// new interface came up while the old plugin still held the link. The planner cannot be told: it
+// would refuse even when another connection fails the native plan anyway and the Apply goes to the
+// generic path again, where the plugin simply keeps running. materialize judges the move on a plan
+// that compiled instead (enginePluginMoves).
 func genericPluginDevices(m *executionMaterializationV1) map[string]string {
 	devices := make(map[string]string)
 	if m == nil || !m.known() || m.nativeTarget() != nil {
@@ -201,15 +194,6 @@ func genericPluginDevices(m *executionMaterializationV1) map[string]string {
 		}
 	}
 	return devices
-}
-
-func mergeNativeInterfaces(a, b map[string]string) map[string]string {
-	for k, v := range b {
-		if _, ok := a[k]; !ok {
-			a[k] = v
-		}
-	}
-	return a
 }
 
 // nativeOwnershipFrom lists the interfaces the previous applied plan created or managed. Only those
@@ -312,6 +296,22 @@ func ownershipBaseline(live, committed *executionMaterializationV1, capture *exe
 	default:
 		return live
 	}
+	committedOwnership := make(map[string]bool)
+	if theirs.Platform == platform.Keenetic && theirs.Keenetic != nil {
+		for _, block := range theirs.Keenetic.Interfaces {
+			if len(block) == 0 {
+				continue
+			}
+			owned := present(block[0])
+			if expected, keyed := exactKeeneticBlockPublicKey(block); keyed {
+				current, observed := capture.ndmPublicKeys[block[0]]
+				if observed && current != "" && (expected == "" || current != expected) {
+					owned = false
+				}
+			}
+			committedOwnership[block[0]] = owned
+		}
+	}
 	added := false
 	decided := make(map[string]bool, 2*len(union.Decisions))
 	for _, d := range union.Decisions {
@@ -319,8 +319,9 @@ func ownershipBaseline(live, committed *executionMaterializationV1, capture *exe
 	}
 	for _, d := range theirs.Decisions {
 		managed := d.Path == nativeplan.PathNativeCreate || d.Path == nativeplan.PathNativeManage || d.Path == nativeplan.PathNativeUpdate
+		owned, tracked := committedOwnership["interface "+d.Interface]
 		if managed && d.Interface != "" && !decided["endpoint "+d.EndpointID] && !decided["interface "+d.Interface] &&
-			present("interface "+d.Interface) {
+			present("interface "+d.Interface) && (!tracked || owned) {
 			union.Decisions = append(union.Decisions, d)
 			added = true
 		}
@@ -338,7 +339,7 @@ func ownershipBaseline(live, committed *executionMaterializationV1, capture *exe
 		}
 		theirBlocks := make(map[string]bool)
 		for _, block := range k.Interfaces {
-			if len(block) != 0 && !blocks[block[0]] && present(block[0]) {
+			if len(block) != 0 && !blocks[block[0]] && committedOwnership[block[0]] {
 				u.Interfaces = append(u.Interfaces, append([]string(nil), block...))
 				theirBlocks[block[0]] = true
 				added = true
@@ -349,13 +350,14 @@ func ownershipBaseline(live, committed *executionMaterializationV1, capture *exe
 			routes[keenetic.RouteKey(route)] = true
 		}
 		for _, route := range k.Routes {
-			if key := keenetic.RouteKey(route); !routes[key] && present(key) {
+			if key := keenetic.RouteKey(route); !routes[key] && present(key) && committedRouteAllowed(route, committedOwnership) {
 				u.Routes = append(u.Routes, route)
 				added = true
 			}
 		}
 		for iface, priority := range k.GlobalPriority {
-			if _, ours := u.GlobalPriority[iface]; ours || !present("interface "+iface) {
+			owned, tracked := committedOwnership["interface "+iface]
+			if _, ours := u.GlobalPriority[iface]; ours || !present("interface "+iface) || (tracked && !owned) {
 				continue
 			}
 			if u.GlobalPriority == nil {
@@ -379,10 +381,25 @@ func ownershipBaseline(live, committed *executionMaterializationV1, capture *exe
 			}
 		}
 	}
+	out := *live
+	if theirs.Platform == platform.OpenWrt && committed.Kernel.Action == ExecutionEnsurePresent {
+		// The native union says nothing about ip rules left by the committed kernel plane. Include its
+		// teardown too, or the next Apply leaves those rules behind (QA: OpenWrt stale ip rules).
+		covered := make(map[string]bool, len(out.Kernel.Teardown))
+		for _, command := range out.Kernel.Teardown {
+			covered[command] = true
+		}
+		for _, command := range committed.Kernel.Teardown {
+			if !covered[command] {
+				out.Kernel.Teardown = append(out.Kernel.Teardown, command)
+				covered[command] = true
+				added = true
+			}
+		}
+	}
 	if !added {
 		return live
 	}
-	out := *live
 	native := executionNativeMaterializationV1{Delta: executionNativeDeltaV1{SchemaVersion: executionNativeDeltaSchemaV1}}
 	if live.Native != nil {
 		native = *live.Native
@@ -390,6 +407,17 @@ func ownershipBaseline(live, committed *executionMaterializationV1, capture *exe
 	native.Delta.Reconcile = nativeplan.Reconciliation{Platform: union.Platform, Target: union}
 	out.Native = &native
 	return &out
+}
+
+// committedRouteAllowed rejects a committed route when its interface now has a different public key.
+// Unkeyed interfaces and routes that name no committed keyed interface keep the old by-name behavior.
+func committedRouteAllowed(route string, ownership map[string]bool) bool {
+	for iface, owned := range ownership {
+		if !owned && strings.Contains(route, " "+strings.TrimPrefix(iface, "interface ")+" ") {
+			return false
+		}
+	}
+	return true
 }
 
 func cloneRouterProtos(source netvpn.RouterProtos) netvpn.RouterProtos {

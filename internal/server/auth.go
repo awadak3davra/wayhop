@@ -33,6 +33,10 @@ const (
 	authFailureWindow         = 10 * time.Minute
 	authLockout               = 5 * time.Minute
 	authMaxFailures           = 5
+	authGlobalMaxFailures     = 20
+	authGlobalDelay           = 2 * time.Second
+	authIPv6KeyBits           = 64
+	authSetupWindow           = 30 * time.Minute
 	authTokenBytes            = 32
 	authSaltBytes             = 16
 	authHashBytes             = 32
@@ -53,6 +57,8 @@ const (
 	AuthCodeRateLimited       = "AUTH_RATE_LIMITED"
 	AuthCodeInvalidRequest    = "AUTH_INVALID_REQUEST"
 	AuthCodeUnavailable       = "AUTH_UNAVAILABLE"
+	// AuthCodeSetupWindowClosed: first-run setup was asked for after its window (setupWindowOpen).
+	AuthCodeSetupWindowClosed = "AUTH_SETUP_WINDOW_CLOSED"
 )
 
 var authUsernamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
@@ -86,17 +92,27 @@ type authManager struct {
 	credentials func() config.Auth
 	save        func(config.Auth) error
 	sessions    map[[sha256.Size]byte]authSession
-	failures    map[string]authFailure
+	failures    map[string]authFailure // keyed by authFailureKey
+	// global counts failed password checks from every source in one window (see throttle).
+	global    authFailure
+	lastSweep time.Time
+	pause     func(context.Context, time.Duration) error
+	// started is when this daemon began serving; first-run setup is answered for authSetupWindow
+	// after it. In production it comes from time.Now and so carries Go's monotonic reading: a router
+	// without an RTC that boots in 2000 and is set by NTP a minute later neither closes the window
+	// early nor reopens it.
+	started time.Time
 }
 
 type authPrincipalContextKey struct{}
 
 func newAuthManager(s *Server) *authManager {
 	manager := &authManager{
-		now: time.Now, random: rand.Reader,
+		now: time.Now, random: rand.Reader, pause: sleepContext,
 		sessions: make(map[[sha256.Size]byte]authSession),
 		failures: make(map[string]authFailure),
 	}
+	manager.started = manager.now()
 	if s != nil {
 		manager.credentials = s.authCredentials
 		manager.save = s.saveAuthCredentials
@@ -239,6 +255,29 @@ func (s *Server) localDemoAuthBypass(r *http.Request) bool {
 	bindIP := net.ParseIP(strings.Trim(bindHost, "[]"))
 	peerIP := net.ParseIP(authClientIP(r))
 	return bindIP != nil && bindIP.IsLoopback() && peerIP != nil && peerIP.IsLoopback()
+}
+
+// setupWindowOpen reports whether this request may answer first-run setup: choose the password, or
+// choose to run without one. That answer decides who controls the router and comes from a request
+// nobody has authenticated, so it is not left open for as long as nobody gives it — a router upgraded
+// from a build without accounts, or restored from a redacted export, can sit unconfigured for months
+// while routing works. It is accepted for authSetupWindow after the daemon starts, which is when the
+// person who just installed or rebooted the router opens the panel, and at any time from a loopback
+// peer: an SSH tunnel, which already proves access to the router. Restarting WayHop reopens it, and
+// whoever can restart it already controls the router.
+//
+// --dev-no-auth and the loopback demo are left as they were: nothing is protected there.
+func (s *Server) setupWindowOpen(r *http.Request) bool {
+	if s == nil || s.auth == nil {
+		return false
+	}
+	if s.authBypass(r) {
+		return true
+	}
+	if peer := net.ParseIP(authClientIP(r)); peer != nil && peer.IsLoopback() {
+		return true
+	}
+	return s.auth.now().Sub(s.auth.started) < authSetupWindow
 }
 
 func requestMutates(method string) bool {
@@ -412,29 +451,88 @@ func authClientIP(r *http.Request) string {
 	return "unknown"
 }
 
-func (manager *authManager) locked(ip string) bool {
+// authFailureKey is the bucket a failed attempt counts against. An IPv4 source is its address. An
+// IPv6 source is its /64: a host is handed a whole /64 and picks addresses in it freely, so counting
+// per address would let it reset its own lockout by changing the last 64 bits. The cost is that SLAAC
+// hosts on one LAN segment share a bucket, so one of them failing locks IPv6 sign-in for the segment
+// for authLockout; IPv4 is unaffected.
+func authFailureKey(ip string) string {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return ip
+	}
+	if v4 := parsed.To4(); v4 != nil {
+		return v4.String()
+	}
+	mask := net.CIDRMask(authIPv6KeyBits, 8*net.IPv6len)
+	return (&net.IPNet{IP: parsed.Mask(mask), Mask: mask}).String()
+}
+
+// throttle is asked before a password is checked, by login and by password change, with loginMu held.
+// A source that failed authMaxFailures times in a window is refused. Past authGlobalMaxFailures
+// failures from all sources together in a window, every attempt first waits authGlobalDelay: the
+// per-source count is reset by a host that changes its address, and a wait taken under loginMu caps
+// guesses router-wide however many addresses they come from. The operator is slowed with everyone
+// else rather than shut out, because a global lockout would let any LAN host keep the operator out.
+func (manager *authManager) throttle(ctx context.Context, ip string) bool {
+	if manager.locked(ip) {
+		return false
+	}
+	if manager.overGlobalBudget() {
+		return manager.pause(ctx, authGlobalDelay) == nil
+	}
+	return true
+}
+
+func (manager *authManager) overGlobalBudget() bool {
 	now := manager.now()
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
-	failure := manager.failures[ip]
+	return manager.global.Count >= authGlobalMaxFailures && now.Sub(manager.global.WindowStart) <= authFailureWindow
+}
+
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (manager *authManager) locked(ip string) bool {
+	key := authFailureKey(ip)
+	now := manager.now()
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	manager.sweepLocked(now)
+	failure := manager.failures[key]
 	if failure.LockedUntil.After(now) {
 		return true
 	}
 	if !failure.LockedUntil.IsZero() || now.Sub(failure.WindowStart) > authFailureWindow {
-		delete(manager.failures, ip)
+		delete(manager.failures, key)
 	}
 	return false
 }
 
 func (manager *authManager) recordLogin(ip string, success bool) {
+	key := authFailureKey(ip)
 	now := manager.now()
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	manager.sweepLocked(now)
 	if success {
-		delete(manager.failures, ip)
+		delete(manager.failures, key)
 		return
 	}
-	failure := manager.failures[ip]
+	if manager.global.WindowStart.IsZero() || now.Sub(manager.global.WindowStart) > authFailureWindow {
+		manager.global = authFailure{WindowStart: now}
+	}
+	manager.global.Count++
+	failure := manager.failures[key]
 	if failure.WindowStart.IsZero() || now.Sub(failure.WindowStart) > authFailureWindow {
 		failure = authFailure{WindowStart: now}
 	}
@@ -442,7 +540,22 @@ func (manager *authManager) recordLogin(ip string, success bool) {
 	if failure.Count >= authMaxFailures {
 		failure.LockedUntil = now.Add(authLockout)
 	}
-	manager.failures[ip] = failure
+	manager.failures[key] = failure
+}
+
+// sweepLocked forgets sources whose window and lockout have both run out; without it every source
+// that ever failed stays in memory for the life of the daemon. It runs at most once per window, from
+// the two paths that already hold mu, so there is no timer goroutine to own and stop.
+func (manager *authManager) sweepLocked(now time.Time) {
+	if now.Sub(manager.lastSweep) < authFailureWindow && !manager.lastSweep.After(now) {
+		return
+	}
+	manager.lastSweep = now
+	for key, failure := range manager.failures {
+		if !failure.LockedUntil.After(now) && now.Sub(failure.WindowStart) > authFailureWindow {
+			delete(manager.failures, key)
+		}
+	}
 }
 
 type authCredentialRequest struct {
@@ -498,6 +611,11 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	if passwordless {
 		response["principal"] = authPasswordlessPrincipal
 	}
+	// Whether THIS request could answer setup, so a panel opened after the window shows how to reopen
+	// it instead of a form whose answer the router is going to refuse.
+	if !configured && !passwordless {
+		response["setup_window_open"] = s.setupWindowOpen(r)
+	}
 	if configured {
 		if session, ok := s.auth.sessionForRequest(r, true); ok {
 			response["authenticated"] = true
@@ -520,11 +638,34 @@ func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 		writeAuthError(w, http.StatusForbidden, AuthCodeAlreadyConfigured, "operator credentials are already configured")
 		return
 	}
+	// "No password" is already on record, so the question was answered. Leaving that state is an
+	// authenticated action and is decided the way every protected route decides it (requireSession),
+	// not by the setup window: that is why Settings → Account can set a password long after the window
+	// has closed. Answering "no password" again is refused.
+	if s.auth.passwordless() {
+		authorized := false
+		s.requireSession(func(http.ResponseWriter, *http.Request) { authorized = true })(w, r)
+		if !authorized {
+			return // requireSession has already written the refusal
+		}
+		request, err := decodeAuthCredential(r)
+		if err == nil && request.Skip {
+			writeAuthError(w, http.StatusForbidden, AuthCodeAlreadyConfigured, "running without a password is already the recorded choice")
+			return
+		}
+		s.completeAuthSetup(w, r, request, err)
+		return
+	}
+	if !s.setupWindowOpen(r) {
+		writeAuthError(w, http.StatusForbidden, AuthCodeSetupWindowClosed,
+			"setup is accepted only in the first 30 minutes after WayHop starts; restart WayHop or reboot the router, then open the panel")
+		return
+	}
 	request, err := decodeAuthCredential(r)
 	// "skip": the operator was asked and declined. Recorded as a decision (config.Auth.Disabled) so it
 	// survives a restart and can be read back and shown; it is NOT the same as leaving setup unfinished,
-	// which keeps blocking. Reachable only while no password exists — this handler already refused
-	// above if one does, so an unauthenticated request can never turn authentication OFF.
+	// which keeps blocking. Reachable only while no password exists and the setup window is open — this
+	// handler already refused above otherwise.
 	if err == nil && request.Skip {
 		if saveErr := s.auth.save(config.Auth{Disabled: true}); saveErr != nil {
 			writeAuthError(w, http.StatusServiceUnavailable, AuthCodeUnavailable, "the choice could not be persisted")
@@ -536,6 +677,12 @@ func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	s.completeAuthSetup(w, r, request, err)
+}
+
+// completeAuthSetup stores the first credential and signs the caller in. handleAuthSetup has already
+// decided that this request may set it, and holds loginMu.
+func (s *Server) completeAuthSetup(w http.ResponseWriter, r *http.Request, request authCredentialRequest, err error) {
 	if err != nil || !validNewCredential(request) {
 		writeAuthError(w, http.StatusBadRequest, AuthCodeInvalidRequest, "username or password does not meet the setup policy")
 		return
@@ -569,7 +716,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	s.auth.loginMu.Lock()
 	defer s.auth.loginMu.Unlock()
 	ip := authClientIP(r)
-	if s.auth.locked(ip) {
+	if !s.auth.throttle(r.Context(), ip) {
 		writeAuthError(w, http.StatusTooManyRequests, AuthCodeRateLimited, "too many login attempts; try again later")
 		return
 	}
@@ -634,7 +781,7 @@ func (s *Server) handleAuthPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ip := authClientIP(r)
-	if s.auth.locked(ip) {
+	if !s.auth.throttle(r.Context(), ip) {
 		writeAuthError(w, http.StatusTooManyRequests, AuthCodeRateLimited, "too many attempts; try again later")
 		return
 	}

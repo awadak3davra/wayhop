@@ -87,6 +87,45 @@ func ipOnlyKernelRule(r *model.Rule) bool {
 		len(r.SourceIface) == 0 && len(r.SourcePort) == 0
 }
 
+// hybridKernelRoutedList reports whether hybrid mode leaves a routing list to pbr alone, so it emits
+// nothing into sing-box: a pure-IP manual list (no remote Source, no domain entries) at a kernel
+// egress, unless it is device-scoped. routingFrom, hybridReachable and dnsListTags share it so rule
+// emission, outbound reachability and DNS rule_set references cannot disagree.
+//
+// A device-scoped list compiles into a SrcScoped zone, and the hybrid TUN does not exclude those
+// (§6.4, server executionGeneratorOptions), so TCP to its prefixes is captured by auto_redirect and matched
+// here. Dropping the list sent the scoped devices' TCP to route.final, out of the WAN when the final
+// is direct (RT-06). It stays with its source_ip_cidr, like a rule with a source matcher.
+func hybridKernelRoutedList(p *model.Profile, rl *model.RoutingList) bool {
+	if rl.Source != "" || !kernelEgress(p, rl.Outbound) || listKernelSourceScoped(p, rl) {
+		return false
+	}
+	domains, ips := listEntries(rl)
+	return len(domains) == 0 && len(ips) > 0
+}
+
+// listKernelSourceScoped mirrors pbr.Compile: an "only" or "except" scope naming at least one device
+// (by MAC or IP) becomes a source-scoped zone. "except nobody" routes for everyone there, so it is not
+// scoped; "only nobody" is not kernel-routed at all, and routingFrom drops it on its own.
+func listKernelSourceScoped(p *model.Profile, rl *model.RoutingList) bool {
+	if rl.ScopeMode != "only" && rl.ScopeMode != "except" {
+		return false
+	}
+	for _, gid := range rl.ScopeGroups {
+		for i := range p.DeviceGroups {
+			if p.DeviceGroups[i].ID != gid {
+				continue
+			}
+			for _, m := range p.DeviceGroups[i].Members {
+				if strings.TrimSpace(m.MAC) != "" || strings.TrimSpace(m.IP) != "" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // hybridReachable returns the set of outbound tags reachable from the route references
 // that SURVIVE into sing-box in hybrid mode — non-default rules pbr can't kernel-route,
 // kept routing lists, and every rule's outbound that becomes route.final — following
@@ -125,12 +164,10 @@ func hybridReachable(p *model.Profile) map[string]bool {
 		if !rl.Enabled {
 			continue
 		}
-		// A pure-IP manual list (no remote Source, no domains) to a kernel egress is
-		// dropped (pbr routes it); any other list stays and keeps its outbound referenced.
-		if kernelEgress(p, rl.Outbound) && rl.Source == "" {
-			if domains, ips := listEntries(rl); len(domains) == 0 && len(ips) > 0 {
-				continue
-			}
+		// A pure-IP manual list (no remote Source, no domains, no device scope) to a kernel
+		// egress is dropped (pbr routes it); any other list stays and keeps its outbound referenced.
+		if hybridKernelRoutedList(p, rl) {
+			continue
 		}
 		addRoot(rl.Outbound)
 		// A remote list's rule_set download_detour references a kernel-class outbound just like the
@@ -176,6 +213,7 @@ func hybridReachable(p *model.Profile) map[string]bool {
 // Options carries generation knobs that originate from the daemon config.
 type Options struct {
 	MixedPort   int    // local mixed (socks+http) inbound port
+	DNSPort     int    // loopback DNS inbound when DNSSettings.ServeClients is on; 0 = none
 	ProbePort   int    // loopback probe inbound (probe.go); 0 = none
 	ClashAddr   string // experimental.clash_api external_controller, e.g. 127.0.0.1:9090
 	ClashSecret string
@@ -388,8 +426,15 @@ func Generate(p *model.Profile, opts Options) (*Result, error) {
 		res.Config["endpoints"] = endpoints
 	}
 
+	serveClients := p.DNS != nil && p.DNS.Enabled && p.DNS.ServeClients && opts.DNSPort > 0
 	inbounds := []map[string]any{
 		{"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": opts.MixedPort},
+	}
+	if serveClients {
+		// dnsmasq forwards client lookups here; the guard below hijacks them into the DNS module.
+		inbounds = append(inbounds, map[string]any{
+			"type": "direct", "tag": "dns-in", "listen": "127.0.0.1", "listen_port": opts.DNSPort,
+		})
 	}
 	if opts.TunEnabled {
 		// Gateway mode: capture LAN traffic. `address` gives the tun device its IP;
@@ -486,8 +531,11 @@ func Generate(p *model.Profile, opts Options) (*Result, error) {
 	}
 	rules, _ := route["rules"].([]map[string]any)
 	// WayHop's guard rules lead, in this order, and a core override's prepended route rules go right
-	// after them (override.go): the probe users' rules, then the sniff, then the endpoint bypass.
+	// after them (override.go): the probe users' rules, DNS hijack, sniff, then the endpoint bypass.
 	guards := probeRules(opts, probeTags)
+	if serveClients {
+		guards = append(guards, map[string]any{"inbound": []string{"dns-in"}, "action": "hijack-dns"})
+	}
 	if opts.TunEnabled {
 		// TUN captures raw IP packets, so the destination domain is unknown — sniff
 		// TLS-SNI/HTTP-Host/QUIC first, or the domain-based rule_sets can't match
@@ -629,11 +677,10 @@ func routingFrom(p *model.Profile, hybrid bool, ruleSetDetour string) (sets []ma
 		// (same CIDRs, same egress) — drop it from sing-box. Only when it is PURELY IPs
 		// with no remote Source and no domain entries: pbr can't route a remote rule-set
 		// or domains (Phase 2), so a list carrying either STAYS in sing-box (and keeps
-		// the kernel outbound it references alive, see hybridKeptKernelRefs).
-		if hybrid && kernelEgress(p, rl.Outbound) && rl.Source == "" {
-			if domains, ips := listEntries(rl); len(domains) == 0 && len(ips) > 0 {
-				continue
-			}
+		// the kernel outbound it references alive, see hybridReachable). A device-scoped
+		// list stays too: its zone is not TUN-excluded (see hybridKernelRoutedList).
+		if hybrid && hybridKernelRoutedList(p, rl) {
+			continue
 		}
 		var tags []string
 		// A plain-text list source is NOT loadable by sing-box; emitting it would abort the whole core
@@ -735,8 +782,8 @@ func routingFrom(p *model.Profile, hybrid bool, ruleSetDetour string) (sets []ma
 // (opts.TunEnabled false): a synthetic fakeip answer would blackhole in the kernel-PBR/mixed plane,
 // so its server AND every rule that targets it are dropped, degrading to DoH-only. Fields are limited
 // to those valid on the deployed sing-box 1.12.17 (this generalizes the orphaned keenetic/dns.go);
-// TLS SNI is intentionally not emitted yet — the secure-default pins provider IPs, whose certs carry
-// the IP in a SAN, so no SNI is needed.
+// TLS SNI is emitted as tls.server_name for encrypted servers when configured, allowing IP upstreams
+// to verify certificates whose SANs contain only names.
 func dnsFrom(p *model.Profile, opts Options, seen map[string]bool) (map[string]any, []map[string]any) {
 	d := p.DNS
 	var extra []map[string]any
@@ -797,6 +844,9 @@ func dnsFrom(p *model.Profile, opts Options, seen map[string]bool) (map[string]a
 			// a custom path returned 404 for every lookup.
 			if (s.Type == "https" || s.Type == "h3") && strings.TrimSpace(s.Path) != "" {
 				sv["path"] = s.Path
+			}
+			if (s.Type == "https" || s.Type == "tls" || s.Type == "quic" || s.Type == "h3") && strings.TrimSpace(s.SNI) != "" {
+				sv["tls"] = map[string]any{"server_name": strings.TrimSpace(s.SNI)}
 			}
 			if detour := canonicalOutbound(strings.TrimSpace(s.Detour)); detour != "" && detour != model.OutboundDirect {
 				// An empty detour already means the direct dial path. Emitting the builtin
@@ -1005,8 +1055,7 @@ func dnsListTags(p *model.Profile, listID string, hybrid bool) []string {
 			// kernel-routed by pbr and emits NO rsm-<id> set into sing-box, so a DNS rule
 			// referencing it must not emit the tag either — that would be a dangling rule_set
 			// (sing-box check FATAL). Only when it is purely IPs with no remote Source.
-			kernelRouted := hybrid && rl.Source == "" && len(dom) == 0 && len(ips) > 0 && kernelEgress(p, rl.Outbound)
-			if !kernelRouted {
+			if !hybrid || !hybridKernelRoutedList(p, rl) {
 				tags = append(tags, "rsm-"+rl.ID)
 			}
 		}
@@ -2012,6 +2061,13 @@ func tlsJSON(t *model.TLS) map[string]any {
 	}
 	if fp := safeEnum(normalizeUTLSFinger(t.Fingerprint), knownUTLSFinger); fp != "" {
 		out["utls"] = map[string]any{"enabled": true, "fingerprint": fp}
+	}
+	// cipher_suites configures only the standard Go TLS client's TLS 1.0-1.2 suites, not uTLS or
+	// Reality, and never TLS 1.3 (sing-box docs, shared/tls.md at v1.12.17).
+	if len(t.CipherSuites) > 0 && t.Type != "reality" {
+		if _, usesUTLS := out["utls"]; !usesUTLS {
+			out["cipher_suites"] = t.CipherSuites
+		}
 	}
 	// Reality REQUIRES a public_key: sing-box rejects a reality block without one
 	// ("invalid public_key"), and because every endpoint shares one singbox.json
