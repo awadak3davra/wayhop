@@ -5,5 +5,7 @@
 
 # Panel-gate fixture in the 0.5.9 public commit: an OpenSSH PEM frame around the 16-byte
 # "openssh-key-v1" magic, no key material. The tree now uses a labelled placeholder; this pins
-# the one historical finding.
+# the one historical finding. The public history was rewritten on 2026-11-12, which renamed that
+# commit from d0374c3 to 5c96701; both pins are kept.
 d0374c3cf3c555bd1311d295e4cc21c4f419a8cc:scripts/check-interaction-fixes.mjs:private-key:2974
+5c967013d06f7e91b94d2be90a92f2ac4ae209b2:scripts/check-interaction-fixes.mjs:private-key:2974
