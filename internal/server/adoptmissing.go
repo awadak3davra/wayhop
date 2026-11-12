@@ -119,16 +119,12 @@ func syncAdoptedTunnels(p *model.Profile, d netvpn.Discovery, ignored []string) 
 		if e.Engine != model.EngineExternal {
 			continue
 		}
-		for _, v := range d.VPNs {
-			if !adoptedMatches(e, v) {
-				continue
-			}
+		if v, ok := adoptedTunnelFor(e, d.VPNs); ok {
 			fresh := refreshAdoptedEndpoint(e, endpointFromDiscovered(v))
 			if !reflect.DeepEqual(fresh, e) {
 				p.Endpoints[i] = fresh
 				changed = true
 			}
-			break
 		}
 	}
 	gone := map[string]bool{}

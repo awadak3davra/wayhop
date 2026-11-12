@@ -606,6 +606,13 @@ func EndpointParamProblem(e *Endpoint) string {
 // endpointLoadProblem is EndpointParamProblem without the settings the generator drops on its own:
 // what Validate refuses, because the core would fail the whole shared config over it.
 func endpointLoadProblem(e *Endpoint) string {
+	if e.Engine == EngineExternal {
+		// An OS interface WayHop only routes through: no server, keys or protocol settings of its
+		// own, and Validate checks its interface name. Discovery records the tunnel's protocol for
+		// display ("amneziawg"), and asking that protocol's params here refused every edit of such a
+		// connection with "missing required private_key".
+		return ""
+	}
 	if e.Engine == EngineByeDPI {
 		// The upsert, bulk import and subscription refresh ask this, not Validate: without it a
 		// strategy Validate refuses was stored enabled and failed the next Apply instead (#89).

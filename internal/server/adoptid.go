@@ -36,8 +36,14 @@ func adoptedPublicKey(e model.Endpoint) string {
 // have "external-<iface>" records, and rewriting their IDs would orphan every rule and group that
 // references them. Keeping the ID and fixing the LOOKUP is the change that costs a user nothing.
 func resolveAdoptedID(existing []model.Endpoint, d netvpn.DiscoveredVPN) string {
+	return resolveAdoptedIDAmong(existing, d, []netvpn.DiscoveredVPN{d})
+}
+
+// resolveAdoptedIDAmong is resolveAdoptedID knowing every tunnel the router has now, so an
+// endpoint whose own interface is still there is never handed to another tunnel with its key.
+func resolveAdoptedIDAmong(existing []model.Endpoint, d netvpn.DiscoveredVPN, vpns []netvpn.DiscoveredVPN) string {
 	for _, e := range existing {
-		if adoptedMatches(e, d) {
+		if t, ok := adoptedTunnelFor(e, vpns); ok && t.Iface == d.Iface {
 			return e.ID // same tunnel, whatever it is called today
 		}
 	}
@@ -54,6 +60,41 @@ func resolveAdoptedID(existing []model.Endpoint, d netvpn.DiscoveredVPN) string 
 		id = fmt.Sprintf("external-%s-%d", d.Iface, n)
 	}
 	return id
+}
+
+// adoptedTunnelFor picks, among the tunnels the router has now, the one an adopted endpoint is.
+//
+// The endpoint's own interface wins while a tunnel by that name is there and its key does not say
+// it is another tunnel. The public key alone (a renamed tunnel) decides only when no tunnel carries
+// the endpoint's name and exactly one carries its key. Two interfaces built from one private key
+// share a public key: a live test router had awg1 to one exit and a second interface to another under
+// one key, and matching by key first re-pointed the RU connection at the second one when a page
+// listed the tunnels. The next Apply, made for a DNS change, sent every RU list into a firewall zone
+// LAN traffic may not enter.
+func adoptedTunnelFor(e model.Endpoint, vpns []netvpn.DiscoveredVPN) (netvpn.DiscoveredVPN, bool) {
+	if e.Engine != model.EngineExternal {
+		return netvpn.DiscoveredVPN{}, false
+	}
+	ek := adoptedPublicKey(e)
+	if iface := endpointIface(e); iface != "" {
+		for _, v := range vpns {
+			if v.Iface != iface {
+				continue
+			}
+			if dk := strings.TrimSpace(v.PublicKey); ek == "" || dk == "" || ek == dk {
+				return v, true
+			}
+		}
+	}
+	var hit netvpn.DiscoveredVPN
+	n := 0
+	for _, v := range vpns {
+		if adoptedMatches(e, v) {
+			hit = v
+			n++
+		}
+	}
+	return hit, n == 1
 }
 
 // adoptedMatches reports whether an adopted endpoint is the discovered tunnel.

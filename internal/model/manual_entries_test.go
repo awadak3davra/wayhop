@@ -32,3 +32,13 @@ func TestValidateRefusesControlCharactersInManualEntries(t *testing.T) {
 		}
 	}
 }
+
+// An external connection has no protocol settings of its own; discovery records "amneziawg" for
+// display, and the save path asked for its private key, so such a connection could not be edited.
+func TestEndpointParamProblemSkipsExternal(t *testing.T) {
+	e := Endpoint{ID: "ru", Engine: EngineExternal, Protocol: "amneziawg", Enabled: true,
+		Params: map[string]any{"interface": "awg1"}}
+	if p := EndpointParamProblem(&e); p != "" {
+		t.Fatalf("EndpointParamProblem = %q, want none", p)
+	}
+}

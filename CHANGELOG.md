@@ -28,6 +28,8 @@ without it, and listed traffic would go direct.
   nobody, including the init script and the binary root runs, so any process running as nobody could
   rewrite them and gain root. Packing now runs as root in its sealed container and refuses to run
   otherwise. An existing install is corrected by the next package update.
+- **Built with Go 1.26.11.** It fixes GO-2026-6859 (CVE-2026-97054), a race in `net/http` through
+  which a crafted request could crash an HTTP/1 server, the panel's included.
 
 ### Added
 - **DNS privacy check.** A unique test lookup shows in the connection table which way DNS really
@@ -77,6 +79,14 @@ without it, and listed traffic would go direct.
   Simplified Chinese covers the whole current panel.
 
 ### Fixed
+- **Two router tunnels sharing a key no longer swap connections.** Interfaces built from one
+  private key share a public key, and an adopted connection matched by that key first moved to
+  whichever such tunnel the router listed first, silently, on any page that listed the tunnels; the
+  next Apply then sent its lists through the other tunnel. A connection now keeps its own interface
+  while it is there; the key alone follows a renamed tunnel only when exactly one tunnel has it.
+- **An adopted router tunnel can be edited again.** Saving one asked for the private key of the
+  protocol it was discovered with, which such a connection never has, so its interface or endpoint
+  could not be changed from the panel.
 - **A missing tunnel no longer takes the whole routing plane down.** When an Apply found a tunnel
   device not there yet, it rolled back everything, kill switch included; now that one route is
   skipped and put back once the device appears.

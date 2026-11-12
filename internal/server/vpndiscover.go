@@ -55,7 +55,7 @@ func (s *Server) handleVPNDiscover(w http.ResponseWriter, r *http.Request) {
 	profile := s.store.Profile()
 	out := make([]vpnRow, 0, len(disc.VPNs))
 	for _, v := range disc.VPNs {
-		id, needsRepair := nativeAdoption(profile.Endpoints, v)
+		id, needsRepair := nativeAdoptionAmong(profile.Endpoints, v, disc.VPNs)
 		out = append(out, vpnRow{
 			Iface: v.Iface, NDMName: v.NDMName, Type: v.Type, Name: v.Name, Source: v.Source,
 			PublicKey: v.PublicKey, ListenPort: v.ListenPort, Peers: v.Peers,
@@ -85,8 +85,14 @@ func (s *Server) handleVPNDiscover(w http.ResponseWriter, r *http.Request) {
 // (adoptedMatches), so a new tunnel that reused a deleted one's interface name is offered for
 // adoption instead of hiding behind the old record.
 func nativeAdoption(endpoints []model.Endpoint, discovered netvpn.DiscoveredVPN) (string, bool) {
+	return nativeAdoptionAmong(endpoints, discovered, []netvpn.DiscoveredVPN{discovered})
+}
+
+// nativeAdoptionAmong is nativeAdoption knowing every tunnel the router has now (adoptedTunnelFor),
+// so two interfaces sharing a key are not both shown as adopted by the endpoint of one of them.
+func nativeAdoptionAmong(endpoints []model.Endpoint, discovered netvpn.DiscoveredVPN, vpns []netvpn.DiscoveredVPN) (string, bool) {
 	for _, endpoint := range endpoints {
-		if !adoptedMatches(endpoint, discovered) {
+		if t, ok := adoptedTunnelFor(endpoint, vpns); !ok || t.Iface != discovered.Iface {
 			continue
 		}
 		if discovered.NDMName == "" { // OpenWrt has no NDM identity to repair.
@@ -229,7 +235,7 @@ func (s *Server) handleVPNAdopt(w http.ResponseWriter, r *http.Request) {
 			// minting a second one beside it (see resolveAdoptedID): the interface name changed, the
 			// tunnel did not.
 			profile := s.store.Profile()
-			ep.ID = resolveAdoptedID(profile.Endpoints, v)
+			ep.ID = resolveAdoptedIDAmong(profile.Endpoints, v, vpns)
 			for _, existing := range profile.Endpoints {
 				if existing.ID == ep.ID {
 					ep = refreshAdoptedEndpoint(existing, ep)
