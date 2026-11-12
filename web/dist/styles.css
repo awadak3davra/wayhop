@@ -2012,6 +2012,11 @@ svg.ico { display:block; }
 .conns-head #conns-sum { margin-left:auto; text-align:right; min-width:0; }
 .sys-tile .sys-v { overflow-wrap:normal; }
 .sys-tile .sys-v .sv-r { white-space:nowrap; display:inline-block; }
+/* WAN now reads "↓26.3 ↑4.4 Mbit/s": in bits the unit is longer than "MB/s" was, and a 152 px tile
+   broke it onto two lines. One line, sized off the tile as .exit-ip is, the unit scaling with it. */
+.sys-tile[data-sys="thru"] { container-type:inline-size; }
+.sys-tile[data-sys="thru"] .sys-v { white-space:nowrap; font-size:clamp(12px,11cqw,var(--fs-stat)); }
+.sys-tile[data-sys="thru"] .sys-v small { font-size:.68em; }
 /* A status chip must keep its natural width: squeezed to 55px by a flex parent, a pill reading just
    "Down" wrapped onto two lines. flex:none stops the squeeze; max-width and overflow-wrap above still
    handle the opposite case, a pill carrying a long URL. */
