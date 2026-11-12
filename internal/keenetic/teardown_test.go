@@ -27,8 +27,8 @@ func TestTeardownCommands(t *testing.T) {
 
 	for _, w := range []string{
 		"no ip route 198.19.0.0 255.255.0.0 Wireguard10", // list route removed
-		"no ip route 192.0.2.0 255.255.255.0 reject",    // blackhole removed
-		"no interface Wireguard10",                      // native interface removed
+		"no ip route 192.0.2.0 255.255.255.0 reject",     // blackhole removed
+		"no interface Wireguard10",                       // native interface removed
 	} {
 		if !strings.Contains(joined, w) {
 			t.Errorf("missing teardown %q\n--- got ---\n%s", w, joined)

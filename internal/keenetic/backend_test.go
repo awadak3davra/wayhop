@@ -47,7 +47,7 @@ func TestCompile_NativeFirst(t *testing.T) {
 	for _, w := range []string{
 		"interface Wireguard10",
 		"ip route 198.18.0.0 255.255.0.0 Wireguard10", // list → native iface
-		"ip route 198.19.0.0 255.255.0.0 Wireguard10",  //
+		"ip route 198.19.0.0 255.255.0.0 Wireguard10", //
 		"ip route 10.10.0.0 255.255.255.0 Wireguard10",
 		"ip route 172.16.0.0 255.255.255.0 wrtun0",  // list → fallback TUN (the integration)
 		"ip route 192.0.2.0 255.255.255.0 reject",   // block → reject
