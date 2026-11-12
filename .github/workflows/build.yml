@@ -221,7 +221,9 @@ jobs:
           # OpenWrt support, so missing Docker/tools/any architecture is a release failure.
           command -v docker >/dev/null 2>&1 || { echo "::error::docker is required to build supported apk artifacts"; exit 1; }
           docker info >/dev/null 2>&1 || { echo "::error::docker daemon is unavailable — apk artifacts were not built"; exit 1; }
-          docker run --rm --network none --read-only --user "$(id -u):$(id -g)" \
+          # Root inside this network-less, read-only container, as in feed.yml: apk mkpkg records the
+          # owner of each staged file, and pack-apk.sh refuses to run as anyone else (QA-005).
+          docker run --rm --network none --read-only --env HOST_OWNER="$(id -u):$(id -g)" \
             --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=256m \
             --env WAYHOP_BASE_VERSION --env WAYHOP_PACKAGE_RELEASE \
             -v "$PWD:/w:ro" -v "$PWD/pkgs:/out" -w /w "$APK_TOOLS_IMAGE" sh -euc '
@@ -237,6 +239,7 @@ jobs:
               # shellcheck disable=SC2086
               sh packaging/feed/pack-apk.sh "bins/wayhop-$goname" "$v" "$rel" /out $owtokens
             done < packaging/feed/arch-map.txt
+            chown -R "$HOST_OWNER" /out
           '
           sh packaging/feed/verify-apk-feed.sh pkgs packaging/feed/arch-map.txt
           # GitHub release assets share one flat namespace. Preserve every target instead of copying
