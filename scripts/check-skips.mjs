@@ -131,6 +131,8 @@ const manifest = JSON.parse(fs.readFileSync(MANIFEST, 'utf8'));
 //                runs `tracert` on Windows and `traceroute` everywhere else, so naming one binary
 //                would predict a skip on the platform that has the other.
 //   os:NAME      expected to skip on that platform (win32, linux, darwin) and to RUN elsewhere
+//   uid:nonroot  expected to skip while this process is not root (and always on Windows, which has no
+//                uid): the test needs to hand a directory to another user
 //   cap:nft      expected to skip while this host cannot syntax-check an nftables ruleset: either
 //                nft is not on PATH, or it is and refuses to initialize its netlink cache, which is
 //                what an unprivileged container does. Those are one fact to the test that needs it,
@@ -166,6 +168,7 @@ const holds = (when) => {
   if (kind === 'env') return !process.env[value];
   if (kind === 'tool') return !value.split('|').some((t) => onPath(t.trim()));
   if (kind === 'os') return process.platform === value;
+  if (kind === 'uid' && value === 'nonroot') return !(typeof process.getuid === 'function' && process.getuid() === 0);
   if (kind === 'cap' && value === 'nft') return nftCheckUnavailable();
   return null;
 };

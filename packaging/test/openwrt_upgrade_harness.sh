@@ -60,7 +60,7 @@ guest() {
   case "$CASE:$FLAV" in apkcopy:entware|vinit:openwrt) echo "  SKIPPED [$TAG $CASE] not this flavour's"; return 0 ;; esac
   if [ "$FLAV" = entware ]; then
     S=/opt/sbin; E=/opt/etc/wayhop; INIT=/opt/etc/init.d/S99wayhop
-    if ! { mkdir -p /opt && mount -t tmpfs -o size=72m,mode=0755 tmpfs /opt && mkdir -p /opt/sbin /opt/bin /opt/etc/init.d /opt/var; }; then
+    if ! { mkdir -p /opt && mount -t tmpfs -o size=96m,mode=0755 tmpfs /opt && mkdir -p /opt/sbin /opt/bin /opt/etc/init.d /opt/var; }; then
       echo "  FAIL  [$TAG $CASE] could not mount the small /opt (the container needs --privileged)"; return 1
     fi
     printf '#!/bin/sh\necho "sing-box version 1.12.17"\n' > /opt/sbin/sing-box && chmod 0755 /opt/sbin/sing-box

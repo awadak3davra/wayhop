@@ -33,6 +33,10 @@
       "why": "WR_TGWSPROXY not set — point it at a tg-ws-proxy binary to run it for real",
       "when": "env:WR_TGWSPROXY"
     },
+    "TestEnsureRunDirRefusesAnotherUsersDir": {
+      "why": "needs root to give the directory to another user",
+      "when": "uid:nonroot"
+    },
     "TestLiveFlush": {
       "why": "WR_CTFLUSH_LIVE not set — needs root, nft and nf_conntrack_netlink",
       "when": "env:WR_CTFLUSH_LIVE"

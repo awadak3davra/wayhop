@@ -6702,8 +6702,9 @@ async function renderSettings(view) {
       lastSavedRouteMode = next.routing_mode || "";
       lastSavedOffload = offloadNow;
       // The baseline is what was SENT, not the form now: a field edited while the request was in
-      // flight is still unsaved and must stay dirty (BW-01).
-      baseline = JSON.stringify(next); markDirty();
+      // flight is still unsaved and must stay dirty. The form carries the config revision, which
+      // the save just advanced, so the baseline carries the new one or the page would stay dirty.
+      baseline = JSON.stringify({ ...next, rev: r.rev }); markDirty();
       // Config now feeds the canonical applied-state (routing mode / TUN / offload…), so a
       // config-only save can flip the backend to "pending" — refresh the Apply banner NOW.
       refreshApplyState();

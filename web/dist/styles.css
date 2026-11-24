@@ -436,6 +436,8 @@ details.form-adv > summary, details.import-adv > summary { cursor:pointer; color
    (e.g. "322.3 MB transferred", "12 restarts") and rows stay tidy when present. */
 .stats { display:flex; flex-wrap:wrap; align-items:baseline; column-gap:8px; row-gap:3px; font-size:var(--fs-control); color:var(--ink-2); margin-top:8px; }
 .stat { white-space:nowrap; }
+/* A figure wider than a phone's row wraps instead of running past the viewport edge. */
+@media (max-width:480px) { .stat { white-space:normal; overflow-wrap:anywhere; } }
 .stats b { color:var(--ink); font-weight:600; }
 .stats .sep { margin-left:8px; color:var(--ink-3); }
 /* In these baseline-aligned rows, round status dots/pills would otherwise hang
