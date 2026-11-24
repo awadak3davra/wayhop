@@ -103,7 +103,7 @@ func importPrefixReason(cidr string) string {
 		return importer.HydraSkipInvalid
 	}
 	// A v4-mapped prefix is judged as the IPv4 prefix the kernel plane files it as: ::ffff:0.0.0.0/96
-	// passed below as an IPv6 /96 and was routed as 0.0.0.0/0 (QA-111).
+	// passed below as an IPv6 /96 and was routed as 0.0.0.0/0.
 	p = cidrfeed.Unmap4In6(p.Masked())
 	a := p.Addr()
 	// The order matters: a short prefix inside a special range (fd00::/8, 224.0.0.0/4) is named by that

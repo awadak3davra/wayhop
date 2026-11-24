@@ -15,7 +15,7 @@ import (
 // UCICommitCmds: uci commit + service restart) is a separate, user-gated, device-mutating step.
 // Pure; the inverse of ReadUCI.
 //
-// It changes what the plane names and leaves everything else in both configs as it is (QA-116). The
+// It changes what the plane names and leaves everything else in both configs as it is. The
 // plan used to delete the whole dnsmasq server list and every https-dns-proxy section and rebuild
 // them from the plane. ReadUCI models neither split-DNS entries ("/domain/ip") nor any instance
 // option besides resolver_url and listen_port, so a user who ran the previewed commands lost their

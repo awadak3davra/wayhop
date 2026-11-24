@@ -54,7 +54,7 @@ func deathsig_alive(pid int) bool {
 	return state != 'Z' && state != 'X'
 }
 
-// QA-109. A daemon that dies without running Shutdown (an OOM kill, a kill -9, a Go fatal error)
+// A daemon that dies without running Shutdown (an OOM kill, a kill -9, a Go fatal error)
 // must not leave its core running: the orphan kept routing by the old config with no supervisor,
 // and it held the cache-file lock and the ports, so the next daemon's core died at every start.
 func TestCoreDiesWithTheDaemon(t *testing.T) {

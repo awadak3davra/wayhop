@@ -7,4 +7,17 @@
 /etc/init.d/wayhop stop 2>/dev/null
 /etc/init.d/wayhop disable 2>/dev/null
 rm -f /usr/sbin/wayhop /usr/sbin/wayhop.new
+# The fast path's dnsmasq snippet: a pointer on flash (in any conf-dir uci names) and the snippet in
+# RAM (reviews FASTPATH-3 F5, FASTPATH-4 R5).
+confdirs="$(uci -q show dhcp 2>/dev/null | sed -n "s/^dhcp\.[^.]*\.confdir='\{0,1\}\([^']*\)'\{0,1\}$/\1/p")"
+for d in /etc/dnsmasq.d /tmp/dnsmasq*.d $confdirs; do
+	f="$d/wayhop-fastpath.conf"
+	[ -e "$f" ] && rm -f "$f" && restart_dnsmasq=1
+done
+f=/var/run/dnsmasq/nftset.wayhop-fastpath
+[ -e "$f" ] && rm -f "$f" && restart_dnsmasq=1
+[ -n "${restart_dnsmasq:-}" ] && /etc/init.d/dnsmasq restart 2>/dev/null
+# The daemon is stopped: its nft tables go too (the routing plane and the fast path's DNS sets).
+nft delete table inet wayhop_dns 2>/dev/null
+nft delete table inet wayhop_pbr 2>/dev/null
 exit 0

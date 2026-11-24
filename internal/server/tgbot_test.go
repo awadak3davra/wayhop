@@ -319,7 +319,7 @@ func TestSettingsSaveLeavesTheBotAlone(t *testing.T) {
 	}
 }
 
-// QA-034: with no token there is no bot, so no code is handed out to send to it.
+// With no token there is no bot, so no code is handed out to send to it.
 func TestTelegramPairRefusedWithoutToken(t *testing.T) {
 	s := tgServer(t)
 	w := tgDo(t, s, http.MethodPost, "/api/telegram/pair", `{"role":"viewer"}`)

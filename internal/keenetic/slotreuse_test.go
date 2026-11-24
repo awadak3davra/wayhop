@@ -10,7 +10,7 @@ import (
 	"wayhop/internal/model"
 )
 
-// QA-108: a native endpoint keeps the WireguardN slot the previous plan created for it while its
+// A native endpoint keeps the WireguardN slot the previous plan created for it while its
 // block is unchanged, and only then.
 
 func slotreuse_endpoint(id, server string) model.Endpoint {

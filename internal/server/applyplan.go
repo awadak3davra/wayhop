@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -207,17 +208,16 @@ func (s *Server) capabilitySet(ctx context.Context, refresh bool) platform.Capab
 		return s.caps.set
 	}
 	caps := platform.DetectCapabilities()
-	// The same observation answers the accelerator for everything else that decides with it
-	// (QA-129): the offload resolver and the preflight must not keep an older one.
+	// The same observation answers the accelerator for everything else that decides with it:
+	// the offload resolver and the preflight must not keep an older one.
 	s.noteAccel(caps.Accel)
 	s.caps.set = platform.Evaluate(caps, s.runtimeFacts(ctx))
 	return s.caps.set
 }
 
 // forgetCapabilities drops the cached evaluation, so the next reader probes the host. An engine installed
-// or removed from Components changes what a connection save may accept, and the cache used to hold the
-// old answer for up to five minutes: a save right after installing sing-box was refused as "the sing-box
-// core is not installed" while the page said it was.
+// or removed from Components changes what a connection save may accept; a cached answer would refuse a
+// save right after installing sing-box as "the sing-box core is not installed" for up to five minutes.
 func (s *Server) forgetCapabilities() {
 	s.caps.mu.Lock()
 	s.caps.set.ProbedAt = time.Time{}
@@ -234,7 +234,7 @@ func (s *Server) keepCapabilities(set platform.CapabilitySet) {
 
 // runtimeFacts gathers the observations the pure evaluator cannot make for itself. It is asked when
 // the capability set is probed, so it probes the kernel-PBR plane afresh and keeps the answer for
-// every other reader (QA-129).
+// every other reader.
 func (s *Server) runtimeFacts(ctx context.Context) platform.RuntimeFacts {
 	c := s.config()
 	rt := platform.RuntimeFacts{
@@ -288,8 +288,8 @@ func (s *Server) planCapabilities(capset platform.CapabilitySet) platform.Capabi
 }
 
 // withConfiguredCore counts the configured core as present. The PATH probe misses it where the updater
-// installs it (/opt/sbin on OpenWrt is not on the daemon's PATH), and the review then told the user to
-// install a sing-box that was running.
+// installs it (/opt/sbin on OpenWrt is not on the daemon's PATH), and without this the review would ask
+// to install a sing-box that is already running.
 func withConfiguredCore(caps platform.Capabilities, runnable bool) platform.Capabilities {
 	caps.SingboxPresent = caps.SingboxPresent || runnable
 	return caps
@@ -342,15 +342,13 @@ func invalidProfileRemedy(err error) string {
 	// A reference to something that is GONE has a different way out again — and for one object kind
 	// the generic sentence names an action that does not exist. Rules are read in five places in the
 	// panel and rendered as an editable row in none, so "correct or disable the affected object" sends
-	// the operator hunting a control no page has. Measured on the demo profile: rule "st-rule-6" (and
-	// "st-rule-12") point at "st-grp-0", which is not in the profile; Apply is blocked for the whole
-	// configuration and neither rule appears anywhere in the DOM.
+	// the operator hunting a control no page has: a rule pointing at a missing group blocks Apply for
+	// the whole configuration while the rule itself appears on no page.
 	var missing *model.UnresolvedRefError
 	if errors.As(err, &missing) {
 		if missing.Kind == "rule" {
-			// No REST route in the sentence any more: the finding now carries the action structurally
-			// (see invalidProfileFix) and the review renders it as a button, so naming a curl here
-			// would describe handwork the operator no longer has to do.
+			// No REST route in the sentence: the finding carries the action structurally (see
+			// invalidProfileFix) and the review renders it as a button.
 			return fmt.Sprintf("This rule has no row on any page, so no screen can correct it. "+
 				"Either bring back %q so the reference resolves, or remove the rule.", missing.Target)
 		}
@@ -367,10 +365,8 @@ func invalidProfileItem(err error) string {
 	if errors.As(err, &missing) {
 		return missing.Kind + " " + strconv.Quote(missing.ID)
 	}
-	// The switched-off class names its object too. It did not until DisabledRefError gained the same
-	// structure, and the effect was visible the moment several problems were listed together: twelve
-	// entries read "routing list \"st-rl-6\"" and the first read "profile" — the whole configuration —
-	// purely because that one happened to be the other class.
+	// The switched-off class names its object too (DisabledRefError carries the same structure), so a
+	// list of several problems names each object instead of reading "profile" for one class.
 	var off *model.DisabledRefError
 	if errors.As(err, &off) {
 		return off.Kind + " " + strconv.Quote(off.ID)
@@ -411,8 +407,6 @@ func (s *Server) rawFindings(ctx context.Context, desired DesiredSnapshot, capse
 		// actively wrong for the class that blocks a working router: a live reference to something
 		// switched OFF. There the object is ALREADY disabled, so the one action the sentence names has
 		// no effect, and the two that do - switch it back on, or drop the reference - go unsaid.
-		// Measured on the demo profile: "group "seed-grp-eu": member "seed-trojan-fi" is disabled",
-		// Apply blocked for the whole configuration, remedy "Correct or disable the affected object".
 		//
 		// This class is worth the extra sentence precisely because it blocks EVERY apply from now on,
 		// including ones that have nothing to do with the reference, and because the store refuses to
@@ -420,9 +414,8 @@ func (s *Server) rawFindings(ctx context.Context, desired DesiredSnapshot, capse
 		// not the one who switched anything off and has no reason to guess what did.
 		// One finding per broken REFERENCE, not one per profile.
 		//
-		// Validate stops at the first failure, so the review named one object, the operator fixed it,
-		// re-reviewed, and met the next — with nothing anywhere saying how many were left. Measured on
-		// the demo profile: st-rule-6, st-rule-7 and st-rule-12 were three round trips.
+		// Validate stops at the first failure; one finding per reference lets the review list every
+		// broken object at once instead of one per round trip.
 		//
 		// These fold into a single entry by ID (see foldFindings): the first one keeps its Detail,
 		// Remedy and Fix, and every one contributes its Item, so the entry reads "3 items" and lists
@@ -458,6 +451,9 @@ func (s *Server) rawFindings(ctx context.Context, desired DesiredSnapshot, capse
 			})
 		}
 	}
+	raw = append(raw, s.fastestFindings(&prof)...)
+	raw = append(raw, s.openwrtPlaneFindings(ctx, cfg, &prof)...)
+	raw = append(raw, s.keeneticFastReview(cfg, &prof)...)
 	// Preflight (routing mode / offload / protocols / DNS-path coherence) against the same host
 	// facts the apply path uses.
 	raw = append(raw, evaluatePlanFindings(capset, s.preflightFor(cfg, prof, s.planCapabilities(capset), s.offloadObservation(ctx).State))...)
@@ -630,12 +626,12 @@ func tlsFragmentFindings(p *model.Profile, mode string) []PlanFinding {
 }
 
 // coreInlineWarnEntries is where the lists the core holds inline start to cost a router something it
-// may not have. Measured on the live Keenetic (sing-box 1.13.19, 149 MB available): 100,000 names took
+// may not have. On a Keenetic (sing-box 1.13.19, 149 MB available), 100,000 names take
 // `sing-box check` to 9.3 s of Apply's 15 s limit and the core to 147 MB RSS against a 34 MB baseline;
-// adding 45,612 prefixes took the check to 12.8 s. On flash each entry costs roughly 150 bytes at the
-// peak of an Apply (the config, its staged check copy and the Apply record), and the test router's overlay
-// had 6.1 MB free. Fetched feeds reach the core since QA-066, so a refilter-sized list sent to a proxy
-// lands here.
+// adding 45,612 prefixes takes the check to 12.8 s. On flash each entry costs roughly 150 bytes at the
+// peak of an Apply (the config, its staged check copy and the Apply record), and a small OpenWrt
+// router's overlay may have about 6 MB free. Fetched feeds reach the core, so a large list sent to a
+// proxy lands here.
 const coreInlineWarnEntries = 20000
 
 func coreInlineSizeFindings(p *model.Profile, mode string) []PlanFinding {
@@ -867,11 +863,9 @@ func (s *Server) endpointFindings(prof model.Profile, capset platform.Capability
 		// A credential sing-box TOLERATES is not a credential the SERVER tolerates. model.Validate
 		// deliberately blocks only the fields whose absence hard-rejects the config (see
 		// missingProtoParam): an empty vless uuid or trojan password loads fine and simply never
-		// authenticates. Right call for a gate — and it left the operator with nothing at all.
-		//
-		// Measured on the demo: Add connection → Manual → trojan, server and port filled, password
-		// left empty. The panel answered "Added Manual probe" in the success style, stored it enabled,
-		// and the review said "ready". Nothing on any screen said the connection cannot authenticate.
+		// authenticates. Right call for a gate, but without this finding a trojan connection saved
+		// with an empty password is stored enabled, the review says "ready", and nothing on any
+		// screen says the connection cannot authenticate.
 		//
 		// Reported as DEGRADED, not blocked, because that is what it is: nothing else breaks, this one
 		// exit will not come up. Blocking Apply over it would take a working router down for a
@@ -1151,9 +1145,9 @@ func (s *Server) endpointFindings(prof model.Profile, capset platform.Capability
 				Remedy: "Install ByeDPI's ciadpi, or disable the connection.",
 			})
 		default:
-			// nfqws included (QA-055): its finding used to say "install nfqws2" and nothing when the
-			// binary was there, but the executor refuses the engine either way (it modifies packets and
-			// has no exit; classifyExecutionEndpoint), so the install it promised fixed nothing.
+			// nfqws included: the executor refuses the engine whether or not the binary is installed
+			// (it modifies packets and has no exit; classifyExecutionEndpoint), so suggesting an
+			// install would fix nothing.
 			out = append(out, PlanFinding{
 				ID: "endpoint.engine." + string(e.Engine), Setting: "engine", Item: name(e),
 				Requested: string(e.Engine), Effective: "not applied",
@@ -1289,9 +1283,8 @@ func (s *Server) planPlatform() planPlatform {
 	}
 	// The demo poses as a router that HAS the core (platform.DemoCapabilities sets SingboxPresent),
 	// and the verdict in this same response is computed from that pose. Reading the real machine here
-	// put both in one payload: "verdict": "ready" beside "core_available": false, for a profile whose
-	// default route needs the core. Measured after pointing the default route at a proxy-carried
-	// group on the demo — zero findings, and the platform block flatly contradicting them.
+	// would put "verdict": "ready" beside "core_available": false in one payload, for a profile whose
+	// default route needs the core.
 	//
 	// The health battery is deliberately NOT changed to match: it answers "what is on this machine",
 	// which is what makes the core-absent branches reachable in the demo at all. This block answers
@@ -1320,9 +1313,8 @@ func foldFindings(raw []PlanFinding, acked func(id string) bool) []Finding {
 		severity := normalizeSeverity(f.Severity)
 		blocks := normalizeBlocks(f.Blocks)
 		// A privacy finding is INFORMATION: the configuration works exactly as asked and discloses
-		// something while doing it. It used to be promoted to "blocks a feature" and then demanded a
-		// signature per finding before Apply would light up — five checkboxes for a disclosure the
-		// operator never asked to change. Telling them is the job; making them countersign it is not.
+		// something while doing it. It is not promoted to "blocks a feature": demanding a signature per
+		// disclosure the operator never asked to change adds checkboxes, not information.
 		k := key{f.ID, severity, blocks}
 		item := f.Item
 		if item == "" && f.Setting != "" && f.Setting != f.ID {
@@ -1351,7 +1343,7 @@ func foldFindings(raw []PlanFinding, acked func(id string) bool) []Finding {
 			// router silently drops. A privacy note is not that: it is reported, counted and left in
 			// plain sight, and Apply stays available.
 			// BlocksFeature and BlocksApply are distinct values, so this test already excludes a hard
-			// blocker; the "!hard &&" that used to lead it restated that and needed a variable to do it.
+			// blocker.
 			AckRequired: blocks == platform.BlocksFeature && severity != platform.SeverityPrivacy,
 			Title:       title, Detail: detail, Remedy: remedy, Count: 1, Items: []string{},
 			Fix: f.Fix,
@@ -1784,6 +1776,54 @@ func findingTemplate(f PlanFinding) (code, title, detail, remedy string) {
 		return "KERNEL_RULE_FALLBACK", "Rules use the userspace fallback",
 			"The kernel plane cannot carry these rules, so the TUN handles them instead.",
 			"No action is needed if the slower fallback is expected."
+	case f.Setting == findingLeakedFlows:
+		return "KILLSWITCH_LEAKED_FLOWS_RESET", "Connections that left by the provider were reset",
+			"Connections to listed destinations that started while the marking rules were being reinstalled left by the provider; they were reset.",
+			"Nothing is required."
+	case strings.HasPrefix(f.Setting, findingOverridden+":"):
+		return "KILLSWITCH_OVERRIDDEN", "A kill-switched list would lose addresses to another list",
+			"Another list holds some of a kill-switched list's addresses and would route them past the kill switch.",
+			"Remove the shared ranges from the other list, or put it under the same kill switch."
+	case strings.HasPrefix(f.Setting, findingOverlap+":"):
+		return "LIST_OVERLAP", "Lists with different exits share addresses",
+			"Some addresses are in two lists that route differently; one of them decides for those addresses.",
+			"Nothing is required if the winning list is the intended exit for them."
+	case strings.HasPrefix(f.Setting, findingHandoff+":"):
+		return "LIST_OVERLAP_HANDOFF", "A domain list shares addresses with another list",
+			"The shared addresses follow the other list; the domain list's own names keep their exit through sing-box.",
+			"Nothing is required."
+	case strings.HasPrefix(f.Setting, findingSharedCDN+":"):
+		return "LIST_SHARED_CDN", "A direct domain list resolves to shared CDN addresses",
+			"A list sent direct acts on addresses, and these addresses serve many other sites.",
+			"Send the list through a tunnel (for address checks, a Russian exit) instead of direct."
+	case f.Setting == findingBackstopCap:
+		return "KILLSWITCH_BACKSTOP_CAP", "The kill switch backstop would exceed its cap",
+			"The kill-switched lists need more blackhole routes than the backstop may hold.",
+			"Make the kill-switched lists smaller, or raise kill_switch_backstop_max in config.json."
+	case f.Setting == findingBackstopNear:
+		return "KILLSWITCH_BACKSTOP_NEAR_CAP", "The kill switch backstop is close to its cap",
+			"The kill-switched lists use most of the routes the backstop may hold.",
+			"Nothing is required. Raise kill_switch_backstop_max in config.json if the domain lists are large."
+	case strings.HasPrefix(f.Setting, findingKillSwitchIntercept+":") || f.ID == findingKillSwitchIntercept:
+		return "KILLSWITCH_DNS_INTERCEPT", "A kill-switched list of names needs DNS interception",
+			"A list of names is routed by the addresses the router's resolver learns; a device asking its own resolver walks past it.",
+			"Turn on DNS interception with encrypted DNS refused, or make the list one of addresses only."
+	case f.Setting == findingBackstopBypass:
+		return "KILLSWITCH_BYPASS_OVERLAP", "A tunnel server is inside a kill-switched list",
+			"The router reaches it; a LAN device connecting to it directly is blocked by the kill switch.",
+			"Nothing is required."
+	case strings.HasPrefix(f.Setting, findingBackstopScoped+":") || f.ID == findingBackstopScoped:
+		return "KILLSWITCH_BACKSTOP_SCOPED", "A kill switch for some devices only cannot be enforced on KeeneticOS",
+			"The kill switch's backstop holds traffic by interface, not by device: while KeeneticOS rebuilds its firewall and while the router boots, a device-scoped kill-switched list or source-matching rule would reach the provider.",
+			"Apply the list or rule to all devices, or switch the kill switch off for its group."
+	case f.Setting == findingKillSwitchNeedsOpt || f.ID == findingKillSwitchNeedsOpt:
+		return "KILLSWITCH_NEEDS_OPT", "The kill switch needs the Entware volume",
+			"If /opt does not mount after a reboot there is no kill switch: the router sends the kill-switched traffic and its DNS by the provider.",
+			"Keep the Entware volume healthy; for a guarantee without it, block the destinations in KeeneticOS as well."
+	case strings.HasPrefix(f.Setting, "dns_path:killswitch:") || strings.HasPrefix(f.ID, "dns_path:killswitch:"):
+		return "DNS_KILLSWITCH_LEAK", "DNS would leave by the provider despite the kill switch",
+			"A list under a kill switch resolves its names through a server that goes out directly, by the provider.",
+			"Add a DNS rule for the list that uses a server whose detour is the list's tunnel or group."
 	case strings.HasPrefix(f.Setting, "dns_path:encrypted:") || strings.HasPrefix(f.ID, "dns_path:encrypted:"):
 		return "DNS_EXIT_MISMATCH_ENCRYPTED", "Encrypted DNS uses a different exit",
 			"DNS queries stay encrypted, but the resolver sees them from the WAN address while the matching traffic exits through a tunnel.",
@@ -1839,7 +1879,8 @@ func (s *Server) preflightFor(c config.Config, prof model.Profile, caps platform
 		if r.Disabled {
 			continue
 		}
-		if len(r.Domain) > 0 || len(r.DomainSuffix) > 0 || len(r.GeoSite) > 0 {
+		// The fast DNS plane routes a rule's Domain/DomainSuffix through the resolver; geosite stays the core's.
+		if len(r.GeoSite) > 0 || !s.fastDNSOn(c) && (len(r.Domain) > 0 || len(r.DomainSuffix) > 0) {
 			in.HasDomainRules = true
 			break
 		}
@@ -1858,6 +1899,28 @@ func (s *Server) preflightFor(c config.Config, prof model.Profile, caps platform
 	plane := dnsaudit.Plane{TUN: dnsPlaneTUN(in.RoutingMode, platform.Platform(caps.Platform))}
 	for _, a := range dnsaudit.DetectAsymmetric(prof, plane) {
 		out = append(out, dnsPathUnsupported(a))
+	}
+	// The kill switch on the KeeneticOS kernel plane: its backstop's size, the lists it cannot cover,
+	// and kill-switched names with no WayHop listener to pin them to. A list already refused above
+	// for its DNS keeps that one finding.
+	keenetic := platform.Platform(caps.Platform) == platform.Keenetic
+	carries := keenetic && keeneticKernelPlaneCarriesLists(in.RoutingMode)
+	var live func(string) []netip.Prefix
+	if carries {
+		live = s.liveSetMembers()
+	}
+	review := append(keeneticKillSwitchPreflight(c, prof, carries), keeneticOverlapPreflight(prof, carries, live)...)
+	if carries {
+		review = append(review, leakedFlowsFinding(s.leaks.counts())...)
+	}
+	for _, u := range review {
+		dup := false
+		for _, have := range out {
+			dup = dup || have.Setting == u.Setting
+		}
+		if !dup {
+			out = append(out, u)
+		}
 	}
 
 	if out != nil {
@@ -1885,11 +1948,9 @@ func evaluatePlanFindings(capset platform.CapabilitySet, pf []platform.Unsupport
 		}
 		if strings.HasPrefix(u.Setting, "dns_path:") {
 			// The setting carries the routing list id, and the list belongs in Item — not in the fold
-			// key. Keying by it gave every list its own card of identical prose: five lists produced
-			// five paragraphs, a "how to fix" box each, and half a screen of review for ONE fact with
-			// five names. Folding on the KIND collapses that to one entry listing the lists, which is
-			// what Items exists for and how every other repeated finding already reads.
-			f.Item = strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(u.Setting, "dns_path:"), "encrypted:"), "plaintext:")
+			// key. Keying by it would give every list its own card of identical prose; folding on the
+			// KIND yields one entry listing the lists, which is what Items exists for.
+			f.Item = strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(u.Setting, "dns_path:"), "encrypted:"), "plaintext:"), "killswitch:")
 			f.ID = strings.TrimSuffix(u.Setting, ":"+f.Item)
 		}
 		if _, known := capset.Items[id]; known {
@@ -1910,8 +1971,28 @@ func evaluatePlanFindings(capset platform.CapabilitySet, pf []platform.Unsupport
 		if f.Severity == platform.SeverityPrivacy && strings.HasPrefix(f.Setting, "dns_path:plaintext:") {
 			f.Blocks = platform.BlocksApply
 		}
+		if strings.HasPrefix(f.Setting, "dns_path:killswitch:") || f.Setting == findingBackstopCap ||
+			strings.HasPrefix(f.Setting, findingKillSwitchIntercept+":") || strings.HasPrefix(f.Setting, findingBackstopScoped+":") {
+			f.Blocks = platform.BlocksApply // the operator's kill switch; never acknowledgeable away, scoped ones included
+		}
+		if strings.HasPrefix(f.Setting, findingKillSwitchIntercept+":") {
+			f.Item = strings.TrimPrefix(f.Setting, findingKillSwitchIntercept+":")
+			f.ID = findingKillSwitchIntercept
+		}
+		if f.Setting == findingBackstopNear || f.Setting == findingKillSwitchNeedsOpt || f.Setting == findingBackstopBypass ||
+			strings.HasPrefix(f.Setting, findingOverlap+":") || strings.HasPrefix(f.Setting, findingHandoff+":") ||
+			strings.HasPrefix(f.Setting, findingSharedCDN+":") || f.Setting == findingLeakedFlows {
+			f.Blocks = platform.BlocksNothing
+		}
+		if strings.HasPrefix(f.Setting, findingOverridden+":") {
+			f.Blocks = platform.BlocksApply // a kill switch is never acknowledgeable away
+		}
+		if strings.HasPrefix(f.Setting, findingBackstopScoped+":") {
+			f.Item = strings.TrimPrefix(f.Setting, findingBackstopScoped+":")
+			f.ID = findingBackstopScoped
+		}
 		// A list on a KeeneticOS access policy: where its traffic leaves is NDM's to know, not WayHop's,
-		// so its DNS finding is advice (dnsPathUnsupported), never a refusal (QA-063).
+		// so its DNS finding is advice (dnsPathUnsupported), never a refusal.
 		if _, policy := model.NDMPolicyName(f.Requested); policy && strings.HasPrefix(f.Setting, "dns_path:") {
 			f.Blocks = platform.BlocksNothing
 		}
@@ -1953,7 +2034,7 @@ func capabilityIDForSetting(setting, value string) string {
 }
 
 // hasRoutableIPv6 reports whether a usable global IPv6 route exists. Only a POSITIVE finding is
-// meaningful: a router whose provider hands out a non-routable prefix (observed in the field) has
+// meaningful: a router whose provider hands out a non-routable prefix has
 // v6 addresses and default routes that reach nothing, so address presence alone proves nothing.
 func hasRoutableIPv6() bool {
 	ifaces, err := net.Interfaces()
@@ -1987,8 +2068,8 @@ func hasRoutableIPv6() bool {
 // tally collapses repeats, keeping first-seen order and saying how many there were.
 //
 // One finding is produced per affected object and the log lines that name them repeat the same id
-// once per routing list that hits it. On the operator's own router that produced a refusal naming
-// `kernel_plane.list-cascade` about ninety times in a row. The count is kept rather than dropped,
+// once per routing list that hits it, so without folding a refusal can name the same id dozens of
+// times in a row. The count is kept rather than dropped,
 // because "this affects 90 of your lists" and "this affects one" are different situations.
 func tally(ids []string) []string {
 	seen := make(map[string]int, len(ids))
@@ -2072,9 +2153,8 @@ func (s *Server) kernelPlaneFindings(cfg *config.Config, prof *model.Profile, nd
 		return nil
 	}
 	// What the kernel compiler declines to route only MEANS something in the modes that ask the
-	// kernel to route. This ran for every mode and phrased every warning the same way, so a Keenetic
-	// in `mixed` — which has no kernel plane at all — answered a plan with 219 findings reporting
-	// that traffic the user never asked the kernel to carry is carried by sing-box instead.
+	// kernel to route. Run in every mode, a Keenetic in `mixed` (which has no kernel plane at all)
+	// would get hundreds of findings about traffic nobody asked the kernel to carry.
 	mode := s.routingMode(*cfg)
 	switch mode {
 	case "tun", "mixed":
@@ -2159,9 +2239,9 @@ func (s *Server) kernelPlaneFindings(cfg *config.Config, prof *model.Profile, nd
 // blockNamesShadowedFindings names each block list that blocks by NAME while the kernel plane routes
 // address ranges in hybrid. Names are matched only in the proxy core, and the kernel takes its lists'
 // addresses before the core sees the connection - the TUN excludes them - so a blocked name whose
-// address sits in one of those ranges is routed, not blocked, whatever the lists' order. Seen live:
-// a messenger listed to block, every one of its addresses inside another list's /20, and its traffic
-// left by the tunnel (QA-065). A block the kernel carries is emitted last and wins any overlap, hence the remedy.
+// address sits in one of those ranges is routed, not blocked, whatever the lists' order: a service
+// listed to block whose addresses all sit inside another list's /20 leaves by the tunnel. A block the
+// kernel carries is emitted last and wins any overlap, hence the remedy.
 func blockNamesShadowedFindings(prof *model.Profile, plan *pbr.Plan) []PlanFinding {
 	if plan == nil {
 		return nil

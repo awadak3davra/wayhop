@@ -62,7 +62,7 @@ func TestStartApply_DiscardsAnUnsavedWindowFromThePreviousLife(t *testing.T) {
 	}
 }
 
-// QA-145: the routing switch can save a Test's native tunnels into startup-config. A reboot must not
+// The routing switch can save a Test's native tunnels into startup-config. A reboot must not
 // discard their record as though every Test had vanished; boot rolls that native state back.
 func TestLiveNeedsRollbackOnBoot_KeepsNativeStateForRollback(t *testing.T) {
 	s, _ := applytest_server(t)
@@ -176,7 +176,7 @@ func TestConvergeOnBoot_FailureIsNeverFatal(t *testing.T) {
 	}
 }
 
-// QA-139: boot converge read the committed revision once, and its retry re-executed it without looking
+// Boot converge read the committed revision once, and its retry re-executed it without looking
 // again. Routing switched off, or an Apply & Save recorded, during the wait is what the router must run:
 // the retry put the core and the kernel plane back under a switch that said off, or ran the old core
 // config under a record that named the new one. Each attempt re-reads both under applyMu.
@@ -295,7 +295,7 @@ func TestReconcileKernelPlane_ReinstallsWhenTheRouterDroppedIt(t *testing.T) {
 	}
 }
 
-// QA-118: KeeneticOS rebuilds its firewall every 150 s and its hook restores WayHop's rules within a
+// KeeneticOS rebuilds its firewall every 150 s and its hook restores WayHop's rules within a
 // second. A tick that reads inside that gap must not reinstall the plane on top of the hook: the
 // second read, after the settle, finds it back and nothing is reinstalled.
 func TestReconcileKernelPlane_RidesOutAFirmwareRebuild(t *testing.T) {

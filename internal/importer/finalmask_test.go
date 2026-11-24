@@ -37,7 +37,7 @@ func fmLinks(fm string) map[string]string {
 	}
 }
 
-// QA-136: fm= used to be dropped without a word. Masks the client applies alone (or that do nothing
+// Fm= used to be dropped without a word. Masks the client applies alone (or that do nothing
 // on a client) import, and fm is kept exactly as the link held it, to be exported again.
 func TestLinkFinalMask_KeptWhenTheServerDoesNotNeedIt(t *testing.T) {
 	for _, fm := range []string{fmFragment, fmNoiseHop, fmFilter, `{"quicParams":{"congestion":"bbr"}}`} {

@@ -97,7 +97,7 @@ func doubleTap(t *testing.T, h *harness, rb *raceBackend, data string) {
 // A double tap on Keep: the second press passed the window check while the first was still saving
 // under the apply lock, then got "there is no unsaved configuration to keep", and the chat read
 // "Kept by Sam" followed by "Did not work": a false failure as the last word on the safety net,
-// inviting a needless Roll back or a second Apply (QA-103).
+// inviting a needless Roll back or a second Apply.
 func TestDoubleTapOnKeepIsNotReportedAsAFailure(t *testing.T) {
 	h, rb := raceHarness(t)
 	doubleTap(t, h, rb, cbKeep+"w1")

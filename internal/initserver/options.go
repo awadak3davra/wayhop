@@ -27,7 +27,7 @@ type Option struct {
 // selfSignedPinNote is what the connection Set up Server adds checks on a self-signed server, which
 // depends on the router's sing-box: the public-key pin comes on its own line beside the link (no link
 // carries one), and the whole-certificate pin in the link. A 1.12 core, which some routers run, has
-// neither and accepts any certificate (QA-138).
+// neither and accepts any certificate.
 const selfSignedPinNote = "The connection WayHop adds also gets the certificate's public-key pin, printed beside the link: " +
 	"on sing-box 1.13 and later the router checks the server by that key, on 1.15 by the whole certificate too, " +
 	"and on 1.12 it accepts any certificate, as the insecure flag says."

@@ -19,11 +19,11 @@ func TestCapabilityProbeCommandRespectsParentContext(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		started := time.Now()
-		_, err := runCapabilityTestCommand(ctx, 5*time.Second, 8<<10, 100*time.Millisecond, "hang")
+		_, err := runCapabilityTestCommand(ctx, capabilityHelperBudget, 8<<10, 100*time.Millisecond, "hang")
 		if !errors.Is(err, errCapabilityProbeCanceled) {
 			t.Fatalf("error = %v, want fixed cancellation sentinel", err)
 		}
-		if elapsed := time.Since(started); elapsed > time.Second {
+		if elapsed := time.Since(started); elapsed > capabilityHangBound {
 			t.Fatalf("pre-canceled parent took %v", elapsed)
 		}
 	})
@@ -32,26 +32,48 @@ func TestCapabilityProbeCommandRespectsParentContext(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 		started := time.Now()
-		_, err := runCapabilityTestCommand(ctx, 5*time.Second, 8<<10, 100*time.Millisecond, "hang")
+		_, err := runCapabilityTestCommand(ctx, capabilityHelperBudget, 8<<10, 100*time.Millisecond, "hang")
 		if !errors.Is(err, errCapabilityProbeTimeout) {
 			t.Fatalf("error = %v, want fixed timeout sentinel", err)
 		}
-		if elapsed := time.Since(started); elapsed > 2*time.Second {
+		if elapsed := time.Since(started); elapsed > capabilityHangBound {
 			t.Fatalf("parent deadline was not inherited: %v", elapsed)
 		}
 	})
 }
 
+// capabilityHelperBudget is the command timeout of the helper-process tests. It bounds starting a
+// second copy of this test binary, which under a full parallel `go test ./...` on Windows took longer
+// than the 2 s these tests used to allow, so they failed with the timeout sentinel instead of the one
+// they check. What each test proves does not depend on it: the pipe and flood sentinels are reached
+// long before it, and the pipe test's own bound is the grandchild's lifetime, not this.
+const capabilityHelperBudget = 30 * time.Second
+
+// capabilityHangLife is how long the "hang" helper sleeps, and capabilityHangBound how soon a call
+// whose parent context is canceled or expires must return: well before the helper or the command
+// budget would end it, which is what shows the parent's context was obeyed. The bound leaves room for
+// starting the helper under a loaded full-suite run.
+const (
+	capabilityHangLife  = 20 * time.Second
+	capabilityHangBound = 10 * time.Second
+)
+
+// capabilityPipeHolderLife is how long the descendant helper's grandchild keeps the inherited pipes
+// open. A Wait that waited for them could not return before it.
+const capabilityPipeHolderLife = 10 * time.Second
+
 func TestCapabilityProbeCommandBoundsInheritedPipes(t *testing.T) {
 	setCapabilityProbeHelper(t)
 	started := time.Now()
 	_, err := runCapabilityTestCommand(
-		context.Background(), 2*time.Second, 8<<10, 100*time.Millisecond, "descendant",
+		context.Background(), capabilityHelperBudget, 8<<10, 100*time.Millisecond, "descendant",
 	)
 	if !errors.Is(err, errCapabilityProbePipes) {
 		t.Fatalf("error = %v, want fixed inherited-pipe sentinel", err)
 	}
-	if elapsed := time.Since(started); elapsed > 2*time.Second {
+	// The grandchild starts after this call did and holds the pipes for capabilityPipeHolderLife, so a
+	// return before that is a return that did not wait for them, however slowly the helper started.
+	if elapsed := time.Since(started); elapsed >= capabilityPipeHolderLife {
 		t.Fatalf("inherited stdout held Wait for %v", elapsed)
 	}
 }
@@ -60,7 +82,7 @@ func TestCapabilityProbeCommandBoundsOutputFlood(t *testing.T) {
 	setCapabilityProbeHelper(t)
 	const limit = 4 << 10
 	_, err := runCapabilityTestCommand(
-		context.Background(), 2*time.Second, limit, 100*time.Millisecond, "flood",
+		context.Background(), capabilityHelperBudget, limit, 100*time.Millisecond, "flood",
 	)
 	if !errors.Is(err, errCapabilityProbeOutput) {
 		t.Fatalf("error = %v, want fixed output-limit sentinel", err)
@@ -123,7 +145,7 @@ func TestCapabilityProbeHelperProcess(t *testing.T) {
 	}
 	switch os.Args[len(os.Args)-1] {
 	case "hang":
-		time.Sleep(5 * time.Second)
+		time.Sleep(capabilityHangLife)
 		os.Exit(0)
 	case "flood":
 		_, _ = fmt.Fprint(os.Stdout, strings.Repeat("secret-flood-output", 32<<10))
@@ -146,7 +168,8 @@ func capabilityPipeHolderCommand() *exec.Cmd {
 	if runtime.GOOS == "windows" {
 		// A system process, not this test executable: keeping platform.test.exe alive prevents the Go
 		// tool from removing its build directory on Windows even after every assertion passed.
-		return exec.Command("cmd.exe", "/d", "/c", "ping -n 3 127.0.0.1 >nul")
+		// ping -n N waits about N-1 seconds.
+		return exec.Command("cmd.exe", "/d", "/c", fmt.Sprintf("ping -n %d 127.0.0.1 >nul", int(capabilityPipeHolderLife/time.Second)+1))
 	}
-	return exec.Command("sh", "-c", "sleep 2")
+	return exec.Command("sh", "-c", fmt.Sprintf("sleep %d", int(capabilityPipeHolderLife/time.Second)))
 }

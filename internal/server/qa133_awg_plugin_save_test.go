@@ -14,7 +14,7 @@ import (
 	"wayhop/internal/platform"
 )
 
-// QA-133. Before KeeneticOS 4.2 the router's own AmneziaWG cannot create a connection (QA-127), and the
+// Before KeeneticOS 4.2 the router's own AmneziaWG cannot create a connection, and the
 // planner runs one on WayHop's amneziawg-go instead - but the save check asked only for the native
 // operations, so a new AmneziaWG connection could not be saved at all. Release strings are invented;
 // only their shape is the firmware's.
@@ -67,7 +67,7 @@ const (
 	qa133Release51 = "5.01.A.2.0-0" // the writer's whole generation
 )
 
-// The hunt's repro, now accepted: KeeneticOS 4.1, /dev/net/tun present, amneziawg-go installed.
+// Accepted: KeeneticOS 4.1, /dev/net/tun present, amneziawg-go installed.
 func TestQA133Pre42AWGSavesOnThePlugin(t *testing.T) {
 	s := qa133Server(t, platform.Keenetic, qa133Capabilities(qa133Release41), true, true)
 	if code, msg := s.gateEndpoint(context.Background(), qa133Endpoint("awg-new")); code != 0 {

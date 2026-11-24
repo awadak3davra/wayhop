@@ -144,17 +144,14 @@ func (s *Server) handleUpdaterVersions(w http.ResponseWriter, r *http.Request) {
 
 // handleUpdaterFit answers what an install would cost and whether it fits — before it runs.
 //
-// Read-only, and it exists because the refusal it mirrors used to arrive too late: the disk
-// pre-flight lives inside Install, so on a small-flash router the operator picked a version, pressed
-// Install and only then learned the binary could never have fit. Same predicate, same directory,
+// Read-only. The disk pre-flight lives inside Install, so without this a small-flash router's
+// operator would pick a version, press Install and only then learn the binary could never fit. Same predicate, same directory,
 // same numbers — reported while the choice is still open.
 func (s *Server) handleUpdaterFit(w http.ResponseWriter, r *http.Request) {
 	// "self" is measured against the RUNNING binary's own directory and with the mandatory rollback
 	// backup counted — SelfUpdate's numbers, not an engine's. Without this the panel could not ask
-	// the question at all for WayHop's own row: EngineByID has no wayhop entry, so /fit answered 404
-	// and the row offered "Update now" with no idea whether it fits. On a live test router that
-	// is not academic — 13 MiB free against ~27 MiB needed — and the refusal could only arrive after
-	// the click.
+	// the question at all for WayHop's own row: EngineByID has no wayhop entry, so /fit would answer
+	// 404. On a small-flash router this matters (for example 13 MiB free against ~27 MiB needed).
 	if r.PathValue("id") == "self" {
 		s.handleSelfFit(w, r)
 		return
@@ -197,25 +194,20 @@ func (s *Server) handleUpdaterFit(w http.ResponseWriter, r *http.Request) {
 // downloadPathSuffix names the outbound a fetch was bound to, for the message that reports it failing.
 //
 // A download bound to a tunnel is the first thing to suspect when the release source cannot be
-// reached, and the operator has no way to remember it from the error. Measured on a live
-// Keenetic: version checks bound to a group answered "3 source(s) tried, all failed" for twelve
-// seconds while the same request over the ordinary path succeeded immediately — and nothing in the
-// message pointed at the setting that made the difference. Empty when downloads take the ordinary
+// reached, and the operator has no way to remember it from the error: a check bound to a group can
+// fail on every source while the same request over the ordinary path succeeds. Empty when downloads take the ordinary
 // path, because then there is no extra suspect to name.
 // releaseSourceUnreachable is the whole message for "the release list could not be fetched".
 //
-// One definition because there are two call sites and appending the bound-path note was optional at
-// each: a first cut left the helper callable and both handlers free to forget it, which a mutation
-// check caught immediately — deleting the append still compiled and still passed the test that
-// exercised the helper directly. Callers now get the complete sentence or nothing.
+// One definition for both call sites, so neither handler can forget the bound-path note: callers get
+// the complete sentence or nothing.
 func (s *Server) releaseSourceUnreachable(lead string, err error) string {
 	msg := lead + err.Error()
 	// Naming the bound download path is only worth doing when the path is a suspect. If the release
 	// host ITSELF answered, the path carried a full TLS request there and the answer back, so it is
 	// the one element that demonstrably works — and the message would send the operator to change a
-	// setting that cannot help. Measured on a live Keenetic: downloads bound to
-	// "grp-primary" (nwg3), direct answered HTTP 404 in 1.9 s because the self repository is
-	// private, and the advice was still to change "Download components through".
+	// setting that cannot help (for example a direct HTTP 404 from a repository with no public
+	// releases).
 	if st := directAnswered(err); st != 0 {
 		return msg + fmt.Sprintf(" — the release host itself answered (HTTP %d), so the download path"+
 			" carried the request; the failure is at the source, not on the way to it", st)
@@ -224,16 +216,15 @@ func (s *Server) releaseSourceUnreachable(lead string, err error) string {
 }
 
 // directAnswered reports the HTTP error status the DIRECT source answered with, or 0 when no such
-// answer arrived. Two restrictions, each measured:
+// answer arrived. Two restrictions:
 //
 // Only the DIRECT attempt counts, for the reason selfChannelMissing gives at length: a mirror is a
 // third party, so its status describes the mirror and not the release host.
 //
 // Only a status that is itself the refusal counts. A 200 that still ended in failure is the shape of
 // a transfer dying part-way, and a tunnel dropping mid-body is exactly when the bound path IS the
-// suspect. The first cut accepted any status and produced, live on a live router, "all
-// failed ... the release host itself answered (HTTP 200), so the download path carried the request"
-// — clearing the path on the strength of an answer that never finished arriving.
+// suspect. Accepting any status would clear the path on the strength of an answer that never
+// finished arriving.
 //
 // The test is on the STATUS, not on the category: categorize() ends in `return CatHTTP` as its
 // default, so a body that would not decode at 200 is filed under CatHTTP too. The condition here is
@@ -309,13 +300,13 @@ func (s *Server) handleUpdaterInstall(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setUpdErr(e.ID, "") // a successful install clears any prior failure reason
 	s.forgetCapabilities()
-	// If we updated the running primary core, reload it — UNDER applyMu so it can't
+	// If this updated the running primary core, reload it — UNDER applyMu so it can't
 	// interleave with handleApply's / the fail-safe's Stop+Start+Reload. Reload drops the
 	// core's lock between Stop and Start, so two concurrent reloads could each spawn a
 	// sing-box while the other's old process is still draining — two instances both
 	// installing TUN auto_route / auto_redirect kernel rules. applyMu is the same gate the
 	// apply path holds end-to-end, making the two mutually exclusive. Re-check Running()
-	// under the lock so we don't resurrect a core an in-flight apply intentionally stopped.
+	// under the lock so it doesn't resurrect a core an in-flight apply intentionally stopped.
 	reloaded := false
 	reloadErr := ""
 	if e.ID == "sing-box" && s.singbox != nil {
@@ -331,12 +322,10 @@ func (s *Server) handleUpdaterInstall(w http.ResponseWriter, r *http.Request) {
 	}
 	// The core was ABSENT and the applied plan expects one: start it the same way a restart does.
 	//
-	// Without this the install was a dead end. Measured on a live Keenetic after removing and
-	// reinstalling sing-box: the binary was back, the core stayed down, encrypted DNS stayed dark, and
-	// the page said "Open Review & Apply" — but nothing was pending (installing a binary changes
-	// neither profile nor config), so no Apply control existed and there was nothing to click. The
-	// only thing that fixed it was restarting the daemon, which converges to the committed
-	// materialization. That is precisely the step to take here, and it needs no operator at all.
+	// Without this, reinstalling a removed sing-box is a dead end: the binary is back but the core
+	// stays down, and nothing is pending (installing a binary changes neither profile nor config), so
+	// there is no Apply to run. Converging to the committed materialization, as a daemon restart does,
+	// is the step to take, and it needs no operator at all.
 	//
 	// converge takes applyMu itself, so it runs outside the reload block above.
 	converged := false
@@ -380,7 +369,7 @@ func (s *Server) handleUpdaterInstall(w http.ResponseWriter, r *http.Request) {
 
 // handleUpdaterUninstall deletes an installed engine binary from BinDir. A RUNNING engine's binary
 // can't be cleanly removed — the deleted inode keeps running as an unmanageable orphan (holding
-// ports/locks) — so we stop the process FIRST. For the core (sing-box) that stops the VPN datapath,
+// ports/locks) — so the process is stopped FIRST. For the core (sing-box) that stops the VPN datapath,
 // so it needs an explicit stop:true; core.Stop() also clears Desired() so the watchdog leaves it
 // down instead of respawning onto a now-missing binary. Plugin engines are stopped via
 // plugins.StopByBin with no stop:true gate (removing a plugin implies stopping it; the gate is
@@ -412,20 +401,19 @@ func (s *Server) handleUpdaterUninstall(w http.ResponseWriter, r *http.Request) 
 	}
 	_ = decodeJSONBody(r.Body, &body)
 	// Hold applyMu across the WHOLE stop→delete, not just the stop. handleApply takes the same lock
-	// end-to-end; the old code released it right after Stop(), leaving a window in which a concurrent
-	// Apply could take the lock, restart the core onto the very binary about to be unlinked, and this
+	// end-to-end; releasing it right after Stop() would leave a window in which a concurrent Apply
+	// could take the lock and restart the core onto the very binary about to be unlinked, and this
 	// path would then delete the file and report removed:true while the old inode kept running as an
-	// unmanageable orphan (LOOP-024, the sibling of the PM-remove race). Uninstall takes no lock of
+	// unmanageable orphan (the sibling of the PM-remove race). Uninstall takes no lock of
 	// its own, so this cannot deadlock. The read-only precheck above stays outside the lock.
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()
 	stopped := false
 	if e.ID == "sing-box" && s.singbox != nil && s.singbox.Running() {
 		if !body.Stop {
-			// The same refusal the package path answers with, in the same shape. It used to be a bare
-			// sentence telling the reader to "resend with stop:true" — an instruction to a program,
-			// printed to a person holding a mouse, on the one control that has no other way forward.
-			// needs_stop is what makes it a QUESTION the panel can ask and the operator can answer.
+			// The same refusal the package path answers with, in the same shape: needs_stop makes it a
+			// QUESTION the panel can ask and the operator can answer, rather than an instruction to
+			// "resend with stop:true".
 			writeJSON(w, http.StatusConflict, map[string]any{
 				"error": "sing-box is running, and removing it deletes the binary the router is using " +
 					"right now. That stops the VPN datapath until sing-box is installed again.",
@@ -486,13 +474,12 @@ func (s *Server) updErr(id string) string {
 //
 // Only the DIRECT attempt can establish it, and only with a 404. That is the request that reached
 // GitHub itself, and 404 is the one answer meaning the release list is not there for us — the same
-// answer whether the repository is private (this build's, for now) or simply has no releases. Either
+// answer whether the repository is private or simply has no releases. Either
 // way there is nothing to update to, which is a property of the build rather than a fault to fix.
 //
-// Mirrors are deliberately ignored, in both directions. Measured on this build: direct answered 404
-// while ghproxy.net answered 403 and a third mirror would not resolve — a mirror's refusal is about
-// the mirror, and a mirror's 404 can equally mean it does not carry the path. Requiring every source
-// to agree therefore never fires in the field, and trusting a mirror alone would let a proxy outage
+// Mirrors are deliberately ignored, in both directions: a mirror's refusal is about the mirror, and a
+// mirror's 404 can equally mean it does not carry the path. Requiring every source to agree would
+// therefore almost never fire, and trusting a mirror alone would let a proxy outage
 // masquerade as "this build does not self-update".
 //
 // 403 is excluded even from the direct source: GitHub answers 403 for rate limiting, and calling a
@@ -568,9 +555,8 @@ func (s *Server) selfStatus(parent context.Context) map[string]any {
 		}
 	} else {
 		out["latest"] = rel.Tag
-		// Whether the comparison could be MADE is reported separately from its outcome. An
-		// unparseable tag used to come back as update_available:false, which the panel rendered
-		// as a confident "up to date".
+		// Whether the comparison could be MADE is reported separately from its outcome, so an
+		// unparseable tag is not rendered as a confident "up to date".
 		newer, decided := updater.Compare(version.Version, rel.Tag)
 		out["version_comparable"] = decided
 		if decided {

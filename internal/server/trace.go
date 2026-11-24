@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"wayhop/internal/clash"
+	"wayhop/internal/generator"
 	"wayhop/internal/model"
 	"wayhop/internal/pbr"
 )
@@ -69,22 +70,192 @@ func validTraceDomain(d string) bool {
 	return true
 }
 
+// traceExitCore labels a flow the core terminated whose route the core did not report (its API is
+// down, or the flow closed between the two reads). Never "direct": the core decided where it went.
+const traceExitCore = "core"
+
+// traceExitRouter labels a flow the router itself answered (a redirect to its own DNS).
+const traceExitRouter = "router"
+
+// traceLabels is what tells a conntrack row's real exit.
+//   - markExit: a flow the kernel routes (not redirected: a plain or pinned flow) leaves by its mark's
+//     egress; this covers fast mode's resolver-fed names (their mark is saved to the connmark like a
+//     static list's) and hybrid's kernel carve-outs.
+//   - localIface: the router's own addresses (loopback included) and the device each is on. A LAN
+//     flow whose reply comes from one of them was redirected into the core (auto_redirect: the reply
+//     source is 127.0.0.1 or the LAN address, at the core's redirect port), so its mark says nothing:
+//     the core chose the outbound. A flow whose SOURCE is the router's is the router's own leg (the
+//     core's outbound socket bound to a tunnel, a probe): it leaves by the device that owns its source
+//     address.
+//   - coreRoute: the core's outbound chain per client "ip:port" (its /connections), for the flows it
+//     terminates. nil when the core is not running or not asked. coreFetch, when set, fills it on
+//     the first row that needs it, so a table with no such row never asks the core.
+//   - ifaceExit: the egress tag that owns a device ("" none: the provider's side).
+type traceLabels struct {
+	markExit   func(uint32) string
+	localIface func(addr string) (iface string, local bool)
+	coreRoute  map[string]string
+	coreFetch  func() map[string]string
+	ifaceExit  map[string]string
+	// routed is the large lists' tables (fast mode): an unmarked flow to one of their addresses
+	// left by that list's egress (fastdns_routed.go).
+	routed *routedIndex
+	// mask and coreMark tell a flow the core's TUN carries: its connmark outside the plan's mask is
+	// the auto_redirect input mark (UDP and ICMP, whose reply still comes from the far side).
+	mask, coreMark uint32
+}
+
+// exitOf is the exit a conntrack row took.
+func (l *traceLabels) exitOf(c *Conn) string {
+	if l.localIface != nil {
+		if c.ReplySrc != "" && c.ReplySrc != c.Dst {
+			if _, local := l.localIface(c.ReplySrc); local && c.ReplySport != 0 && c.ReplySport == c.Dport {
+				// Redirected to the router on the same port: its own service (the DNS redirect to
+				// dnsmasq on :53), not the core, whose redirect port differs.
+				return traceExitRouter
+			}
+			if _, local := l.localIface(c.ReplySrc); local {
+				if l.coreRoute == nil && l.coreFetch != nil {
+					l.coreRoute, l.coreFetch = l.coreFetch(), nil
+				}
+				if route := l.coreRoute[flowKey(c.Src, strconv.Itoa(c.Sport))]; route != "" {
+					return route
+				}
+				return traceExitCore
+			}
+		}
+		if iface, local := l.localIface(c.Src); local {
+			if tag := l.ifaceExit[iface]; tag != "" {
+				return tag
+			}
+			return model.OutboundDirect
+		}
+	}
+	// The core's TUN carries it (UDP): its route, as for a redirected flow.
+	if l.coreMark != 0 && c.Mark&^l.mask == l.coreMark {
+		if l.coreRoute == nil && l.coreFetch != nil {
+			l.coreRoute, l.coreFetch = l.coreFetch(), nil
+		}
+		if route := l.coreRoute[flowKey(c.Src, strconv.Itoa(c.Sport))]; route != "" {
+			return route
+		}
+		return traceExitCore
+	}
+	if tag := l.routed.lookup(c.Dst, c.Mark); tag != "" {
+		return tag
+	}
+	return l.markExit(c.Mark)
+}
+
+// connLabels is the exit attribution the trace and the Dashboard share (traceLabels): the installed
+// plan's marks and devices, the router's addresses read now, and the core's routes from coreFetch
+// (nil: none), asked only when a row the core terminated needs them.
+func (s *Server) connLabels(coreFetch func() map[string]string) traceLabels {
+	plan := s.installedKernelPlan()
+	_, remote, _ := s.planRemote(plan)
+	labels := traceLabels{markExit: s.markExitResolver(), localIface: localIfaceFrom(routerAddrIfaces()),
+		coreFetch: coreFetch, ifaceExit: ifaceExits(plan), routed: newRoutedIndex(plan, remote),
+		coreMark: generator.AutoRedirectInputMark}
+	if plan != nil {
+		labels.mask = plan.Mask
+	}
+	return labels
+}
+
+// coreRoutes indexes the core's connections by client "ip:port", each with its chain as the trace
+// prints it (outbound first, then the groups that chose it).
+func coreRoutes(conns []clash.Conn) map[string]string {
+	out := make(map[string]string, len(conns))
+	for i := range conns {
+		m := conns[i].Metadata
+		if m.SourceIP == "" || m.SourcePort == "" || len(conns[i].Chains) == 0 {
+			continue
+		}
+		out[flowKey(m.SourceIP, m.SourcePort)] = strings.Join(conns[i].Chains, "→")
+	}
+	return out
+}
+
+// flowKey is a client "ip:port" in one spelling: conntrack's proc file writes IPv6 in full, the
+// core compressed.
+func flowKey(ip, port string) string {
+	return net.JoinHostPort(canonIP(ip), port)
+}
+
+// ifaceExits maps each kernel device of the plan's tunnel egresses to the egress's tag.
+func ifaceExits(plan *pbr.Plan) map[string]string {
+	out := map[string]string{}
+	if plan == nil {
+		return out
+	}
+	for _, e := range plan.Egresses {
+		if e.Kind != pbr.EgressInterface {
+			continue
+		}
+		for _, d := range e.Devices() {
+			if _, ok := out[d]; !ok {
+				out[d] = e.Tag
+			}
+		}
+	}
+	return out
+}
+
+// routerAddrIfaces is the router's own addresses by device, read when a trace needs them. A variable for
+// tests.
+var routerAddrIfaces = func() map[string]string {
+	out := map[string]string{}
+	ifs, err := net.Interfaces()
+	if err != nil {
+		return out
+	}
+	for _, ifc := range ifs {
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			if p, err := netip.ParsePrefix(a.String()); err == nil {
+				out[p.Addr().Unmap().String()] = ifc.Name
+			}
+		}
+	}
+	return out
+}
+
+// localIfaceFrom answers traceLabels.localIface from an address -> device map; loopback is always
+// the router's.
+func localIfaceFrom(addrs map[string]string) func(string) (string, bool) {
+	return func(addr string) (string, bool) {
+		a, err := netip.ParseAddr(addr)
+		if err != nil {
+			return "", false
+		}
+		a = a.Unmap()
+		if a.IsLoopback() {
+			return "lo", true
+		}
+		iface, ok := addrs[a.String()]
+		return iface, ok
+	}
+}
+
 // traceConnections matches conntrack rows against the domain's resolved IPs and reports each with
-// its resolved exit + a per-exit tally. Pure (deps passed in) for unit-testing. A device using its
-// own DNS may have connected to different IPs than the router resolves now — hence the note when
+// its exit (traceLabels) + a per-exit tally. Pure (deps passed in) for unit-testing. A device using
+// its own DNS may have connected to different IPs than the router resolves now — hence the note when
 // nothing matches.
-func traceConnections(domain string, ips []string, conns []Conn, markExit func(uint32) string) traceResult {
+func traceConnections(domain string, ips []string, conns []Conn, labels traceLabels) traceResult {
 	ipset := make(map[string]bool, len(ips))
 	for _, ip := range ips {
-		ipset[ip] = true
+		ipset[canonIP(ip)] = true
 	}
 	res := traceResult{Domain: domain, IPs: ips, Exits: map[string]int{}}
 	for i := range conns {
 		c := &conns[i]
-		if !ipset[c.Dst] {
+		if !ipset[canonIP(c.Dst)] {
 			continue
 		}
-		exit := markExit(c.Mark)
+		exit := labels.exitOf(c)
 		res.Connections = append(res.Connections, traceConn{Dst: c.Dst, Exit: exit, Dport: c.Dport, UpBytes: c.UpBytes, DownBytes: c.DownBytes, State: c.State})
 		res.Exits[exit]++
 	}
@@ -220,7 +391,7 @@ func traceCandidates(domain string, ipStrs []string, p *model.Profile, plan *pbr
 	}
 	if plan != nil {
 		for _, z := range plan.Zones {
-			entries := append(append([]string{}, z.V4...), z.V6...)
+			entries := append(append(append(append([]string{}, z.V4...), z.V6...), z.RouteV4...), z.RouteV6...)
 			if c := ipInCIDRs(ips, entries); c != "" {
 				cands = append(cands, traceCandidate{Kind: "kernel-zone", ID: z.Name, Why: "ip ∈ " + c, Outbound: z.EgressTag})
 			}
@@ -300,27 +471,36 @@ func (s *Server) traceDomain(parent context.Context, domain string) traceResult 
 		res.Note = "the router could not resolve this domain (check its spelling, or the router's DNS)"
 	default:
 		res.IPs = ips
+		// The core's view first: the route of every flow it terminates (a LAN flow redirected into
+		// it carries no mark that says where it went), and the sniffed connections below.
+		var core []clash.Conn
+		coreOK := false
+		if s.clash != nil {
+			cctx, ccancel := context.WithTimeout(parent, 4*time.Second)
+			if cs, cerr := s.clash.Connections(cctx); cerr == nil {
+				core, coreOK = cs.Connections, true
+			}
+			ccancel()
+		}
 		if data, ferr := os.ReadFile("/proc/net/nf_conntrack"); ferr == nil {
-			live := traceConnections(domain, ips, parseConntrack(string(data)), s.markExitResolver())
+			labels := s.connLabels(nil)
+			labels.coreRoute = coreRoutes(core)
+			live := traceConnections(domain, ips, parseConntrack(string(data)), labels)
 			res.Connections, res.Exits, res.Note = live.Connections, live.Exits, live.Note
 		} else {
 			res.Note = "connection table unavailable (non-Linux?) — resolution + configured rules shown only"
 		}
 		// Augment with connections sing-box sniffed to this domain at IPs the resolved set missed
 		// (CDN rotation / a client resolving itself). Best-effort: tun/hybrid only, clash-failure-safe.
-		if s.clash != nil {
-			cctx, ccancel := context.WithTimeout(parent, 4*time.Second)
-			if cs, cerr := s.clash.Connections(cctx); cerr == nil {
-				seen := make(map[string]bool, len(res.Connections))
-				for _, c := range res.Connections {
-					seen[c.Dst] = true
-				}
-				for _, e := range clashTraceMatches(domain, cs.Connections, seen) {
-					res.Connections = append(res.Connections, e)
-					res.Exits[e.Exit]++
-				}
+		if coreOK {
+			seen := make(map[string]bool, len(res.Connections))
+			for _, c := range res.Connections {
+				seen[c.Dst] = true
 			}
-			ccancel()
+			for _, e := range clashTraceMatches(domain, core, seen) {
+				res.Connections = append(res.Connections, e)
+				res.Exits[e.Exit]++
+			}
 		}
 		if len(res.Connections) > 0 {
 			res.Note = "" // found live connections (via conntrack and/or sniffed) — clear the no-match hint

@@ -16,7 +16,7 @@ import (
 // install anything: where does this land, and is there room.
 //
 // A router is not a laptop. On KeeneticOS the package tree lives under /opt, which is Entware — and
-// Entware is usually on a USB stick, not on the router's own flash: measured on a live box,
+// Entware is usually on a USB stick, not on the router's own flash: typically
 // /opt is a 7.3 GB /dev/sda1 with 6.7 GB free while the internal storage is 98 MB. On OpenWrt the
 // same packages land on the overlay, which IS the internal flash and is routinely under 10 MB free.
 // The same "Install" button therefore means two completely different risks, and a section that shows
@@ -116,11 +116,10 @@ func (s *Server) updaterStorageFacts() updaterStorage {
 		st.Note = "OpenWrt installs packages onto the overlay — the router's INTERNAL flash. It is " +
 			"small on most devices, and filling it can leave the router unbootable."
 	}
-	// The manager is whatever the REST of this section already decided it is. This card used to run
-	// its own exec.LookPath, preferring opkg — while pm.Detect (which the engine rows, the install
-	// buttons and every ownership check go through) prefers apk. On a box carrying both, one page
-	// named two different package managers for one router. The lookup that remains is only for the
-	// PATH to display; it can no longer choose.
+	// The manager is whatever the REST of this section already decided it is: pm.Detect (which the
+	// engine rows, the install buttons and every ownership check go through) prefers apk, and a
+	// separate lookup preferring opkg would name two different package managers for one router on a
+	// box carrying both. The lookup that remains is only for the PATH to display; it does not choose.
 	st.Manager = string(s.updater.PMKind())
 	if st.Manager == "" {
 		st.Manager = "none"
@@ -152,7 +151,7 @@ type downloadPath struct {
 //
 // An endpoint an engine carries (VLESS, Hysteria2 …) is deliberately absent. Binding is a socket
 // option and there is nothing to point it at, so offering one is offering a choice that cannot take
-// effect — measured on the test router, whose list included a VLESS exit beside the native tunnels.
+// effect.
 func (s *Server) downloadPathChoices() []downloadPath {
 	if s == nil || s.store == nil {
 		return nil
@@ -290,8 +289,8 @@ func mountBacking(path string) (device string, external bool) {
 // panel knows the mount point, the device and how much is free on it. This names them.
 //
 // Three exclusions, each because including it would point somewhere an install must not go:
-// read-only mounts (nothing can be written), non-attached devices (the router's own flash is what we
-// are moving away from), and anything that is not a real disk — a tmpfs has plenty of "free space"
+// read-only mounts (nothing can be written), non-attached devices (the router's own flash is what the
+// install is moving away from), and anything that is not a real disk — a tmpfs has plenty of "free space"
 // and loses the binary at the next reboot, which is the most expensive way to appear helpful.
 func roomElsewhere(mounts []mountEntry, cur storageTarget, free func(string) (uint64, bool)) []storageTarget {
 	var out []storageTarget
@@ -301,7 +300,7 @@ func roomElsewhere(mounts []mountEntry, cur storageTarget, free func(string) (ui
 			continue
 		}
 		avail, known := free(m.Point)
-		// Unmeasurable, or no better than where we already are: not an option worth naming.
+		// Unmeasurable, or no better than the current target: not an option worth naming.
 		if !known || (cur.FreeKnown && avail <= cur.FreeBytes) {
 			continue
 		}

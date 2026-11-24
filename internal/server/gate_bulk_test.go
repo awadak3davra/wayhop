@@ -104,7 +104,7 @@ func TestGateBulk_UnknownRefusesTheBatch(t *testing.T) {
 	}
 }
 
-// QA-028: an entry the core cannot load (an OpenVPN client with no certificate, as a pasted sing-box
+// An entry the core cannot load (an OpenVPN client with no certificate, as a pasted sing-box
 // config can carry) arrives disabled and named, instead of enabled and failing every later Apply.
 func TestGateBulk_UnloadableArrivesDisabled(t *testing.T) {
 	s := gateBulkServer(t, platform.CapSupported)
@@ -143,7 +143,7 @@ func TestGateBulk_UnloadableArrivesDisabled(t *testing.T) {
 	}
 }
 
-// QA-028 on the single save: enabled, the same entry is refused with the reason and the way to keep
+// On the single save: enabled, the same entry is refused with the reason and the way to keep
 // it; disabled, it saves as a draft.
 func TestUpsertEndpoint_UnloadableEnabledIsRefused(t *testing.T) {
 	s := gateBulkServer(t, platform.CapSupported)

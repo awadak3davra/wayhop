@@ -89,7 +89,7 @@ func TestKeeneticRender_DomainAndIPZones(t *testing.T) {
 	mustContain(t, td, "ipset destroy wr_list_youtube_4")
 	mustContain(t, td, "iptables -t mangle -D PREROUTING -j WR_PREROUTING")
 	// Every jump goes, for both families: one -D left the duplicates lock races had added, the chain
-	// stayed referenced and -X failed quietly (QA-067).
+	// stayed referenced and -X failed quietly.
 	mustContain(t, td, "while iptables -t mangle -D PREROUTING -j WR_PREROUTING 2>/dev/null; do :; done")
 	mustContain(t, td, "while ip6tables -t mangle -D PREROUTING -j WR_PREROUTING 2>/dev/null; do :; done")
 	mustContain(t, td, "ip route flush table 151")
@@ -215,7 +215,7 @@ func TestKeeneticRender_SourceScoped(t *testing.T) {
 		t.Errorf("missing/wrong source MARK rule; want substring:\n%s\ngot:\n%s", wantRule, ipt)
 	}
 	// tcp + udp → two rules (multiport requires a proto).
-	if c := strings.Count(ipt, "-m multiport --sports 443"); c != 2 {
+	if c := strings.Count(mangleRestoreRules(ipt), "-m multiport --sports 443"); c != 2 {
 		t.Errorf("want tcp+udp source-port rules (2), got %d:\n%s", c, ipt)
 	}
 	// Teardown must destroy the source set too.
@@ -311,7 +311,7 @@ func TestKeeneticRender_SourceOnly(t *testing.T) {
 	if strings.Contains(ipt, "wr_rule_devall_4 dst") {
 		t.Errorf("source-only zone must carry no dst set:\n%s", ipt)
 	}
-	if c := strings.Count(ipt, "--match-set wr_bypass_4 dst -j RETURN"); c != 1 {
+	if c := strings.Count(mangleRestoreRules(ipt), "--match-set wr_bypass_4 dst -j RETURN"); c != 1 {
 		t.Errorf("want exactly one bypass RETURN (no re-assert on iptables), got %d:\n%s", c, ipt)
 	}
 }
@@ -334,6 +334,24 @@ func TestKeeneticRender_DomainsOffByDefault(t *testing.T) {
 	if !sawWarn {
 		t.Errorf("domain-only list should warn on the OpenWrt path; warns=%v", warns)
 	}
+}
+
+// mangleRestoreRules is the rule lines of the script's atomic mangle commits, each rule once: the
+// fallback below each commit repeats them for the staging and the live chain.
+func mangleRestoreRules(script string) string {
+	var b strings.Builder
+	in := false
+	for _, line := range strings.Split(script, "\n") {
+		switch {
+		case strings.HasSuffix(line, "--noflush <<'WR_MANGLE' || {"):
+			in = true
+		case line == "WR_MANGLE":
+			in = false
+		case in && strings.HasPrefix(line, "-A WR_PREROUTING "):
+			b.WriteString(line + "\n")
+		}
+	}
+	return b.String()
 }
 
 func mustContain(t *testing.T, hay, needle string) {

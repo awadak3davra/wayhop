@@ -1,5 +1,5 @@
 // Package platform identifies the router OS WayHop is running on, so a single universal
-// binary picks the right apply backend at runtime (D-PLAT-2: one binary + Detect(), not
+// binary picks the right apply backend at runtime (one binary + Detect(), not
 // per-platform builds). The OpenWrt backend is today's nft/fw4 + awg-quick path; the
 // Keenetic backend (internal/keenetic) drives KeeneticOS-native AmneziaWG/WireGuard + NDM
 // routing over RCI. See docs/ARCHITECTURE_NATIVE_FIRST.md (development repository) (Phase 2.5/3) + memory
@@ -29,7 +29,7 @@ type probes struct {
 
 // detect is the pure decision: Keenetic markers win (the family device runs Entware ON
 // KeeneticOS, so /opt may exist alongside OpenWrt-looking paths — check Keenetic FIRST).
-// Signals validated on the live reference router (read-only probe 2026-06-21):
+// Signals validated on a Keenetic reference router (read-only probe):
 //   - /bin/ndmc (the NDM CLI client) — Keenetic-only;
 //   - /proc/version contains "keenetic.com" or a "-ndm-" kernel suffix;
 //   - /etc/openwrt_release, /sbin/fw4, /sbin/uci — OpenWrt.

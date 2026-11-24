@@ -8,7 +8,7 @@ import (
 
 // Showing the command is not the same as showing what it does.
 //
-// Measured on the test router: the plan for removing sing-box is one line, `apk del sing-box`, and the
+// Measured on the reference OpenWrt router: the plan for removing sing-box is one line, `apk del sing-box`, and the
 // operator would read it and click. What actually happens is
 //
 //	(1/2) Purging sing-box (1.12.17-r1)

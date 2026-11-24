@@ -109,7 +109,7 @@ func TestCanonicalPins(t *testing.T) {
 	if strings.Join(tl.PinPubKeySHA256, ",") != testPinB64 {
 		t.Errorf("pubkey pins = %q", tl.PinPubKeySHA256)
 	}
-	// QA-137: the pins a provenance flag is about are stored as the pins are, so the panel's next edit
+	// The pins a provenance flag is about are stored as the pins are, so the panel's next edit
 	// finds them however they were written.
 	of := &TLS{PinCertMayBeCAOf: []string{colonHex(testPinSum[:]), strings.ToUpper(testPin)},
 		PinCertBesideChainOf: []string{base64.StdEncoding.EncodeToString(testPinSum[:])}}

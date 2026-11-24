@@ -47,7 +47,7 @@ func TestResolve_NothingProvidesIt(t *testing.T) {
 	}
 }
 
-// apk has the same trap, and both of these are verbatim from the test router.
+// apk has the same trap, and both of these are verbatim from the reference OpenWrt router.
 //
 // A VIRTUAL name: `apk list libustream-openssl` is empty while the package exists under another
 // name, so a feed-existence check refuses an install apk can perform.

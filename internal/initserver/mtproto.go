@@ -5,7 +5,7 @@ import "strings"
 // MTProto proxy for Telegram (competitor gap 7: b4 and the nfqws2 Keenetic selector ship one). It
 // runs on the server, not the router: LAN devices already reach Telegram through the routing lists,
 // while a tg://proxy link works on a phone's mobile data with no VPN app - the job telemt already
-// does on the NL VPS.
+// does on a VPS.
 //
 // telemt (github.com/telemt/telemt, Rust) is installed at a pinned version from its static musl
 // builds, each checked against the sha256 GitHub publishes for the asset, embedded here rather than
@@ -27,7 +27,7 @@ var telemtSHA256 = map[string]string{
 const mtprotoPort = "8449"
 
 // mtprotoCover is the site the fake-TLS handshake imitates (and, with mask on, forwards a stranger
-// to). The NL VPS runs telemt with this cover.
+// to). A telemt server runs with this cover.
 const mtprotoCover = "www.bing.com"
 
 // ShareLinkMarker introduces a link the installer hands back for people to use, not for this router

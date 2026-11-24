@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// QA-105. With `final` empty, sing-box makes the FIRST server it creates the default resolver, so
+// With `final` empty, sing-box makes the FIRST server it creates the default resolver, so
 // every query no rule matches goes there. Leak protection checked only an explicit final, and the
 // panel sets final to "" when the default resolver is deleted (and offers "(first resolver)" in the
 // picker). Deleting the encrypted default and keeping the router's `local` resolver first therefore

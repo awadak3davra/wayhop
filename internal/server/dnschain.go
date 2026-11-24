@@ -423,7 +423,7 @@ func (s *Server) writeChainReport(w http.ResponseWriter, rev string, do func(con
 // Measured on dnsmasq 2.90: an interface that is absent at start is picked up when it appears, and one
 // that goes link-down fails over and comes back, but one deleted and created again is never rebound.
 // dnsmasq's socket stays tied to the old interface, the row is skipped from then on, and the lookups
-// fall to the next row with nothing in the logs: if that row is the last resort, the house is back on
+// fall to the next row with nothing in the logs: if that row is the last resort, the LAN is back on
 // plaintext until something restarts the service. A new index on the same name is what tells this apart.
 func (s *Server) NativeDNSChainGuardLoop(ctx context.Context) {
 	if s.config().Demo {

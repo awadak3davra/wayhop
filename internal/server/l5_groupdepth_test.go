@@ -9,7 +9,7 @@ import (
 
 // TestShallowKernelGroups (L5): a fallback pair that the kernel can only fall to once.
 //
-// Measured on a live test router: group-failover lists tunnel-a (interface awg1) and proxy-member (a
+// Observed on an OpenWrt router: group-failover lists tunnel-a (interface awg1) and proxy-member (a
 // sing-box socks outbound), its policy table holds one route and no blackhole, and the group has no
 // kill switch. When awg1 dies there is nothing to elect, the fwmark lookup falls through to main, and
 // traffic meant for a tunnel leaves through the provider. Every other battery row stays green through

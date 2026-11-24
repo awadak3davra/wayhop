@@ -196,6 +196,7 @@ func (s *Server) runApply(ctx context.Context, req applyRequest) (*applyResult, 
 	}
 	defer s.applyMu.Unlock()
 	s.applyInProgress.Store(true)
+	s.cancelThroughput() // a download through tunnels this Apply may remove, holding the speed slot
 	s.setStage("plan")
 	defer func() {
 		s.applyInProgress.Store(false)
@@ -306,8 +307,9 @@ func (s *Server) runApply(ctx context.Context, req applyRequest) (*applyResult, 
 		return nil, &applyError{Status: http.StatusBadRequest, Code: applyCodeInvalidConfig, Stage: stage,
 			Message: "the configuration cannot be materialized on this router", Detail: detail, Remedy: remedy}
 	}
+	// The fast DNS plane carries names itself; what it cannot express Review refuses outright.
 	if warn := fastModeDomainWarning(&desired.Profile, desiredRoutingMode(desired.Config),
-		keeneticKernelCarriesDomains(nativeCapture)); warn != "" {
+		keeneticKernelCarriesDomains(nativeCapture)); warn != "" && (kernelOptions == nil || !kernelOptions.FastDNS) {
 		warnings = append(warnings, warn)
 	}
 	if offloadWarning != "" {
@@ -326,8 +328,8 @@ func (s *Server) runApply(ctx context.Context, req applyRequest) (*applyResult, 
 	// From here on the router may change, and the run no longer belongs to the request that started
 	// it. The request context ends when the client goes away, and an Apply routinely takes its own
 	// client away: it reloads the core or re-creates the tunnel a remote operator's session rides on.
-	// Cancelled between steps it was rolled back, every time, so that change could never be applied
-	// remotely, and a Test never got to arm the window that exists for exactly this. The panel already
+	// Rolled back whenever cancelled between steps, that change could never be applied remotely, and
+	// a Test would never get to arm the window that exists for exactly this. The panel already
 	// follows GET /api/apply/status after a lost answer. Up to here cancelling was free; from here the
 	// run finishes (or fails and rolls back) on its own bound, like the routing switch.
 	if err := context.Cause(ctx); err != nil {
@@ -384,7 +386,7 @@ func (s *Server) runApply(ctx context.Context, req applyRequest) (*applyResult, 
 					s.noteRollbackFailed(baseline, plane, rbErr)
 				case baseline != nil && sameRevision(baseline, s.liveRevision()):
 					// The Test this Apply ran over could not be put back: it no longer runs as tested, and
-					// Keep must not save it (QA-140). Its plane is as tested when the rollback restored
+					// Keep must not save it. Its plane is as tested when the rollback restored
 					// it, or when neither run got to the kernel step.
 					if plane == rollbackPlaneCommitted || (plane == rollbackPlaneTested && forwardPlane == rollbackPlaneTested) {
 						plane = rollbackPlaneTested
@@ -395,7 +397,7 @@ func (s *Server) runApply(ctx context.Context, req applyRequest) (*applyResult, 
 				default:
 					// The record named the committed configuration as running over this Apply's leftovers:
 					// Roll back answered that it was, and the reconcile loop put the committed plane back
-					// under this Apply's core (QA-140). This Apply becomes the live state with its rollback
+					// under this Apply's core. This Apply becomes the live state with its rollback
 					// outstanding, which Roll back undoes and Keep refuses. Its own plane is in when it
 					// reached its kernel step; the committed one is when neither run did.
 					if plane == rollbackPlaneTested {
@@ -610,7 +612,7 @@ func (s *Server) rollbackTo(ctx context.Context, ops applyExecOps, base *applied
 	s.flushStaleFlows(failed.kernelPlan(), target.kernelPlan())
 	if abortErr != nil {
 		// The baseline runs again, but the failed target's tunnels, routes and ladder are still on the
-		// router. Reporting success made the record forget them and the API say rolled_back (QA-144);
+		// router. Reporting success made the record forget them and the API say rolled_back;
 		// as a failure the record keeps what is left to undo, and Roll back retries the abort.
 		return rollbackPlaneCommitted, abortErr
 	}
@@ -821,7 +823,7 @@ func (s *Server) handleApplyStatus(w http.ResponseWriter, _ *http.Request) {
 		st = s.failsafe.Status()
 	}
 	// Keep is refused while a rollback is outstanding (applyConfirm), so the panel must not offer it:
-	// the banner showed "Keep & Save" over a Test that no longer ran as tested.
+	// the banner would show "Keep & Save" over a Test that no longer runs as tested.
 	rbErr, rbFailed := "", false
 	if m := s.liveRollbackFailed(); m != nil {
 		rbErr, rbFailed = m.Error, true

@@ -60,7 +60,7 @@ func LevelOf(in AdviseInput) Level {
 	switch first.Kind {
 	case "local", "doh", "dot":
 		if first.Kind != "local" && first.LeavesBy != "" {
-			// Seen on a test router: https-dns-proxy to 1.1.1.1 routed through a tunnel, called the provider's
+			// Seen on a reference OpenWrt router: https-dns-proxy to 1.1.1.1 routed through a tunnel, called the provider's
 			// line because the page read sing-box's detour, which this proxy has nothing to do with. The
 			// same box sent 8.8.8.8 by the provider: dnsmasq picks among these rows, so the worst one counts.
 			for _, u := range in.Path.Upstreams {

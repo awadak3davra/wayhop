@@ -9,7 +9,7 @@ import (
 	"wayhop/internal/platform"
 )
 
-// The real shape, taken from a live router: the firmware keeps a dozen sets of its own
+// The real shape, taken from a real router: the firmware keeps a dozen sets of its own
 // (_NDM_*), and WayHop's are the wr_list_* ones. Counting the router's would report someone else's
 // memory as the price of a routing list.
 const ipsetTerseFixture = `Name: _NDM_BFD_Telnet4

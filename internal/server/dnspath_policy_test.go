@@ -12,7 +12,7 @@ import (
 // A list sent to a KeeneticOS access policy with a plaintext default resolver: WayHop cannot see whether
 // the policy leaves by a tunnel or by the WAN, and a DNS server's detour cannot name a policy, so the
 // usual "point the list's DNS at a server with the same detour" could not be followed. It blocked Apply
-// even for a WAN policy (QA-063). Now advice, with steps that can be taken; a tunnel list still blocks.
+// even for a WAN policy. Now advice, with steps that can be taken; a tunnel list still blocks.
 func TestDNSPathFindingForAPolicyListIsAdvice(t *testing.T) {
 	findings := func(outbound string) []PlanFinding {
 		p := model.Profile{

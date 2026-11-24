@@ -2,7 +2,7 @@ package dnscheck
 
 import "testing"
 
-// A row of https-dns-proxy, as read on a test router.
+// A row of https-dns-proxy, as read on a reference OpenWrt router.
 func proxyRow(address, dev string, tunnel bool) Upstream {
 	return Upstream{Address: address, Port: 5053, Kind: "doh", LeavesBy: dev, ViaTunnel: tunnel}
 }

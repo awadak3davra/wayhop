@@ -7,7 +7,7 @@ import (
 )
 
 // A package name can be VIRTUAL. opkg lets a package declare `Provides:` and then answers to that
-// name as well as its own — measured on the Keenetic:
+// name as well as its own — on Keenetic Entware:
 //
 //	opkg status sing-box-go   ->  Provides: sing-box-go-any, sing-box
 //	opkg list sing-box        ->  (empty)
@@ -16,8 +16,8 @@ import (
 //
 // So "the feed has no package called sing-box" is a WRONG conclusion from an empty `opkg list`: the
 // name resolves, the install works, and a caller that stops at the list refuses an operation the
-// package manager can perform. That is a regression this repo introduced by adding a feed-existence
-// check for apk — where an empty list really does mean absent — and applying it to both managers.
+// package manager can perform. A feed-existence check that is right for apk, where an empty list
+// really does mean absent, is wrong for opkg.
 //
 // apk is deliberately NOT given an implementation here. It has its own provides mechanism, and no
 // measurement of it has been taken on a real box; guessing at the output shape is exactly what put
@@ -41,7 +41,7 @@ func (m Manager) Resolve(ctx context.Context, name string) (string, bool, error)
 		}
 		return "", false, nil
 	case Apk:
-		// apk has the same trap, measured on the test router:
+		// apk has the same trap, on OpenWrt:
 		//
 		//	apk list   libustream-openssl  ->  (empty)
 		//	apk search --exact libustream-openssl -> libustream-openssl20201210-2026.03.01~99f1c0db-r1

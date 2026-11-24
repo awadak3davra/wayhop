@@ -134,7 +134,7 @@ func (s *Server) subscriptionHWID(mode, custom, rawURL string) (string, error) {
 // request's headers onto each redirect and adds the URL it came from as Referer:
 //   - Referer is removed on every redirect: it is the subscription URL, whose path or query is the
 //     account token, and the next hop (a CDN, or anyone the provider redirects to) has no business
-//     with it (QA-126);
+//     with it;
 //   - x-hwid and x-device-os go only to the host the operator gave: a redirect to another host must
 //     not learn the ID this router is known by to the provider.
 func subscriptionRedirect(req *http.Request, via []*http.Request) error {

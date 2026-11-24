@@ -7,7 +7,7 @@ import (
 )
 
 // openwrt_remove.go is the counterpart to the write path, and it exists in this shape because the
-// end-to-end check on a real test router found what the network-only removal left behind.
+// end-to-end check on a reference OpenWrt router found what the network-only removal left behind.
 //
 // RemoveUCI deletes the interface and its peer sections, which is what "remove the tunnel" sounds
 // like it means. On the router it was not enough: after removing a tunnel that had been attached to

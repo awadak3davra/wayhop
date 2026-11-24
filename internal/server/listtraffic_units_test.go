@@ -16,7 +16,7 @@ import (
 	"wayhop/internal/store"
 )
 
-// QA-113. The Matched column read the kernel's packet counters out of the connections field, so a
+// The Matched column read the kernel's packet counters out of the connections field, so a
 // list the kernel had matched 52,341 packets for read "52341 conns", and dropped to "1 conn" as soon
 // as the core attributed one connection to it. The kernel's numbers have their own field, in packets,
 // and stay there whatever the core reports; the connection count is only ever the core's.

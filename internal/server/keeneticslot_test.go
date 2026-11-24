@@ -15,13 +15,13 @@ import (
 	"wayhop/internal/nativeplan"
 )
 
-// QA-108. A second Apply of a profile whose native KeeneticOS connection did not change must leave
+// A second Apply of a profile whose native KeeneticOS connection did not change must leave
 // that connection on the NDM interface the first Apply created. The capture reads every `interface
-// WireguardN` block of the running config as occupied, WayHop's own included, and Compile used to
-// allocate past all of them: the unchanged endpoint moved from Wireguard10 to Wireguard11 and the
-// reconcile removed the live Wireguard10, so every Apply re-created every native tunnel (handshake,
-// dropped flows, and whatever the operator had attached to the interface in KeeneticOS went with
-// the `no interface`).
+// WireguardN` block of the running config as occupied, WayHop's own included; allocating past all of
+// them would move the unchanged endpoint from Wireguard10 to Wireguard11 and the reconcile would
+// remove the live Wireguard10, so every Apply would re-create every native tunnel (handshake,
+// dropped flows, and whatever the operator had attached to the interface in KeeneticOS would go
+// with the `no interface`).
 func TestKeeneticReapplyKeepsTheNativeSlot(t *testing.T) {
 	desired, host, capture := keeneticUserspaceTuple(t)
 	first, _, err := materialize(materializeInput{desired: desired, host: ExecutionHostFactsV1{Host: host}, native: &capture})
@@ -130,11 +130,11 @@ func keeneticslot_insertBefore(anchor, line string) func([]string) []string {
 	}
 }
 
-// The reviewer's case. The live interface differs from its block only by a line the operator added
-// in KeeneticOS (an access group, printed between `ip global` and `ip tcp`). prepare used to find no
-// exact run of the block's lines, re-send the block, file it under `attempted`, fail the verification
-// (NDM keeps the added line where it is) and answer with `no interface`: the tunnel the previous
-// Apply created was deleted by an Apply that changed nothing about it.
+// The live interface differs from its block only by a line the operator added in KeeneticOS (an
+// access group, printed between `ip global` and `ip tcp`). Requiring an exact run of the block's
+// lines, prepare would re-send the block, file it under `attempted`, fail the verification (NDM
+// keeps the added line where it is) and answer with `no interface`: the tunnel the previous Apply
+// created would be deleted by an Apply that changed nothing about it.
 func TestKeeneticKeptSlotWithAnOperatorLineSurvivesPrepare(t *testing.T) {
 	desired, host, capture := keeneticUserspaceTuple(t)
 	first, ndm := keeneticslot_applied(t, desired, host, capture)

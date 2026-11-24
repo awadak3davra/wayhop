@@ -16,17 +16,21 @@ import (
 	"syscall"
 	"time"
 
+	"wayhop/internal/atomicfile"
+	"wayhop/internal/binstore"
 	"wayhop/internal/clash"
 	"wayhop/internal/config"
 	"wayhop/internal/core"
 	"wayhop/internal/health"
 	"wayhop/internal/platform"
+	"wayhop/internal/ramdir"
 	"wayhop/internal/server"
 	"wayhop/internal/serverstore"
 	"wayhop/internal/store"
 	"wayhop/internal/traffic"
 	"wayhop/internal/util"
 	"wayhop/internal/version"
+	"wayhop/internal/writebehind"
 	"wayhop/web"
 )
 
@@ -184,8 +188,20 @@ func main() {
 		log.Fatalf("clash client: %v", err)
 	}
 
+	// Flash wear (internal/ramdir, internal/writebehind): the RAM budget first, then the stores that
+	// coalesce their writes under it.
+	ramdir.Shared.Configure(int64(cfg.Flash.RAMBudgetMB)<<20, int64(cfg.Flash.MinFreeMB)<<20)
+	if !cfg.Demo {
+		if rd := ramdir.MustResolveOrLog(cfg.Flash.RuntimeDir); rd != "" {
+			atomicfile.SetRAMDirs(rd, binstore.DefaultRunDir)
+		}
+	}
+	cacheEvery := time.Duration(cfg.Flash.CacheFlushHours) * time.Hour
+	if cacheEvery <= 0 {
+		cacheEvery = 24 * time.Hour
+	}
 	profilePath := filepath.Join(filepath.Dir(*configPath), "profile.json")
-	st, err := store.Open(profilePath)
+	st, err := store.OpenWith(profilePath, store.Options{CacheFlushEvery: cacheEvery, CacheDebounce: time.Minute})
 	if err != nil {
 		log.Fatalf("store: %v", err)
 	}
@@ -225,6 +241,8 @@ func main() {
 	// The apply-state record lives next to the startup config. StartApply discards a stale unsaved
 	// window, converges the router to the committed state in the background (never fatal), feeds the
 	// health monitor the applied native interface names and runs the kernel-plane reconcile loop.
+	// The fast path's remote lists from /tmp (a daemon restart), before the converge reinstalls the plane.
+	srv.LoadFastDNSRemoteCache()
 	srv.StartApply(ctx, startupConfigPath)
 	if cfg.Demo {
 		go runDemoTraffic(ctx, hub)
@@ -232,13 +250,14 @@ func main() {
 		go runClashTraffic(ctx, cl, hub)
 	}
 	go mon.Run(ctx)
-	go srv.SubscriptionRefreshLoop(ctx) // re-fetch an imported subscription when auto-refresh is opted in (off by default)
-	go srv.BackupLoop(ctx)              // scheduled local whole-setup backup when Backup.AutoHours>0 (opt-in, off by default)
-	go srv.SampleInterfacesLoop(ctx)    // RAM-only per-iface counter history so a fresh dashboard seeds recent throughput (no flash writes)
-	go srv.CIDRRefreshLoop(ctx)         // updates the saved routing-list caches only; activation is Apply
-	go srv.NativeDNSChainGuardLoop(ctx) // restarts dnsmasq when a tunnel its upstream chain binds to was recreated
-	srv.StartTelegram(ctx)              // the Telegram bot, when enabled in Settings (off by default)
-	go srv.AutoUpdateLoop(ctx)          // opt-in binary update, serialized with Apply
+	go supervise(ctx, "subscription refresh", srv.SubscriptionRefreshLoop) // re-fetch an imported subscription when auto-refresh is opted in (off by default)
+	go supervise(ctx, "backup", srv.BackupLoop)                            // scheduled local whole-setup backup when Backup.AutoHours>0 (opt-in, off by default)
+	go supervise(ctx, "interface sampling", srv.SampleInterfacesLoop)      // RAM-only per-iface counter history so a fresh dashboard seeds recent throughput (no flash writes)
+	go supervise(ctx, "fast DNS", srv.FastDNSLoop)                         // fast mode: new resolver-fed addresses, set warm-up, remote rule-sets
+	go supervise(ctx, "list refresh", srv.CIDRRefreshLoop)                 // updates the saved routing-list caches only; activation is Apply
+	go supervise(ctx, "DNS chain guard", srv.NativeDNSChainGuardLoop)      // restarts dnsmasq when a tunnel its upstream chain binds to was recreated
+	srv.StartTelegram(ctx)                                                 // the Telegram bot, when enabled in Settings (off by default)
+	go supervise(ctx, "auto update", srv.AutoUpdateLoop)                   // opt-in binary update, serialized with Apply
 	// The Telegram bridge (tg-ws-proxy) on the LAN, when enabled (off by default); the shutdown below
 	// waits for its loop before StopAll.
 	bridgeDone := srv.StartTelegramBridge(ctx)
@@ -281,6 +300,8 @@ func main() {
 	// after teardown and orphan a fresh core. httpSrv.Shutdown does not cancel a
 	// running handler's context, and there is no WriteTimeout, so this is the only
 	// backstop for that apply-vs-shutdown race.
+	// The fast DNS plane's resolver-fed set elements, kept in RAM for the next Apply after a restart.
+	srv.SaveFastDNSCache(context.Background())
 	_ = sb.Shutdown()
 	// The bridge's loop too, for the same reason as the watchdog: a sync in flight could start a
 	// bridge after StopAll below. StopAll also closes the manager, so a handler that outlived the
@@ -289,6 +310,11 @@ func main() {
 	// Retire only plugin processes tracked by WayHop so none survives the daemon and keeps an
 	// interface or listener behind. Externally owned/adopted tunnels are not in this manager.
 	srv.Plugins().StopAll()
+	// Coalesced writes still pending (the routing-list feed caches) reach flash before exit.
+	if err := st.Close(); err != nil {
+		log.Printf("store: flush feed caches: %v", err)
+	}
+	writebehind.FlushAll()
 }
 
 // runClashTraffic keeps the Clash /traffic stream connected, retrying on failure.
@@ -298,6 +324,34 @@ func main() {
 // log the first drop, then stay quiet while retrying so we don't flood the
 // router log (logread) every few seconds when nothing is applied. The next
 // drop is logged again only after a stream that actually stayed connected.
+// supervise runs a background loop that parses content from remote providers. A panic in one is
+// logged and the loop is started again a minute later, so a malformed answer cannot take the
+// whole daemon down; a loop that returns normally is not restarted.
+func supervise(ctx context.Context, name string, loop func(context.Context)) {
+	for ctx.Err() == nil {
+		if !runRecovered(ctx, name, loop) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Minute):
+		}
+	}
+}
+
+// runRecovered runs loop and reports whether it panicked.
+func runRecovered(ctx context.Context, name string, loop func(context.Context)) (panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("%s loop panicked, restarting in a minute: %v", name, r)
+			panicked = true
+		}
+	}()
+	loop(ctx)
+	return false
+}
+
 func runClashTraffic(ctx context.Context, cl *clash.Client, hub *traffic.Hub) {
 	const retry = 3 * time.Second
 	loggedDown := false

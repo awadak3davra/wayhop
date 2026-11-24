@@ -70,7 +70,7 @@ func apkCandidates(out, pkg string) []Candidate {
 		// asked apk for the available set — so every line here is available, and one that also carries
 		// the tag is the installed build being offered by the feed as well.
 		installed := strings.Contains(ln, "[installed]")
-		// apk can print ONE version on TWO lines — observed on the test router, where the same version came
+		// apk can print ONE version on TWO lines — observed on the reference OpenWrt router, where the same version came
 		// back tagged and untagged. Deduplicating by keeping the first line threw the tag away whenever
 		// the untagged line came first, and nothing guarantees the order: the build already running
 		// would then be offered as something to roll back TO, which is an action that changes nothing
@@ -128,7 +128,7 @@ func (m Manager) Candidates(ctx context.Context, pkg string) ([]Candidate, error
 		// included — and the two used to be told apart by the `[installed]` tag, which turns out to
 		// mean "this build is on disk" and not "this line came from the database".
 		//
-		// Measured on the test router minutes after an upgrade: `apk list sing-box` prints ONE line,
+		// Measured on the reference OpenWrt router minutes after an upgrade: `apk list sing-box` prints ONE line,
 		// `sing-box-1.13.21-r1 … [installed]`, while `apk policy sing-box` shows that same build
 		// coming from both the installed database AND the OpenWrt repository. Reading the tag as
 		// "not available" left the newest build in the feed marked unavailable, no candidate

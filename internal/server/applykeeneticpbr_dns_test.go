@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -16,9 +17,8 @@ import (
 )
 
 // DNS interception on the Keenetic plane: the netfilter.d hook must put the encrypted-DNS refusals
-// back after a filter-table rebuild without re-running the mangle program (QA-115), and the reconcile
-// postcheck must notice a missing redirect or refusal (QA-115). The teardown side is in
-// internal/pbr (QA-114).
+// back after a filter-table rebuild without re-running the mangle program, and the reconcile
+// postcheck must notice a missing redirect or refusal. The teardown side is in internal/pbr.
 
 // keeneticDNSProfile routes one documentation prefix through a kernel tunnel, with the DNS switches set.
 func keeneticDNSProfile(intercept, reject bool) *model.Profile {
@@ -58,9 +58,41 @@ func keeneticHookShims(t *testing.T, sh string) (executionKernelIpsetArtifactV1,
 		t.Skipf("sh cannot enter the temp dir: %v", err)
 	}
 	dir.sh = strings.TrimSpace(string(out))
-	shim := "#!/bin/sh\necho \"$*\" >> \"$QA_LOG\"\ncase \" $* \" in *\" -C \"*|*\" -D \"*) exit 1 ;; esac\nexit 0\n"
+	// `ip rule del` fails like -C/-D: the program deletes every copy of a rule in a loop (make-before-
+	// break), which ends when the kernel has none left. BusyBox also models the measured multicall sh
+	// and start-stop-daemon behavior; the latter really starts the child instead of only logging it.
+	shim := "#!/bin/sh\necho \"$*\" >> \"$QA_LOG\"\ncase \" $* \" in *\" -C \"*|*\" -D \"*|*\" rule del \"*) exit 1 ;; esac\nexit 0\n"
+	busybox := `#!/bin/sh
+case "$1" in
+start-stop-daemon)
+	echo "start-stop-daemon" >> "$QA_LOG"
+	shift
+	exe=; pidfile=
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+		-x) exe=$2; shift 2 ;;
+		-p) pidfile=$2; shift 2 ;;
+		--) shift; break ;;
+		*) shift ;;
+		esac
+	done
+	( "$exe" "$@" ) </dev/null >/dev/null 2>&1 &
+	[ -z "$pidfile" ] || echo "$!" > "$pidfile"
+	exit 0
+	;;
+sh) shift; exec /bin/sh "$@" ;;
+-c) echo "-c: applet not found" >&2; exit 127 ;;
+esac
+echo "$*" >> "$QA_LOG"
+case " $* " in *" -C "*|*" -D "*|*" rule del "*) exit 1 ;; esac
+exit 0
+`
 	for _, name := range []string{"ipset", "xtables-multi", "busybox"} {
-		if err := os.WriteFile(filepath.Join(dir.native, name), []byte(shim), 0o755); err != nil {
+		program := shim
+		if name == "busybox" {
+			program = busybox
+		}
+		if err := os.WriteFile(filepath.Join(dir.native, name), []byte(program), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -118,10 +150,10 @@ func countCalls(calls []string, parts ...string) int {
 	return n
 }
 
-// QA-115: NDM calls each netfilter.d script per table, and a filter rebuild drops the FORWARD
-// refusals. The hook let only mangle and nat through, so they stayed gone until the next nat or
-// mangle rebuild. It now answers filter:iptables for a program that has refusals, and the program
-// stops after its filter section, so that event never re-runs the mangle flush and rebuild.
+// NDM calls each netfilter.d script per table, and a filter rebuild drops the FORWARD refusals. A
+// hook that lets only mangle and nat through leaves them gone until the next nat or mangle rebuild.
+// The hook answers filter:iptables for a program that has refusals, and the program stops after its
+// filter section, so that event never re-runs the mangle flush and rebuild.
 func TestKeeneticPBRHook_FilterRebuildRestoresOnlyTheRefusals(t *testing.T) {
 	sh, err := exec.LookPath("sh")
 	if err != nil {
@@ -147,7 +179,7 @@ func TestKeeneticPBRHook_FilterRebuildRestoresOnlyTheRefusals(t *testing.T) {
 	for _, table := range []string{"nat", "mangle"} {
 		calls := runKeeneticHook(t, sh, dir, hook, table, "iptables")
 		if countCalls(calls, "-j REJECT") != 2*refusals || countCalls(calls, "-t nat -A PREROUTING -i br0", "-j REDIRECT") != 2 ||
-			countCalls(calls, "iptables -w -t mangle -F WR_PREROUTING") != 1 {
+			countCalls(calls, "iptables-restore --noflush") != 1 || countCalls(calls, "-t mangle -F WR_PREROUTING") != 0 {
 			t.Errorf("a %s rebuild did not re-run the whole program: %q", table, calls)
 		}
 	}
@@ -167,8 +199,8 @@ func TestKeeneticPBRHook_FilterRebuildRestoresOnlyTheRefusals(t *testing.T) {
 	}
 }
 
-// The hook for a program without refusals is the one routers run today, byte for byte, so the fix
-// changes nothing on them. Pinned literally: this is the header live routers carry.
+// The hook for a program without refusals stays byte for byte the same as before refusals existed.
+// Pinned literally: this is the header installed routers carry.
 func TestKeeneticPBRHook_WithoutRefusalsIsUnchanged(t *testing.T) {
 	const header = "#!/opt/bin/sh\n" +
 		"# WayHop policy plane — re-asserted after an NDM firewall rebuild.\n" +
@@ -187,7 +219,8 @@ func TestKeeneticPBRHook_WithoutRefusalsIsUnchanged(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if want := header + string(art.Script) + "exit 0\n"; hook != want {
+		// Plus the stamp the daemon's leaked-flow sweep watches (kill switch audit).
+		if want := header + string(art.Script) + ": > " + keeneticHookStamp + " 2>/dev/null\n" + "exit 0\n"; hook != want {
 			t.Errorf("intercept=%v reject=%v: hook changed:\n%s", sw[0], sw[1], hook)
 		}
 	}
@@ -196,6 +229,7 @@ func TestKeeneticPBRHook_WithoutRefusalsIsUnchanged(t *testing.T) {
 // keeneticFakeRouter answers the postcheck's reads the way iptables 1.4.21 prints them.
 type keeneticFakeRouter struct {
 	sets, mangle4, mangle6, natPrerouting, filterForward string
+	rules4, rules6                                       string
 	calls                                                []string
 }
 
@@ -213,6 +247,10 @@ func (r *keeneticFakeRouter) run(_ context.Context, _ string, name string, args 
 		return r.natPrerouting, nil
 	case "iptables -w -t filter -S FORWARD":
 		return r.filterForward, nil
+	case "ip rule":
+		return r.rules4, nil
+	case "ip -6 rule":
+		return r.rules6, nil
 	}
 	return "", fmt.Errorf("unexpected call %q", call)
 }
@@ -229,7 +267,50 @@ func healthyKeeneticRouter(art *executionKernelIpsetArtifactV1) *keeneticFakeRou
 		"-A PREROUTING -i br0 -p udp -m udp --dport 53 -j REDIRECT --to-ports 53\n" +
 		"-A PREROUTING -i br0 -p tcp -m tcp --dport 53 -j REDIRECT --to-ports 53\n"
 	r.filterForward = filterForwardWithRefusals()
+	r.rules4, r.rules6 = ipRuleDump(string(art.Script), "ip rule add "), ipRuleDump(string(art.Script), "ip -6 rule add ")
 	return r
+}
+
+// ipRuleDump prints the rules a program adds the way `ip rule` lists them: priority first, a host
+// prefix bare, marks without leading zeros.
+func ipRuleDump(script, prefix string) string {
+	out := "0:\tfrom all lookup local\n"
+	for _, line := range strings.Split(script, "\n") {
+		if !strings.HasPrefix(line, prefix) || strings.Contains(line, "||") {
+			continue
+		}
+		f := strings.Fields(strings.TrimPrefix(line, prefix))
+		var pref, sel, action string
+		for i := 0; i < len(f); i++ {
+			switch f[i] {
+			case "priority":
+				i++
+				pref = f[i]
+			case "to":
+				i++
+				sel += " to " + strings.TrimSuffix(f[i], "/32")
+			case "iif":
+				i++
+				sel += " iif " + f[i]
+			case "fwmark":
+				i++
+				mark, mask, _ := strings.Cut(f[i], "/")
+				m, _ := strconv.ParseUint(mark, 0, 32)
+				sel += fmt.Sprintf(" fwmark 0x%x", m)
+				if mask != "" {
+					k, _ := strconv.ParseUint(mask, 0, 32)
+					sel += fmt.Sprintf("/0x%x", k)
+				}
+			case "table", "lookup":
+				i++
+				action = " lookup " + f[i]
+			case "blackhole":
+				action = " blackhole"
+			}
+		}
+		out += pref + ":\tfrom all" + sel + action + "\n"
+	}
+	return out
 }
 
 func filterForwardWithRefusals() string {
@@ -241,8 +322,8 @@ func filterForwardWithRefusals() string {
 	return dump + "-A FORWARD -j _NDM_SL_FORWARD\n"
 }
 
-// QA-115: the postcheck read only the sets and mangle, so a router whose filter rebuild had dropped
-// every refusal was reported as running the plane and the reconcile loop reinstalled nothing.
+// A postcheck that reads only the sets and mangle would report a router whose filter rebuild had
+// dropped every refusal as running the plane, and the reconcile loop would reinstall nothing.
 func TestKeeneticPostcheck_NoticesAMissingRedirectOrRefusal(t *testing.T) {
 	art := keeneticDNSArtifact(t, keeneticPBRTestTools(), true, true)
 	ctx := context.Background()
@@ -270,6 +351,8 @@ func TestKeeneticPostcheck_NoticesAMissingRedirectOrRefusal(t *testing.T) {
 			r.natPrerouting = strings.Replace(r.natPrerouting, "-A PREROUTING -i br0 -p udp", "-A PREROUTING -i br1 -p udp", 1)
 		},
 		"nat rebuilt": func(r *keeneticFakeRouter) { r.natPrerouting = "-P PREROUTING ACCEPT\n" },
+		// `sh -s` reports only its last command, so a refused `ip rule add` could pass the Apply.
+		"policy rules gone": func(r *keeneticFakeRouter) { r.rules4 = "0:\tfrom all lookup local\n" },
 	} {
 		r := healthyKeeneticRouter(art)
 		damage(r)
@@ -299,8 +382,8 @@ func TestKeeneticPostcheck_ReadsOnlyTheChainsThePlaneWrites(t *testing.T) {
 		intercept, reject bool
 		want              []string
 	}{
-		{false, false, []string{"ipset list -n", "iptables -w -t mangle -S", "ip6tables -w -t mangle -S"}},
-		{true, false, []string{"ipset list -n", "iptables -w -t mangle -S", "ip6tables -w -t mangle -S", "iptables -w -t nat -S PREROUTING"}},
+		{false, false, []string{"ipset list -n", "iptables -w -t mangle -S", "ip6tables -w -t mangle -S", "ip rule"}},
+		{true, false, []string{"ipset list -n", "iptables -w -t mangle -S", "ip6tables -w -t mangle -S", "iptables -w -t nat -S PREROUTING", "ip rule"}},
 	} {
 		art := keeneticDNSArtifact(t, keeneticPBRTestTools(), tc.intercept, tc.reject)
 		r := healthyKeeneticRouter(art)
@@ -342,7 +425,7 @@ func TestReconcileKernelPlane_ReinstallsRefusalsAFilterRebuildDropped(t *testing
 	s.reconcileKernelPlane(context.Background())
 
 	// One reinstall, verified after it. How many reads come before it is the loop's own business
-	// (QA-118 reads twice, a settle apart), so only their kind is pinned.
+	// (it reads twice, a settle apart), so only their kind is pinned.
 	got := fake.snapshot()
 	if len(got) < 3 || countCalls(got, "kernel:ensure_present") != 1 || countCalls(got, "kernelPostcheck") != len(got)-1 ||
 		got[0] != "kernelPostcheck" || got[len(got)-1] != "kernelPostcheck" {
@@ -414,7 +497,7 @@ func runKeeneticTeardown(t *testing.T, sh string, dir keeneticHookDir, name, pro
 	return runKeeneticHook(t, sh, dir, program, name, "teardown")
 }
 
-// QA-114: the teardown that turning interception off, leaving the kernel plane or switching routing
+// The teardown that turning interception off, leaving the kernel plane or switching routing
 // off runs must delete the redirect and every refusal, every copy, waiting for the xtables lock, on
 // the interface the program installed them on. It is run here, not just read.
 func TestKeeneticTeardown_DeletesEveryCopyOfTheDNSRules(t *testing.T) {
@@ -450,8 +533,8 @@ func TestKeeneticTeardown_DeletesEveryCopyOfTheDNSRules(t *testing.T) {
 	}
 }
 
-// legacyKeeneticTeardown is art's Teardown as the renderer wrote it before QA-114: without a delete
-// for the redirect or the refusals.
+// legacyKeeneticTeardown is art's Teardown as an older renderer wrote it: without a delete for the
+// redirect or the refusals.
 func legacyKeeneticTeardown(art *executionKernelIpsetArtifactV1) []byte {
 	var keep []string
 	for _, line := range strings.SplitAfter(string(art.Teardown), "\n") {
@@ -463,7 +546,7 @@ func legacyKeeneticTeardown(art *executionKernelIpsetArtifactV1) []byte {
 	return []byte(strings.Join(keep, ""))
 }
 
-// A router upgraded with interception on holds an artifact whose Teardown predates QA-114, and that is
+// A router upgraded with interception on holds an artifact whose Teardown lacks those deletes, and that is
 // the one turning interception off or routing off tears down. The executor adds the deletes from the
 // artifact's own Script; an artifact rendered now runs its Teardown byte for byte.
 func TestKeeneticTeardownProgram_CoversAPlaneRecordedBeforeTheFix(t *testing.T) {
@@ -499,7 +582,7 @@ func TestKeeneticTeardownProgram_CoversAPlaneRecordedBeforeTheFix(t *testing.T) 
 
 // iptables prints a rule in its own form; the comparison must see through that and nothing more.
 // A replaced plane keeps the DNS rules the new program installs too: a list edit must not open a
-// window in which client DNS escapes interception and encrypted DNS connects (#212 review of QA-114).
+// window in which client DNS escapes interception and encrypted DNS connects.
 func TestKeeneticReplaceTeardownSparesTheRulesTheNewPlaneKeeps(t *testing.T) {
 	tools := keeneticPBRTestTools()
 	both := keeneticDNSArtifact(t, tools, true, true)

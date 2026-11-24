@@ -142,7 +142,7 @@ func TestRunEffectivePath_FallsBackToNftWhenIptablesIsMissing(t *testing.T) {
 	}
 }
 
-// When neither tool works, the honest answer from AUD-43 must still stand.
+// When neither tool works, the answer stays "the firewall could not be read".
 func TestRunEffectivePath_BothToolsMissingIsStillUnknown(t *testing.T) {
 	missing := errors.New("executable file not found in $PATH")
 	run := func(name string, args ...string) (string, error) {

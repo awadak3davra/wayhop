@@ -1,6 +1,7 @@
 package pbr
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -67,7 +68,7 @@ func TestCompileGivesAPolicyListASlotRewrittenAfterTheSave(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(base.Egresses) != len(plan.Egresses) || base.Egresses[1] != plan.Egresses[1] ||
+	if len(base.Egresses) != len(plan.Egresses) || !reflect.DeepEqual(base.Egresses[1], plan.Egresses[1]) ||
 		tunnelZone.Mark != base.Zones[0].Mark {
 		t.Fatalf("the policy list renumbered WayHop's egresses: %+v vs %+v", plan.Egresses, base.Egresses)
 	}
@@ -90,12 +91,12 @@ func TestCompileGivesAPolicyListASlotRewrittenAfterTheSave(t *testing.T) {
 	}
 
 	ip := plan.RenderIPScript(Options{})
-	if !strings.Contains(ip, "ip rule add fwmark 0x0ffffaab blackhole priority 146") ||
+	if !strings.Contains(ip, "ip rule add fwmark 0x0ffffaab type blackhole priority 146") ||
 		strings.Contains(ip, "table 0") || !strings.Contains(ip, "ip rule add fwmark 0x00020000/0x00ff0000 table 151") {
 		t.Fatalf("ip script must route the tunnel and only backstop the policy:\n%s", ip)
 	}
 	teardown := plan.RenderTeardownScript(Options{}, IpsetOptions{})
-	for _, want := range []string{"ipset destroy wr_list_via_policy_4", "ip rule del fwmark 0x0ffffaab blackhole priority 146"} {
+	for _, want := range []string{"ipset destroy wr_list_via_policy_4", "ip rule del fwmark 0x0ffffaab type blackhole priority 146"} {
 		if !strings.Contains(teardown, want) {
 			t.Fatalf("teardown lacks %q:\n%s", want, teardown)
 		}
@@ -160,10 +161,10 @@ func TestCompileMarksAPolicyDomainListInBothFamilies(t *testing.T) {
 			t.Fatalf("script lacks %q:\n%s", want, script)
 		}
 	}
-	if n := strings.Count(script, "-m mark --mark "+slot+"/0x00ff0000 -j MARK --set-xmark 0x0ffffaaa/0xffffffff"); n != 2 {
+	if n := strings.Count(mangleRestoreRules(script), "-m mark --mark "+slot+"/0x00ff0000 -j MARK --set-xmark 0x0ffffaaa/0xffffffff"); n != 2 {
 		t.Fatalf("rewrite rules = %d, want one per family:\n%s", n, script)
 	}
-	if ip := plan.RenderIPScript(Options{}); !strings.Contains(ip, "ip -6 rule add fwmark 0x0ffffaaa blackhole priority 146") {
+	if ip := plan.RenderIPScript(Options{}); !strings.Contains(ip, "ip -6 rule add fwmark 0x0ffffaaa type blackhole priority 146") {
 		t.Fatalf("no v6 backstop (some NDM policy marks have v4 rules only):\n%s", ip)
 	}
 	if conf := plan.DnsmasqIpsetConfig(IpsetOptions{}, 0); !strings.Contains(conf, "ipset=/example.com/wr_list_dom_4,wr_list_dom_6") {

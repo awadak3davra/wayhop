@@ -60,7 +60,7 @@ func TestKillSwitchFailClosed(t *testing.T) {
 	if strings.Contains(cmdsOff, "replace blackhole default metric") {
 		t.Errorf("a group without kill_switch must not render a blackhole fallback:\n%s", cmdsOff)
 	}
-	// RT-01: the install no longer flushes the table first, so it removes a blackhole an earlier
+	// The install no longer flushes the table first, so it removes a blackhole an earlier
 	// kill-switched plane left there itself.
 	if !strings.Contains(cmdsOff, "ip route del blackhole default metric 1000 table") {
 		t.Errorf("a group without kill_switch must remove a stale blackhole fallback:\n%s", cmdsOff)
@@ -72,7 +72,7 @@ func TestKillSwitchFailClosed(t *testing.T) {
 
 // IPv6 routes added without a metric get the kernel's 1024, so the v6 kill-switch blackhole must sit
 // above that, not at the v4 value: at 1000 it sorted ahead of the live `default dev` route and every
-// marked IPv6 packet was dropped while the tunnel was up (QA-096; measured on a Linux kernel).
+// marked IPv6 packet was dropped while the tunnel was up (measured on a Linux kernel).
 func TestKillSwitchV6BlackholeSitsBelowTheLiveRoute(t *testing.T) {
 	p := &model.Profile{
 		Endpoints: []model.Endpoint{

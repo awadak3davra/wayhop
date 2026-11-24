@@ -7,7 +7,7 @@ import (
 	"wayhop/internal/model"
 )
 
-// QA-013: a Clash / mihomo config reaching Parse (Paste link, or Import file with a .yaml) imports
+// A Clash / mihomo config reaching Parse (Paste link, or Import file with a .yaml) imports
 // its one proxy, says where a config with several goes, and passes on a lone proxy's own error -
 // never "malformed share link: invalid control character".
 func TestParse_ClashConfigPastedAsALink(t *testing.T) {

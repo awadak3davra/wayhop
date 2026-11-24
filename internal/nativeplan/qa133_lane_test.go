@@ -8,7 +8,7 @@ import (
 	"wayhop/internal/platform"
 )
 
-// QA-133: the save check asks UserspaceLane of one endpoint, and it must be Compile's own answer - the
+// The save check asks UserspaceLane of one endpoint, and it must be Compile's own answer - the
 // lane Compile turns into PathEnginePlugin, on every release, and nothing where NDM creates it.
 func TestQA133UserspaceLaneIsCompilesDecision(t *testing.T) {
 	awg2 := awg1Endpoint()

@@ -327,7 +327,7 @@ func (st fileState) restore() error {
 //  2. Write both files, keeping the first-ever versions in StateDir.
 //  3. dnsmasq's syntax check. A failure restores the files with nothing restarted.
 //  4. Restart, then ask the running service for an answer. A failure restores the files and restarts
-//     again: a house with no DNS is worse than a house with the DNS it had.
+//     again: a LAN with no DNS is worse than a LAN with the DNS it had.
 func (h ChainHost) Apply(ctx context.Context, rows []ChainRow) ChainReport {
 	rep := ChainReport{Steps: []ChainStep{}}
 	refuse := func(err error) ChainReport {

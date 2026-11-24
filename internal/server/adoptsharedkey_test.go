@@ -21,7 +21,7 @@ func adoptedEndpoint(id, iface, key string, enabled bool) model.Endpoint {
 	}
 }
 
-// Two interfaces built from one private key share a public key. A live test router had awg1 to one exit
+// Two interfaces built from one private key share a public key. An OpenWrt router had awg1 to one exit
 // and awg_b to another under one key; matching by key first re-pointed the enabled "RU (awg1)" at
 // awg_b whichever came first in the listing, and the next Apply sent every RU list there.
 func TestSyncAdoptedTunnelsKeepsEachEndpointOnItsOwnInterfaceUnderASharedKey(t *testing.T) {

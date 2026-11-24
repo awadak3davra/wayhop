@@ -1022,10 +1022,24 @@ input[type=checkbox], input[type=radio] { accent-color:var(--accent); }
 
   /* sidebar -> slide-in drawer */
   .sidebar { position:fixed; top:0; left:0; bottom:0; width:80vw; max-width:300px; z-index:60;
-    transform:translateX(-100%); transition:transform .22s ease;
+    transform:translateX(-100%); transition:transform .22s ease, visibility 0s linear .22s;
     box-shadow:0 0 44px rgba(0,0,0,.55); overflow-y:auto;
-    padding-top:max(18px, env(safe-area-inset-top)); }
-  body:has(.nav-toggle:checked) .sidebar { transform:none; }
+    padding-top:max(18px, env(safe-area-inset-top));
+    /* Off-screen is not hidden: the closed drawer's nine items stayed in the Tab order and the
+       accessibility tree (DS-003). Hidden once the slide-out ends, visible at once on open. */
+    visibility:hidden; }
+  body:has(.nav-toggle:checked) .sidebar { transform:none; visibility:visible; transition:transform .22s ease, visibility 0s; }
+
+  /* Failover member rows: on one line the name shrank to nothing beside latency, protocol and the
+     order buttons (DS-002). Two lines: the name owns the first, latency and protocol the second. */
+  .check.member-row { display:grid; grid-template-columns:auto auto auto minmax(0,1fr) auto;
+    column-gap:8px; row-gap:2px; align-items:center; }
+  .check.member-row > input { grid-column:1; grid-row:1 / span 2; }
+  .check.member-row > .insp-dot { grid-column:2; grid-row:1; }
+  .check.member-row > .member-n { grid-column:3 / 5; grid-row:1; }
+  .check.member-row > .member-m { grid-column:3; grid-row:2; }
+  .check.member-row > .member-p { grid-column:4; grid-row:2; justify-self:start; min-width:0; }
+  .check.member-row > .member-ord { grid-column:5; grid-row:1 / span 2; }
 
   /* dimmed backdrop (tap to close) */
   .nav-scrim { display:block; position:fixed; inset:0; z-index:55; background:var(--backdrop);
@@ -1469,6 +1483,13 @@ body[data-health-stale] [data-health] { opacity:.55; }
 .insp-row.native .insp-row-n { color:var(--ink-2); }
 .insp-row-n { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
   font-size:var(--fs-control); }
+/* The last speed measurement beside a latency: dimmed once too old to elect by, dotted under when
+   the latest attempt failed (the reason is the title). */
+.tp-note { white-space:nowrap; }
+.tp-note.stale { opacity:.55; }
+.tp-note.failed { text-decoration:underline dotted; text-underline-offset:3px; cursor:help; }
+.insp-row.tp { flex-wrap:wrap; row-gap:2px; }
+.insp-row.tp .insp-row-m { flex:1 0 100%; text-align:right; }
 .insp-row-m { flex:0 0 auto; font-size:var(--fs-caption); color:var(--ink-3);
   font-variant-numeric:tabular-nums; }
 
@@ -1577,7 +1598,7 @@ body[data-health-stale] [data-health] { opacity:.55; }
 .fo-g-stopped { border-color:var(--warn); background:var(--warn-tint); }
 .fo-g-stopped.err { border-color:var(--err); background:var(--err-tint, var(--warn-tint)); }
 .fo-chain.rows { flex-direction:column; gap:0; margin-top:var(--sp-2); }
-.fo-chain.rows .fo-hop { display:grid; grid-template-columns:2.4em 8px 7.5em minmax(0,1fr) 5em;
+.fo-chain.rows .fo-hop { display:grid; grid-template-columns:2.4em 8px 7.5em minmax(0,1fr) minmax(5em,max-content);
   align-items:baseline; gap:var(--sp-2); padding:8px var(--sp-3);
   border:1px solid var(--divider); border-bottom:0; border-radius:0; }
 .fo-chain.rows .fo-hop:first-child { border-radius:var(--radius-sm) var(--radius-sm) 0 0; }
@@ -1586,12 +1607,12 @@ body[data-health-stale] [data-health] { opacity:.55; }
 /* The notch belonged to the strip: between stacked rows it is a diamond sitting on a shared edge. */
 .fo-chain.rows .fo-hop + .fo-hop::before { display:none; }
 .fo-chain.rows .fo-hop-p { font-size:var(--fs-caption); color:var(--ink-3); font-variant-numeric:tabular-nums; }
-.fo-chain.rows .fo-hop-l { text-align:right; }
+.fo-chain.rows .fo-hop-l { text-align:right; white-space:nowrap; }
 .fo-chain.rows .fo-hop-more { border:1px solid var(--divider); border-top:0; padding:6px var(--sp-3); }
 /* The dot sits on the text baseline like the numbers beside it, not on its own line. */
 .fo-chain.rows .fo-hop > .insp-dot { align-self:center; }
 @container (max-width:520px) {
-  .fo-chain.rows .fo-hop { grid-template-columns:2.4em 8px minmax(0,1fr) 5em; }
+  .fo-chain.rows .fo-hop { grid-template-columns:2.4em 8px minmax(0,1fr) minmax(5em,max-content); }
   .fo-chain.rows .fo-hop-r { grid-column:3 / -1; grid-row:2; }
 }
 
@@ -2372,3 +2393,25 @@ svg.ico { display:block; }
 .tg-card-line { display:flex; align-items:center; gap:var(--sp-2); flex-wrap:wrap; min-width:0; }
 .tg-card-text { margin-top:0; }
 .dns-fast-more { display: block; margin: 12px auto 4px; }
+
+/* Fastest tunnel per routing list (page-routing.js): the active tunnel under a row's route select,
+   the editor's tunnel checkboxes, and the list panel's matrix and journal. */
+.rl-fast:empty { display:none; }
+.rl-fast { margin-top:5px; min-width:0; }
+.rl-fast-link { display:inline-flex; flex-wrap:wrap; align-items:center; gap:6px; max-width:100%; padding:2px 0;
+  background:none; border:0; color:var(--ink); font:inherit; font-size:var(--fs-small); cursor:pointer; text-align:left; }
+.rl-fast-link:hover .rl-fast-now, .rl-fast-link:focus-visible .rl-fast-now { text-decoration:underline; }
+.rl-fast-now { font-weight:600; }
+.rl-fast-warn { color:var(--warn); background:var(--warn-tint); }
+.rl-fast-err { color:var(--err); background:var(--err-tint); }
+.rl-fast-tunnels { display:flex; flex-wrap:wrap; gap:4px 14px; }
+.rl-fast-edit .check.off { opacity:.55; }
+.rl-fast-matrix { width:100%; border-collapse:collapse; font-size:var(--fs-small); }
+.rl-fast-matrix th, .rl-fast-matrix td { padding:6px 8px; border-bottom:1px solid var(--divider); text-align:left; vertical-align:middle; }
+.rl-fast-matrix th { color:var(--ink-3); font-weight:600; font-size:var(--fs-caption); }
+.rl-fast-matrix tr.rl-fast-best td { background:var(--ok-tint); }
+.rl-fast-matrix tr.off td { opacity:.6; }
+.rl-fast-matrix td.rl-fast-bad { color:var(--err); }
+.rl-fast-log { max-height:260px; overflow:auto; margin-top:6px; font-size:var(--fs-small); line-height:1.6; }
+.dashrl-fast:empty { display:none; }
+.dashrl-fast { margin-bottom:8px; }

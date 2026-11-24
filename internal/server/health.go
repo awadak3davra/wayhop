@@ -40,12 +40,26 @@ func (s *Server) handleFailoverState(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// A group whose table the kernel plane steers is on the member that table holds, whatever a running
+	// core's own group of the same id reports: on a Keenetic the page said "AWG3.1_czech_republic"
+	// (sing-box's urltest pick, the core running for DNS) while table 152 pointed at awg1. Unread yet
+	// means unknown, not the core's answer.
+	kernelElected, kernelOwned, units := s.kernelElected()
+	for g := range kernelOwned {
+		delete(elected, g)
+		if m := kernelElected[g]; m != "" {
+			elected[g] = m
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"elected": elected, "local_fault": localFault,
+		// Per kernel table: candidates' last measurements, the current member since when and why, and
+		// the recent switches with reasons.
+		"kernel_units": units,
 		// Which groups the daemon itself re-points when a member dies. Without this the Failover page
 		// had to guess, and guessed the old answer: it told a native group backing routing lists that
 		// it "does not switch by itself", which stopped being true when the routing-list failover owner
-		// landed (listfailover.go) — measured on a live router, nwg3 down to nwg5 in 15s. A
+		// landed (listfailover.go) — observed on a router, nwg3 down to nwg5 in 15s. A
 		// page that under-promises here is as wrong as one that over-promises: it sends the operator
 		// looking for a manual switch the daemon has already made.
 		"self_switching_groups": s.selfSwitchingGroups(),

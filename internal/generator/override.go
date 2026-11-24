@@ -164,7 +164,13 @@ func ApplyCoreOverride(cfg map[string]any, text string, routeGuards int) error {
 		return err
 	}
 	o.Apply(cfg, routeGuards)
-	return o.checkRuleOutbounds(cfg)
+	if err := o.checkRuleOutbounds(cfg); err != nil {
+		return err
+	}
+	if o == nil {
+		return nil
+	}
+	return checkRedirectMarks(cfg)
 }
 
 // checkRuleOutbounds is the reference check `sing-box check` does not make (see the top of this

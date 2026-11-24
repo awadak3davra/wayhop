@@ -9,7 +9,7 @@ import (
 	"wayhop/internal/platform"
 )
 
-// QA-108. Only an interface the authenticated previous plan CREATED is offered back to the next
+// Only an interface the authenticated previous plan CREATED is offered back to the next
 // compile as the endpoint's own block: an adopted tunnel, a WayHop engine device and a block no
 // decision names are never WayHop's to keep, and nothing comes from an OpenWrt or missing baseline.
 func TestKeeneticOwnedBlocksComeOnlyFromCreatedInterfaces(t *testing.T) {

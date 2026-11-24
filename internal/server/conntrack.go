@@ -2,6 +2,7 @@ package server
 
 import (
 	"container/heap"
+	"context"
 	"net/http"
 	"os"
 	"sort"
@@ -34,6 +35,9 @@ type Conn struct {
 	// ReplySrc is the reply tuple's source: the far side on an ordinary flow, the LAN host on one
 	// forwarded in from outside.
 	ReplySrc string `json:"-"`
+	// ReplySport is the reply tuple's source port: the original destination port unless a NAT moved
+	// it (the core's redirect does; a redirect to the router's own DNS on :53 does not).
+	ReplySport int `json:"-"`
 }
 
 var tcpStates = map[string]bool{
@@ -85,6 +89,8 @@ func parseConntrackInto(s string, yield func(Conn)) {
 			case "sport":
 				if c.Sport == 0 {
 					c.Sport, _ = strconv.Atoi(v)
+				} else if c.ReplySport == 0 {
+					c.ReplySport, _ = strconv.Atoi(v)
 				}
 			case "bytes":
 				n, _ := strconv.ParseInt(v, 10, 64)
@@ -154,7 +160,21 @@ func (s *Server) handleConntrack(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"available": false})
 		return
 	}
-	conns, total, exits, cl := conntrackSummary(string(data), s.markExitResolver(), readLeases(), 80)
+	// A flow the core terminates carries no mark that says where it went: the core's own route, as
+	// the trace reads it (connLabels), asked only when such a flow is in the table.
+	labels := s.connLabels(func() map[string]string {
+		if s.clash == nil {
+			return map[string]string{}
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		cs, err := s.clash.Connections(ctx)
+		if err != nil {
+			return map[string]string{}
+		}
+		return coreRoutes(cs.Connections)
+	})
+	conns, total, exits, cl := conntrackSummary(string(data), labels, readLeases(), 80)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"available": true,
 		"total":     total, // pre-cap connection count
@@ -171,13 +191,13 @@ func (s *Server) handleConntrack(w http.ResponseWriter, r *http.Request) {
 // maxRows connections regardless of table size, via a min-heap, so a busy router with thousands
 // of flows doesn't allocate and fully sort the whole table on every ~5s Dashboard poll. The
 // per-exit and per-client totals still reflect EVERY flow (they're accumulated in the stream).
-func conntrackSummary(data string, markExit func(uint32) string, leases map[string]string, maxRows int) (conns []Conn, total int, exits map[string]int64, clients []*clientAgg) {
+func conntrackSummary(data string, labels traceLabels, leases map[string]string, maxRows int) (conns []Conn, total int, exits map[string]int64, clients []*clientAgg) {
 	exits = map[string]int64{} // egress tag -> total bytes
 	clientsM := map[string]*clientAgg{}
 	top := make(connHeap, 0, maxRows+1)
 	parseConntrackInto(data, func(c Conn) {
 		total++
-		c.Exit = markExit(c.Mark)
+		c.Exit = labels.exitOf(&c)
 		exits[c.Exit] += c.UpBytes + c.DownBytes
 		ca := clientsM[c.Src]
 		if ca == nil {
@@ -234,31 +254,55 @@ func (s *Server) markExitResolver() func(uint32) string {
 	return r
 }
 
-// computeMarkExitResolver builds the connmark→egress-tag lookup from the live profile + pbr
-// plan (the expensive Profile() deep-clone + pbr.Compile() the cache above amortises). Until
-// the pbr connmark-save ships, every conn reads mark=0 → "direct", so the grouping is correct
-// (single-bucket) and lights up per-exit automatically once `ct mark set meta mark` is deployed.
+// computeMarkExitResolver builds the connmark->exit lookup from the kernel plan the router HOLDS, not
+// from a recompile of the saved profile: marks are numbered by egress order, so an edit made after the
+// last Apply (or a recompile under different options) numbers them differently, and a flow marked by
+// the installed plan was labelled with another egress. Observed on KeeneticOS: Telegram flows
+// carrying 0x30000 (installed: grp-awg31, table 152, out nwg5) read as "grp-list-cascade". A compile of
+// the saved profile is used only when no plan is installed.
+//
+// A table the runtime elector owns (a group's, or a fastest list's own) is labelled with the member it
+// holds now, "grp-awg31 (nwg5)", because the tag alone does not say which tunnel the flow leaves by.
 func (s *Server) computeMarkExitResolver() func(uint32) string {
-	p := s.store.Profile()
-	// A list sent to a KeeneticOS access policy compiles only with the policy's mark; the installed plan
-	// has the marks it was applied with. Its flows carry the policy's slot in the connmark, so the slot
-	// names the policy - without it they read as "direct", leaving by the WAN (gap 6 review).
-	var opts pbr.Options
-	if installed := s.installedKernelPlan(); installed != nil {
-		for _, ps := range installed.NDMPolicySlots() {
-			if opts.NDMPolicies == nil {
-				opts.NDMPolicies = map[string]uint32{}
-			}
-			opts.NDMPolicies[ps.Name] = ps.Mark
+	plan := s.installedKernelPlan()
+	if plan == nil {
+		p := s.store.Profile()
+		var err error
+		plan, _, err = pbr.Compile(&p, pbr.Options{})
+		if err != nil || plan == nil {
+			return func(uint32) string { return "direct" }
 		}
 	}
-	plan, _, err := pbr.Compile(&p, opts)
-	if err != nil || plan == nil {
-		return func(uint32) string { return "direct" }
+	return markExitResolverFrom(plan, s.electedIfaceByTable())
+}
+
+// electedIfaceByTable is, per table the kernel elector owns, the link it holds now ("" unknown).
+func (s *Server) electedIfaceByTable() map[int]string {
+	if !s.kernelElectionPlatform() {
+		return nil
 	}
+	out := map[int]string{}
+	for _, u := range s.kernelElector().States() {
+		if u.CurrentIface != "" {
+			out[u.Table] = u.CurrentIface
+		}
+	}
+	return out
+}
+
+// markExitResolverFrom is the lookup over one plan, apart from the server so it can be asserted.
+func markExitResolverFrom(plan *pbr.Plan, elected map[int]string) func(uint32) string {
 	byMark := map[uint32]string{}
 	for _, e := range plan.Egresses {
-		byMark[e.Mark] = e.Tag
+		label := e.Tag
+		if iface := elected[e.Table]; iface != "" && e.Kind == pbr.EgressInterface {
+			label += " (" + iface + ")"
+		}
+		byMark[e.Mark] = label
+	}
+	// A KeeneticOS access policy's slot names the policy (gap 6 review).
+	for _, ps := range plan.NDMPolicySlots() {
+		byMark[ps.Slot] = model.NDMPolicyPrefix + ps.Name
 	}
 	for _, z := range plan.Zones {
 		if z.NDMPolicy != "" {

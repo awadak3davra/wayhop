@@ -112,6 +112,66 @@ function rlSlug(s) {
   return "rl-" + (body || "list");
 }
 
+// The lists ticked for a group change. Kept by id outside the rows so a re-render does not lose them.
+const rlSelected = new Set();
+
+// routingBulkBar is the strip above the lists: tick lists, pick one exit, and move them all there,
+// either where their traffic goes or where their source is downloaded through.
+function routingBulkBar(lists) {
+  const ids = lists.map(l => l.id);
+  for (const id of Array.from(rlSelected)) if (!ids.includes(id)) rlSelected.delete(id);
+  const all = el("input", { type: "checkbox", "aria-label": t("Select all lists") });
+  const count = el("span", { class: "hint" });
+  const routeSel = addKeeneticPolicies(routingOutboundSelect("direct", true));
+  routeSel.setAttribute("aria-label", t("Route the selected lists via"));
+  const dlSel = routingOutboundSelect("direct", false);
+  routeSel.style.cssText = dlSel.style.cssText = "width:auto;min-width:170px;max-width:240px";
+  dlSel.setAttribute("aria-label", t("Download the selected lists via"));
+  const goRoute = el("button", { class: "btn btn-sm", onclick: () => bulkSetExit("outbound", routeSel.value) }, t("Set route"));
+  const goDl = el("button", { class: "btn btn-sm", onclick: () => bulkSetExit("download_via", dlSel.value === "direct" ? "" : dlSel.value) }, t("Set download"));
+  const sync = () => {
+    const n = rlSelected.size;
+    const vis = shown().length;
+    all.checked = n > 0 && n >= vis;
+    all.indeterminate = n > 0 && n < vis;
+    count.textContent = n ? tn("{0} list selected|{0} lists selected", n) : t("Tick lists to change their exit together");
+    [routeSel, dlSel, goRoute, goDl].forEach(c => { c.disabled = n === 0; });
+    document.querySelectorAll("[data-rlsel]").forEach(cb => { cb.checked = rlSelected.has(cb.getAttribute("data-rlsel")); });
+  };
+  // "All" means every list the filter leaves showing: a change must never reach a row the operator
+  // cannot see.
+  const shown = () => ids.filter(id => {
+    const row = document.querySelector('[data-rlframe="' + id + '"]');
+    return !row || row.style.display !== "none";
+  });
+  all.onchange = () => { rlSelected.clear(); if (all.checked) shown().forEach(id => rlSelected.add(id)); sync(); };
+  window.rlBulkSync = sync;
+  setTimeout(sync, 0);
+  return el("div", { class: "rl-bulk", style: "display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:10px" },
+    all, count,
+    el("span", {}, t("Route via")), routeSel, goRoute,
+    el("span", {}, t("Download via")), dlSel, goDl);
+}
+
+// bulkSetExit writes one field of every ticked list, one save each (the same checked save a single
+// dropdown makes), and says how many went through. A list the server refuses keeps its old value.
+async function bulkSetExit(field, value) {
+  if (applyInFlight) { toast(t("Apply in progress — finish it first"), "err"); return; }
+  const picked = (state.profile.routing_lists || []).filter(l => rlSelected.has(l.id));
+  let done = 0; const failed = [];
+  for (const rl of picked) {
+    if (field === "download_via" && !(rl.source || rl.cidr_source || rl.domain_source)) continue; // nothing to download
+    const prev = rl[field];
+    rl[field] = value;
+    try { keepRev(rl, await api.post("/api/routing", rl, ifMatch(rl))); done++; }
+    catch (e) { rl[field] = prev; failed.push((rl.name || rl.id) + ": " + e.message); }
+  }
+  updateDirty();
+  route();
+  if (failed.length) toast(tn("{0} list changed, others refused: {1}|{0} lists changed, others refused: {1}", done, failed.join("; ")), "err");
+  else toast(tn("{0} list changed|{0} lists changed", done), "ok");
+}
+
 function routingRow(rl, idx, total) {
   // The switch IS the status light. It is already the one control every row has in the same place,
   // so colouring it says "on and working" (green) or "on and its source is failing" (red) without
@@ -135,7 +195,16 @@ function routingRow(rl, idx, total) {
   // reverts the 1st change, because saveRoutingList intentionally doesn't reload.
   const routeSel = addKeeneticPolicies(routingOutboundSelect(rl.outbound, true));
   routeSel.setAttribute("aria-label", t("Route matching traffic via")); // programmatic name — the row has no per-select <label>
-  routeSel.onchange = () => { const prev = rl.outbound, next = routeSel.value; rl.outbound = next; saveRoutingList(rl, t("route → {0}", nameOf(next) || next), () => { if (rl.outbound === next) { rl.outbound = prev; routeSel.value = prev; } }); }; // revert only if a newer edit hasn't superseded this one
+  // With several tunnels the row's select is the FIRST of them (the server keeps outbound = candidates[0]);
+  // picking another one here makes it first and keeps the rest.
+  routeSel.onchange = () => {
+    const prev = rl.outbound, prevC = rl.candidates, next = routeSel.value;
+    rl.outbound = next;
+    if (Array.isArray(rl.candidates) && rl.candidates.length) {
+      rl.candidates = rlTunnelLike(next) ? [next].concat(rl.candidates.filter(c => c !== next)) : [];
+    }
+    saveRoutingList(rl, t("route → {0}", nameOf(next) || next), () => { if (rl.outbound === next) { rl.outbound = prev; rl.candidates = prevC; routeSel.value = prev; } });
+  }; // revert only if a newer edit hasn't superseded this one
   const dlSel = routingOutboundSelect(rl.download_via || "direct", false);
   dlSel.setAttribute("aria-label", t("Download the list via"));
   dlSel.onchange = () => { const prev = rl.download_via || "", next = dlSel.value === "direct" ? "" : dlSel.value; rl.download_via = next; saveRoutingList(rl, t("download via {0}", nameOf(dlSel.value) || dlSel.value), () => { if (rl.download_via === next) { rl.download_via = prev; dlSel.value = prev || "direct"; } }); };
@@ -163,10 +232,17 @@ function routingRow(rl, idx, total) {
       String(idx + 1)),
     tog,
     el("div", { class: "rl-list" },
-      el("div", { class: "name" }, rl.name || rl.id, dot, scopeTag),
+      el("div", { class: "name" },
+        el("input", { type: "checkbox", "data-rlsel": rl.id, checked: rlSelected.has(rl.id) ? "" : null, style: "margin-right:8px",
+          "aria-label": t("Select {0}", rl.name || rl.id),
+          onchange: (ev) => { if (ev.target.checked) rlSelected.add(rl.id); else rlSelected.delete(rl.id); if (window.rlBulkSync) window.rlBulkSync(); } }),
+        rl.name || rl.id, dot, scopeTag),
       el("div", { class: "sub" }, src),
       err),
-    el("div", { class: "rl-cell", "data-col": t("route via") }, routeSel),
+    // The active tunnel of a list in fastest mode rides under its route select (paintFastestRows): the
+    // row grid's column tracks are measured by the layout gates, so it is a second line, not a column.
+    el("div", { class: "rl-cell", "data-col": t("route via") }, routeSel,
+      el("div", { class: "rl-fast", "data-rlfast": rl.id })),
     // A list of hand-typed entries downloads nothing, and a second select with the same options as
     // "route via" beside it read as a second routing choice.
     el("div", { class: "rl-cell", "data-col": t("download via") }, (rl.source || feed) ? dlSel
@@ -201,8 +277,21 @@ async function saveRoutingList(rl, msg, revert) {
 
 async function delRoutingList(rl) {
   if (!await modalConfirm(t("Delete routing list {0}?", rl.name || rl.id))) return;
-  try { await api.del("/api/routing/" + encodeURIComponent(rl.id)); await loadProfile(); route(); toast("Deleted", "ok"); }
-  catch (e) { toast(e.message, "err"); }
+  const base = "/api/routing/" + encodeURIComponent(rl.id);
+  const finish = async () => { await loadProfile(); route(); toast("Deleted", "ok"); };
+  try { await api.del(base); await finish(); }
+  catch (e) {
+    const data = e && e.data;
+    if (!data || data.code !== "ROUTING_LIST_IN_USE") { toast(e.message, "err"); return; }
+    // A DNS rule still matches on this list. Offer the way out instead of naming the rule and
+    // leaving the operator to find it: take the list out of those rules (a rule that matched on
+    // nothing else goes with it) and delete.
+    const names = (data.dependents || []).map(d => d.name || d.id).join(", ");
+    if (!await modalConfirm(t("DNS rules still use {0}: {1}. Remove the list from those rules (a rule that matches nothing else is deleted) and delete the list?",
+      rl.name || rl.id, names), { okLabel: t("Remove from rules and delete") })) return;
+    try { await api.del(base + "?detach=1"); await finish(); }
+    catch (e2) { toast(e2.message, "err"); }
+  }
 }
 
 // ---------- Device groups (per-device routing scope) ----------
@@ -332,6 +421,7 @@ function openRoutingList(rl) {
     el("div", { class: "hint" }, t("Against DPI that reads the site name in the TLS handshake. Try TLS records first; works only in tun or hybrid mode.")));
   const syncFrag = () => { fragField.style.display = routeSel.value === "direct" ? "" : "none"; };
   routeSel.addEventListener("change", syncFrag); syncFrag();
+  const fast = fastestEditor(rl, routeSel);
 
   async function save(btn) {
     if (!name.value.trim()) return toast("Name required", "err");
@@ -368,6 +458,8 @@ function openRoutingList(rl) {
       body.scope_groups = $$("input[type=checkbox]:checked", scopeGroupsWrap).map(c => c.value);
       if (!body.scope_groups.length) { adv.open = true; return toast(t("Pick at least one device group, or choose All devices"), "err"); }
     } else { body.scope_groups = []; }
+    const fastErr = fast.collect(body);
+    if (fastErr) return toast(fastErr, "err");
     if (btn) { if (btn.disabled) return; btn.disabled = true; } // in-flight guard — no duplicate POST from a double-click (mirrors the group editors)
     // An edit is refused, nothing saved, if the list was saved by anything else since it was loaded (QA-152).
     try { await api.post("/api/routing", body, ifMatch(rl)); back.remove(); await loadProfile(); route(); toast(editing ? t("Saved {0}", body.name) : t("Added {0}", body.name), "ok"); }
@@ -388,6 +480,7 @@ function openRoutingList(rl) {
     el("div", { class: "field" }, el("label", {}, "Source"), mode),
     srcField, manField,
     el("div", { class: "field" }, el("label", {}, "Route matching traffic via"), routeSel),
+    fast.node,
     fragField,
     adv);
   const back = modal({ title: editing ? "Edit routing list" : "New routing list", body,
@@ -559,4 +652,302 @@ async function openRoutingImport() {
       el("button", { class: "btn btn-primary", onclick: (e) => add(e.currentTarget) }, t("Add selected"))] });
   try { show(await api.get("/api/routing/import/keenetic")); }
   catch (e) { if (e.status !== 422) toast(e.message, "err"); }
+}
+
+// ---------- Fastest tunnel per list ----------
+// A list with two or more tunnels may leave by the fastest WORKING one, measured to its own
+// destinations (KeeneticOS kernel plane; listfastest.go). The editor collects the tunnels and the
+// policy, the row shows the active tunnel, and the panel shows the measurements and the journal.
+
+// rlTunnelLike: an outbound that can be one of several tunnels (not direct/block or an NDM policy).
+function rlTunnelLike(id) { return !!id && id !== "direct" && id !== "block" && !String(id).startsWith("ndm-policy:"); }
+
+// rlExpandCandidates mirrors model.ListCandidates: groups expanded in order, duplicates dropped.
+function rlExpandCandidates(ids) {
+  const p = state.profile || {}, out = [], seen = new Set();
+  const walk = (id, visiting) => {
+    if (!rlTunnelLike(id) || visiting.has(id)) return;
+    if ((p.endpoints || []).some(e => e.id === id)) { if (!seen.has(id)) { seen.add(id); out.push(id); } return; }
+    const g = (p.groups || []).find(x => x.id === id);
+    if (g) { visiting.add(id); (g.members || []).forEach(m => walk(m, visiting)); visiting.delete(id); }
+  };
+  (ids || []).forEach(id => walk(id, new Set()));
+  return out;
+}
+
+const FASTEST_MODE_WORDS = { auto: "auto", pinned: "pinned", fallback: "fallback", all_down: "all down", targets_down: "targets unreachable" };
+function fastestModeBadge(mode) {
+  const cls = mode === "all_down" ? "badge rl-fast-err" : mode === "pinned" || mode === "fallback" || mode === "targets_down" ? "badge rl-fast-warn" : "badge";
+  return el("span", { class: cls }, t(FASTEST_MODE_WORDS[mode] || "auto"));
+}
+
+// fastestEditor is the editor's "tunnels + fastest" block under the route select.
+function fastestEditor(rl, routeSel) {
+  const pol = Object.assign({ enabled: false, targets: [], interval_sec: 0, switch_delta_ms: 0, switch_delta_pct: 0,
+    min_dwell_sec: 0, on_all_down: "", reset_on_switch: false, notify: false }, rl.fastest || {});
+  const extra = new Set((rl.candidates || []).slice(1));
+  const tunnels = el("div", { class: "rl-fast-tunnels" });
+  const fastCb = el("input", { type: "checkbox" });
+  fastCb.checked = !!pol.enabled;
+  const fastHint = el("div", { class: "hint" });
+  const num = (v, min, max, ph) => el("input", { type: "number", min: String(min), max: String(max), placeholder: ph, value: v ? String(v) : "", style: "max-width:110px" });
+  const interval = num(pol.interval_sec, 30, 600, "60");
+  const dms = num(pol.switch_delta_ms, 0, 5000, "30");
+  const dpct = num(pol.switch_delta_pct, 0, 500, "20");
+  const dwell = num(pol.min_dwell_sec, 0, 86400, "120");
+  interval.setAttribute("aria-label", t("Measure every (seconds)"));
+  dms.setAttribute("aria-label", t("Switch threshold, ms"));
+  dpct.setAttribute("aria-label", t("Switch threshold, %"));
+  dwell.setAttribute("aria-label", t("Minimum time on a tunnel (seconds)"));
+  const tgtMode = el("select", {}, el("option", { value: "auto" }, t("Automatic")), el("option", { value: "custom" }, t("My own")));
+  tgtMode.value = (pol.targets || []).length ? "custom" : "auto";
+  const tgts = el("textarea", { rows: "3", class: "rl-ta", placeholder: "149.154.167.51:443\nwww.example.com:443" }, (pol.targets || []).join("\n"));
+  tgts.setAttribute("aria-label", t("Probe targets (host:port, up to 3)"));
+  const autoNote = el("div", { class: "hint" });
+  const pickAuto = el("button", { class: "btn btn-sm", type: "button" }, t("Pick automatically"));
+  pickAuto.onclick = async () => {
+    tgtMode.value = "auto"; syncTargets();
+    if (!rl.id) { autoNote.textContent = t("Targets are picked from the list's own addresses after it is saved."); return; }
+    try {
+      const d = await api.get("/api/lists/" + encodeURIComponent(rl.id) + "/fastest");
+      autoNote.textContent = t("Automatic targets: {0}", (d.auto_targets ? d.targets : []).join(", ") || "—");
+    } catch (e) { autoNote.textContent = e.message; }
+  };
+  const syncTargets = () => { tgts.style.display = tgtMode.value === "custom" ? "" : "none"; };
+  tgtMode.onchange = syncTargets; syncTargets();
+  const allDown = el("select", {}, el("option", { value: "wan" }, t("Through the provider")),
+    el("option", { value: "block" }, t("Block")), el("option", { value: "keep" }, t("Keep the last tunnel")));
+  allDown.value = pol.on_all_down || "wan";
+  // What "fastest" means for this list. Left on Automatic, a media list (Telegram, Instagram,
+  // YouTube) chooses by both, any other list by delay.
+  const modeSel = el("select", {}, el("option", { value: "" }, tpMediaList(rl && rl.id, rl && rl.name) ? t("Automatic (both)") : t("Automatic (delay)")), el("option", { value: "latency" }, t("Delay (latency)")),
+    el("option", { value: "throughput" }, t("Download speed")), el("option", { value: "mixed" }, t("Both: drop the slow to answer, then the highest speed")));
+  modeSel.value = pol.mode || "";
+  const resetCb = el("input", { type: "checkbox" }); resetCb.checked = !!pol.reset_on_switch;
+  const notifyCb = el("input", { type: "checkbox" }); notifyCb.checked = !!pol.notify;
+  const adv = el("details", { class: "form-adv" }, el("summary", {}, t("Fine tuning")),
+    el("div", { class: "field" }, el("label", {}, t("Choose by")), modeSel,
+      el("div", { class: "hint" }, t("Automatic: both for Telegram, Instagram and YouTube lists, delay for the rest. Speed is what Measure speed last found; older than 24 hours it is not used."))),
+    el("div", { class: "field" }, el("label", {}, t("Probe targets")), tgtMode, pickAuto, tgts, autoNote,
+      el("div", { class: "hint" }, t("Up to three host:port destinations that stand for this list. Automatic: built-in ones for well-known lists, else addresses or names from the list."))),
+    el("div", { class: "field" }, el("label", {}, t("Measure every (seconds)")), interval),
+    el("div", { class: "field" }, el("label", {}, t("Switch when faster by")),
+      el("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" }, dms, el("span", {}, t("ms and")), dpct, el("span", {}, "%"))),
+    el("div", { class: "field" }, el("label", {}, t("Minimum time on a tunnel (seconds)")), dwell),
+    el("div", { class: "field" }, el("label", {}, t("When every tunnel is down")), allDown),
+    el("label", { class: "check" }, resetCb, el("span", {}, t("Reset connections on switch"))),
+    el("label", { class: "check" }, notifyCb, el("span", {}, t("Notify in Telegram"))));
+  const fastRow = el("label", { class: "check" }, fastCb, el("span", {}, t("Fastest tunnel for this list")));
+  const node = el("div", { class: "field rl-fast-edit" },
+    el("label", {}, t("More tunnels for this list")), tunnels,
+    el("div", { class: "hint" }, t("The list may leave by any of these. Without the option below the first one is used.")),
+    fastRow, fastHint, adv);
+  // linked: the tunnels with an interface of their own, which a list's table can be pointed at (null
+  // until the router said). note: what the choice covers on a router whose kernel plane routes
+  // addresses only (OpenWrt), in the router's own words.
+  let supported = true, why = "", linked = null, note = "";
+  const sync = () => {
+    const first = routeSel.value;
+    tunnels.innerHTML = "";
+    if (!rlTunnelLike(first)) {
+      tunnels.appendChild(el("div", { class: "hint" }, t("Direct, block and access policies have no alternatives.")));
+    } else {
+      const p = state.profile;
+      const opts = (p.endpoints || []).filter(e => e.enabled).map(e => [e.id, e.name || e.id])
+        .concat((p.groups || []).map(g => [g.id, "▣ " + (g.name || g.id)]));
+      opts.filter(([id]) => id !== first).forEach(([id, label]) => {
+        const cb = el("input", { type: "checkbox", value: id });
+        cb.checked = extra.has(id);
+        cb.onchange = () => { if (cb.checked) extra.add(id); else extra.delete(id); sync(); };
+        tunnels.appendChild(el("label", { class: "check" }, cb, el("span", {}, label)));
+      });
+    }
+    const cands = rlTunnelLike(first) ? rlExpandCandidates([first].concat([...extra])) : [];
+    const n = cands.length;
+    const nLinked = linked ? cands.filter(id => linked.has(id)).length : n;
+    const can = n >= 2 && nLinked >= 2 && supported;
+    fastCb.disabled = !can;
+    fastRow.classList.toggle("off", !can);
+    if (!supported) fastHint.textContent = why || t("Not available on this router.");
+    else if (n < 2) fastHint.textContent = t("Needs at least two tunnels.");
+    else if (nLinked < 2) fastHint.textContent = t("Needs at least two tunnels with an interface of their own on the router (WireGuard, AmneziaWG). Tunnels that run inside the proxy core cannot be switched between.");
+    else fastHint.textContent = t("Measures each tunnel to this list's own destinations and uses the fastest working one.") + (note ? " " + note : "");
+    if (!can) fastCb.checked = false;
+    adv.style.display = fastCb.checked ? "" : "none";
+  };
+  fastCb.onchange = sync;
+  routeSel.addEventListener("change", sync);
+  sync();
+  const info = state.fastestInfo ? Promise.resolve(state.fastestInfo) : (typeof loadFastestInfo === "function" ? loadFastestInfo() : Promise.resolve(null));
+  info.then(d => {
+    if (!d) return;
+    if (d.supported === false) { supported = false; why = d.reason || ""; }
+    if (Array.isArray(d.linked)) linked = new Set(d.linked);
+    note = d.note || "";
+    sync();
+  });
+  adv.open = !!(pol.mode || (pol.targets || []).length || pol.interval_sec || pol.switch_delta_ms || pol.switch_delta_pct || pol.min_dwell_sec || pol.on_all_down || pol.reset_on_switch || pol.notify);
+
+  // collect writes candidates/fastest into the request body; a string return is a refusal.
+  function collect(body) {
+    const first = routeSel.value;
+    const more = rlTunnelLike(first) ? [...extra].filter(x => x !== first) : [];
+    body.candidates = more.length ? [first].concat(more) : [];
+    if (!fastCb.checked && !rl.fastest) return "";
+    const targets = tgtMode.value === "custom" ? tgts.value.split("\n").map(s => s.trim()).filter(Boolean) : [];
+    if (targets.length > 3) return t("At most three probe targets.");
+    if (targets.some(x => !/^[^\s:]+:\d{1,5}$|^\[[0-9a-fA-F:]+\]:\d{1,5}$/.test(x))) return t("A probe target is host:port, e.g. www.example.com:443.");
+    const iv = parseInt(interval.value, 10) || 0;
+    if (iv && (iv < 30 || iv > 600)) return t("Measure every 30 to 600 seconds.");
+    body.fastest = Object.assign({}, rl.fastest || {}, {
+      enabled: fastCb.checked, targets, mode: modeSel.value || undefined,
+      interval_sec: iv, switch_delta_ms: parseInt(dms.value, 10) || 0, switch_delta_pct: parseInt(dpct.value, 10) || 0,
+      min_dwell_sec: parseInt(dwell.value, 10) || 0, on_all_down: allDown.value === "wan" ? "" : allDown.value,
+      reset_on_switch: resetCb.checked, notify: notifyCb.checked,
+    });
+    return "";
+  }
+  return { node, collect };
+}
+
+// paintFastestRows writes the active tunnel under each fastest list's route select.
+function paintFastestRows(info) {
+  const by = {};
+  ((info && info.lists) || []).forEach(s => { by[s.id] = s; });
+  document.querySelectorAll("[data-rlfast]").forEach(box => {
+    const s = by[box.getAttribute("data-rlfast")];
+    box.innerHTML = "";
+    if (!s || !s.active) return;
+    const parts = [el("span", { class: "rl-fast-ico", "aria-hidden": "true" }, "⚡")];
+    if (!s.applied) parts.push(el("span", { class: "hint" }, t("fastest: after Apply")));
+    else if (s.mode === "all_down") parts.push(fastestModeBadge("all_down"));
+    else {
+      parts.push(el("span", { class: "rl-fast-now" }, s.current_name || "—"));
+      if (s.rtt_ms) parts.push(el("span", { class: "hint" }, t("{0} ms", s.rtt_ms)));
+      parts.push(fastestModeBadge(s.mode || "auto"));
+      if (s.since) parts.push(el("span", { class: "hint" }, t("since {0}", fmtClock(s.since))));
+    }
+    box.appendChild(el("button", { class: "rl-fast-link", type: "button", title: t("Open the list's measurements"),
+      onclick: () => openFastestPanel(s.id) }, ...parts));
+  });
+}
+
+// openFastestPanel shows one list's measurements, its controls and its journal.
+async function openFastestPanel(id) {
+  let d;
+  try { d = await api.get("/api/lists/" + encodeURIComponent(id) + "/fastest"); await loadThroughput(); }
+  catch (e) { toast(e.message, "err"); return; }
+  const body = el("div", { class: "rl-fast-panel" });
+  const back = modal({ title: t("Fastest tunnel: {0}", d.name || d.id), body,
+    footer: [el("button", { class: "btn btn-ghost", onclick: () => back.remove() }, t("Close"))] });
+  const reload = async () => { back.remove(); await loadFastestInfo(); paintFastestRows(state.fastestInfo); openFastestPanel(id); };
+  const staged = async (path, payload, msg) => {
+    try {
+      await api.post("/api/lists/" + encodeURIComponent(id) + "/fastest/" + path, payload || {});
+      await loadProfile(); updateDirty();
+      toast(msg + " — " + t("staged: Review and Apply to run it"), "ok");
+      reload();
+    } catch (e) { toast(e.message, "err"); }
+  };
+  // Head: where it goes now and why.
+  const head = el("div", { class: "row-between", style: "gap:var(--sp-3);flex-wrap:wrap;align-items:center" });
+  if (!d.applied) head.appendChild(el("div", { class: "hint" }, t("The router does not run this yet: Review and Apply.")));
+  else head.appendChild(el("div", {},
+    el("strong", {}, d.current_name || "—"), " ",
+    d.rtt_ms ? el("span", { class: "hint" }, t("{0} ms", d.rtt_ms) + " ") : null,
+    fastestModeBadge(d.mode || "auto"), " ",
+    d.since ? el("span", { class: "hint" }, t("since {0}", fmtClock(d.since))) : null));
+  const probeBtn = el("button", { class: "btn btn-sm", type: "button" }, t("Probe now"));
+  // Nothing measures a list the router does not run (the line beside it says so): no "Measuring within 20 s".
+  probeBtn.disabled = !d.applied;
+  probeBtn.onclick = async () => {
+    probeBtn.disabled = true;
+    try { const r = await api.post("/api/lists/" + encodeURIComponent(id) + "/fastest/probe", {}); toast(t("Measuring within {0} s", r.within_s || 20), "ok"); setTimeout(() => { if (document.body.contains(body)) reload(); }, ((r.within_s || 20) + 4) * 1000); }
+    catch (e) { probeBtn.disabled = false; toast(e.message, "err"); }
+  };
+  head.appendChild(probeBtn);
+  // Every tunnel of the list, one after another; the list's own media sources first for a media list.
+  head.appendChild(tpButton("list", id, "btn btn-sm", d.name || d.id));
+  body.setAttribute("data-tp-live", "1");
+  body._tpLive = done => { if (done && document.body.contains(body)) reload(); };
+  body.appendChild(head);
+  body.appendChild(el("div", { class: "hint" }, d.election === "mixed" ? t("Chooses by both: tunnels much slower to answer are dropped, then the highest measured speed wins.")
+    : d.election === "throughput" ? t("Chooses by the highest measured download speed.") : t("Chooses by the lowest delay.")));
+  if (d.election_now === "delay") body.appendChild(el("div", { class: "hint" }, t("By delay for now: {0} of {1} live tunnels have a fresh speed measurement, and speed is compared only between measured ones.", d.sampled || 0, d.sampled_of || 0)));
+  else if (d.election_now === "throughput") body.appendChild(el("div", { class: "hint" }, d.sample_class === "media"
+    ? t("Speeds compared are those of the Telegram media file.") : t("Speeds compared are those of the test servers.")));
+  if (d.pin_dead) body.appendChild(el("div", { class: "hint", style: "color:var(--warn)" }, t("The pinned tunnel is unavailable: automatic choice meanwhile.")));
+  if (d.calm) body.appendChild(el("div", { class: "hint", style: "color:var(--warn)" }, t("Frequent switches: the list waits four times longer before the next one.")));
+  if ((d.dead_targets || []).length) body.appendChild(el("div", { class: "hint", style: "color:var(--warn)" },
+    t("A target answers through no tunnel, so measuring it says nothing: {0}", d.dead_targets.join(", "))));
+  if (d.pinned) body.appendChild(el("div", { class: "row-between", style: "gap:8px;align-items:center;margin-top:8px" },
+    el("span", {}, t("Pinned to {0}", (d.candidates.find(c => c.id === d.pinned) || {}).name || d.pinned) + " " +
+      (d.pinned_until ? t("until {0}", new Date(d.pinned_until * 1000).toLocaleString()) : t("until cancelled"))),
+    el("button", { class: "btn btn-sm", type: "button", onclick: () => staged("unpin", {}, t("Unpinned")) }, t("Unpin"))));
+
+  // Matrix: tunnel x target.
+  const targets = d.targets || [];
+  let best = "", bestScore = Infinity;
+  Object.entries(d.measurements || {}).forEach(([c, m]) => { if (m.alive && m.score_ms < bestScore) { best = c; bestScore = m.score_ms; } });
+  const tbl = el("table", { class: "tbl rl-fast-matrix" });
+  tbl.appendChild(el("thead", {}, el("tr", {}, el("th", {}, t("Tunnel")), ...targets.map(x => el("th", { class: "mono" }, x)),
+    el("th", {}, t("Score")), el("th", {}, t("Speed")), el("th", {}, ""))));
+  const tb = el("tbody", {});
+  // The Speed column shows the figures the list compares: the Telegram media file's while those elect it.
+  const tpClass = d.election_now === "throughput" && d.sample_class === "media" ? "media" : "";
+  (d.candidates || []).forEach(c => {
+    const row = (d.matrix || {})[c.id] || {};
+    const m = (d.measurements || {})[c.id];
+    const cells = targets.map(x => {
+      const cell = row[x];
+      if (!cell) return el("td", { class: "hint" }, "—");
+      return el("td", { class: cell.ok ? "" : "rl-fast-bad", title: t("measured at {0}", fmtClock(cell.at)) },
+        cell.ok ? t("{0} ms", cell.median_ms) : t("no answer"), cell.loss_pct && cell.ok ? el("span", { class: "hint" }, " · " + t("{0}% lost", cell.loss_pct)) : null);
+    });
+    const pinSel = el("select", { class: "rl-sel", style: "max-width:140px" },
+      el("option", { value: "" }, t("Pin…")), el("option", { value: "15" }, t("for 15 min")), el("option", { value: "60" }, t("for 1 hour")), el("option", { value: "0" }, t("until cancelled")));
+    pinSel.setAttribute("aria-label", t("Pin {0}", c.name));
+    pinSel.onchange = () => { if (pinSel.value === "") return; staged("pin", { candidate: c.id, minutes: parseInt(pinSel.value, 10) }, t("Pinned to {0}", c.name)); };
+    const exBtn = el("button", { class: "btn btn-sm", type: "button" }, c.excluded ? t("Include") : t("Exclude"));
+    exBtn.onclick = () => staged("exclude", { candidate: c.id, excluded: !c.excluded }, c.excluded ? t("Included {0}", c.name) : t("Excluded {0}", c.name));
+    tb.appendChild(el("tr", { class: (c.id === best ? "rl-fast-best" : "") + (c.excluded ? " off" : "") },
+      el("td", {}, c.name, c.id === d.current ? el("span", { class: "badge", style: "margin-left:6px" }, t("now")) : null,
+        c.excluded ? el("span", { class: "hint" }, " " + t("excluded")) : null),
+      ...cells,
+      el("td", {}, m ? (m.alive ? t("{0} ms", m.score_ms) : t("down")) : "—"),
+      el("td", { style: "white-space:nowrap" }, tpSpan(c.id, tpClass) || el("span", { class: "hint" }, "—")),
+      // A tunnel inside the proxy core has no interface to point the list's table at: no pin control.
+      el("td", { style: "white-space:nowrap" }, c.no_link ? null : pinSel, c.no_link ? null : " ", exBtn)));
+  });
+  tbl.appendChild(tb);
+  body.appendChild(el("div", { class: "tbl-wrap", style: "margin-top:var(--sp-3);overflow-x:auto" }, tbl));
+  body.appendChild(el("div", { class: "hint" }, d.last_cycle ? t("Last measured at {0}.", fmtClock(d.last_cycle)) : t("Not measured yet.")));
+
+  // Journal: last 50 events, newest first, filter by reason, copy.
+  const evs = (d.events || []).slice().reverse();
+  const reasons = [...new Set(evs.map(e => e.reason))];
+  const filt = el("select", { class: "rl-sel", style: "max-width:180px" }, el("option", { value: "" }, t("All reasons")),
+    ...reasons.map(r => el("option", { value: r }, t(fastestReasonWord(r)))));
+  filt.setAttribute("aria-label", t("Filter by reason"));
+  const feed = el("div", { class: "rl-fast-log" });
+  const name = cid => ((d.candidates || []).find(c => c.id === cid) || {}).name || cid || "—";
+  const line = e => fmtClock(e.at) + "  " + name(e.from) + " → " + name(e.to) + "  " + t(fastestReasonWord(e.reason)) +
+    (e.rtt_from || e.rtt_to ? "  (" + (e.rtt_from || "—") + " → " + (e.rtt_to || "—") + " ms)" : "");
+  const paint = () => {
+    feed.innerHTML = "";
+    const shown = evs.filter(e => !filt.value || e.reason === filt.value);
+    if (!shown.length) { feed.appendChild(el("div", { class: "hint" }, t("No events yet."))); return; }
+    shown.forEach(e => feed.appendChild(el("div", { class: "mono" }, line(e))));
+  };
+  filt.onchange = paint; paint();
+  const copy = el("button", { class: "btn btn-sm", type: "button", onclick: () => copyText(evs.filter(e => !filt.value || e.reason === filt.value).map(line).join("\n")) }, t("Copy log"));
+  body.appendChild(el("div", { class: "row-between", style: "gap:8px;align-items:center;margin-top:var(--sp-3)" },
+    el("div", { class: "card-title" }, t("Journal")), el("div", { style: "display:flex;gap:8px" }, filt, copy)));
+  body.appendChild(feed);
+}
+
+function fastestReasonWord(r) {
+  return ({ elected: "elected", faster: "faster", dead: "tunnel down", recovered: "recovered", pinned: "pinned",
+    unpinned: "unpinned", all_down: "all down", manual: "excluded by you", flapping: "frequent switches",
+    targets_down: "targets unreachable" })[r] || r;
 }

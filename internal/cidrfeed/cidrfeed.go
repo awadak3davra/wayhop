@@ -260,7 +260,7 @@ func TooBroad(p netip.Prefix) bool {
 }
 
 // Screen splits fetched entries into those a list may carry and those TooBroad refuses, both in
-// their original order (QA-111). A feed is fetched and staged with nobody reading its lines, and the
+// their original order. A feed is fetched and staged with nobody reading its lines, and the
 // review shows only a count, so one "/0" in it (a typo, or a body rewritten on the way) sent every
 // destination through the list's exit and, on the ipset plane, which refuses a /0, failed every
 // Apply until the list was switched off. The caller keeps the rest of the feed and names what was

@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// QA-111. An entry covering the whole address space, or a large share of it, is one no list may
+// An entry covering the whole address space, or a large share of it, is one no list may
 // carry: the default route in any spelling, two /1 halves, anything shorter than an IPv4 /4 or an
 // IPv6 /8. A /4 and a /8 themselves stay, as do a feed's ordinary networks, and both halves keep the
 // feed's order.

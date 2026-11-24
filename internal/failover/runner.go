@@ -7,6 +7,7 @@ type GroupSpec struct {
 	Policy  Policy
 	Members []string
 	Cfg     Config
+	Pick    string // selector only: the manual pick when the live selection is not it (DecideInput.Pick)
 }
 
 // HealthSource supplies per-member health in member order (implemented by health.Monitor.MemberHealth).
@@ -184,6 +185,7 @@ func (r *Runner) Tick(groups []GroupSpec, hs HealthSource, sel Selector, now int
 			Now:             now,
 			Cfg:             g.Cfg,
 			CurrentRawAlive: &rawCurrentAlive,
+			Pick:            g.Pick,
 		})
 		if !changed {
 			delete(r.pending, g.ID) // the want went away — reset any in-progress failback hold

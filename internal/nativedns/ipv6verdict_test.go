@@ -92,7 +92,7 @@ const (
 	addrsV6LAN = addrsV4Only + "5: br0    inet6 2001:db8:24::1/64 scope global dynamic\n"
 )
 
-// QA-107. WayHop installs the DNS intercept with iptables only, so on a LAN with IPv6 a client reaches
+// WayHop installs the DNS intercept with iptables only, so on a LAN with IPv6 a client reaches
 // a v6 resolver on :53, :853 or :443 untouched. RunEffectivePath never read ip6tables and cleared the
 // leak verdict ("all three bypass routes are constrained"), and the DNS page then told the operator
 // that clients could not route around it.
@@ -195,7 +195,7 @@ func TestRunEffectivePath_UnreadableIPv6FirewallIsNotCoverage(t *testing.T) {
 	}
 }
 
-// QA-107 on the router it was found on. KeeneticOS fills ip6tables with DNS rules of its own: a jump
+// The ip6tables shape of a KeeneticOS router. KeeneticOS fills ip6tables with DNS rules of its own: a jump
 // on :53 to an empty chain named _NDM_IC_REDIRECT, and hotspot redirects on br0 that apply only to
 // marked devices (shapes read from a live Keenetic, addresses replaced). Neither does what WayHop's
 // unconditional IPv4 redirect does, so the IPv6 :53 route is still open; read loosely, either one

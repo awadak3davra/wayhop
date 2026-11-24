@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"os/exec"
 	"strings"
+	"time"
 
 	"wayhop/internal/model"
 	"wayhop/internal/netvpn"
@@ -126,7 +128,7 @@ func (s *Server) buildNetvpnPlan(r *http.Request) (netvpn.Plan, int, error) {
 	}
 
 	// The router's own netifd handler set decides which protocol may actually be written. Without it
-	// a WireGuard endpoint on a live test router would be written as proto='wireguard' on a box
+	// a WireGuard endpoint on an OpenWrt router would be written as proto='wireguard' on a box
 	// that has no wireguard.sh — visible in LuCI, never brought up. With it the plan either falls
 	// back to a protocol the router does carry and says so, or refuses and names the package.
 	plan, err := netvpn.BuildPlanFor(intended, s.routerProtos(), strings.TrimSpace(q.Get("zone")), netOut, fwOut)
@@ -219,15 +221,32 @@ func uciSafeIface(s string) string { return s }
 // configured". nil means the real reader.
 type uciReadFunc func() (network, firewall string, err error)
 
+// uciReadTimeout bounds one reading of both configurations, and uciCommand is how uci is run; tests
+// replace both.
+var (
+	uciReadTimeout = 5 * time.Second
+	uciCommand     = func(ctx context.Context, args ...string) *exec.Cmd { return exec.CommandContext(ctx, "uci", args...) }
+	uciPresent     = func() bool { _, err := exec.LookPath("uci"); return err == nil }
+)
+
 // readUCI takes both snapshots at the same moment, because a plan built from a network config read
 // now and a firewall config read later describes a router that never existed.
 func readUCI() (network, firewall string, err error) {
-	if _, err := exec.LookPath("uci"); err != nil {
+	if !uciPresent() {
 		return "", "", fmt.Errorf("uci is not available on this host")
 	}
+	// Bounded: the reconcile tick reads this too, and a uci that hangs on a lock would
+	// stop everything behind it: the renewal of the names hold, the reinstall of a lost plane.
+	ctx, cancel := context.WithTimeout(context.Background(), uciReadTimeout)
+	defer cancel()
 	out := make([]string, 2)
 	for i, cfg := range []string{"network", "firewall"} {
-		b, err := exec.Command("uci", "show", cfg).CombinedOutput()
+		cmd := uciCommand(ctx, "show", cfg)
+		cmd.WaitDelay = time.Second
+		b, err := cmd.CombinedOutput()
+		if ctx.Err() != nil {
+			return "", "", fmt.Errorf("uci show %s: no answer in %s", cfg, uciReadTimeout)
+		}
 		if err != nil {
 			return "", "", fmt.Errorf("uci show %s: %w", cfg, err)
 		}

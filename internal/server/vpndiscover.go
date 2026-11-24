@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -124,11 +125,11 @@ func peerEndpointHost(peers []netvpn.Peer) string {
 	return ""
 }
 
-// endpointFromDiscovered maps a discovered native tunnel to a DISABLED
+// endpointFromDiscovered maps a discovered native tunnel to an
 // model.EngineExternal endpoint the user can then route through. It is pure (no I/O)
 // so it is unit-tested directly. The OS owns the iface; WayHop only uses it as an
-// egress, so no Server/Port/keys are created. Enabled is false — adoption never
-// auto-enables or auto-applies; enabling + routing is the user's explicit next step.
+// egress, so no Server/Port/keys are created. Enabled follows whether the tunnel is up; adoption
+// never auto-applies, and routing through it is the user's explicit next step.
 //
 // The ID is stable per iface ("external-<iface>"), so re-adopting the same tunnel
 // updates the existing record (via store.UpsertEndpoint) rather than duplicating it.
@@ -163,9 +164,12 @@ func endpointFromDiscovered(d netvpn.DiscoveredVPN) model.Endpoint {
 		Protocol: model.Protocol(d.Type), // descriptive only; validate skips protocol for external
 		// The underlying tunnel is owned by the router/OS — WayHop routes through it but must never
 		// stop/delete/rewrite it. OwnerExternal is the flag every destructive native op gates on.
-		Owner:   model.OwnerExternal,
-		Params:  params,
-		Enabled: false,
+		Owner:  model.OwnerExternal,
+		Params: params,
+		// On from the start when the router has the tunnel up, so adding a connection is not followed by
+		// a second step to switch it on. A tunnel that is down stays off: enabled, it would stop every
+		// Apply until it was brought up (the capture cannot bind a switched-off interface).
+		Enabled: d.Active(time.Now().Unix()),
 	}
 }
 
@@ -210,10 +214,10 @@ func autoNamed(e model.Endpoint) bool {
 	return strings.HasSuffix(e.Name, " (native)")
 }
 
-// handleVPNAdopt turns an already-discovered native tunnel into a DISABLED
-// EngineExternal endpoint the user can route through. It re-runs the SAME discovery
+// handleVPNAdopt turns an already-discovered native tunnel into an
+// EngineExternal endpoint (switched on when the tunnel is up) the user can route through. It re-runs the SAME discovery
 // handleVPNDiscover uses and adopts ONLY a tunnel that is currently present — never a
-// phantom iface. It does NOT touch the OS tunnel, auto-enable, or auto-apply.
+// phantom iface. It does NOT touch the OS tunnel or auto-apply.
 func (s *Server) handleVPNAdopt(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Iface string `json:"iface"`
@@ -256,4 +260,88 @@ func (s *Server) handleVPNAdopt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeErr(w, http.StatusNotFound, "iface not currently discovered")
+}
+
+// replacedTunnelEndpoint is existing re-bound to the discovered tunnel d: the same record (ID, name,
+// health policy, on or off), so everything that routes through it keeps doing so, with the new
+// tunnel's identity in place of the old one's. The old parameters are NOT merged in, unlike
+// refreshAdoptedEndpoint: a stale peer address or key belongs to the tunnel that died.
+func replacedTunnelEndpoint(existing model.Endpoint, d netvpn.DiscoveredVPN, now int64) model.Endpoint {
+	fresh := endpointFromDiscovered(d)
+	fresh.ID = existing.ID
+	fresh.Health = existing.Health
+	fresh.MTU = existing.MTU
+	fresh.PersistentKeepalive = existing.PersistentKeepalive
+	// The operator's own name stays; a name WayHop made follows the new tunnel's label.
+	if strings.TrimSpace(existing.Name) != "" && !autoNamed(existing) {
+		fresh.Name = existing.Name
+	}
+	// A switched-on connection stays on. One that was off comes on when the new tunnel is up: replacing
+	// a dead tunnel is asking for it to work.
+	fresh.Enabled = existing.Enabled || d.Active(now)
+	return fresh
+}
+
+// handleReplaceTunnel (POST /api/endpoints/{id}/replace-tunnel {"iface":"nwg0"}) points an adopted
+// connection at another tunnel the router has now: the dead one was replaced by a new one, in the
+// same slot or another. Rules, lists, groups and DNS detours stay as they are. A connection already
+// adopted for that tunnel (made when it first appeared) is folded in: what used it moves to this
+// record and it is removed.
+func (s *Server) handleReplaceTunnel(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var body struct {
+		Iface string `json:"iface"`
+	}
+	if err := decodeJSONBody(r.Body, &body); err != nil || strings.TrimSpace(body.Iface) == "" {
+		writeErr(w, http.StatusBadRequest, "iface is required")
+		return
+	}
+	iface := strings.TrimSpace(body.Iface)
+	profile := s.store.Profile()
+	existing := profile.EndpointByID(id)
+	if existing == nil {
+		writeErr(w, http.StatusNotFound, fmt.Sprintf("connection %q does not exist", id))
+		return
+	}
+	if existing.Engine != model.EngineExternal {
+		writeErr(w, http.StatusBadRequest, "only a connection adopted from a router tunnel can be pointed at another tunnel")
+		return
+	}
+	disc := netvpn.DiscoverAll(r.Context())
+	var target *netvpn.DiscoveredVPN
+	for i := range disc.VPNs {
+		if disc.VPNs[i].Iface == iface {
+			target = &disc.VPNs[i]
+		}
+	}
+	if target == nil {
+		if disc.Err != nil {
+			writeErr(w, http.StatusInternalServerError, "tunnel discovery failed: "+disc.Err.Error())
+			return
+		}
+		writeErr(w, http.StatusNotFound, "that tunnel is not on the router now")
+		return
+	}
+	// Another record for the same tunnel, to fold in after this one is re-bound.
+	var duplicate string
+	for _, e := range profile.Endpoints {
+		if e.ID == id || e.Engine != model.EngineExternal {
+			continue
+		}
+		if t, ok := adoptedTunnelFor(e, disc.VPNs); ok && t.Iface == target.Iface {
+			duplicate = e.ID
+		}
+	}
+	fresh := replacedTunnelEndpoint(*existing, *target, time.Now().Unix())
+	if err := s.store.UpsertEndpoint(fresh); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if duplicate != "" {
+		if err := s.store.DeleteEndpointReplacing(duplicate, id); err != nil {
+			writeErr(w, http.StatusConflict, "the connection was re-bound, but the duplicate record "+duplicate+" could not be folded into it: "+err.Error())
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "iface": target.Iface, "folded": duplicate})
 }

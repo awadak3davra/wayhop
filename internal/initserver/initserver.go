@@ -233,18 +233,7 @@ const scriptReality = `
 # ---- sing-box VLESS-Reality ----
 log "installing sing-box (VLESS-Reality)..."
 if ! command -v sing-box >/dev/null 2>&1; then
-  apt-get install -y curl tar >/dev/null 2>&1 || true
-  A=$(dpkg --print-architecture 2>/dev/null || echo amd64)
-  case "$A" in amd64) SB=amd64;; arm64) SB=arm64;; armhf) SB=armv7;; *) SB=amd64;; esac
-  VER=$(curl -fsS https://api.github.com/repos/SagerNet/sing-box/releases/latest 2>/dev/null | grep -o '"tag_name":[^,]*' | head -1 | sed 's/.*"v\{0,1\}\([0-9][^"]*\)".*/\1/')
-  # GitHub API blocked from this server? fall back to the releases atom feed (proxiable by
-  # wr_fetch's mirror chain), taking the newest STABLE tag (skip -alpha/-beta/-rc suffixes).
-  [ -n "$VER" ] || VER=$(wr_fetch https://github.com/SagerNet/sing-box/releases.atom 2>/dev/null | grep -o 'releases/tag/v[0-9][^"<]*' | sed 's@releases/tag/v@@' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
-  [ -n "$VER" ] || { log "failed to resolve sing-box version (GitHub API + mirror both failed)"; exit 1; }
-  wr_fetch "https://github.com/SagerNet/sing-box/releases/download/v${VER}/sing-box-${VER}-linux-${SB}.tar.gz" /tmp/sb.tgz || { log "failed to download sing-box ${VER}"; exit 1; }
-  tar -xzf /tmp/sb.tgz -C /tmp || { log "failed to extract sing-box archive"; exit 1; }
-  install -m755 "/tmp/sing-box-${VER}-linux-${SB}/sing-box" /usr/local/bin/sing-box
-  rm -rf /tmp/sb.tgz "/tmp/sing-box-${VER}-linux-${SB}" 2>/dev/null || true
+  wr_sb_install || exit 1
 fi
 mkdir -p /etc/sing-box
 # Persist the Reality identity so a re-run REUSES it. Regenerating the uuid /
@@ -298,18 +287,7 @@ echo "WR_CLIENT_CONFIG=vless://$UUID@$PUBLIC_IP:443?security=reality&sni=$SNI&fp
 // fragment is safe and re-runnable.
 const scriptSingboxInstall = `
 if ! command -v sing-box >/dev/null 2>&1; then
-  apt-get install -y curl tar >/dev/null 2>&1 || true
-  A=$(dpkg --print-architecture 2>/dev/null || echo amd64)
-  case "$A" in amd64) SB=amd64;; arm64) SB=arm64;; armhf) SB=armv7;; *) SB=amd64;; esac
-  VER=$(curl -fsS https://api.github.com/repos/SagerNet/sing-box/releases/latest 2>/dev/null | grep -o '"tag_name":[^,]*' | head -1 | sed 's/.*"v\{0,1\}\([0-9][^"]*\)".*/\1/')
-  # GitHub API blocked from this server? fall back to the releases atom feed (proxiable by
-  # wr_fetch's mirror chain), taking the newest STABLE tag (skip -alpha/-beta/-rc suffixes).
-  [ -n "$VER" ] || VER=$(wr_fetch https://github.com/SagerNet/sing-box/releases.atom 2>/dev/null | grep -o 'releases/tag/v[0-9][^"<]*' | sed 's@releases/tag/v@@' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
-  [ -n "$VER" ] || { log "failed to resolve sing-box version (GitHub API + mirror both failed)"; exit 1; }
-  wr_fetch "https://github.com/SagerNet/sing-box/releases/download/v${VER}/sing-box-${VER}-linux-${SB}.tar.gz" /tmp/sb.tgz || { log "failed to download sing-box ${VER}"; exit 1; }
-  tar -xzf /tmp/sb.tgz -C /tmp || { log "failed to extract sing-box archive"; exit 1; }
-  install -m755 "/tmp/sing-box-${VER}-linux-${SB}/sing-box" /usr/local/bin/sing-box
-  rm -rf /tmp/sb.tgz "/tmp/sing-box-${VER}-linux-${SB}" 2>/dev/null || true
+  wr_sb_install || exit 1
 fi
 mkdir -p /etc/sing-box
 `
@@ -318,8 +296,8 @@ mkdir -p /etc/sing-box
 // sing-box inbounds (VMess-WS-TLS, Trojan, Hysteria2, TUIC, AnyTLS) and reads its pins
 // (scriptTLSPins). The SNI baked into the cert is wayhop.local. No CA signs it, so the client links
 // emitted below carry insecure=1 (skip-cert-verify) for clients that cannot pin, and beside it the
-// certificate's pin, which WayHop's importer reads and the router's own connection checks instead
-// (QA-138). openssl is installed if absent. The key/cert are persisted so a re-run reuses them (no
+// certificate's pin, which WayHop's importer reads and the router's own connection checks instead.
+// openssl is installed if absent. The key/cert are persisted so a re-run reuses them (no
 // client churn).
 const scriptSelfSignedTLS = `
 command -v openssl >/dev/null 2>&1 || apt-get install -y openssl >/dev/null 2>&1 || true
@@ -356,7 +334,7 @@ fi
 // busybox also has. The certificate is read once, into a shell variable (PEM is text), and every
 // later step pipes from that copy: nothing here writes a file, so two runs against one server at once
 // (a double start, two routers set up against one VPS) cannot overwrite each other's input, and both
-// pins describe the same certificate even if another run replaces it meanwhile (QA-138 review).
+// pins describe the same certificate even if another run replaces it meanwhile.
 // dgst's text output differs between openssl releases ("(stdin)= h", "SHA2-256(stdin)= h",
 // "h *stdin", a bare h), so the hash is taken as the one word of exactly 64 hex digits. The public key
 // is converted by `openssl pkey` (openssl 1.0.0 on) or, where that cannot read it, by `openssl rsa`,
@@ -637,9 +615,17 @@ echo "WR_CLIENT_CONFIG=wayhop-snell = snell, $PUBLIC_IP, 8448, psk=$SNPSK, versi
 // characters, so %q is safe here; do NOT call BuildScript with unvalidated input, or
 // shell-quote publicHost first.
 func BuildScript(protocols []string, publicHost string, mirrors ...string) string {
+	return BuildScriptPinned(protocols, publicHost, nil, mirrors...)
+}
+
+// BuildScriptPinned is BuildScript with the sing-box release the router resolved (see SingBoxPin);
+// a nil pin leaves the server to resolve the version and its digest over api.github.com itself.
+func BuildScriptPinned(protocols []string, publicHost string, pin *SingBoxPin, mirrors ...string) string {
 	var b strings.Builder
 	b.WriteString(scriptHeader)
 	b.WriteString(mirrorFetchShell(mirrors)) // defines wr_fetch before any fragment uses it
+	b.WriteString(pin.shell())
+	b.WriteString(singBoxInstallShell) // wr_sb_install: checked install, used by every sing-box fragment
 	if publicHost != "" {
 		// prepend an override (placed after header sets the default; re-set it).
 		b.WriteString(fmt.Sprintf("PUBLIC_IP=%q\n", publicHost))
@@ -692,7 +678,8 @@ func mirrorFetchShell(mirrors []string) string {
 // safeMirrorPrefix reports whether m is a plain http(s) URL prefix with no shell
 // metacharacters, so it can be single-quoted into the generated wr_fetch list verbatim.
 func safeMirrorPrefix(m string) bool {
-	if !strings.HasPrefix(m, "http://") && !strings.HasPrefix(m, "https://") {
+	// https only: a plain-http mirror lets anyone on the path hand a root install its binary.
+	if !strings.HasPrefix(m, "https://") {
 		return false
 	}
 	return !strings.ContainsAny(m, " \t\r\n'\"`$;|&<>(){}\\")
@@ -723,7 +710,7 @@ type Creds struct {
 // A "--" end-of-options marker precedes the user@host destination as defense-in-depth: ssh
 // (OpenSSH and dropbear, both getopt-based) then treats the destination as a positional even
 // if c.User/c.Host begins with '-', so a hostile value can never be reparsed as an option
-// (argument injection, CWE-88). Callers MUST still validate user+host with netdiag.ValidTarget
+// (argument injection). Callers MUST still validate user+host with netdiag.ValidTarget
 // (the primary guard); this only ensures the arg-builder is self-safe if a future caller forgets.
 func provisionSSHArgs(c Creds) []string {
 	port := c.Port

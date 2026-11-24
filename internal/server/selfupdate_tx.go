@@ -67,7 +67,7 @@ var errUpdateInFlight = errors.New("an update is still being judged")
 //
 // A live supervisor refuses on its own, marker or not. It drops the marker before it is done: a
 // rollback then restores the copy and waits 60 s for the old build, a proven update compresses the
-// copy (10-40 s on a test router). A second update in that window relinked .bak to the build now
+// copy (10-40 s on a small OpenWrt router). A second update in that window relinked .bak to the build now
 // running and deleted .bak.gz, and the compression then moved its gzip of the first build into place
 // and deleted .bak: the second update's rollback copy was gone, and a crashing build crash-looped.
 //
@@ -133,6 +133,11 @@ func (s *Server) selfSwapAndJudge(ctx context.Context, repo, tag, exe, by string
 	}
 	s.applyMu.Lock()
 	if err = s.updateInFlight(); err == nil {
+		// The build being installed may be one from before the blob store (a downgrade, or the
+		// supervisor putting the previous build back): leave it a record it can read.
+		if lerr := s.writeLegacyApplyState(); lerr != nil {
+			log.Printf("self-update: %v; an older build would start with an empty apply record", lerr)
+		}
 		installed, err = swap(ctx, repo, tag, exe, before)
 		if err != nil && marked {
 			updatetx.Clear(etc) // under the lock: a request queued behind this one must not see it

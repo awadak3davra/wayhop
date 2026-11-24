@@ -218,7 +218,7 @@ func TestSSHSingBoxCheck(t *testing.T) {
 	}
 }
 
-// Generate -> ParseSingbox -> Generate keeps an SSH outbound byte for byte, as QA-019 asks of every
+// Generate -> ParseSingbox -> Generate keeps an SSH outbound byte for byte, as required of every
 // protocol WayHop writes.
 func TestSSHRoundTrip(t *testing.T) {
 	p := sshTestProfile(t)

@@ -11,7 +11,7 @@ import (
 // engine at an interface the router owns.
 //
 // The plugin manager starts and stops a process and, for AmneziaWG, CREATES AND DELETES a kernel
-// interface. An adopted tunnel is the operator's own — on the live Keenetic, nwg0/nwg1/nwg3/nwg4/nwg5
+// interface. An adopted tunnel is the operator's own — on a Keenetic, nwg0/nwg1/nwg3/nwg4/nwg5
 // are KeeneticOS tunnels WayHop merely routes through, stored with Owner=external precisely so no
 // destructive native operation can touch them. Materialization gates on that, and nothing pinned the
 // gate: the two ownership refusals in nativeplan have a test, this one had none, and it is the one

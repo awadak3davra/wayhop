@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// liveUCIShow is `uci show network` from the test router (OpenWrt 25.12.2), keys redacted, trimmed to
+// liveUCIShow is `uci show network` from the reference OpenWrt router (OpenWrt 25.12.2), keys redacted, trimmed to
 // the parts that matter. Both peer forms are present on purpose: awg0's peer is ANONYMOUS and
 // awg1's is NAMED, which is exactly the pair a reader has to survive. The allowed_ips line carries
 // four values on one line, which is how uci prints a list.

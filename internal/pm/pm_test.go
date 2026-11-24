@@ -208,9 +208,8 @@ func TestOwner_ThreeState(t *testing.T) {
 	}
 }
 
-// TestOwner_RealEntwareGoldens pins the opkg parse against VERBATIM output captured from the live
-// Keenetic reference router (Entware opkg 2024-10-16, 2026-07-01) — the opkg branch was previously only
-// exercised by hand-authored mock strings (a review finding). Covers: owned (sing-box-go), clean
+// TestOwner_RealEntwareGoldens pins the opkg parse against VERBATIM output captured from a
+// Keenetic reference router (Entware opkg 2024-10-16). Covers: owned (sing-box-go), clean
 // not-owned (EMPTY output, rc=0 — unlike apk, which errors), and a version containing '~'.
 func TestOwner_RealEntwareGoldens(t *testing.T) {
 	owned := Manager{Kind: Opkg, Runner: &recRunner{out: "sing-box-go - 1.13.3-2\n"}}

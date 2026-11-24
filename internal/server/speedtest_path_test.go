@@ -93,7 +93,7 @@ func postSpeed(t *testing.T, s *Server, body string) speedAnswer {
 	return a
 }
 
-// QA-112. A run through the core goes wherever the core's rules send the test's site, so the answer
+// A run through the core goes wherever the core's rules send the test's site, so the answer
 // names that route, not the request. On a split-tunnel profile (no default rule) the core sends
 // speed.cloudflare.com straight out, and the panel showed the provider's line as "(proxy)". With a
 // default route through a tunnel the answer still says proxy.
@@ -121,7 +121,7 @@ func TestPanelSpeedtestNamesThePathTheCoreSendsItBy(t *testing.T) {
 	}
 }
 
-// QA-112, a route through a kernel tunnel. In hybrid mode a list sending the test's site to an
+// A route through a kernel tunnel. In hybrid mode a list sending the test's site to an
 // adopted tunnel is the kernel's: the core carries neither the list nor the tunnel and sends the site
 // to its final, the provider's line, which the answer called "proxy". Such a route is measured as the
 // Telegram bot measures it, bound to the tunnel and past the engine's redirect, and the answer names

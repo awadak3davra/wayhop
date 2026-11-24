@@ -12,7 +12,7 @@ import (
 	"wayhop/internal/store"
 )
 
-// QA-152. A connection, group or routing list is saved whole, and so are the settings: the page
+// A connection, group or routing list is saved whole, and so are the settings: the page
 // sends back the object it loaded with its edit applied. A form or a switch left open while another
 // tab, device or script saved a newer version therefore put the older one back, with a 200 - a
 // connection's on/off switch restored the server another tab had just changed, and a Settings save

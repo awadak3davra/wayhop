@@ -12,7 +12,7 @@ import (
 	"wayhop/internal/localtz"
 )
 
-// QA-131. When GitHub's allowance lifts is written in the router's zone and names it. Go's time.Local
+// When GitHub's allowance lifts is written in the router's zone and names it. Go's time.Local
 // is UTC on Keenetic and OpenWrt, so a reset at 23:05 router time in UTC+3 read "until 20:05", with
 // no zone to tell. The zone here is five hours off this host's own, so a time formatted in
 // time.Local cannot pass.

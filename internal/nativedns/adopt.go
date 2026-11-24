@@ -12,9 +12,8 @@ type Runner func(name string, args ...string) (string, error)
 //
 // https-dns-proxy is an OPTIONAL package. On a stock OpenWrt that never installed it,
 // `uci show https-dns-proxy` exits non-zero with "Entry not found" — the COMMON case, not an error.
-// Treating that as fatal made the whole native-DNS view report unavailable on most OpenWrt routers
-// even though the dnsmasq/dhcp half was present and perfectly adoptable (observed on a real
-// OpenWrt 24.10.4). So the DoH-proxy read is best-effort and only the dhcp read is load-bearing.
+// Treating that as fatal would make the whole native-DNS view report unavailable on most OpenWrt
+// routers even though the dnsmasq/dhcp half is present and perfectly adoptable. So the DoH-proxy read is best-effort and only the dhcp read is load-bearing.
 func AdoptOpenWrt(run Runner) (NativeDNS, error) {
 	hp, _ := run("uci", "show", "https-dns-proxy")
 	dh, err := run("uci", "show", "dhcp")
@@ -28,8 +27,8 @@ func AdoptOpenWrt(run Runner) (NativeDNS, error) {
 
 // resolvFileResolvers are the WAN's servers dnsmasq forwards to from its resolv file, which it reads
 // unless noresolv is set. A stock OpenWrt names no server at all and forwards only to these, so without
-// them the DNS page said "No upstreams detected" about a router that resolved every name (found by a
-// hunter on an emulated OpenWrt 23.05: resolv.conf.auto held 1.1.1.1 and nslookup through dnsmasq worked).
+// them the DNS page would say "No upstreams detected" about a router that resolves every name (on
+// OpenWrt the resolv file is resolv.conf.auto).
 func resolvFileResolvers(dhcp string, nd NativeDNS, run Runner) []NativeResolver {
 	if nd.NoResolv {
 		return nil
@@ -66,15 +65,15 @@ func AdoptKeenetic(run Runner) (NativeDNS, error) {
 	// The MAIN config first, then the conf-dir — which is the order dnsmasq itself reads them in on
 	// Entware, where /opt/etc/dnsmasq.conf ends with conf-dir=/opt/etc/dnsmasq.d,*.conf.
 	//
-	// Reading only the conf-dir missed the upstreams entirely. Measured on a live Keenetic:
-	// dnsmasq is running and owns :53, its main config carries no-resolv, strict-order,
-	// server=1.1.1.1 and server=8.8.8.8, and the one file in dnsmasq.d is WayHop's own policy file
-	// with zero server= lines. So the "Router's native DNS" card said "No upstreams detected" about a
-	// resolver that forwards every LAN lookup to two plaintext servers, and the write-back preview
-	// would have described a plane with neither strict-order nor no-resolv — the opposite of the
-	// router's actual configuration, in the two directives that decide how upstreams are consulted.
+	// Reading only the conf-dir would miss the upstreams entirely. On Keenetic the main config
+	// typically carries no-resolv, strict-order and the server= lines, while the one file in
+	// dnsmasq.d is WayHop's own policy file with zero server= lines. The "Router's native DNS" card
+	// would then say "No upstreams detected" about a resolver that forwards every LAN lookup to
+	// plaintext servers, and the write-back preview would describe a plane with neither strict-order
+	// nor no-resolv — the opposite of the router's actual configuration, in the two directives that
+	// decide how upstreams are consulted.
 	// The sentinel between the two reads is what lets the parser tag each upstream with the file it
-	// really came from. A blob of concatenated text cannot say, and every resolver was labelled
+	// really came from. A blob of concatenated text cannot say, and would label every resolver
 	// "dnsmasq.d server" — including the ones that live in the MAIN config, which is exactly the
 	// distinction that matters: an upstream there comes before anything in the conf-dir, so a chain
 	// written only into the conf-dir lands behind it. ChainHost.Apply moves those lines aside for that

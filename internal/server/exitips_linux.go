@@ -16,7 +16,7 @@ import (
 // first, then the single-exit probe's set (which entirely is).
 //
 // The order matters because an exit that routes Cloudflare's ranges out a separate path answers a
-// Cloudflare-fronted echo with THAT path's address. Measured through one tunnel on a test router whose
+// Cloudflare-fronted echo with THAT path's address. Measured through one tunnel on a small OpenWrt router whose
 // VPS sends Cloudflare traffic over WARP: the Cloudflare-fronted echoes reported a Cloudflare-owned
 // address — the WARP egress — while the neutral one reported the VPS itself. Both are true for
 // their own destination; the neutral responder gives the tunnel's GENERAL egress, which is what the

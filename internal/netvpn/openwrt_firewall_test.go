@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// The zone block as the test router reports it: three anonymous zones, and the tunnels attached to the
+// The zone block as the reference OpenWrt router reports it: three anonymous zones, and the tunnels attached to the
 // third by a LIST of two interfaces. The indices are the whole point — a writer that remembers "2"
 // instead of "vpn" attaches the next tunnel to whatever ends up in that slot.
 const liveFirewallShow = `firewall.@defaults[0]=defaults

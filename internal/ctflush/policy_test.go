@@ -11,7 +11,7 @@ import (
 // A flow routed by a KeeneticOS access policy holds the policy's slot in its connmark. When the plane
 // goes (routing off, a rollback to nothing) it is as stale as a tunnel flow: its NAT binding points at
 // the tunnel while the main table now sends it out of the WAN. Unowned, it was kept, and stayed dead
-// until the app gave up (QA-062).
+// until the app gave up.
 func TestPolicySlotFlowIsStaleWhenThePlaneGoes(t *testing.T) {
 	p := &model.Profile{
 		Endpoints: []model.Endpoint{{

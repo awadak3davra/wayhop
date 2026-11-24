@@ -912,7 +912,7 @@ func TestParseSubscription_PlainMixed(t *testing.T) {
 		t.Fatalf("want exactly 1 error (junkline), got %d: %v", len(errs), errs)
 	}
 	// The error locates the entry by LINE NUMBER, never by echoing the raw line (which for a share
-	// link is the credential — LOOP-021). The junk line here is benign, but the contract is uniform.
+	// link is the credential). The junk line here is benign, but the contract is uniform.
 	if strings.Contains(errs[0], "junkline-no-scheme") {
 		t.Fatalf("subscription error echoed the raw line instead of its position: %q", errs[0])
 	}

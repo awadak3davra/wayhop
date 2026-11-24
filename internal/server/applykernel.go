@@ -12,9 +12,11 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"wayhop/internal/pbr"
+	"wayhop/internal/version"
 )
 
 var (
@@ -31,6 +33,112 @@ type exactKernelRunner interface {
 
 type exactKernelAdapter struct {
 	runner exactKernelRunner
+	// keep, when set, is asked before each install command; true skips it. It is how a reinstall
+	// leaves a table the runtime elector re-pointed as it is (Server.electedRouteKeeper): RenderIP
+	// seeds every table with `route replace default dev <first candidate>`, which would put the
+	// compile-time pin back over an elected member on every Apply and every fw4 reload.
+	keep func(command string) bool
+	// hold, when set, is the names hold the kill-switch guard is rendered with for a plan
+	// (Server.namesHold); nil renders the guard without one. Install and postcheck must be given the
+	// same one, or the guard's marker would never match.
+	hold func(plan *pbr.Plan) pbr.NamesHold
+	// fallbackGuard is the guard of the plane this install replaces. A rollback loads it back before
+	// it takes the plane down, so the lists the old plane kill-switched are held while nothing marks.
+	fallbackGuard string
+	// fallbackPlan is the plan fallbackGuard was rendered for (its learned addresses go back with it).
+	fallbackPlan *pbr.Plan
+	// learned, when set, is the program that puts the learned addresses of the plan's kill-switched
+	// names back into a guard that has just been loaded (Server.learnedNamesProgram): a load replaces
+	// the table, and the sets with it. Same transaction, so there is no moment without them.
+	learned func(plan *pbr.Plan) string
+	// guardTx, when set, is held over a load of the guard: the learned addresses are rendered and
+	// loaded as one step against the loop that learns them (Server.ksGuardTx).
+	guardTx sync.Locker
+	// coreRunning, when set, says whether the core runs. A guard loaded while it does not takes over
+	// what the names hold of the guard it replaces had left, instead of a fresh period.
+	coreRunning func() bool
+	// carry, when set, renders the program that puts the fast DNS plane's resolver-fed set elements
+	// back into the table the nft load replaces (Server.dlistCarry). Loaded in the same transaction;
+	// a load that fails with it is tried once more without, so the carry can never cost the plane.
+	carry func(ctx context.Context, plan *pbr.Plan) string
+	// mustLoad, when set, renders the program loaded right after the table that must succeed: the
+	// remote lists' prefixes and the core pin's devices (Server.fastMustLoad).
+	mustLoad func(ctx context.Context, plan *pbr.Plan) string
+}
+
+// guardProgram is the kill-switch guard for plan as this adapter loads it: the table and its marker
+// in one transaction. "" when the plan has nothing to guard.
+func (adapter *exactKernelAdapter) guardProgram(plan *pbr.Plan) string {
+	if plan == nil {
+		return ""
+	}
+	var hold pbr.NamesHold
+	if adapter.hold != nil {
+		hold = adapter.hold(plan)
+	}
+	return plan.RenderNftGuardWith(hold)
+}
+
+// loadGuard replaces the guard table with guard, rendered for plan: the table, its marker, the
+// learned addresses of the plan's kill-switched names, and the names hold's remaining time when the
+// core is down, all in one transaction.
+func (adapter *exactKernelAdapter) loadGuard(ctx context.Context, guard string, plan *pbr.Plan) error {
+	if adapter.guardTx != nil {
+		adapter.guardTx.Lock()
+		defer adapter.guardTx.Unlock()
+	}
+	program := guard + pbr.GuardProofProgram(guard)
+	if adapter.learned != nil && plan != nil {
+		program += adapter.learned(plan)
+	}
+	program += adapter.holdCarryOver(ctx, plan)
+	_, err := adapter.runner.Run(ctx, program, "nft", "-f", "-")
+	return err
+}
+
+// holdCarryOver keeps the names hold bounded across a reload. The hold is "at most
+// one period without the core"; if every load of the table started that period again, then with the
+// core down each Apply, each rollback and each list refresh that changed a guarded set would hold the
+// LAN for another ten minutes. While the core is not running, the new table's hold gets what the
+// old one had left: emptied when it had lapsed, shortened when it was counting down. With the core
+// running, or with no hold in place to read (the boot, a table someone deleted), it is the full
+// period, which the renewal keeps up anyway.
+func (adapter *exactKernelAdapter) holdCarryOver(ctx context.Context, plan *pbr.Plan) string {
+	if adapter.hold == nil || adapter.coreRunning == nil || plan == nil || adapter.coreRunning() {
+		return ""
+	}
+	hold := adapter.hold(plan)
+	if hold.Seconds <= 0 || len(hold.Pass) == 0 {
+		return "" // no hold, or a strict one that never counts down
+	}
+	listing, err := adapter.runner.Run(ctx, "", "nft", "list", "set", "inet", pbr.GuardTable, pbr.GuardHoldSet)
+	if err != nil {
+		return ""
+	}
+	left, ok := pbr.GuardHoldRemaining(listing)
+	switch {
+	case !ok || left >= hold.Seconds:
+		return ""
+	case left <= 0:
+		return pbr.RenderGuardHoldLift()
+	}
+	return pbr.RenderGuardHoldRenew(left)
+}
+
+// guardLoaded reports whether the guard in the kernel is this program with its rules in place: the
+// marker is the last rule of the chain, so a flushed chain or table reads as absent.
+func (adapter *exactKernelAdapter) guardLoaded(ctx context.Context, guard string) bool {
+	listing, err := adapter.runner.Run(ctx, "", "nft", "list", "chain", "inet", pbr.GuardTable, pbr.GuardChain)
+	return err == nil && pbr.GuardProofPresent(listing, guard)
+}
+
+// dropGuard removes the guard table; one that is not there is the state asked for.
+func (adapter *exactKernelAdapter) dropGuard(ctx context.Context) error {
+	command := "nft delete table inet " + pbr.GuardTable
+	if err := adapter.runCommand(ctx, command); err != nil && !exactKernelAlreadyAbsent(command, err) {
+		return err
+	}
+	return nil
 }
 
 const exactKernelRollbackTimeout = 10 * time.Second
@@ -109,6 +217,7 @@ func (adapter *exactKernelAdapter) apply(
 	if err := context.Cause(ctx); err != nil {
 		return err
 	}
+	artifact = rerenderKernelArtifact(artifact)
 	if !validExactKernelArtifact(artifact) {
 		return errExactKernelArtifact
 	}
@@ -119,6 +228,11 @@ func (adapter *exactKernelAdapter) apply(
 		if err := adapter.teardown(ctx, artifact.Retire); err != nil {
 			return fmt.Errorf("%w: retire baseline: %v", errExactKernelArtifact, err)
 		}
+		// The plane is gone because the operator switched kernel routing off: the guard goes with it,
+		// after it. Left behind it would hold the kill-switched addresses with no tunnel route to take.
+		if err := adapter.dropGuard(ctx); err != nil {
+			return fmt.Errorf("%w: kill switch guard removal: %v", errExactKernelArtifact, err)
+		}
 		return nil
 	}
 	rollback := func(primary error) error {
@@ -126,6 +240,16 @@ func (adapter *exactKernelAdapter) apply(
 		// not be skipped merely because the client disconnected, but it remains strictly bounded.
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), exactKernelRollbackTimeout)
 		defer cancel()
+		// The guard is never part of a rollback's teardown: with the plane deleted it is the only
+		// thing between a kill-switched list and the provider. The replaced plane's guard goes back
+		// first, so what that plane held stays held until the baseline is installed again.
+		// Not when it is already the one in place (the install changed nothing of the guard): a load
+		// replaces the table, and with it the time the names hold has left.
+		if adapter.fallbackGuard != "" && !adapter.guardLoaded(cleanupCtx, adapter.fallbackGuard) {
+			if err := adapter.loadGuard(cleanupCtx, adapter.fallbackGuard, adapter.fallbackPlan); err != nil {
+				log.Printf("apply: kernel plane rollback: the previous kill switch guard was not restored (the new one stays): %v", err)
+			}
+		}
 		if rollbackErr := adapter.teardown(cleanupCtx, artifact.Teardown); rollbackErr != nil {
 			return errors.Join(primary, fmt.Errorf("exact kernel rollback: %w", rollbackErr))
 		}
@@ -141,6 +265,23 @@ func (adapter *exactKernelAdapter) apply(
 	// 2. The nft program, which replaces its own table atomically.
 	// 3. Only then the deletions: the RenderIP lines that remove stale state from a table the plane
 	//    keeps, and the retire list of rules and tables the new plane no longer names.
+	//
+	// 0. Before any of it, the kill-switch guard (pbr/guard_nft.go): its own table, replaced in one
+	//    transaction, which holds the plan's kill-switched destinations whatever the steps below, a
+	//    rollback or a later loss of a rule or route leave behind. A guard that does not load fails
+	//    the install before anything of the plane was touched.
+	//    A guard that is already this plan's (its marker is there) is left as it is: reloading it
+	//    would start the names hold's timeouts again, and a plane that something keeps breaking, so
+	//    that it is reinstalled every half minute, would then hold the LAN for as long as that
+	//    lasts instead of for the hold's one period.
+	guard := adapter.guardProgram(artifact.Plan)
+	if guard != "" {
+		if !adapter.guardLoaded(ctx, guard) {
+			if err := adapter.loadGuard(ctx, guard, artifact.Plan); err != nil {
+				return fmt.Errorf("%w: kill switch guard: %v", errExactKernelArtifact, err)
+			}
+		}
+	}
 	var cleanups []string
 	for _, command := range artifact.IP {
 		if err := context.Cause(ctx); err != nil {
@@ -148,6 +289,9 @@ func (adapter *exactKernelAdapter) apply(
 		}
 		if exactKernelIPCleanupCommand(command) {
 			cleanups = append(cleanups, command)
+			continue
+		}
+		if adapter.keep != nil && adapter.keep(command) {
 			continue
 		}
 		if err := adapter.runCommand(ctx, command); err != nil {
@@ -169,12 +313,34 @@ func (adapter *exactKernelAdapter) apply(
 	if err := context.Cause(ctx); err != nil {
 		return rollback(err)
 	}
-	if _, err := adapter.runner.Run(ctx, string(artifact.Nft), "nft", "-f", "-"); err != nil {
+	carried := ""
+	if adapter.carry != nil {
+		carried = adapter.carry(ctx, artifact.Plan)
+	}
+	if carried != "" {
+		if _, err := adapter.runner.Run(ctx, string(artifact.Nft)+carried, "nft", "-f", "-"); err != nil {
+			log.Printf("apply: kernel plane: the resolver-fed set elements were not carried over (%v); loading without them", err)
+		} else {
+			carried = "loaded"
+		}
+	}
+	if carried == "loaded" {
+		// The table and its carried elements are in.
+	} else if _, err := adapter.runner.Run(ctx, string(artifact.Nft), "nft", "-f", "-"); err != nil {
 		// nft rejects a program as a whole, so the running table still marks as before; what step 1
 		// changed is at most which tunnel a renumbered egress's table points at, and no blackhole was
 		// removed. A rollback here would delete that running table and hand everything to the WAN; the
 		// failed Apply re-runs its baseline over this instead.
 		return fmt.Errorf("%w: nft load: %v", errExactKernelArtifact, err)
+	}
+	// The fast DNS plane's must-load part: the remote lists' prefixes and the
+	// core pin's devices, a transaction of its own after the table, never dropped with the carry.
+	if adapter.mustLoad != nil {
+		if prog := adapter.mustLoad(ctx, artifact.Plan); prog != "" {
+			if _, err := adapter.runner.Run(ctx, prog, "nft", "-f", "-"); err != nil {
+				return rollback(fmt.Errorf("%w: fast path sets: %v", errExactKernelArtifact, err))
+			}
+		}
 	}
 	for _, command := range cleanups {
 		if err := context.Cause(ctx); err != nil {
@@ -209,6 +375,13 @@ func (adapter *exactKernelAdapter) apply(
 	if _, err := adapter.runner.Run(ctx, proof, "nft", "-f", "-"); err != nil {
 		return rollback(fmt.Errorf("%w: verification marker: %v", errExactKernelArtifact, err))
 	}
+	if guard == "" {
+		// The new plane kill-switches nothing: a guard an earlier plane left would go on dropping
+		// what the operator has just released. Last, once the new plane routes.
+		if err := adapter.dropGuard(ctx); err != nil {
+			return fmt.Errorf("%w: stale kill switch guard: %v", errExactKernelArtifact, err)
+		}
+	}
 	return nil
 }
 
@@ -219,7 +392,10 @@ func (adapter *exactKernelAdapter) postcheck(
 	ctx context.Context,
 	artifact executionKernelArtifactV1,
 ) error {
-	if adapter == nil || adapter.runner == nil || !validExactKernelArtifact(artifact) {
+	if adapter == nil || adapter.runner == nil {
+		return errExactKernelArtifact
+	}
+	if artifact = rerenderKernelArtifact(artifact); !validExactKernelArtifact(artifact) {
 		return errExactKernelArtifact
 	}
 	if err := context.Cause(ctx); err != nil {
@@ -246,6 +422,65 @@ func (adapter *exactKernelAdapter) postcheck(
 	}
 	if _, err := adapter.runner.Run(ctx, "", "nft", "list", "set", "inet", artifact.Plan.Table, proof); err != nil {
 		return errExactKernelArtifact
+	}
+	// The kill-switch guard is a table of its own; its marker follows its program and is the last
+	// rule of its chain, so an absent guard, another plan's guard and a flushed one all read as drift.
+	if guard := adapter.guardProgram(artifact.Plan); guard != "" {
+		if !adapter.guardLoaded(ctx, guard) {
+			return fmt.Errorf("%w: the kill switch guard is not loaded", errExactKernelArtifact)
+		}
+	}
+	return adapter.postcheckRoutes(ctx, artifact)
+}
+
+// postcheckRoutes reads back what the nft marker cannot vouch for: the plane's ip
+// rules and the kill switch's blackhole routes live outside the nft table, so another script, an `ip
+// rule flush` or an `ip route flush table N` removed them with the marker still in place, the panel
+// still saying applied, and the marked traffic falling through to the main table. A missing rule or
+// blackhole is drift, and the reconcile loop reinstalls the plane.
+//
+// A table's `default dev <tunnel>` route is deliberately not judged: the runtime elector owns it, an
+// elected member is not drift, and it is rightly absent while a tunnel is down.
+func (adapter *exactKernelAdapter) postcheckRoutes(ctx context.Context, artifact executionKernelArtifactV1) error {
+	plan := artifact.Plan
+	read := func(args ...string) (string, error) {
+		out, err := adapter.runner.Run(ctx, "", "ip", args...)
+		if err != nil {
+			return "", fmt.Errorf("%w: ip %s: %v", errExactKernelArtifact, strings.Join(args, " "), err)
+		}
+		return out, nil
+	}
+	rules4, err := read("rule", "show")
+	if err != nil {
+		return err
+	}
+	var rules6, routes6 string
+	if plan.HasV6() {
+		if rules6, err = read("-6", "rule", "show"); err != nil {
+			return err
+		}
+	}
+	if missing := pbr.MissingIPRules(strings.Join(artifact.IP, "\n"), rules4, rules6, plan.HasV6()); len(missing) > 0 {
+		return fmt.Errorf("%w: ip rules are missing: %s", errExactKernelArtifact, strings.Join(missing, "; "))
+	}
+	failClosed := false
+	for _, e := range plan.Egresses {
+		failClosed = failClosed || e.Kind == pbr.EgressBlackhole || e.Kind == pbr.EgressInterface && e.FailClosed
+	}
+	if !failClosed {
+		return nil
+	}
+	routes4, err := read("route", "show", "table", "all")
+	if err != nil {
+		return err
+	}
+	if plan.HasV6() {
+		if routes6, err = read("-6", "route", "show", "table", "all"); err != nil {
+			return err
+		}
+	}
+	if missing := plan.MissingFailClosedRoutes(routes4, routes6); len(missing) > 0 {
+		return fmt.Errorf("%w: kill switch routes are missing: %s", errExactKernelArtifact, strings.Join(missing, "; "))
 	}
 	return nil
 }
@@ -347,6 +582,171 @@ func validExactKernelPresentArtifact(artifact executionKernelArtifactV1) bool {
 		slices.Equal(artifact.Teardown, artifact.Plan.RenderTeardown(exactKernelOptions())) &&
 		validExactKernelCommands(artifact.IP) && validExactKernelCommands(artifact.Teardown)
 }
+
+// rerenderKernelArtifact brings a stored nft artifact to this build's renderer (after a binary
+// upgrade the nft program, ip commands and teardown stored by the previous build need not equal what
+// the new one renders from the same plan, and the start converge would refuse it as "exact kernel
+// artifact is invalid", leaving the router without its plane after a reboot). The plan is the
+// reviewed, authenticated part of the record; the rendering is derived from it, so an artifact whose
+// tools are still authenticated is re-rendered from its plan and then checked like any other. An
+// artifact this build rendered (Renderer) is never re-rendered: a difference there is drift and is
+// refused, as is one whose tools are not authenticated, and a Keenetic (ipset) artifact.
+// The postcheck's marker follows the rendering, so the first reconcile after an upgrade reinstalls
+// the plane once in the new form.
+func rerenderKernelArtifact(artifact executionKernelArtifactV1) executionKernelArtifactV1 {
+	if artifact.Action != ExecutionEnsurePresent || artifact.Ipset != nil || artifact.Plan == nil ||
+		artifact.Renderer == kernelRendererID() || validExactKernelPresentArtifact(artifact) ||
+		!validExecutionToolIdentity(artifact.NFTTool, executionToolNFT) ||
+		!validExecutionToolIdentity(artifact.IPTool, executionToolIP) {
+		return artifact
+	}
+	// Only plans whose shape every build renders alike are re-rendered: hybrid and
+	// fast without the resolver plane. A fast plan with the resolver plane (routing mode fast, Phase 2,
+	// never released) from another build carries choices this build may refuse (which lists are routed
+	// by tables, which stay in nft): it is not re-rendered, and Diagnostics asks for one Apply.
+	if fastPlanOfAnotherBuild(artifact) {
+		log.Printf("apply: the stored fast-mode plane was planned by another build; it is not re-rendered: Apply once to plan it again")
+		return artifact
+	}
+	// The stored bytes must still prove the stored plan: a plan changed beside an old
+	// rendering is not made executable here; it takes a fresh Review and Apply.
+	if why := renderingDisagrees(artifact); why != "" {
+		log.Printf("apply: the stored kernel plane was rendered by another build and its plan does not match that rendering (%s); a new Review and Apply is needed", why)
+		return artifact
+	}
+	out := artifact
+	out.Nft = []byte(artifact.Plan.RenderNft())
+	out.IP = artifact.Plan.RenderIP(exactKernelOptions())
+	out.Offload = []byte(artifact.Plan.RenderOffload())
+	out.Teardown = artifact.Plan.RenderTeardown(exactKernelOptions())
+	out.Renderer = kernelRendererID()
+	// What the old rendering installed and the new one does not is removed after the install
+	// (an IPv6 blackhole at an older metric would otherwise outrank the tunnel's route and stay).
+	out.Retire = append(append([]string(nil), artifact.Retire...), supersededKernelCommands(artifact.IP, out.IP)...)
+	if validExactKernelPresentArtifact(out) {
+		log.Printf("apply: the stored kernel plane was rendered by an older build; re-rendered from its plan")
+	}
+	return out
+}
+
+// staleFastPlan reports a stored fast plan of another build whose rendering this build would not run
+// as stored (it renders differently now), so it waits for an Apply.
+func staleFastPlan(a executionKernelArtifactV1) bool {
+	return a.Action == ExecutionEnsurePresent && a.Ipset == nil && fastPlanOfAnotherBuild(a) && !validExactKernelPresentArtifact(a)
+}
+
+// fastPlanOfAnotherBuild reports a stored plan of the fast DNS plane (or one carrying its routed
+// tables) that another build planned.
+func fastPlanOfAnotherBuild(a executionKernelArtifactV1) bool {
+	if a.Plan == nil || a.Renderer == kernelRendererID() {
+		return false
+	}
+	if a.Plan.FastDNS {
+		return true
+	}
+	for _, z := range a.Plan.Zones {
+		if z.Routed || len(z.RouteV4)+len(z.RouteV6) > 0 || z.RemoteRouted {
+			return true
+		}
+	}
+	return false
+}
+
+// supersededKernelCommands is the inverse of every rule and route an old rendering added that the new
+// one does not: `ip [-6] rule add X` -> `ip [-6] rule del X`, `ip [-6] route replace|add X` ->
+// `ip [-6] route del X`. The executor takes an already absent one as done.
+func supersededKernelCommands(oldIP, newIP []string) []string {
+	// A route is the same object whether a rendering added or replaced it.
+	same := func(c string) string { return strings.Replace(c, " route add ", " route replace ", 1) }
+	now := map[string]bool{}
+	for _, c := range newIP {
+		now[same(c)] = true
+	}
+	var out []string
+	for _, c := range oldIP {
+		if now[same(c)] {
+			continue
+		}
+		f := strings.Fields(c)
+		i := 1
+		if len(f) > 1 && f[1] == "-6" {
+			i = 2
+		}
+		if len(f) < i+3 || f[0] != "ip" {
+			continue
+		}
+		switch {
+		case f[i] == "rule" && f[i+1] == "add":
+			f[i+1] = "del"
+		case f[i] == "route" && (f[i+1] == "replace" || f[i+1] == "add"):
+			f[i+1] = "del"
+		default:
+			continue
+		}
+		if cmd := strings.Join(f, " "); validExactKernelCommands([]string{cmd}) {
+			out = append(out, cmd)
+		}
+	}
+	return out
+}
+
+// renderingDisagrees says how an older build's stored rendering fails to account for its stored plan
+// ("" = it accounts for it): every egress's device, table and mark, and the address of every zone
+// prefix kept in nft, must appear in the old nft program or ip commands, and the old teardown must
+// delete the plan's table. A legacy record carries no authentication of its plan; this ties the plan
+// to bytes an earlier build produced from it.
+func renderingDisagrees(a executionKernelArtifactV1) string {
+	nft, ip := string(a.Nft), strings.Join(a.IP, "\n")
+	if len(a.Teardown) == 0 || a.Teardown[0] != "nft delete table inet "+a.Plan.Table {
+		return "the teardown does not delete table " + a.Plan.Table
+	}
+	for _, e := range a.Plan.Egresses {
+		if e.Kind == pbr.EgressWAN {
+			continue
+		}
+		if !strings.Contains(ip, fmt.Sprintf("table %d", e.Table)) || !strings.Contains(nft+ip, fmt.Sprintf("0x%08x", e.Mark)) {
+			return "egress " + e.Tag + " is not in the rendering"
+		}
+		if e.Kind == pbr.EgressInterface && e.Iface != "" && !strings.Contains(ip, "dev "+e.Iface+" ") {
+			return "egress " + e.Tag + "'s device is not in the rendering"
+		}
+	}
+	// Each prefix as a whole element of the old program, not a substring of one.
+	tokens := map[string]bool{}
+	for _, t := range strings.FieldsFunc(nft, func(r rune) bool { return strings.ContainsRune(" \t\n{},;", r) }) {
+		tokens[t] = true
+	}
+	for _, z := range a.Plan.Zones {
+		for _, c := range append(append([]string(nil), z.V4...), z.V6...) {
+			if !tokens[c] {
+				return "zone " + z.Name + "'s " + c + " is not in the rendering"
+			}
+		}
+	}
+	return ""
+}
+
+// kernelTeardownOf is what takes a stored plane down: its own teardown and, for an older build's
+// rendering, this build's teardown of the same plan too (a table this build adds, such as
+// the DNS table, is not in an older teardown).
+func kernelTeardownOf(a executionKernelArtifactV1) []string {
+	re := rerenderKernelArtifact(a)
+	if re.Renderer == a.Renderer {
+		return a.Teardown
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, c := range append(append([]string(nil), a.Teardown...), re.Teardown...) {
+		if !seen[c] {
+			seen[c] = true
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// kernelRendererID names this build's renderer: the release and the commit it was built from.
+func kernelRendererID() string { return version.Version + "+" + version.Commit }
 
 // Keep the exact adapter's renderer comparison visibly pinned to the zero/default pbr.Options used
 // by the review builder without importing mutable Server state.

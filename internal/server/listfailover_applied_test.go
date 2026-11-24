@@ -45,6 +45,9 @@ func appliedFailoverServer(t *testing.T, applied, saved model.Profile, tables *f
 	}
 	cfg := config.Default()
 	cfg.RoutingMode = "fast"
+	// apply-state.json and fastest-journal.json live beside the sing-box config: here, never in the
+	// installed daemon's directory.
+	cfg.SingBox.Config = filepath.Join(t.TempDir(), "singbox.json")
 	s := &Server{cfg: cfg, store: st, routeTables: tables.io()}
 	plan, _, err := pbr.Compile(&applied, s.pbrCompileOptions(*cfg))
 	if err != nil {
@@ -95,7 +98,7 @@ func egressTable(t *testing.T, plan *pbr.Plan, tag string) int {
 	return 0
 }
 
-// QA-091. The loop elected tables from the SAVED profile, recompiled on every tick, while the router
+// The loop elected tables from the SAVED profile, recompiled on every tick, while the router
 // holds the tables of the APPLIED plan. A pending edit that adds a list through an endpoint sorting
 // before the group renumbers the group into the table the applied plan gave another egress: the tick
 // then wrote the group's member into that egress's table (its list left through the wrong tunnel), and
@@ -111,7 +114,11 @@ func TestListFailoverElectsIntoTheAppliedTables(t *testing.T) {
 	tables := &fakeTables{}
 	s, plan := appliedFailoverServer(t, applied, saved, tables)
 	grpTable, nlTable := egressTable(t, plan, "grp"), egressTable(t, plan, "nl")
-	pending, _, err := pbr.Compile(&saved, s.pbrCompileOptions(*s.cfg))
+	// Numbered from scratch, as before marks were kept across compiles (pbr.Options.Slots): the loop
+	// must work from the applied tables whatever a compile of the saved profile would number.
+	fromScratch := s.pbrCompileOptions(*s.cfg)
+	fromScratch.Slots = nil
+	pending, _, err := pbr.Compile(&saved, fromScratch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +143,7 @@ func TestListFailoverElectsIntoTheAppliedTables(t *testing.T) {
 	}
 }
 
-// QA-091. An Apply renumbers the tables; a tick that read the old plan and wrote after the new one was
+// An Apply renumbers the tables; a tick that read the old plan and wrote after the new one was
 // installed would put a member into another egress's table. The tick steps aside like the reconcile
 // loop.
 func TestListFailoverStepsAsideWhileApplyRuns(t *testing.T) {
@@ -156,7 +163,7 @@ func TestListFailoverStepsAsideWhileApplyRuns(t *testing.T) {
 	}
 }
 
-// QA-092. Apply seeds a v6 default next to the v4 one in every table of a plan that marks v6, but the
+// Apply seeds a v6 default next to the v4 one in every table of a plan that marks v6, but the
 // loop moved only v4: when the elected member died, marked v6 stayed on the dead tunnel and, once its
 // device went down and the kernel flushed the route, fell through to the main v6 table - the WAN. When
 // the member came back nothing re-seeded the group's v6 table either, so v6 leaked until the next Apply.
@@ -221,7 +228,7 @@ func TestListFailoverRepointsIPv6Too(t *testing.T) {
 	})
 }
 
-// QA-093. self_switching_groups was built from the loop's ELECTION, so a group whose members were all
+// Self_switching_groups was built from the loop's ELECTION, so a group whose members were all
 // down (or not measured yet) dropped out of it exactly during the outage, and the Failover card said the
 // group does not switch by itself while the daemon stood ready to re-point it the moment a member came
 // back. It is a capability: the group's table in the applied plan and a member the kernel can route to.

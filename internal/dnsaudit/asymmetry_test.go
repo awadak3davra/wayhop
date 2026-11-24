@@ -222,7 +222,7 @@ func TestDetectAsymmetric_FallThroughDetailReads(t *testing.T) {
 	}
 }
 
-// QA-105. With no `final`, sing-box answers unmatched lookups with the first server it creates. An
+// With no `final`, sing-box answers unmatched lookups with the first server it creates. An
 // empty final used to skip the uncovered-list check altogether, so a plaintext `local` first server
 // answered a tunnelled list with no finding, while naming it as final was reported.
 func TestDetectAsymmetric_EmptyFinalIsTheFirstEmittedServer(t *testing.T) {
@@ -240,7 +240,7 @@ func TestDetectAsymmetric_EmptyFinalIsTheFirstEmittedServer(t *testing.T) {
 	}
 }
 
-// QA-106. A fakeip server sends no lookup anywhere, so a rule pointing a list at it is not a direct
+// A fakeip server sends no lookup anywhere, so a rule pointing a list at it is not a direct
 // plaintext resolver. Without TUN the generator drops the server and its rules, so the list is
 // judged by where its lookups fall through to.
 func TestDetectAsymmetric_FakeIPRule(t *testing.T) {

@@ -45,7 +45,7 @@ func streamCmd(ctx context.Context, emit func(string), name string, args ...stri
 
 // validIfaceRe guards the interface name passed to `ping -I` / `traceroute -i`
 // (same argument-injection concern as ValidTarget). Real iface names (awg0, eth0,
-// br-lan, tun-keen) fit; max 15 chars (IFNAMSIZ-1).
+// br-lan, tun-keen) fit; max 15 chars.
 var validIfaceRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,14}$`)
 
 // ValidIface reports whether s is a safe interface name to bind a probe to.

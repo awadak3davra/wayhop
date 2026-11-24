@@ -16,6 +16,7 @@ import (
 	"wayhop/internal/config"
 	"wayhop/internal/core"
 	"wayhop/internal/dnscheck"
+	"wayhop/internal/failover"
 	"wayhop/internal/failsafe"
 	"wayhop/internal/health"
 	"wayhop/internal/initserver"
@@ -69,12 +70,9 @@ type Server struct {
 	// keeneticLeft records the WayHop-created KeeneticOS tunnels last found changed outside WayHop;
 	// see keeneticleft.go.
 	keeneticLeft keeneticLeftAsIs
-	// The optional-module (Plugins/IPTV) state used to live here as a featurestore handle plus a data
-	// dir, wired by a setter that nothing ever called: its routes were never registered, its start
-	// hook never ran, and the field stayed nil for the life of every process. The subsystem is
-	// deferred, not deleted — it is preserved in the development repository, outside the Go build and
-	// outside this published tree. deferred_features_test.go is the tripwire that keeps it out: it
-	// asserts the routes 404 and the IPTV assets are not embedded.
+	// The optional-module (Plugins/IPTV) subsystem is not part of this build.
+	// deferred_features_test.go keeps it out: it asserts the routes 404 and the IPTV assets are not
+	// embedded.
 	// routingProbes holds each routing list source's last reachability answer (handleRoutingStatus).
 	routingProbeMu sync.Mutex
 	routingProbes  map[string]routingProbe
@@ -115,6 +113,30 @@ type Server struct {
 	// applyStage / applyInProgress publish the running Apply's step for GET /api/apply/status.
 	applyStage      atomic.Value
 	applyInProgress atomic.Bool
+	// ksb holds the kill switch backstop's routes (killswitchbackstop.go).
+	ksb ksBackstop
+	// ksl persists the learned members of kill-switched domain sets for the boot fill
+	// (killswitchlearned.go).
+	ksl ksLearned
+	// ksn holds the addresses kill-switched names were reached at, for the nft guard's sets and
+	// their file (killswitchnames.go).
+	ksn ksNames
+	// ksLearn is the plan the learn loop reads the core's connections for (killswitchlearn.go).
+	ksLearn atomic.Pointer[ksLearnTarget]
+	// ksLocal is the router's own routes as the nft guard is told them (killswitchlocal.go).
+	ksLocal ksLocal
+	// fastDNS is the fast DNS plane's runtime state (fastdns.go): the remote rule-sets decompiled into
+	// RAM and the dnsmasq snippet last written.
+	fastDNS fastDNSRuntime
+	// ksGuardTx is held over a load of the nft guard with its replay of the learned addresses, and
+	// over a learn pass's change of them, so neither can fall between the other's two halves.
+	ksGuardTx sync.Mutex
+	// ksCoreSeen is whether the core ran at the last reconcile tick (killswitchnft.go coreReturned).
+	ksCoreSeen atomic.Int32
+	// hok keeps the route into the overlap hand-off TUN (handoffcore.go).
+	hok handoffRouteKeeper
+	// leaks resets flows that left by the WAN while the marking chain was rebuilt (leaksweep.go).
+	leaks leakSweeper
 	// kernelPlaneState is the last kernel-plane observation (postcheck / reconcile), for /api/state.
 	kernelPlaneState atomic.Int32
 	// execOps is nil in production (the real adapters); tests inject fakes. See applyexec.go.
@@ -204,6 +226,28 @@ type Server struct {
 	// routeTables is nil in production (iproute2, see tableIO); tests replace how the list-routing
 	// loop reads and writes table defaults and asks whether a device is up.
 	routeTables *routeTableIO
+	// unitElector is the kernel plane's runtime election (kernelelect.go), created on first use. It
+	// holds per-table decision state and the log the Failover page reads.
+	unitElectorOnce sync.Once
+	unitElector     *failover.TableElector
+	// fastest is the per-list "fastest tunnel" scheduler, probe cache and journal writer
+	// (listfastest.go).
+	fastest fastestState
+	// throughput is the capped RAM result store, budget and serialized manual/scheduled work queue.
+	throughput throughputState
+	// Test seams; nil selects the real interface-bound downloader, WAN discovery and clock.
+	throughputRunOf    func(context.Context, model.Endpoint, string, speedtest.DownloadOptions) (speedtest.DownloadResult, error)
+	throughputWANOf    func() (string, error)
+	throughputNowOf    func() time.Time
+	throughputJitterOf func(time.Duration) time.Duration
+	throughputAliveOf  func(string) bool
+	// throughputCoreRunningOf and throughputCoreRunOf are nil in production: whether the proxy core
+	// runs, and the download through its probe inbound (throughputcore.go).
+	throughputCoreRunningOf func() bool
+	throughputCoreRunOf     func(context.Context, coreExit, speedtest.DownloadOptions) (speedtest.DownloadResult, error)
+	// throughputMemAvailableOf is nil in production (ramdir.MemAvailable): the memory gate of a
+	// measurement through the core.
+	throughputMemAvailableOf func() (int64, bool)
 	// tableRestoreErr is the last refusal per family/table the route restore logged (under
 	// listFailoverErrMu), so a device that keeps failing is reported once, not every tick.
 	tableRestoreErr map[string]string
@@ -302,6 +346,7 @@ func New(cfg *config.Config, hub *traffic.Hub, cl *clash.Client, sb *core.SingBo
 		failsafe: failsafe.New(failsafe.DefaultDurations()), plugins: plugin.New(pdir, filepath.Dir(cfg.SingBox.Bin)),
 		servers: ss, jobs: initserver.NewJobManager(), ui: ui, pbrRunner: pbr.ExecRunner{}, updErrs: map[string]string{},
 		startedAt: time.Now(), keeneticConfigReader: readKeeneticRunningConfig}
+	s.ksb.ready = ksBackstopReadyStamp // set once, before any goroutine reads it
 	s.auth = newAuthManager(s)
 	// NDM owns KeeneticOS's AmneziaWG kernel module: the plugin must not add links on it behind NDM's
 	// back, so every AmneziaWG endpoint it runs there runs on amneziawg-go.
@@ -358,6 +403,14 @@ func (s *Server) Handler() http.Handler {
 	s.route(mux, authRoutePublic, "GET /api/health", s.handleHealth)
 	s.route(mux, authRouteProtected, "GET /api/health/endpoints", s.handleHealthEndpoints)
 	s.route(mux, authRouteProtected, "GET /api/failover/state", s.handleFailoverState)
+	// Fastest tunnel per routing list (listfastest.go): state reads, a measurement on demand, and the
+	// pin/exclude settings (staged like any edit, run by Apply).
+	s.route(mux, authRouteProtected, "GET /api/lists/fastest", s.handleFastestLists)
+	s.route(mux, authRouteProtected, "GET /api/lists/{id}/fastest", s.handleFastestList)
+	s.route(mux, authRouteProtected, "POST /api/lists/{id}/fastest/probe", s.handleFastestProbe)
+	s.route(mux, authRouteProtected, "POST /api/lists/{id}/fastest/pin", s.handleFastestPin)
+	s.route(mux, authRouteProtected, "POST /api/lists/{id}/fastest/unpin", s.handleFastestUnpin)
+	s.route(mux, authRouteProtected, "POST /api/lists/{id}/fastest/exclude", s.handleFastestExclude)
 	s.route(mux, authRouteProtected, "GET /api/failover/events", s.handleFailoverEvents)
 	s.route(mux, authRouteProtected, "GET /api/health/history", s.handleHealthHistory)
 	s.route(mux, authRouteProtected, "POST /api/health/test/{id}", s.handleHealthTest)
@@ -373,7 +426,7 @@ func (s *Server) Handler() http.Handler {
 	s.route(mux, authRouteProtected, "POST /api/endpoints", s.handleUpsertEndpoint)
 	s.route(mux, authRouteProtected, "POST /api/endpoints/bulk", s.handleBulkEndpoints)
 	s.route(mux, authRouteProtected, "DELETE /api/endpoints/{id}", s.handleDeleteEndpoint)
-	// A connection's on/off switch: {"enabled": bool} and nothing else (QA-152).
+	// A connection's on/off switch: {"enabled": bool} and nothing else.
 	s.route(mux, authRouteProtected, "PATCH /api/endpoints/{id}", s.handlePatchEndpoint)
 	s.route(mux, authRouteProtected, "POST /api/groups", s.handleUpsertGroup)
 	s.route(mux, authRouteProtected, "DELETE /api/groups/{id}", s.handleDeleteGroup)
@@ -382,7 +435,7 @@ func (s *Server) Handler() http.Handler {
 	// Routing lists (the "Routing" page): list CRUD + the preset catalog.
 	s.route(mux, authRouteProtected, "POST /api/routing", s.handleUpsertRoutingList)
 	s.route(mux, authRouteProtected, "DELETE /api/routing/{id}", s.handleDeleteRoutingList)
-	s.route(mux, authRouteProtected, "PATCH /api/routing/{id}", s.handlePatchRoutingList) // the list's switch (QA-152)
+	s.route(mux, authRouteProtected, "PATCH /api/routing/{id}", s.handlePatchRoutingList) // the list's switch
 	s.route(mux, authRouteProtected, "POST /api/device-groups", s.handleUpsertDeviceGroup)
 	s.route(mux, authRouteProtected, "DELETE /api/device-groups/{id}", s.handleDeleteDeviceGroup)
 	s.route(mux, authRouteProtected, "GET /api/routing/catalog", s.handleRoutingCatalog)
@@ -432,6 +485,9 @@ func (s *Server) Handler() http.Handler {
 	// Undo part of the pending set (field | object | subsystem | all) — reverts the REAL stored data.
 	s.route(mux, authRouteProtected, "POST /api/changeset/undo", s.handleChangeSetUndo)
 	s.route(mux, authRouteProtected, "POST /api/speedtest", s.handleSpeedtest)
+	s.route(mux, authRouteProtected, "GET /api/throughput", s.handleThroughput)
+	s.route(mux, authRouteProtected, "POST /api/throughput/measure", s.handleThroughputMeasure)
+	s.route(mux, authRouteProtected, "DELETE /api/throughput/measure", s.handleThroughputCancel)
 	s.route(mux, authRouteProtected, "GET /api/plugins", s.handlePlugins)
 	s.route(mux, authRouteProtected, "GET /api/watchdog", s.handleWatchdog)
 	s.route(mux, authRouteProtected, "GET /api/system", s.handleSystem)
@@ -448,6 +504,7 @@ func (s *Server) Handler() http.Handler {
 	s.route(mux, authRouteProtected, "GET /api/pbr/lists/memory", s.handlePBRListMemory)
 	s.route(mux, authRouteProtected, "GET /api/vpn/discover", s.handleVPNDiscover)
 	s.route(mux, authRouteProtected, "POST /api/vpn/adopt", s.handleVPNAdopt)
+	s.route(mux, authRouteProtected, "POST /api/endpoints/{id}/replace-tunnel", s.handleReplaceTunnel)
 	s.route(mux, authRouteProtected, "POST /api/drift/ignore", s.handleDriftIgnore)
 	s.route(mux, authRouteProtected, "GET /api/native/capabilities", s.handleNativeCapabilities)
 	s.route(mux, authRouteProtected, "GET /api/interfaces", s.handleInterfaces)
@@ -459,6 +516,7 @@ func (s *Server) Handler() http.Handler {
 	s.route(mux, authRouteProtected, "GET /api/diagnostics", s.handleDiagnostics)
 	s.route(mux, authRouteProtected, "POST /api/diagnostics", s.handleDiagnosticsAnalyze)
 	s.route(mux, authRouteProtected, "GET /api/diagnostics/trace", s.handleTrace)
+	s.route(mux, authRouteProtected, "GET /api/diagnostics/flash", s.handleFlashWrites) // flash writes per file class since start
 	s.route(mux, authRouteProtected, "GET /api/healthcheck", s.handleHealthCheck)
 	s.route(mux, authRouteProtected, "POST /api/netdiag", s.handleNetDiag)
 	s.route(mux, authRouteProtected, "POST /api/netdiag/all", s.handleNetDiagAll)
@@ -468,7 +526,7 @@ func (s *Server) Handler() http.Handler {
 	s.route(mux, authRouteProtected, "GET /api/reality/dests", s.handleRealityDests)
 	s.route(mux, authRouteProtected, "GET /api/kb", s.handleKB)
 
-	// Init Server (R8) — multi-server registry, options, job-based provisioning,
+	// Init Server — multi-server registry, options, job-based provisioning,
 	// hardening, and the smart-console job feed.
 	s.route(mux, authRouteProtected, "GET /api/servers", s.handleServers)
 	s.route(mux, authRouteProtected, "POST /api/servers", s.handleServers)
@@ -536,11 +594,11 @@ func (s *Server) Handler() http.Handler {
 	s.route(mux, authRouteProtected, "DELETE /api/updater/{id}", s.handleUpdaterUninstall)
 
 	// No route forwards to the sing-box Clash controller. Its bearer secret exists
-	// so that only this daemon may drive it; the generic /api/clash/ reverse proxy
-	// that used to be mounted here re-published that authority to any client the
-	// host guard admits — every method, every suffix the controller understands
-	// (including ones a future sing-box adds), and encoded traversals (..%2F)
-	// forwarded verbatim past the mount. The panel never needed it: every
+	// so that only this daemon may drive it; a generic /api/clash/ reverse proxy
+	// would re-publish that authority to any client the host guard admits — every
+	// method, every suffix the controller understands (including ones a future
+	// sing-box adds), and encoded traversals (..%2F) forwarded verbatim past the
+	// mount. The panel does not need it: every
 	// Clash-derived view is served by a typed endpoint above (traffic, health,
 	// connections), and the UI has no /api/clash/* call. The boundary is pinned
 	// by TestClashControllerNotReachableThroughPanel.

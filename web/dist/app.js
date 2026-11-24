@@ -543,8 +543,30 @@ const findEndpoint = id => state.profile.endpoints.find(e => e.id === id);
 const ifMatch = o => o && o._rev ? { "If-Match": o._rev } : {};
 const keepRev = (o, r) => { if (o && r && r.rev && r.was === o._rev) o._rev = r.rev; };
 const findGroup = id => state.profile.groups.find(g => g.id === id);
-const nameOf = id => (findEndpoint(id) || findGroup(id) || {}).name ||
+const plainNameOf = id => (findEndpoint(id) || findGroup(id) || {}).name ||
   ((state.ndmPolicies || []).find(p => "ndm-policy:" + p.name === id) || {}).description || id;
+// splitExit reads an exit label the daemon builds for a table the elector owns: "<tag> (<iface>)",
+// the group or "list:<id>" and the link it holds now. Ids never contain " (".
+const splitExit = label => {
+  const m = /^(.+) \(([^()\s]+)\)$/.exec(label || "");
+  return m ? { tag: m[1], iface: m[2] } : { tag: label || "", iface: "" };
+};
+// exitTagName is a tag by the name the operator gave it, a fastest list's own egress ("list:<id>")
+// by the list's name.
+const exitTagName = tag => {
+  if (tag.startsWith("list:")) {
+    const rl = ((state.profile && state.profile.routing_lists) || []).find(l => l.id === tag.slice(5));
+    return (rl && (rl.name || rl.id)) || tag.slice(5);
+  }
+  return plainNameOf(tag);
+};
+// nameOf is an endpoint, group, access policy or exit label by its display name: "grp-awg31 (nwg5)"
+// reads "AWG31 (nwg5)", "list:telegram (nwg5)" reads "Telegram (nwg5)".
+const nameOf = id => {
+  const { tag, iface } = splitExit(id);
+  const n = exitTagName(tag);
+  return iface ? n + " (" + iface + ")" : n;
+};
 
 /* ---------- formatting ---------- */
 function fmtRate(bps) {
@@ -1240,7 +1262,6 @@ function renderError(view, e) {
 // change the hash), plus browser reload/close via the shared beforeunload hook below. Native
 // confirm() is synchronous, so it can block before the new page renders (an async dialog cannot). ---
 let _navGuardHash = location.hash || "#dashboard";
-let _navGuardSkip = false;
 // Registry: ANY page with unsaved-form state registers { check, discard } from its render —
 //   registerDirtyCheck("settings", () => _settingsDirty, () => { _settingsDirty = false; })
 // The guard consults the checker of the page being LEFT; a re-render simply overwrites its
@@ -1265,11 +1286,12 @@ function onHashChange() {
     if (to !== _navGuardHash) history.replaceState(null, "", _navGuardHash);
     return;
   }
-  if (_navGuardSkip) { _navGuardSkip = false; _navGuardHash = to; route(); return; }
   if (to !== _navGuardHash && hasUnsavedPageEdits(_navGuardHash)) {
     if (!confirm(t("You have unsaved changes on this page. Leave without saving?"))) {
-      _navGuardSkip = true;
-      location.hash = _navGuardHash; // revert; the resulting hashchange is skipped above
+      // Put the address back without a hashchange. Assigning location.hash fired one, and the skip
+      // branch above then called route(), which rebuilt this very page and lost the edits of the
+      // operator who had just chosen to stay (BW-02).
+      history.replaceState(null, "", _navGuardHash);
       return;
     }
     discardPageEdits(_navGuardHash); // user chose to leave without saving → clear so re-entry is clean
@@ -1914,8 +1936,7 @@ function fmtAge(startISO) {
 // was the internal id.
 function exitLabel(tag) {
   if (!tag || tag === "direct") return t("direct");
-  const e = findEndpoint(tag) || findGroup(tag);
-  return (e && e.name) ? e.name : tag;
+  return nameOf(tag);
 }
 // connItem renders one REAL kernel connection (from /api/conntrack) — remote dst:port, the
 // L4 proto, which exit it took, and per-direction bytes. The right-hand slot shows the TCP
@@ -2022,7 +2043,14 @@ function talkersCard() {
 // exitsSummary turns the per-exit byte totals into a short "direct 1.2G · NL 300M" line.
 function exitsSummary(exits) {
   if (!exits) return "";
-  return Object.entries(exits).sort((a, b) => b[1] - a[1]).slice(0, 3)
+  // One total per group or list: the elected link in the label changes with every switch, and the
+  // totals split by it read as two exits.
+  const byTag = {};
+  Object.entries(exits).forEach(([label, bytes]) => {
+    const tag = splitExit(label).tag;
+    byTag[tag] = (byTag[tag] || 0) + bytes;
+  });
+  return Object.entries(byTag).sort((a, b) => b[1] - a[1]).slice(0, 3)
     .map(([tag, bytes]) => exitLabel(tag) + " " + fmtBytes(bytes)).join("  ·  ");
 }
 // connRowsWanted says whether this tick should build the rows. The card is collapsed by default, and
@@ -2164,6 +2192,12 @@ function routingStripCard() {
   // push the dashboard past two screens, where the demo's four sit on one line. Fold the enumeration
   // and keep the verdict. The chips stay in the DOM either way, so paintDashRouting still finds every
   // [data-dashrl] and a closed card is as current as an open one.
+  // Lists in fastest mode get one short line each ("Telegram → czech 69 ms"), filled once read.
+  const fastBox = el("div", { class: "hint dashrl-fast" });
+  card.appendChild(fastBox);
+  loadFastestInfo().then(info => {
+    fastestLines(info).forEach(line => fastBox.appendChild(el("div", {}, "⚡ " + line)));
+  });
   if (lists.length > 8) {
     const det = el("details", { class: "dashrl-det" },
       el("summary", { class: "hint" }, t("Show all {0} lists", lists.length)));
@@ -2464,6 +2498,10 @@ async function renderConnections(view) {
       el("button", { class: "btn btn-primary", title: "Add one connection — paste a vless://, hysteria2://… link, fill a form, or import a config", onclick: openAddConnection }, "+ Add connection")));
   view.appendChild(head);
   view.appendChild(await connectionsBody());
+  // The last speed measurement of each tunnel rides beside its latency; it arrives after the list.
+  head.setAttribute("data-tp-live", "1");
+  head._tpLive = () => { if (typeof paintExitsList === "function") paintExitsList(); };
+  loadThroughput().then(() => tpRepaint(!(state.throughput && state.throughput.busy)));
 }
 
 // connectionsBody is everything under that head: the first-run card, or the exits list beside the
@@ -2611,7 +2649,8 @@ function failoverMembers(g) {
     chip.appendChild(el("span", { class: "pill " + dotCls, role: "img", "aria-label": alive ? t("alive") : down ? t("down") : t("not yet checked"), title: alive ? "alive" : down ? "down" : "not yet checked" },
       el("span", { class: "dot" }),
       nameOf(id),
-      alive && h.latency_ms ? el("small", { style: "margin-left:6px;color:inherit;opacity:.75" }, t("{0} ms", h.latency_ms)) : null));
+      alive && h.latency_ms ? el("small", { style: "margin-left:6px;color:inherit;opacity:.75" }, t("{0} ms", h.latency_ms)) : null,
+      tpNote(id) ? el("small", { style: "margin-left:6px;color:inherit;opacity:.75" }, tpSpan(id)) : null));
     // "● LIVE" = the member sing-box is ACTUALLY routing through now (authoritative, from the
     // daemon). "✓ BEST" = the client-side lowest-latency guess — shown only when there is no live
     // truth, or when it DIFFERS from LIVE (so the user sees "you'd expect X by latency, but sing-box
@@ -2631,12 +2670,15 @@ async function renderFailover(view) {
   // Pull the daemon's REAL failover truth (elected member per group + local-fault flag). Best-effort:
   // on any error fall back to an empty state so the page still renders with the latency guess.
   await loadFailoverState();
+  await loadThroughput(); // the last measured speed of each member, beside its latency
 
-  const head = el("div", { class: "block-head" },
+  const head = el("div", { class: "block-head", "data-tp-live": "1" },
     el("div", {},
       el("div", { class: "desc" }, "Group your connections so traffic automatically switches to a healthy one when the active tunnel goes down.")),
     el("div", { class: "side" },
       el("button", { class: "btn btn-primary", title: "Create a failover group — pick members and traffic auto-switches to a healthy one", onclick: openNewGroup }, "+ New group")));
+  // A measurement that just ended changed the members' speeds: draw the page again.
+  head._tpLive = done => { if (done && document.body.contains(head)) route(); };
   view.appendChild(head);
 
   if (failoverState.local_fault) {
@@ -2649,6 +2691,7 @@ async function renderFailover(view) {
   if (!state.profile.groups.length) {
     view.appendChild(el("div", { class: "card" }, emptyState("No failover groups",
       "Create one to auto-select the fastest working connection (urltest), like a router's backup-WAN stack.")));
+    foFastestCard(view);
     return;
   }
   const defRule = state.profile.rules.find(r => r.default);
@@ -2737,12 +2780,31 @@ async function renderFailover(view) {
       el("div", { class: "desc" }, t("Every exit once, in readiness bands. Chips show which groups can fall back to it.")))));
   view.appendChild(foBands(state.profile.groups));
 
+  foFastestCard(view);
+
   // The log is appended asynchronously so a slow or missing endpoint cannot delay the page.
   const logBox = el("div", { class: "card fo-log-box" },
     el("div", { class: "fo-log-t" }, t("Switch log")),
     el("div", { class: "hint" }, t("Reading…")));
   view.appendChild(logBox);
   foRenderLog(logBox);
+}
+
+// foFastestCard lists the routing lists that pick their own fastest tunnel (they switch by themselves
+// too), each with a way to its measurements. Filled asynchronously; absent when there are none.
+function foFastestCard(view) {
+  const fastBox = el("div");
+  view.appendChild(fastBox);
+  loadFastestInfo().then(info => {
+    const lists = ((info && info.lists) || []).filter(s => s.active);
+    if (!lists.length) return;
+    const card = el("div", { class: "card" }, el("div", { class: "fo-log-t" }, t("Lists in fastest mode")),
+      el("div", { class: "hint" }, t("Each picks the fastest working tunnel for its own destinations.")));
+    lists.forEach(s => card.appendChild(el("div", { class: "row-between", style: "gap:8px;align-items:center;margin-top:6px" },
+      el("span", {}, (s.name || s.id) + " → " + (s.applied ? (s.mode === "all_down" ? t("all down") : (s.current_name || "—") + (s.rtt_ms ? " " + t("{0} ms", s.rtt_ms) : "")) : t("after Apply"))),
+      el("button", { class: "btn btn-sm", type: "button", onclick: () => openFastestFromElsewhere(s.id) }, t("Measurements")))));
+    fastBox.appendChild(card);
+  });
 }
 
 // foRenderLog fills the switch log in place. An unreadable endpoint and an empty log are different
@@ -2861,7 +2923,9 @@ function blockingGroupRefs(g) {
     }
   }
   for (const rl of (p.routing_lists || [])) {
-    if (rl.outbound === g.id || rl.download_via === g.id) out.push({ kind: "routing_list", name: rl.name || rl.id });
+    // A list with other tunnels moves on to the next one when this group goes (store.hasOtherTunnel).
+    const others = (rl.candidates || []).some((c) => c !== g.id);
+    if ((rl.outbound === g.id && !others) || rl.download_via === g.id) out.push({ kind: "routing_list", name: rl.name || rl.id });
   }
   for (const ds of ((p.dns && p.dns.servers) || [])) {
     if (ds.detour === g.id) out.push({ kind: "dns_detour", name: ds.tag || "" });
@@ -2870,33 +2934,31 @@ function blockingGroupRefs(g) {
 }
 
 async function delGroup(g) {
-  // Ask BEFORE offering the destructive confirm: a dialog that takes OK and then refuses has spent
-  // the operator's decision on nothing.
-  const blocked = blockingGroupRefs(g);
-  if (blocked.length) {
-    // The same sentence the refusal path uses, so a blocker the pre-check knows and one it does not
-    // read identically to the operator.
-    await modalConfirm(t("{0} cannot be deleted yet. {1} Point it somewhere else first, then delete this group.",
-      g.name || g.id,
-      tn("{0} object still points at it: {1}.|{0} objects still point at it: {1}.",
-        blocked.length, blocked.map(b => b.name).filter(Boolean).join(", "))),
-      { acknowledgeOnly: true, okLabel: t("Close") });
-    return;
-  }
-  if (!await modalConfirm(t("Delete group {0}?", g.name))) return;
-  try { await api.del("/api/groups/" + encodeURIComponent(g.id)); await loadProfile(); route(); toast("Deleted", "ok"); }
+  // A group something still points at is not a dead end: the daemon answers GROUP_IN_USE with what
+  // points at it, and the operator picks what happens to those references - leave them parked
+  // without a failover, move them to another exit, or send them straight to the WAN. When nothing
+  // points at it, the ordinary confirm is all there is.
+  const name = g.name || g.id;
+  const base = "/api/groups/" + encodeURIComponent(g.id);
+  const finish = async () => { await loadProfile(); route(); toast("Deleted", "ok"); };
+  if (!blockingGroupRefs(g).length && !await modalConfirm(t("Delete group {0}?", g.name))) return;
+  try { await api.del(base); await finish(); return; }
   catch (err) {
-    // The check above asks before offering, so reaching here means it did not know about a condition
-    // the store does. The daemon now answers structurally (GROUP_IN_USE + dependents) for exactly
-    // that case, so the fallback names what blocks instead of printing a sentence the operator
-    // cannot act on — which is what this path used to do.
     const data = err && err.data;
-    const deps = (data && data.code === "GROUP_IN_USE" && Array.isArray(data.dependents)) ? data.dependents : null;
-    if (!deps || !deps.length) { toast(err.message, "err"); return; }
-    const named = deps.map(d => d.name || d.id).join(", ");
-    await modalConfirm(t("{0} cannot be deleted yet. {1} Point it somewhere else first, then delete this group.",
-      g.name || g.id, tn("{0} object still points at it: {1}.|{0} objects still point at it: {1}.", deps.length, named)),
-      { acknowledgeOnly: true, okLabel: t("Close") });
+    if (!data || data.code !== "GROUP_IN_USE") { toast(err.message, "err"); return; }
+    // The dialog lives in the Connections chunk, which may not be loaded yet.
+    try { await loadChunk("page-connections"); } catch (_) { toast(err.message, "err"); return; }
+    const choice = await askDependentsChoice(name, data.dependents || [], data.replacements || [], {
+      title: t("Delete {0}", name),
+      move: t("Move and delete"),
+      hint: t("Or leave them without a failover: they keep their addresses but are switched off until you give them an exit."),
+      anyway: t("Delete and leave without a failover"),
+      direct: t("Delete and send them straight to the WAN"),
+    });
+    if (!choice) return;
+    const q = choice.detach ? "?detach=1" : "?replace_with=" + encodeURIComponent(choice.replace);
+    try { await api.del(base + q); await finish(); }
+    catch (err2) { toast(err2.message, "err"); }
   }
 }
 
@@ -3067,6 +3129,7 @@ async function renderRouting(view) {
     // in their own columns instead of flowing inline after variable-width source text
     // (which made them drift left/right by ~200px between rows).
     const table = el("div", { class: "rltable" });
+    card.appendChild(routingBulkBar(lists));
     table.appendChild(el("div", { class: "rlhead framed" },
       el("span", { title: t("Match order — the first list that matches decides where the traffic goes") }, "#"),
       el("span", {}, ""),
@@ -3077,6 +3140,13 @@ async function renderRouting(view) {
       el("span", {}, "")));
     lists.forEach((rl, i) => table.appendChild(routingRow(rl, i, lists.length)));
     card.appendChild(table);
+    // Fastest lists: the active tunnel under each route select, and the panel a link elsewhere asked for.
+    loadFastestInfo().then(info => {
+      paintFastestRows(info);
+      const want = state.openFastestId;
+      state.openFastestId = null;
+      if (want) openFastestPanel(want);
+    });
     // At real scale the ordered ruleset outgrows the screen: 29 lists on the Keenetic is 2425px,
     // three screens, where the demo's four fit easily. Order is the semantics here, so tabs or
     // grouping are out — the list keeps its sequence and gains a filter above it plus its own
@@ -3105,7 +3175,9 @@ async function renderRouting(view) {
           const on = !q || hay.includes(q);
           row.style.display = on ? "" : "none";
           if (on) shown++;
+          else rlSelected.delete(rl.id); // a list the filter hides is no longer part of a group change
         });
+        if (window.rlBulkSync) window.rlBulkSync();
         count.textContent = q
           ? t("{0} of {1} lists — reordering is disabled while filtered", shown, lists.length)
           : t("{0} lists, evaluated in this order", lists.length);
@@ -3119,17 +3191,14 @@ async function renderRouting(view) {
     // work it out from the arrows.
     card.appendChild(el("div", { class: "hint rl-order-note" },
       t("Evaluated top to bottom: the first list that matches wins, and a disabled list is skipped entirely.")));
-    // …on the plane that reads a rule list. The KERNEL plane does neither: pbr.go sorts zones (blocks
-    // last, then by zone name) and emits one non-terminating mark per zone, so an address in two
-    // zones takes the LAST one emitted — "for OVERLAPPING destination CIDRs the LAST-emitted zone
-    // wins", in the compiler's own words. Verified on a live Keenetic: the panel lists
-    // Telegram, Antifilter, Meta, Twitter, Re:filter, TeamViewer, GitHub in that order while
-    // iptables -t mangle -S WR_PREROUTING emits antifilter, meta, refilter, telegram, twitter,
-    // github, teamviewer — alphabetical. It changes nothing there because all seven carry the same
-    // mark, and that is exactly why it would go unnoticed until two overlapping lists take
-    // different exits.
+    // …on the plane that reads a rule list. The KERNEL plane does neither: it emits one
+    // non-terminating mark per zone, so an address in two zones takes the LAST one emitted, and
+    // pbr orderZonesForEmit emits by precedence (direct, tunnels, kill-switched tunnels, blocks;
+    // names before addresses, then by zone name), never in the panel's order. A direct domain list
+    // once took shared Cloudflare addresses from refilter on a live Keenetic; on a shared address
+    // its own names now keep their exit through the sing-box hand-off (pbr/handoff.go).
     card.appendChild(el("div", { class: "hint rl-order-note" },
-      t("Where the kernel carries a list this order does not decide an overlap: a block always wins, and between two ordinary lists the later zone name does. It only matters if overlapping lists take different exits.")));
+      t("Where the kernel carries a list this order does not decide an overlap. A shared address goes to the stronger list: direct yields to a tunnel, a tunnel to a kill-switched tunnel, everything to a block; among equals a list of names yields to a list of addresses, then the later name wins. A domain list acts on the addresses its names resolve to, and a CDN address serves many sites: on a shared address only the list's own names keep its exit, decided by sing-box from the site name.")));
   }
   view.appendChild(card);
   // What these lists cost the router, in kernel memory, per list. A routing list is not free: each one
@@ -4201,6 +4270,14 @@ function saveDNS(msg, rerender) {
   dnsSaveChain = dnsSaveChain.then(() => saveDNSNow(msg, rerender));
   return dnsSaveChain;
 }
+// saveDNSAfter runs mutate on dnsState only once every earlier save has landed, then saves. A delete
+// that spliced dnsState before queueing was undone by the earlier PUT's answer, which reassigns
+// dnsState: the record came back and the panel still said it was deleted (BW-03). mutate returns
+// false when there is nothing to change any more.
+function saveDNSAfter(mutate, msg, rerender) {
+  dnsSaveChain = dnsSaveChain.then(() => (mutate() === false ? false : saveDNSNow(msg, rerender)));
+  return dnsSaveChain;
+}
 async function saveDNSNow(msg, rerender) {
   try {
     const r = await dnsPut();
@@ -4957,6 +5034,177 @@ function fmtClock(ms) {
   return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
 }
 
+// ── Fastest tunnel per list: what several pages share (the list panel is in page-routing.js) ──
+// loadFastestInfo reads GET /api/lists/fastest into state.fastestInfo; null when unreadable.
+async function loadFastestInfo() {
+  try { state.fastestInfo = await api.get("/api/lists/fastest"); } catch (_) { state.fastestInfo = null; }
+  return state.fastestInfo;
+}
+
+// fastestLines is "Telegram → czech 69 ms" per list the router runs in fastest mode.
+function fastestLines(info) {
+  return ((info && info.lists) || []).filter(s => s.active && s.applied).map(s =>
+    (s.name || s.id) + " → " + (s.mode === "all_down" ? t("all down") : (s.current_name || "—") + (s.rtt_ms ? " " + t("{0} ms", s.rtt_ms) : "")));
+}
+
+// openFastestFromElsewhere goes to the Routing page and opens one list's panel there.
+function openFastestFromElsewhere(id) { state.openFastestId = id; location.hash = "#routing"; }
+
+// ── Tunnel throughput: what several pages share (server/throughput.go) ──
+// A measurement downloads up to the configured volume (100 MB) through one tunnel, bound to its own interface, and keeps
+// nothing. It spends the line's traffic, so it runs when asked (or on the opt-in schedule) and the
+// pages show the last result with its time, never a figure of unknown age.
+// loadThroughput reads GET /api/throughput into state.throughput; null when unreadable.
+async function loadThroughput() {
+  try { state.throughput = await api.get("/api/throughput"); state.tpAt = Date.now(); } catch (_) { state.throughput = null; }
+  if (state.throughput && state.throughput.busy) tpWatch();
+  return state.throughput;
+}
+function tpReasonWord(r) {
+  switch (r) {
+    case "rate_limited": return t("the test servers refuse this exit (HTTP 429/403)");
+    case "restricted": return t("the exit is up but does not carry the test servers; speed unknown");
+    case "too_short": return t("the sample was too short to judge the speed by");
+    case "budget": return t("the monthly traffic budget for measurements is spent");
+    case "no_interface": return t("this connection has no interface of its own on the router");
+    case "unsupported": return t("this router cannot bind a download to a tunnel");
+    case "cancelled": return t("the measurement was cancelled");
+    case "core_down": return t("the proxy core is not running");
+    case "needs_apply": return t("the running proxy core does not know this connection yet: Apply once");
+    case "low_memory": return t("the router has too little free memory to measure through the proxy core");
+  }
+  return t("no test server answered through this tunnel");
+}
+function tpMbps(v) { v = +v || 0; return v >= 100 ? String(Math.round(v)) : v.toFixed(1); }
+// tpNow is the router's clock, carried forward from the last answer: ages and staleness are counted
+// against it, so a browser whose clock is off does not turn a fresh figure stale.
+function tpNow() {
+  const d = state.throughput;
+  return d && d.now ? d.now + (Date.now() - (state.tpAt || Date.now())) : Date.now();
+}
+// tpWhen is the local clock time of a measurement, marked "yesterday" when it is not today's (a bare
+// 14:02 from 23 hours ago reads as today's), or its age past a day.
+function tpWhen(at) {
+  const now = tpNow(), age = now - at;
+  if (age >= 86400000) return t("{0} h ago", Math.floor(age / 3600000));
+  return new Date(at).toDateString() === new Date(now).toDateString() ? fmtClock(at) : t("yesterday {0}", fmtClock(at));
+}
+// tpNote is what a row says about one tunnel's speed: null when it was never measured (a row then
+// says nothing, rather than a placeholder), else the text, whether it is stale and the hover text.
+// The figure is the test servers' one; a tunnel that only has the Telegram media sample shows that,
+// labelled, since the two are not comparable. cls "media" asks for the media sample first: the
+// panel of a list that is elected by those shows the figures it compares, not the test servers'.
+function tpNote(id, cls) {
+  const d = state.throughput, st = d && d.tunnels && d.tunnels[id];
+  if (!st) return null;
+  if (st.running) return { text: "↓ " + (st.live_mbps ? t("{0} Mbit/s", tpMbps(st.live_mbps)) : "…"), title: t("Measuring the speed now") };
+  const why = st.reason ? tpReasonWord(st.reason) : "";
+  // An exit that is up but forwards only some destinations is not a failed tunnel: no failure mark.
+  const failed = !!why && st.reason !== "restricted";
+  const media = !!st.media_at && (cls === "media" || !st.success_at);
+  const at = media ? st.media_at : st.success_at, res = media ? st.media : st.success;
+  if (!at) return why ? { text: st.reason === "restricted" ? "↓ ?" : "↓ —", failed, title: t("Speed not measured: {0}", why) } : null;
+  const fresh = d.fresh_hours || 24;
+  const stale = tpNow() - at > fresh * 3600000;
+  let title = stale ? t("Measured more than {0} h ago: too old to choose a tunnel by", fresh)
+    : t("Download speed through this tunnel, measured {0}", new Date(at).toLocaleString());
+  if (why) title = t("The last attempt failed: {0}", why) + ". " + title;
+  if (!media && st.restricted && res.source) title += " " + t("This exit carries only some destinations; measured through {0}.", res.source);
+  if (!media && st.media_at) title += " " + t("Telegram media file: {0} Mbit/s.", tpMbps(st.media.steady_mbps));
+  if ((d.via || {})[id] === "core") title += " " + t("Measured through the proxy core: this connection has no interface of its own on the router.");
+  return { text: "↓ " + t("{0} Mbit/s", tpMbps(res.steady_mbps)) + (media ? " (Telegram)" : "") + " · " + tpWhen(at), stale, failed, title };
+}
+function tpSpan(id, cls) {
+  const n = tpNote(id, cls);
+  return n ? el("span", { class: "tp-note" + (n.stale ? " stale" : "") + (n.failed ? " failed" : ""), title: n.title }, n.text) : null;
+}
+// tpBlocked says why a measurement cannot start now, "" when it can.
+function tpBlocked(scope, id) {
+  const d = state.throughput;
+  if (!d) return "";
+  if (d.supported === false) return t("This router cannot bind a download to a tunnel, so speed is not measured here.");
+  if (scope === "tunnel" && !(d.measurable || []).includes(id)) {
+    // A connection the proxy core carries is measured through the core's own outbound where the
+    // router can do that (OpenWrt); the router says why it cannot right now.
+    const why = (d.unmeasurable || {})[id];
+    if (why === "core_down") return t("This connection runs inside the proxy core, which is not running, so its speed cannot be measured now.");
+    if (why === "needs_apply") return t("This connection runs inside the proxy core. Apply once, and its speed can be measured through the core.");
+    return t("This connection has no interface of its own on the router, so its speed cannot be measured apart from the others.");
+  }
+  if (d.usage && d.usage.remaining_bytes <= 0) return t("The monthly traffic budget for speed measurements is spent.");
+  if (d.busy) return t("A speed measurement is already running.");
+  return "";
+}
+// tpMine says whether the router is working on this very request (running or queued), by its own
+// account: any tab, and a page loaded in the middle of the run, sees the same.
+function tpMine(scope, id) {
+  const d = state.throughput;
+  if (!d || !d.busy) return false;
+  const same = r => r && r.scope === scope && r.id === id;
+  return same(d.active) || (d.queued || []).some(same) || state.tpMine === scope + ":" + id;
+}
+// tpButton is "Measure speed" for a tunnel, a group or a list. It holds no state of its own: what it
+// says comes from state.throughput on every repaint, so a button a page re-rendered in the middle of
+// a measurement is as right as the one that was pressed. While its own request runs it is the Stop
+// control: a second press ends the run and drops the queue.
+function tpButton(scope, id, cls, name) {
+  const btn = el("button", { class: cls || "btn", type: "button", "data-tp-live": "1",
+    "aria-label": t("Measure speed") + (name ? " " + name : "") }, t("Measure speed"));
+  btn._tpLive = () => {
+    const d = state.throughput, why = tpBlocked(scope, id);
+    const mine = tpMine(scope, id);
+    const run = mine && d.running && d.tunnels[d.running];
+    btn.textContent = !mine ? t("Measure speed") : run && run.live_mbps ? t("{0} Mbit/s", tpMbps(run.live_mbps)) + " …" : t("Measuring…");
+    btn.disabled = !!why && !mine;
+    btn.title = mine ? t("Stop the measurement")
+      : why || t("Downloads up to {0} MB through the tunnel and keeps none of it. Uses the line's traffic.", Math.round(((d && d.max_bytes) || 1e8) / 1e6));
+  };
+  btn._tpLive();
+  btn.onclick = async () => {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    try {
+      if (tpMine(scope, id)) { state.tpMine = ""; await api.post("/api/throughput/measure", null, null, "DELETE"); }
+      else { state.tpMine = scope + ":" + id; await api.post("/api/throughput/measure", { scope, id }); }
+    } catch (e) { toast(e.message, "err"); }
+    await loadThroughput(); // starts the watch while the router is busy
+    tpRepaint(!(state.throughput && state.throughput.busy));
+  };
+  return btn;
+}
+// tpMediaList mirrors model.MediaList: whole words of the id and the name.
+function tpMediaList(id, name) {
+  return ((id || "") + " " + (name || "")).toLowerCase().split(/[^\p{L}\p{N}]+/u).some(w => ["telegram", "instagram", "youtube", "meta"].includes(w));
+}
+// tpPlanText says what the schedule would spend with the saved settings.
+function tpPlanText(d) {
+  const p = d && d.plan;
+  if (!p) return "";
+  if (!p.tunnels) return t("Nothing chooses a tunnel by speed, so the schedule has nothing to measure.");
+  return t("The schedule fits the budget: {0} per tunnel every {1} h for {2} tunnels, about {3} a month; {4} stays for the Measure speed button.",
+    fmtBytes(p.run_bytes), p.interval_hours, p.tunnels, fmtBytes(p.monthly_bytes), fmtBytes(p.reserve_bytes));
+}
+// tpRepaint tells everything on the page that shows a measurement to look again: each element marked
+// data-tp-live has its _tpLive(done) called, done being true once nothing runs any more.
+function tpRepaint(done) {
+  document.querySelectorAll("[data-tp-live]").forEach(n => { if (n._tpLive) n._tpLive(!!done); });
+}
+// tpWatch polls once a second while a measurement runs, whoever started it (this page, another
+// browser, the schedule), and stops when the router is idle again.
+let tpWatching = false;
+async function tpWatch() {
+  if (tpWatching) return;
+  tpWatching = true;
+  try {
+    for (let i = 0; i < 900; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      const d = await loadThroughput();
+      if (d && !d.busy) break;
+      tpRepaint(false);
+    }
+  } finally { tpWatching = false; tpRepaint(true); }
+}
+
 // ── Ask the router ────────────────────────────────────────────────────────────────────────────
 // Diagnostics had three text inputs — a target, a domain, and a log paste — each in its own card
 // with its own buttons. They ask the same kind of question ("what happens to this thing?") and
@@ -5153,7 +5401,7 @@ function renderTraceResult(wrap, r) {
     conns.forEach(c => wrap.appendChild(el("div", { style: rowStyle },
       el("span", { style: "font-family:ui-monospace,Consolas,monospace;overflow-wrap:anywhere" },
         c.dst + (c.dport ? ":" + c.dport : "") + (c.domain && c.domain !== r.domain ? " (" + c.domain + ")" : "")),
-      el("span", { class: "badge" }, t("via {0}", c.exit || "direct")))));
+      el("span", { class: "badge" }, t("via {0}", c.exit ? nameOf(c.exit) : "direct")))));
   }
   const cfg = r.configured || [];
   if (cfg.length) {
@@ -5678,6 +5926,9 @@ const SETTING_META = {
   "Notify webhook URL": { cfg: "watchdog.notify_url", secret: true },
   "Scheduled core restart": { cfg: "core_restart" },
   "Connectivity-check target": { cfg: "failsafe.target" },
+  "Tunnel speed measurements": { cfg: "throughput.scheduled" },
+  "Monthly traffic budget, MB": { cfg: "throughput.monthly_budget_mb" },
+  "Your own test file URL": { cfg: "throughput.custom_url" },
 };
 
 // Facets, in the order they are offered. Each is a question someone actually arrives with.
@@ -6234,6 +6485,14 @@ async function renderSettings(view) {
   // Fail-safe (Apply rollback)
   const fsTarget = txt(cfg.failsafe && cfg.failsafe.target, "1.1.1.1");
   const fsReboot = el("input", { type: "checkbox" }); fsReboot.checked = !!(cfg.failsafe && cfg.failsafe.auto_reboot);
+  const tpCfg = cfg.throughput || {};
+  const tpSched = el("input", { type: "checkbox" }); tpSched.checked = !!tpCfg.scheduled;
+  const tpBudget = el("input", { type: "number", min: "0", max: "1000000", placeholder: "3072", value: tpCfg.monthly_budget_mb ? String(tpCfg.monthly_budget_mb) : "" });
+  const tpURL = el("input", { type: "text", placeholder: "https://… (" + t("optional") + ")", value: tpCfg.custom_url || "" });
+  const tpUsage = el("div", { class: "hint", style: "margin-top:6px" });
+  loadThroughput().then(d => {
+    if (d && d.usage) tpUsage.textContent = t("Used this month: {0} of {1}.", fmtBytes(d.usage.used_bytes), fmtBytes(d.usage.budget_bytes)) + " " + tpPlanText(d);
+  });
   // Mode
   const demo = el("input", { type: "checkbox" }); demo.checked = !!cfg.demo;
   // Security — Host allow-list (DNS-rebinding guard; one host per line, empty = allow any)
@@ -6243,7 +6502,7 @@ async function renderSettings(view) {
   const autoRouteCapability = cfg.gateway ? "routing.mode.tun" : "routing.mode.mixed";
   const ROUTE_MODES = [
     ["hybrid", t("Everything via WayHop (domain carve-outs work; general traffic slower / CPU-bound)"), "routing.mode.hybrid"],
-    ["fast", t("Fast: general traffic bypasses WayHop (kernel fast-path) — IP carve-outs (calls/VoWiFi) still work; domain carve-outs OFF"), "routing.mode.fast"],
+    ["fast", t("Fast: general traffic bypasses WayHop (kernel fast-path); IP and domain lists are routed by the kernel, domains through the router's DNS; lists sent to a proxy go through sing-box"), "routing.mode.fast"],
     ["tun", t("All traffic through sing-box (TUN)"), "routing.mode.tun"],
     ["mixed", t("Local proxy only, no gateway (mixed)"), "routing.mode.mixed"],
     ["", t("Auto (derive from Gateway)"), autoRouteCapability],
@@ -6388,6 +6647,7 @@ async function renderSettings(view) {
       watchdog: { ...(cfg.watchdog || {}), notify_url: wdURL.value.trim() },
       core_restart: coreRestart.value.trim(),
       failsafe: { ...(cfg.failsafe || {}), target: fsTarget.value.trim(), auto_reboot: fsReboot.checked },
+      throughput: { ...(cfg.throughput || {}), scheduled: tpSched.checked, monthly_budget_mb: +tpBudget.value || 0, custom_url: tpURL.value.trim() },
       allowed_hosts: allowedHosts.value.split("\n").map(s => s.trim()).filter(Boolean),
     };
   }
@@ -6412,10 +6672,12 @@ async function renderSettings(view) {
   save.addEventListener("click", async () => {
     const next = collectSettings();
     const errs = validateSettingsClient(next);
-    // Lock-out guard: a non-empty allow-list that omits the host you're using now
-    // would 403 you on the next request — block and offer to add it.
+    // Lock-out guard: a non-empty allow-list that omits the NAME you're using now would 403 you on
+    // the next request — block and offer to add it. An address is exempt: the panel reached by an IP
+    // is reached on one of the router's own addresses, which the server always accepts (JK-11).
     const here = normalizeHostJS(location.hostname);
-    const lockedOut = next.allowed_hosts.length && here && !next.allowed_hosts.map(normalizeHostJS).includes(here);
+    const hereIsAddress = /^[0-9.]+$/.test(here) || here.includes(":");
+    const lockedOut = next.allowed_hosts.length && here && !hereIsAddress && !next.allowed_hosts.map(normalizeHostJS).includes(here);
     errBox.innerHTML = "";
     errs.forEach(m => errBox.appendChild(el("div", { class: "err-row" }, m)));
     if (lockedOut) {
@@ -6439,7 +6701,9 @@ async function renderSettings(view) {
       cfg = { ...next, rev: r.rev };
       lastSavedRouteMode = next.routing_mode || "";
       lastSavedOffload = offloadNow;
-      baseline = JSON.stringify(collectSettings()); _settingsDirty = false; dirtyBadge.style.display = "none";
+      // The baseline is what was SENT, not the form now: a field edited while the request was in
+      // flight is still unsaved and must stay dirty (BW-01).
+      baseline = JSON.stringify(next); markDirty();
       // Config now feeds the canonical applied-state (routing mode / TUN / offload…), so a
       // config-only save can flip the backend to "pending" — refresh the Apply banner NOW.
       refreshApplyState();
@@ -6511,6 +6775,16 @@ async function renderSettings(view) {
     el("label", { class: "check", style: "display:inline-flex;margin-top:10px" }, fsReboot, el("span", {}, t("Allow auto-reboot as a last resort"))),
     el("div", { class: "hint", style: "margin-top:6px" }, t("Off by default. Only triggers if a rollback still can't restore connectivity — leave off unless you trust unattended reboots."))));
 
+  view.appendChild(el("div", { class: "card", "data-section": "Reliability" },
+    el("div", { class: "card-title", style: "margin-bottom:8px" }, t("Tunnel speed measurements")),
+    el("div", { class: "hint", style: "margin-bottom:10px" }, t("A measurement downloads up to 100 MB through one tunnel and keeps none of it. It runs when you press Measure speed; the schedule below is off unless you turn it on.")),
+    el("label", { class: "check", style: "display:inline-flex;margin-bottom:10px" }, tpSched, el("span", {}, t("Measure every tunnel on a schedule"))),
+    el("div", { class: "hint", style: "margin-bottom:10px" }, t("At most once in 6 hours per tunnel, one tunnel at a time, and only while the line is idle.")),
+    field(t("Monthly traffic budget, MB"), tpBudget),
+    field(t("Your own test file URL"), tpURL),
+    el("div", { class: "hint", style: "margin-top:6px" }, t("Tried first when set. The built-in sources are tried in turn when one refuses or does not answer.")),
+    tpUsage));
+
   // Titled for what it holds. It was "Mode", which collided with the routing-mode field also called
   // "Mode": the settings index keys a row's metadata BY NAME, so this card inherited the routing
   // mode's config path and was compared against it — a checkbox against a routing-mode string, which
@@ -6521,8 +6795,10 @@ async function renderSettings(view) {
     el("div", { class: "hint", style: "margin-top:6px" }, restartTag(), t(" applies after restart"))));
 
   view.appendChild(el("div", { class: "card", "data-section": "Panel" },
-    el("div", { class: "card-title", style: "margin-bottom:8px" }, t("Security"), restartTag()),
-    el("div", { class: "hint", style: "margin-bottom:10px" }, t("Host allow-list — one hostname or IP per line. When set, the panel only answers requests whose Host header matches one of these (a DNS-rebinding defense). Leave EMPTY to allow any host (the default). List every name/IP you use to reach the panel, or you will lock yourself out (recover by clearing it in config.json and restarting).")),
+    // JK-11: the old text said an empty list allows any host, that the list replaces the router's own
+    // addresses and that a restart is needed. hostAllowGuard does the opposite on all three counts.
+    el("div", { class: "card-title", style: "margin-bottom:8px" }, t("Security")),
+    el("div", { class: "hint", style: "margin-bottom:10px" }, t("Host allow-list, one hostname or IP per line: a defense against DNS rebinding. The panel always answers on this router's own addresses (its interface IPs, loopback and hostname) and refuses any other name. Add here the other names you open it by, such as a local DNS name. Entries are added to the router's own addresses and never replace them, so the LAN IP keeps working. Takes effect on Save, no restart needed.")),
     allowedHosts));
 
   // Backup & restore — download/upload the whole config + reset to defaults.
@@ -7304,15 +7580,11 @@ function foOrderNote(g) {
     return t("This group runs on the core, which has no strict-order mode: it keeps the fastest working member and uses your order only as a tiebreak.");
   }
   if (g.type === "selector" && !g.managed) return t("selector routes through the member you pick; it does not switch by itself.");
-  // urltest means two different things, and only one of them measures anything. With the core,
-  // sing-box probes the members and keeps picking the fastest. A native group has no prober at all:
-  // Compile pins the group to one member, the daemon is supposed to supply that choice through
-  // CompileOptions.GroupElection — and nothing in the daemon sets it today, so the documented
-  // fallback applies: "the first routable member in the operator's own order". The ladder is then
-  // written in that order and the router walks it top-down. That is fallback behaviour under a
-  // urltest label, and the card said "picks the fastest working member" over it.
+  // urltest on router tunnels: the daemon's kernel elector measures every member through its own
+  // interface and moves the group's routing table to the fastest working one at runtime
+  // (internal/failover/kernel.go); the saved order only breaks ties.
   if (g.type === "urltest" && !foGroupNeedsCore(g)) {
-    return t("These are router tunnels, so nothing measures their latency: your order is followed, top to bottom, exactly as fallback does.");
+    return t("These are router tunnels: WayHop measures each one through the tunnel itself and routes the group through the fastest working member. Your order (#) is only the tiebreak.");
   }
   return t("urltest picks the fastest working member. Your order (#) is only the tiebreak.");
 }
@@ -7339,6 +7611,7 @@ function foChainCard(g, defRule) {
   const acts = el("div", { class: "fo-g-acts" },
       el("button", { class: "btn btn-sm", "aria-label": t("Test all members of {0}", gname), title: t("Actively re-test every member's latency, then sort best-first"), onclick: e => testFailoverGroup(g, e.currentTarget) }, t("Test all")),
       !isDefault ? el("button", { class: "btn btn-sm", "aria-label": t("Set as default route for {0}", gname), onclick: () => setDefault(g) }, t("Set as default route")) : null,
+      tpButton("group", g.id, "btn btn-sm", gname),
       el("button", { class: "btn btn-sm", "aria-label": t("Edit") + " " + gname, title: t("Edit group settings"), onclick: () => openEditGroup(g) }, t("Edit")),
       el("button", { class: "btn btn-danger btn-sm", "aria-label": t("Delete") + " " + gname, onclick: () => delGroup(g) }, t("Delete")));
 
@@ -7418,7 +7691,9 @@ function foChainCard(g, defRule) {
       el("span", { class: "insp-dot " + dotCls, "aria-hidden": "true" }),
       el("span", { class: "fo-hop-r" }, role),
       el("span", { class: "fo-hop-n" }, nameOf(id)),
-      el("span", { class: "fo-hop-l" }, down ? t("down") : h.latency_ms ? t("{0} ms", h.latency_ms) : t("checking…")));
+      // The last measured speed rides after the delay, as on the Connections page.
+      el("span", { class: "fo-hop-l" }, down ? t("down") : h.latency_ms ? t("{0} ms", h.latency_ms) : t("checking…"),
+        tpNote(id) ? " · " : null, tpSpan(id)));
     if (hopMore && mi >= HOPS_VISIBLE) hopMore.appendChild(hop); else track.appendChild(hop);
   });
   if (hopMore) track.appendChild(hopMore);

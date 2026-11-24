@@ -17,7 +17,7 @@ import (
 // drawn — a check whose subject is absent, which is the failure this project keeps finding in its own
 // work. Demo mode already synthesizes traffic for exactly this reason.
 //
-// The answers are shaped like a real apk on the test router, including the detail that caught a defect in
+// The answers are shaped like a real apk on the reference OpenWrt router, including the detail that caught a defect in
 // the planner: `apk info --who-owns` reports the owner as name AND version glued together.
 //
 // Mutating verbs do NOT mutate. They return the line the package manager would print, so the flow can
@@ -60,7 +60,7 @@ func (demoRunner) Run(_ context.Context, name string, args ...string) (string, e
 			"sing-box-1.12.4-r2 aarch64 {sing-box} (GPL-3.0-or-later)\n" +
 			"sing-box-1.11.15-r0 aarch64 {sing-box} (GPL-3.0-or-later)\n", nil
 	case strings.HasPrefix(argv, "apk query"):
-		// The sizes the space assessment reads, in apk-tools 3 own JSON shape and with the test router own
+		// The sizes the space assessment reads, in apk-tools 3 own JSON shape and with the reference router's own
 		// figures. The dev host has room for both builds at once, so demo mode plans the one-command
 		// upgrade — the two-command path belongs to a router that cannot, and is covered by tests.
 		return `[{"name":"sing-box","version":"1.12.17-r1","installed-size":40537528,"file-size":14485215},` +

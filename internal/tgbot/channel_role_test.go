@@ -24,7 +24,7 @@ func (h *harness) pressIn(chat Chat, from int64, data string) {
 // later make it a viewer, and then every alert in it carried Status and Mute: anyone who can see the
 // channel (a public one: anyone at all) could press them, since a callback is authorised by the chat,
 // not by who pressed. A subscriber muted the channel for a week, switched its uplink alerts off in
-// config.json and posted the LAN's device list into it (QA-102).
+// config.json and posted the LAN's device list into it.
 func TestAChannelIsAlertsOnlyWhateverItsRecordSays(t *testing.T) {
 	channel := config.TelegramChat{ID: -100700, Name: "Group news", Role: roleViewer, Lang: "en"}
 	h := newHarness(t, owner, channel)

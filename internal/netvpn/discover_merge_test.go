@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// keeneticListing5x is the layout `ndmc -c "show interface"` prints on KeeneticOS 5.x (captured
-// 2026-10), sanitized: fake keys, doc-range addresses, generic labels. Wireguard6 is switched on
+// keeneticListing5x is the layout `ndmc -c "show interface"` prints on KeeneticOS 5.x,
+// sanitized: fake keys, doc-range addresses, generic labels. Wireguard6 is switched on
 // but has no handshake ("state: up", "link: down", "connected: no"). Wireguard5 is absent: it was
 // deleted in the web UI.
 const keeneticListing5x = `Interface, name = "Wireguard0"
@@ -70,7 +70,7 @@ func TestParseNDMInterfaces_KeeneticOS5Listing(t *testing.T) {
 	}{
 		{"nwg0", "Wireguard0", "Exit_Malta", "KEY0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", true},
 		{"nwg4", "Wireguard4", "Exit_Poland", "KEY4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", true},
-		// Switched on, never connected: the admin state alone used to call it up.
+		// Switched on, never connected: the admin state alone does not make it up.
 		{"nwg6", "Wireguard6", "RU_exit", "KEY6AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", false},
 	}
 	if len(got) != len(want) {
@@ -125,8 +125,8 @@ func TestParseNDMInterfaceStatus_NestedBlocksDoNotLeak(t *testing.T) {
 	}
 }
 
-// A switch port's sub-block carries its own interface-name:, which used to open a bogus interface
-// that then collected the parent's later fields.
+// A switch port's sub-block carries its own interface-name:, which must not open a bogus interface
+// that would then collect the parent's later fields.
 func TestParseNDMInterfaceStatus_PortSubBlockIsNotAnInterface(t *testing.T) {
 	in := `Interface, name = "GigabitEthernet0"
                id: GigabitEthernet0
@@ -146,9 +146,9 @@ func TestParseNDMInterfaceStatus_PortSubBlockIsNotAnInterface(t *testing.T) {
 	}
 }
 
-// The regression this file exists for: a Keenetic that also runs an Entware awg tunnel. The awg
-// dump is not empty, and that used to stop discovery before NDM was asked, so the router's own
-// tunnels were never listed.
+// The case this file exists for: a Keenetic that also runs an Entware awg tunnel. The awg dump is
+// not empty, and that must not stop discovery before NDM is asked, or the router's own tunnels are
+// never listed.
 func TestMergeDiscovered_KeeneticWithEntwareAWG(t *testing.T) {
 	ndm := parseNDMInterfaces(keeneticListing5x)
 	runtime := parseWgDump(strings.Join([]string{

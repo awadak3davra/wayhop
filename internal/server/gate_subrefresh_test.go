@@ -83,7 +83,7 @@ func TestGateSubRefresh_UnknownAbortsRatherThanGuessing(t *testing.T) {
 	}
 }
 
-// QA-028 on the timer path: a feed entry the core cannot load (a sing-box openvpn-client with no
+// On the timer path: a feed entry the core cannot load (a sing-box openvpn-client with no
 // certificate) arrives disabled, so the next Apply is not refused for the whole profile.
 func TestGateSubRefresh_UnloadableArrivesDisabled(t *testing.T) {
 	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

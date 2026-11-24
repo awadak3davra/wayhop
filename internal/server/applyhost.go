@@ -315,7 +315,7 @@ func (s *Server) probeHostSnapshot(ctx context.Context, desired DesiredSnapshot)
 	return foldOffloadDeviceProbe(probe, deviceProbeErrors), nil
 }
 
-// foldOffloadDeviceProbe scopes a failed offload-device observation to offload (QA-128). The devices
+// foldOffloadDeviceProbe scopes a failed offload-device observation to offload. The devices
 // are only what a flowtable attaches to: a WAN that is down has no default route, and that says
 // nothing about the router's tunnels. Joined into ProbeErrors it made every capability unknown, which
 // on OpenWrt silently replaced the reviewed native plan with the generic path, the previous native

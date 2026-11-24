@@ -6,6 +6,7 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -22,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"wayhop/internal/atomicfile"
 	"wayhop/internal/awg"
 	"wayhop/internal/binstore"
 	"wayhop/internal/model"
@@ -373,7 +375,7 @@ func (m *Manager) Sync(specs []Spec) {
 	defer m.mu.Unlock()
 	// After StopAll (daemon shutdown) nothing may start again: an Apply or a Components install still
 	// running past the HTTP server's shutdown would otherwise start plugins nobody stops, and they
-	// would outlive the daemon holding their ports (QA-097; services had the same gap, fixed in RunService).
+	// would outlive the daemon holding their ports (services had the same gap, fixed in RunService).
 	if m.closed {
 		return
 	}
@@ -430,7 +432,7 @@ func (m *Manager) start(id string, s Spec) *proc {
 		return p
 	}
 	p.cfgPath = filepath.Join(m.dir, fname)
-	if err := os.WriteFile(p.cfgPath, []byte(cfg), 0o600); err != nil {
+	if err := writeConfigIfChanged(p.cfgPath, []byte(cfg)); err != nil {
 		p.reason = "write config: " + err.Error()
 		return p
 	}
@@ -636,7 +638,7 @@ func procDied(p *proc) bool {
 // The counters clear only after an incarnation has stayed up pluginStableWindow (the watchdog's own
 // stable window for the core). Clearing them on any tick that found the proc alive meant a proc that
 // lived one tick and died on the next was always on its first crash, inside the grace, and was
-// relaunched every other tick forever (QA-110).
+// relaunched every other tick forever.
 const (
 	pluginRestartGrace = 3
 	pluginMaxCooldown  = 20
@@ -779,6 +781,15 @@ func (m *Manager) relaunchProc(p *proc) {
 // flash too small for it (binstore) is unpacked into runDir first, its digest checked, and that copy
 // is what runs - for the first start and for every crash-relaunch, which resolve again.
 func (m *Manager) resolve(name string) (string, bool) {
+	// amneziawg-go serves its configuration sockets, private keys included, under the run directory
+	// (awg.uapiSocketDir), and creates the socket directory itself: the run directory must be WayHop's
+	// before it starts, whether its binary is unpacked there or not.
+	if name == "amneziawg-go" && m.runDir != "" {
+		if err := binstore.EnsureRunDir(m.runDir); err != nil {
+			log.Printf("wayhop: amneziawg-go not started: %v", err)
+			return "", false
+		}
+	}
 	if m.binDir != "" {
 		pth := filepath.Join(m.binDir, name)
 		if fi, err := os.Stat(pth); err == nil && !fi.IsDir() {
@@ -878,4 +889,19 @@ func (m *Manager) StopByBin(binName string) int {
 		}
 	}
 	return n
+}
+
+// writeConfigIfChanged writes an engine config unless the file already holds exactly it. Every
+// engine start (including each watchdog restart) rendered and rewrote the same file in the plugins
+// directory, which sits on the router's flash.
+func writeConfigIfChanged(path string, data []byte) error {
+	if cur, err := os.ReadFile(path); err == nil && bytes.Equal(cur, data) {
+		atomicfile.NoteSkip(path, len(data))
+		return nil
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	atomicfile.Note(path, len(data))
+	return nil
 }

@@ -27,6 +27,20 @@
   // scrim, keyboard — ends in a checkbox "change", so mirror ARIA from there.
   if (toggle) toggle.addEventListener("change", syncExpanded);
 
+  // Opening the drawer takes focus into it, at the current page; closing it from inside (scrim,
+  // keyboard) hands focus back to the burger, so Tab never lands on a hidden item (DS-003).
+  if (toggle && sidebar) {
+    toggle.addEventListener("change", function () {
+      if (toggle.checked) {
+        var at = sidebar.querySelector(".nav-item[aria-current='page']") || sidebar.querySelector(".nav-item");
+        if (at) at.focus();
+      } else if (burger && (sidebar.contains(document.activeElement) || document.activeElement === toggle)) {
+        // The scrim is a <label> for the hidden checkbox, so closing by tap focuses that checkbox.
+        burger.focus();
+      }
+    });
+  }
+
   // Tapping any nav item closes the off-canvas drawer (uncheck the CSS toggle).
   if (sidebar) {
     sidebar.addEventListener("click", function (event) {

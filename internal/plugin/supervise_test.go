@@ -119,13 +119,12 @@ func TestPluginsup_SyncNoBinariesWritesConfigsAndNeedsBinary(t *testing.T) {
 // reported state and the same rendered config. That is worth having — a Sync whose second pass
 // produced different output would be caught here — but it is NOT the restart guarantee.
 //
-// The name used to be SyncIdempotent, with a comment claiming the second Sync "neither restarts nor
-// mutates the tracked set". It cannot see either: Status is a value struct and the config is
-// deterministic, so a tear-down-and-rebuild ends at identical values and identical bytes. Measured on
-// this very fixture — no engine binaries, so both procs are needs_binary and NOT running — the second
-// Sync replaces both *proc objects and rewrites the config file, and this test stays green. The
-// branch the old name described, "a running proc is untouched", was never reached, because nothing in
-// the fixture is running. TestPluginsup_SyncKeepsARunningPluginAlive below exercises it.
+// It cannot see whether the second Sync restarts or mutates the tracked set: Status is a value
+// struct and the config is deterministic, so a tear-down-and-rebuild ends at identical values and
+// identical bytes. In this fixture (no engine binaries, so both procs are needs_binary and NOT
+// running) the second Sync replaces both *proc objects and rewrites the config file, and this test
+// stays green. The branch "a running proc is untouched" is not reached here, because nothing in the
+// fixture is running. TestPluginsup_SyncKeepsARunningPluginAlive below exercises it.
 func TestPluginsup_SyncReportsTheSameStateAndConfig(t *testing.T) {
 	m, cfgDir := pluginsup_newManager(t)
 
@@ -302,7 +301,7 @@ func TestPluginsup_SuperviseThrottleSkipsDuringCooldown(t *testing.T) {
 // TestPluginsup_SuperviseResetsThrottleWhenAlive verifies a managed long-running proc
 // that has stayed up for the stable window (alive, open done) has its crash-loop counters
 // reset — so a plugin that recovers keeps being restarted normally on a future crash — and
-// that one alive tick soon after a relaunch is not yet that (QA-110).
+// that one alive tick soon after a relaunch is not yet that.
 func TestPluginsup_SuperviseResetsThrottleWhenAlive(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

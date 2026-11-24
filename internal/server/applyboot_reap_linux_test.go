@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// QA-109. A sing-box that an earlier daemon left running (an OOM kill, kill -9, a Go fatal error)
+// A sing-box that an earlier daemon left running (an OOM kill, kill -9, a Go fatal error)
 // still holds the cache-file lock, the Clash and mixed ports and the TUN, so the core this daemon
 // starts dies at every start with "initialize cache-file: timeout" and the watchdog restarts it in a
 // loop. The reaper for exactly that (core.SingBox.ReapStrays) lost its only caller with the old

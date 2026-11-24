@@ -95,13 +95,24 @@ func ipOnlyKernelRule(r *model.Rule) bool {
 // A device-scoped list compiles into a SrcScoped zone, and the hybrid TUN does not exclude those
 // (§6.4, server executionGeneratorOptions), so TCP to its prefixes is captured by auto_redirect and matched
 // here. Dropping the list sent the scoped devices' TCP to route.final, out of the WAN when the final
-// is direct (RT-06). It stays with its source_ip_cidr, like a rule with a source matcher.
+// is direct. It stays with its source_ip_cidr, like a rule with a source matcher.
 func hybridKernelRoutedList(p *model.Profile, rl *model.RoutingList) bool {
-	if rl.Source != "" || !kernelEgress(p, rl.Outbound) || listKernelSourceScoped(p, rl) {
+	return kernelRoutedList(p, rl, false)
+}
+
+// kernelRoutedList is hybridKernelRoutedList with the fast DNS plane (Options.FastDNS) taken into
+// account: there the resolver puts a list's names, and a remote rule-set's content as the daemon
+// decompiled it, into the kernel's sets, so a list at a kernel egress emits nothing into the core
+// however its entries are written. A device-scoped list still stays (as above).
+func kernelRoutedList(p *model.Profile, rl *model.RoutingList, fastDNS bool) bool {
+	if !kernelEgress(p, rl.Outbound) || listKernelSourceScoped(p, rl) {
 		return false
 	}
 	domains, ips := listEntries(rl)
-	return len(domains) == 0 && len(ips) > 0
+	if fastDNS {
+		return rl.Source != "" || len(domains) > 0 || len(ips) > 0
+	}
+	return rl.Source == "" && len(domains) == 0 && len(ips) > 0
 }
 
 // listKernelSourceScoped mirrors pbr.Compile: an "only" or "except" scope naming at least one device
@@ -137,7 +148,10 @@ func listKernelSourceScoped(p *model.Profile, rl *model.RoutingList) bool {
 // referenced kernel outbound is always safe — it just routes via sing-box (bound to its
 // interface) exactly as in non-hybrid mode. The set of DROPPED rules/lists here mirrors
 // routeFrom/routingFrom's skip predicate exactly, so reachability and rule emission agree.
-func hybridReachable(p *model.Profile) map[string]bool {
+func hybridReachable(p *model.Profile) map[string]bool { return hybridReachableFor(p, false) }
+
+// hybridReachableFor is hybridReachable with the fast DNS plane's list split (kernelRoutedList).
+func hybridReachableFor(p *model.Profile, fastDNS bool) map[string]bool {
 	roots := map[string]bool{}
 	addRoot := func(tag string) {
 		switch canonicalOutbound(tag) {
@@ -166,7 +180,7 @@ func hybridReachable(p *model.Profile) map[string]bool {
 		}
 		// A pure-IP manual list (no remote Source, no domains, no device scope) to a kernel
 		// egress is dropped (pbr routes it); any other list stays and keeps its outbound referenced.
-		if hybridKernelRoutedList(p, rl) {
+		if kernelRoutedList(p, rl, fastDNS) {
 			continue
 		}
 		addRoot(rl.Outbound)
@@ -220,7 +234,15 @@ type Options struct {
 	TunEnabled  bool
 	TunMTU      int    // TUN device MTU in gateway mode; 0 → 1500 default
 	TunAddr     string // TUN host address/CIDR in gateway mode; "" → 172.31.3.1/30 default
-	CacheFile   string // experimental.cache_file path (caches remote rule-sets); "" = sing-box default
+	// TunName pins the TUN's device name ("" leaves it to the core, which takes the first free tunN).
+	// The OpenWrt kill-switch guard lets traffic through by that device's name, and reads it back
+	// from the generated config.
+	TunName string
+	// TunV6 gives a hybrid TUN an IPv6 address as well, so the core carries the LAN's IPv6 like
+	// its IPv4. Set when a kill switch covers names: only the core can match those, and IPv6 that
+	// passes beside it would take a kill-switched name's AAAA straight to the provider.
+	TunV6     bool
+	CacheFile string // experimental.cache_file path (caches remote rule-sets); "" = sing-box default
 	// RuleSetDetour is the DEFAULT outbound used to download remote rule-sets when a routing list
 	// does not name its own DownloadVia. "" keeps the historical default of `direct`.
 	//
@@ -242,6 +264,12 @@ type Options struct {
 	Hybrid          bool
 	KernelExcludeV4 []string
 	KernelExcludeV6 []string
+	// FastDNS is the fast DNS plane of routing mode "fast" (pbr.Options.FastDNS): a routing list at a
+	// kernel egress is carried by the kernel whatever its entries (names through dnsmasq's nftset, a
+	// remote rule-set through the daemon's decompiled copy), so it emits nothing into the core. The
+	// TUN, when TunEnabled, is there only for the lists the core carries (pbr's wr_corepin lets only
+	// their destinations through to it).
+	FastDNS bool
 
 	// NDMPolicies is KeeneticOS's access policies by name → mark, read from the router for this
 	// generation. A routing list sent to "ndm-policy:<name>" needs its policy here (see
@@ -285,7 +313,7 @@ func Generate(p *model.Profile, opts Options) (*Result, error) {
 	hybrid := opts.Hybrid
 	var reachable map[string]bool
 	if hybrid {
-		reachable = hybridReachable(p)
+		reachable = hybridReachableFor(p, opts.FastDNS)
 	}
 	omitKernelOutbound := func(id string) bool { return hybrid && !reachable[id] }
 
@@ -452,7 +480,7 @@ func Generate(p *model.Profile, opts Options) (*Result, error) {
 			addr = "172.31.3.1/30"
 		}
 		addrs := []string{addr}
-		if !hybrid {
+		if !hybrid || opts.TunV6 {
 			// Pure-tun / gateway mode has NO kernel-PBR plane, so a v4-only TUN address makes
 			// auto_route install only IPv4 default routes — a dual-stack LAN client's IPv6 traffic
 			// is never captured and leaks straight out the WAN (the ISP/censor sees the AAAA dest).
@@ -460,13 +488,27 @@ func Generate(p *model.Profile, opts Options) (*Result, error) {
 			// route engine (fail-closed: v6 to a censored site goes through the proxy, or fails,
 			// rather than leaking). This is the documented dual-stack TUN form. In HYBRID the kernel
 			// plane owns v6 (fwmark rules + KernelExcludeV6 route_exclude), so the TUN stays v4-only
-			// there to avoid double-routing what the kernel already steers.
+			// there to avoid double-routing what the kernel already steers, unless a kill switch
+			// covers names (opts.TunV6): the kernel plane cannot match a name, so IPv6 beside the
+			// core would carry a kill-switched name's AAAA to the provider. The kernel-routed IPv6
+			// prefixes stay out of the TUN through route_exclude_address, as the IPv4 ones do.
 			addrs = append(addrs, "fdfe:dcba:9876::1/126")
 		}
 		tun := map[string]any{
 			"type": "tun", "tag": "tun-in",
 			"address": addrs, "mtu": mtu,
 			"auto_route": true, "auto_redirect": true, "stack": "system",
+			// The redirect's two marks, written out although they are sing-tun's defaults.
+			// The daemon's own sockets carry the output mark to get past the redirect: the
+			// kernel elector's handshakes, the exit-IP, DNS and speed probes. Left to the core's
+			// default, a core that changed it would redirect every such probe into itself and answer
+			// it over its own route: every tunnel would measure alive and alike, and a dead one would
+			// never be left. Now both sides read one constant.
+			"auto_redirect_input_mark":  redirectMark(AutoRedirectInputMark),
+			"auto_redirect_output_mark": redirectMark(AutoRedirectOutputMark),
+		}
+		if opts.TunName != "" {
+			tun["interface_name"] = opts.TunName
 		}
 		if hybrid {
 			// Exclude the kernel-routed CIDRs so they fall through to kernel routing,
@@ -507,7 +549,7 @@ func Generate(p *model.Profile, opts Options) (*Result, error) {
 	// inline manual) plus referencing rules (reject lists first). Compose the final
 	// rule order: user rules, then list rules, then — only now — the block-by-default
 	// catch-all, so a block default never shadows the list rules.
-	sets, listRules := routingFrom(p, hybrid, opts.RuleSetDetour)
+	sets, listRules := routingFromFor(p, hybrid, opts.FastDNS, opts.RuleSetDetour)
 	// Prepend the rule-sets synthesised from geosite/geoip rule matchers (empty for a
 	// profile without such rules, so the rule_set / cache_file below are unchanged).
 	sets = append(geoSets, sets...)
@@ -653,6 +695,11 @@ func listScopeIPs(p *model.Profile, rl *model.RoutingList) []string {
 // manual domains/IPs).
 // ruleSetDetour is the profile-wide default download outbound for remote rule-sets ("" = direct).
 func routingFrom(p *model.Profile, hybrid bool, ruleSetDetour string) (sets []map[string]any, rules []map[string]any) {
+	return routingFromFor(p, hybrid, false, ruleSetDetour)
+}
+
+// routingFromFor is routingFrom with the fast DNS plane's list split (kernelRoutedList).
+func routingFromFor(p *model.Profile, hybrid, fastDNS bool, ruleSetDetour string) (sets []map[string]any, rules []map[string]any) {
 	var rejects, routes []map[string]any
 	for i := range p.RoutingLists {
 		rl := &p.RoutingLists[i]
@@ -664,7 +711,7 @@ func routingFrom(p *model.Profile, hybrid bool, ruleSetDetour string) (sets []ma
 		// source expression — a dest-only rule would over-match every in-TUN client hitting the dest,
 		// so this list contributes nothing to sing-box (the kernel plane scopes it; MAC-in-TUN is a
 		// documented limit; fast-mode LAN never reaches sing-box rules anyway). Compute early + skip
-		// before building any rule_set so we don't leave orphan sets. "except" isn't source-negated on
+		// before building any rule_set so no orphan sets are left. "except" isn't source-negated on
 		// the sing-box plane yet (P8), so its rule stays dest-only (routes for all — matches the pbr warn).
 		var scopeIPs []string
 		if rl.ScopeMode == "only" {
@@ -679,7 +726,7 @@ func routingFrom(p *model.Profile, hybrid bool, ruleSetDetour string) (sets []ma
 		// or domains (Phase 2), so a list carrying either STAYS in sing-box (and keeps
 		// the kernel outbound it references alive, see hybridReachable). A device-scoped
 		// list stays too: its zone is not TUN-excluded (see hybridKernelRoutedList).
-		if hybrid && hybridKernelRoutedList(p, rl) {
+		if hybrid && kernelRoutedList(p, rl, fastDNS) {
 			continue
 		}
 		var tags []string
@@ -695,9 +742,9 @@ func routingFrom(p *model.Profile, hybrid bool, ruleSetDetour string) (sets []ma
 			// a down proxy that the list itself might route around (a chicken-and-egg
 			// fetch-through-the-thing-being-configured trap). This mirrors the geosite/
 			// geoip remote sets (geoRuleSets), which also fetch direct + cache via
-			// cache_file. An empty DownloadVia previously omitted the field (sing-box then
-			// fetches via the route's default outbound) — defaulting it to direct is the
-			// safer, always-reachable choice and keeps the auto-update self-healing.
+			// cache_file. Omitting the field would make sing-box fetch via the route's
+			// default outbound; defaulting it to direct is the safer, always-reachable
+			// choice and keeps the auto-update self-healing.
 			// Per-list DownloadVia wins; else the profile-wide default (opts.RuleSetDetour) when set;
 			// else direct. On a censored WAN `direct` is what makes every remote rule-set fail (and a
 			// failing rule-set aborts the whole core), so RuleSetDetour is the escape hatch.
@@ -718,7 +765,7 @@ func routingFrom(p *model.Profile, hybrid bool, ruleSetDetour string) (sets []ma
 			(rl.ScopeMode == "" || rl.ScopeMode == "all") {
 			// The list stays here for its names, but pbr routes its fetched IP feed and the TUN excludes
 			// those prefixes, so no packet to them reaches this set: a refilter-sized feed would only
-			// cost the core memory and check time (QA-066 review). Typed IPs stay, as before the feed
+			// cost the core memory and check time. Typed IPs stay, as before the feed
 			// joined. Scoped lists keep everything: their zones are not excluded from the TUN.
 			domains, ips = splitDomainsIPs(append(append(make([]string, 0, len(rl.Manual)+len(rl.DomainCache)), rl.Manual...), rl.DomainCache...))
 		}
@@ -853,7 +900,7 @@ func dnsFrom(p *model.Profile, opts Options, seen map[string]bool) (map[string]a
 				// `direct` outbound explicitly looks equivalent and passes `sing-box check`
 				// on 1.12.17, but `sing-box run` aborts at startup with:
 				//   detour to an empty direct outbound makes no sense
-				// That failure was reached on the test router after Review and left the Apply
+				// That failure was reached on the reference OpenWrt router after Review and left the Apply
 				// transaction requiring reboot recovery. Preserve endpoint/group detours,
 				// but encode direct using the schema's native omission.
 				sv["detour"] = detour
@@ -886,7 +933,7 @@ func dnsFrom(p *model.Profile, opts Options, seen map[string]bool) (map[string]a
 		m := map[string]any{}
 		var listTags, geoTags []string
 		for _, listID := range r.RuleSets {
-			listTags = append(listTags, dnsListTags(p, listID, opts.Hybrid)...)
+			listTags = append(listTags, dnsListTagsFor(p, listID, opts.Hybrid, opts.FastDNS)...)
 		}
 		if len(r.RuleSets) > 0 && len(listTags) == 0 {
 			// Every list the rule names emits no set here (switched off, kernel-routed in hybrid, gone).
@@ -1033,6 +1080,11 @@ func dnsDefaultResolverTag(block map[string]any) string {
 // referencing a list resolves via that list's already-emitted set. A disabled/absent list yields
 // nothing (the reference silently drops), never a dangling tag that would fail `sing-box check`.
 func dnsListTags(p *model.Profile, listID string, hybrid bool) []string {
+	return dnsListTagsFor(p, listID, hybrid, false)
+}
+
+// dnsListTagsFor is dnsListTags with the fast DNS plane's list split (kernelRoutedList).
+func dnsListTagsFor(p *model.Profile, listID string, hybrid, fastDNS bool) []string {
 	for i := range p.RoutingLists {
 		rl := &p.RoutingLists[i]
 		if rl.ID != listID || !rl.Enabled {
@@ -1047,6 +1099,9 @@ func dnsListTags(p *model.Profile, listID string, hybrid bool) []string {
 		var tags []string
 		// Mirror routingFrom: a plain-text Source emits no remote set there, so naming it here left the
 		// DNS rule pointing at a rule_set that does not exist and `sing-box check` refused the config.
+		if hybrid && fastDNS && kernelRoutedList(p, rl, true) {
+			return nil // mirrors routingFromFor: the list emits nothing into the core
+		}
 		if rl.Source != "" && singboxConsumableSource(rl) {
 			tags = append(tags, "rs-"+rl.ID)
 		}
@@ -1073,11 +1128,10 @@ func ruleSetFormat(rl *model.RoutingList) string {
 	if rl.Format == "binary" || rl.Format == "source" {
 		return rl.Format
 	}
-	path := rl.Source
-	if i := strings.IndexAny(path, "?#"); i >= 0 {
-		path = path[:i]
-	}
-	if strings.HasSuffix(path, ".json") {
+	// model.RuleSetURLKind is the one reading of a URL's extension (any case, ?query and #fragment
+	// left out), shared with validation, the store and the panel: a second, case-sensitive reading
+	// here called "list.JSON" binary.
+	if model.RuleSetURLKind(rl.Source) == "source" {
 		return "source"
 	}
 	return "binary"
@@ -1097,11 +1151,10 @@ func singboxConsumableSource(rl *model.RoutingList) bool {
 	if rl.Format == "binary" || rl.Format == "source" {
 		return true // explicit user intent — trust it
 	}
-	path := rl.Source
-	if i := strings.IndexAny(path, "?#"); i >= 0 {
-		path = path[:i]
-	}
-	return strings.HasSuffix(path, ".srs") || strings.HasSuffix(path, ".json")
+	// As ruleSetFormat: read case-sensitively, "list.SRS" was taken for a text list and the whole
+	// list left out of the core, while every other layer called it a rule set and said nothing.
+	kind := model.RuleSetURLKind(rl.Source)
+	return kind == "binary" || kind == "source"
 }
 
 func refreshInterval(hours int) string {
@@ -1114,8 +1167,8 @@ func refreshInterval(hours int) string {
 // listEntries is what a routing list matches on the sing-box plane: its typed entries plus the
 // last-good fetch of its feeds, the same union pbr.Compile routes. Reading Manual alone left a list
 // fed by a CIDRSource or DomainSource with no rule here at all, so on OpenWrt every domain-feed preset
-// and every IP feed sent to a proxy (or routed in tun mode) applied cleanly and matched nothing
-// (QA-066). Every caller that decides a list's presence here goes through this, or the hybrid split,
+// and every IP feed sent to a proxy (or routed in tun mode) applied cleanly and matched nothing.
+// Every caller that decides a list's presence here goes through this, or the hybrid split,
 // the DNS tags and the native-only verdict would disagree about which sets exist.
 func listEntries(rl *model.RoutingList) (domains, ips []string) {
 	entries := rl.Manual
@@ -1155,8 +1208,11 @@ func splitDomainsIPs(entries []string) (domains, ips []string) {
 		if strings.Contains(e, "/") {
 			if _, _, err := net.ParseCIDR(e); err == nil {
 				ips = append(ips, e)
-				continue
 			}
+			// A "/" that is not a prefix ("10.0.0.0/99", a pasted URL) is not a name either: no name
+			// holds one. Emitted, it would be a domain suffix nothing matches; it is left out, as the kernel plane leaves it out (pbr normalizeDomains). New ones are
+			// refused where they are typed (model.MalformedManualPrefix).
+			continue
 		}
 		if ip := net.ParseIP(e); ip != nil {
 			if ip.To4() != nil {
@@ -1992,7 +2048,7 @@ func transportJSON(t *model.Transport) map[string]any {
 		// A v2rayN/Xray httpupgrade share-link carries the same "/path?ed=N"
 		// early-data hint as ws. Unlike ws, sing-box's httpupgrade transport has
 		// NO early-data fields — it REJECTS max_early_data ("unknown field",
-		// verified on 1.12.17) — so we cannot translate the hint, only strip it.
+		// verified on 1.12.17), so the hint cannot be translated, only stripped.
 		// Left literal, sing-box sends "GET /path?ed=N" and a server matching the
 		// bare path fails the upgrade (`unexpected EOF`); passes `check` but every
 		// connection dies at runtime. Stripping makes the path match (losing only
@@ -2353,3 +2409,110 @@ func intp(m map[string]any, k string) int {
 // can take after import or a JSON store round-trip. It is model.ParamBool, so the model's own
 // questions about a switch (model.MuxUoTIgnored) read it exactly as the config is written.
 func boolp(m map[string]any, k string) bool { return model.ParamBool(m, k) }
+
+// The fwmarks of the TUN's auto_redirect, as the generated config states them.
+//
+// AutoRedirectOutputMark exempts a socket from the redirect: the first rule of the core's nft output
+// chain returns on it, and its `ip rule` sends it past the TUN's table. Every daemon socket that has
+// to leave by the interface it is bound to carries it. AutoRedirectInputMark is what the core puts on
+// the connections it takes into the TUN.
+const (
+	AutoRedirectInputMark  = 0x2023
+	AutoRedirectOutputMark = 0x2024
+)
+
+func redirectMark(m int) string { return fmt.Sprintf("0x%x", m) }
+
+// CoreTunName is the device name WayHop gives the core's TUN on OpenWrt in hybrid mode. Not "tun0":
+// that is what an OpenVPN client on the same router takes, and a name that is taken stops the core.
+const CoreTunName = "whtun0"
+
+// TunFacts reads the capture TUN out of a generated config (after any override): its device name
+// ("" when the config leaves the name to the core) and whether it has an IPv6 address. found is
+// false for a config with no TUN inbound.
+func TunFacts(cfg map[string]any) (name string, v6, found bool) {
+	inbounds, _ := cfg["inbounds"].([]any)
+	if typed, ok := cfg["inbounds"].([]map[string]any); ok {
+		for _, in := range typed {
+			inbounds = append(inbounds, in)
+		}
+	}
+	for _, raw := range inbounds {
+		in, ok := raw.(map[string]any)
+		if !ok || in["type"] != "tun" {
+			continue
+		}
+		name, _ = in["interface_name"].(string)
+		var addrs []string
+		switch a := in["address"].(type) {
+		case []string:
+			addrs = a
+		case []any:
+			for _, x := range a {
+				if s, ok := x.(string); ok {
+					addrs = append(addrs, s)
+				}
+			}
+		case string:
+			addrs = []string{a}
+		}
+		for _, a := range addrs {
+			v6 = v6 || strings.Contains(a, ":")
+		}
+		return name, v6, true
+	}
+	return "", false, false
+}
+
+// checkRedirectMarks refuses a config whose TUN redirect would run on other marks than the daemon's
+// sockets carry: an operator's override that replaced the inbounds. A TUN the override wrote without
+// naming the marks gets them, so it cannot fall back to a default that may move.
+func checkRedirectMarks(cfg map[string]any) error {
+	inbounds, _ := cfg["inbounds"].([]any)
+	if typed, ok := cfg["inbounds"].([]map[string]any); ok {
+		for _, in := range typed {
+			inbounds = append(inbounds, in)
+		}
+	}
+	for _, raw := range inbounds {
+		in, ok := raw.(map[string]any)
+		if !ok || in["type"] != "tun" || in["auto_redirect"] != true {
+			continue
+		}
+		for key, want := range map[string]int{
+			"auto_redirect_input_mark": AutoRedirectInputMark, "auto_redirect_output_mark": AutoRedirectOutputMark,
+		} {
+			have, present := in[key]
+			if !present {
+				// Only WayHop's own TUN is completed. KeeneticOS's fallback datapath has a TUN of its
+				// own (tun-va) that the server re-asserts after the override, redirect off.
+				if in["tag"] == "tun-in" {
+					in[key] = redirectMark(want)
+				}
+				continue
+			}
+			if got, ok := markValue(have); !ok || got != want {
+				return fmt.Errorf("core override: %s is %v, and WayHop's own probes carry %s to get past the redirect; "+
+					"with another value every tunnel would measure alive. Remove %s from the override", key, have, redirectMark(want), key)
+			}
+		}
+	}
+	return nil
+}
+
+// markValue reads a mark as sing-box accepts it: a number, or a string in any base strconv knows.
+func markValue(v any) (int, bool) {
+	switch x := v.(type) {
+	case float64:
+		return int(x), x == float64(int(x))
+	case int:
+		return x, true
+	case fmt.Stringer: // json.Number, when the config was decoded with UseNumber
+		n, err := strconv.ParseInt(x.String(), 0, 64)
+		return int(n), err == nil
+	case string:
+		n, err := strconv.ParseInt(strings.TrimSpace(x), 0, 64)
+		return int(n), err == nil
+	}
+	return 0, false
+}

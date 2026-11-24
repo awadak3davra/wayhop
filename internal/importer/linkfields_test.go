@@ -223,7 +223,7 @@ func TestReimport_AnUnbelievableTagFailsClosed(t *testing.T) {
 	}
 }
 
-// The hunter's case: a Clash Hysteria2 proxy re-imported without its bandwidth and its obfs packet
+// A Clash Hysteria2 proxy re-imported without its bandwidth and its obfs packet
 // sizes loses all three, not only the ones the list happened to name.
 func TestReimport_ClashHysteria2ClearsWhatTheConfigDropped(t *testing.T) {
 	const head = "proxies:\n  - {name: h, type: hysteria2, server: 203.0.113.21, port: 443, password: pw, sni: example.com"

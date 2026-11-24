@@ -23,7 +23,7 @@ func reimportParse(t *testing.T, link string) model.Endpoint {
 	return *e
 }
 
-// QA-148: importing a link again takes everything the link can express from the link, a value it no
+// Importing a link again takes everything the link can express from the link, a value it no
 // longer carries included, and keeps only what the user owns: name, switch, health target,
 // multiplex, MTU, and the pins the user added.
 func TestReimport_TakesTheLinkWholeAndKeepsWhatTheUserOwns(t *testing.T) {

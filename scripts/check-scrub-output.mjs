@@ -93,7 +93,25 @@ const RULES = path.join(ROOT, 'publish', 'scrub-rules.json');
 // subnets to leave the public tree, so the test router's model name is now scrubbed to "test router"
 // (three rules, "an"/"An" first for the article). The comments, test-case names and fixtures that
 // name it change in the fixture and the assertion together.
-const EXPECTED_GO_COVERAGE_SHA256 = '6910215c645deef2703862fe3a20cfe9554b70bfe4a4670c306d7e045ecc65d0';
+// Moved again (2026-11-22), catching up rather than introducing: the pin above is commit 8e0ac69d's
+// coverage (recomputed with that commit's own rules), and four later rule commits (df22dad0,
+// b24429f4, 05869c01, 49f9f34b) plus the kill-switch, kernel-election and conntrack work after it
+// moved the coverage without re-pinning, so this gate was red on the base of the fast-path branch.
+// Reviewed by rule and file against 8e0ac69d: 52 (rule, file) entries grew, none shrank, every one a test fixture or
+// a comment except "list-cascade" in conntrack.go and "test router" in tcpprobe.go, killswitchsource.go
+// and openwrtreview.go, which are comments; rules 192.168.2./192.168.50.1/test router rewrite fixture and
+// assertion together. The fast-path branch itself adds no coverage: its fixtures were moved off the
+// scrubbed literals. One base file did not survive the scrub at all: killswitchsides_test.go named
+// its fixtures sidestest router/sidestest routerNetwork, which the "test router" rule turned into "sidestest
+// router", so the published tree did not parse; the identifiers were renamed (11 substitutions
+// fewer, the 3 left are comments). Past the parse, ten base tests failed in the scrubbed tree only,
+// each a fixture the rules rewrote on one side of a comparison: "list-heavy" list ids whose derived
+// zone names (list_ru_heavy) the rules do not touch (guard_nft, guard_ow2, listegress_nft tests),
+// "192.168.50.1" rewriting 192.168.50.10 but not the 192.168.1.0/24 beside it (guard_ow4), and
+// "192.168.2." rewriting the string but not the same address as bytes or /proc/net/route hex
+// (ctflush direct_test, killswitchlocal_test). Those fixtures now use ids and addresses no rule
+// matches, so nothing in them is rewritten. 223 files / 909 substitutions against the floors below.
+const EXPECTED_GO_COVERAGE_SHA256 = 'a026d70bbdb37c18463791fc32a0a83c24dbfbe2eec13fa405c0eb17716805ee';
 // K5 intentionally retired seven more personal-device-derived Keenetic migration/cutover Go files.
 // Their scrub matches disappeared with the code; pin the reduced subject so any further loss fails.
 const MIN_REWRITTEN_GO_FILES = 108;

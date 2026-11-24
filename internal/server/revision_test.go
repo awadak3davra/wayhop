@@ -72,7 +72,7 @@ func rev_ok(t *testing.T, w *httptest.ResponseRecorder, what string) map[string]
 	return m
 }
 
-// QA-152, connections: a page that loaded a connection, then had another tab save over that same
+// Connections: a page that loaded a connection, then had another tab save over that same
 // connection, is refused when it saves its copy - the other tab's server stays. Without If-Match a
 // save is unconditional, as it was for every API caller; a garbled one is refused, not ignored. A save
 // answers the connection's revisions before and after it.
@@ -102,9 +102,9 @@ func TestRevision_EndpointSaveFromAStaleCopyIsRefused(t *testing.T) {
 	rev_ok(t, rev_req(s.handleUpsertEndpoint, http.MethodPost, "", "", rev_json(t, tabA)), "a save without If-Match (API callers)")
 }
 
-// The regression a profile-wide revision caused (hunter, after the first fix): every write anywhere
-// made every open form stale, and the 412 closed the form and threw its input away. Measured in the
-// panel's own flow: a routing list form that creates a device group from inside itself, then saves.
+// A profile-wide revision would make every open form stale on every write anywhere, and the 412
+// would close the form and throw its input away. The panel's own flow: a routing list form that
+// creates a device group from inside itself, then saves.
 // A write to another connection, a new connection, a reorder, a deletion of something else, a new
 // device group and the feed refresh rewriting the list's own caches all leave each form's save valid.
 func TestRevision_WritesElsewhereDoNotStaleAnOpenForm(t *testing.T) {
@@ -159,7 +159,7 @@ func TestRevision_WritesElsewhereDoNotStaleAnOpenForm(t *testing.T) {
 	}
 }
 
-// QA-152, the switch: PATCH changes enabled and nothing else, so a switch flipped in a page that never
+// The switch: PATCH changes enabled and nothing else, so a switch flipped in a page that never
 // saw another tab's edit keeps that edit. It answers the connection's revisions, and refuses any field
 // but enabled.
 func TestRevision_EndpointSwitchChangesOnlyEnabled(t *testing.T) {
@@ -269,7 +269,7 @@ func TestRevision_GroupAndRoutingListSaves(t *testing.T) {
 	}
 }
 
-// QA-152, settings: GET /api/config carries the revision of what a save writes; a save from a page
+// Settings: GET /api/config carries the revision of what a save writes; a save from a page
 // loaded before another save is refused and changes nothing; a save answers the revision it made, so
 // the same page can save again; and a save without If-Match still works.
 func TestRevision_ConfigSaveFromAStaleCopyIsRefused(t *testing.T) {
@@ -336,7 +336,7 @@ func TestRevision_ConfigRevCoversOnlyWhatASaveWrites(t *testing.T) {
 	}
 }
 
-// QA-150 through the API: a list moved to a plain-text .lst URL with the preset's format echoed back
+// Through the API: a list moved to a plain-text .lst URL with the preset's format echoed back
 // is stored, and answered, without it (the generator then skips a list sing-box cannot read).
 func TestRevision_RoutingListSaveAnswersTheListAsStored(t *testing.T) {
 	s, _ := sharehandlers_server(t)

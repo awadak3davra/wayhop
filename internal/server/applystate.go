@@ -26,8 +26,9 @@ import (
 // reconcile loop) and the persisted acknowledgements. It lives next to the startup config so it
 // survives a reboot on both platforms (DataDir may be tmpfs on OpenWrt).
 
-// applyStateSchema is the on-disk schema of apply-state.json.
-const applyStateSchema = 2
+// applyStateSchema is the on-disk schema of apply-state.json. 3 stores the revisions as
+// content-addressed blobs (applystateblobs.go); a schema-2 record (inline revisions) is still read.
+const applyStateSchema = 3
 
 const applyStateFileName = "apply-state.json"
 
@@ -143,6 +144,8 @@ type applyStateStore struct {
 	rec     applyStateRecord
 	loaded  bool
 	saveErr string // last persistence failure, surfaced by /api/state; cleared by the next good write
+	// blobMemo maps the revisions the record holds to their blob names (applystateblobs.go).
+	blobMemo map[*appliedRevision]revBlobs
 }
 
 // known reports whether a materialization was actually recorded (as opposed to the zero value an
@@ -154,14 +157,36 @@ func (m *executionMaterializationV1) known() bool {
 // applyStateFile is where the record lives: next to the startup config once StartApply told us
 // where that is, else next to the sing-box config (the same directory on every real installation).
 func (s *Server) applyStateFile() string {
+	dir := s.stateDir()
+	if dir == "" {
+		dir = "."
+	}
+	return statePath(filepath.Join(dir, applyStateFileName))
+}
+
+// stateDir is the directory of apply-state.json and fastest-journal.json: the one StartApply was
+// given, else the sing-box config's (both come from the daemon's configuration, never a constant);
+// "" when neither is known.
+func (s *Server) stateDir() string {
 	if s.applyStateDir != "" {
-		return filepath.Join(s.applyStateDir, applyStateFileName)
+		return s.applyStateDir
 	}
-	dir := "."
 	if s.cfg != nil && s.cfg.SingBox.Config != "" {
-		dir = filepath.Dir(s.cfg.SingBox.Config)
+		return filepath.Dir(s.cfg.SingBox.Config)
 	}
-	return filepath.Join(dir, applyStateFileName)
+	return ""
+}
+
+// statePathTest is nil in production. The package's tests set it so that no test reads or writes
+// the state files of the installed daemon (the default /opt/etc/wayhop) instead of a temporary
+// directory: such a path is reported and moved aside.
+var statePathTest func(path string) string
+
+func statePath(path string) string {
+	if statePathTest != nil {
+		return statePathTest(path)
+	}
+	return path
 }
 
 // legacyAppliedSnapshotPath is where the pre-ledger stack kept the full applied inputs.
@@ -191,11 +216,12 @@ func (s *Server) stateLocked() *applyStateRecord {
 	raw, err := os.ReadFile(st.path)
 	switch {
 	case err == nil:
-		var rec applyStateRecord
-		if jsonErr := json.Unmarshal(raw, &rec); jsonErr != nil || rec.Schema != applyStateSchema {
-			// A corrupt record means "WayHop owns nothing it can prove". Apply still works; it will
-			// simply not remove anything it did not create in this life. Never fatal.
-			log.Printf("apply-state: %s is unreadable (%v, schema %d) — starting with an empty record", st.path, jsonErr, rec.Schema)
+		atomicfile.RemoveStaleMatching(s.applyBlobDir(), "*"+applyBlobExt+".*.tmp")
+		rec, decErr := s.decodeApplyState(raw)
+		if decErr != nil {
+			// A corrupt record (or a blob it names) means "WayHop owns nothing it can prove". Apply
+			// still works; it will simply not remove anything it did not create in this life. Never fatal.
+			log.Printf("apply-state: %s is unreadable (%v) — starting with an empty record", st.path, decErr)
 			return &st.rec
 		}
 		if rec.Acks == nil {
@@ -214,9 +240,14 @@ func (s *Server) stateLocked() *applyStateRecord {
 // in force — but it is recorded so /api/state can say the record will not survive a reboot.
 func (s *Server) persistLocked() {
 	st := &s.applyState
-	b, err := json.Marshal(st.rec)
+	// Blobs first, then the record that names them, then the sweep of blobs nothing names any more
+	// (applystateblobs.go has the crash-safety argument).
+	b, keep, err := s.encodeApplyState()
 	if err == nil {
 		err = atomicfile.Write(st.path, b, 0o600)
+	}
+	if err == nil {
+		s.sweepApplyBlobs(keep)
 	}
 	if err != nil {
 		st.saveErr = err.Error()
@@ -385,6 +416,22 @@ func (s *Server) recordApplied(save bool, rev *appliedRevision) {
 	rec.InFlight = nil
 	rec.Last = applyLastResult{At: time.Now().Unix(), OK: true, Rev: rev.Rev}
 	s.persistLocked()
+	if save {
+		s.flushListCachesOnCommit()
+	}
+}
+
+// flushListCachesOnCommit writes the routing-list feed caches the committed configuration was built
+// from, if they changed since their last (rate-limited) flash write: after a reboot the saved profile
+// then matches what was committed instead of showing the caches' newer fetch as an unapplied change.
+// Skipped when nothing changed, so a run of Applies costs no extra write.
+func (s *Server) flushListCachesOnCommit() {
+	if s.store == nil {
+		return
+	}
+	if err := s.store.FlushListCaches(); err != nil {
+		log.Printf("apply-state: flush routing-list feed caches: %v", err)
+	}
 }
 
 // recordCommit keeps the live state: it becomes committed and the window closes.
@@ -398,6 +445,7 @@ func (s *Server) recordCommit() {
 	}
 	rec.RollbackOutstanding = nil
 	s.persistLocked()
+	s.flushListCachesOnCommit()
 }
 
 // recordRollback drops the live state: the router runs the committed state again.

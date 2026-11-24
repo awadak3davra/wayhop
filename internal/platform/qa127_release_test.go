@@ -6,7 +6,7 @@ import (
 	"wayhop/internal/awg"
 )
 
-// QA-127. A KeeneticOS release, not the WireGuard component, decides whether NDM has `wireguard asc`
+// A KeeneticOS release, not the WireGuard component, decides whether NDM has `wireguard asc`
 // (4.2) and whether it takes the AmneziaWG 2 settings (5.1). The release strings are invented: only
 // their shape is the firmware's.
 func keeneticVersionText(release string) string {
@@ -23,8 +23,8 @@ func keeneticWiredOps() RuntimeFacts {
 	return RuntimeFacts{NativeOperations: ops}
 }
 
-// The hunt's repro: KeeneticOS 4.1 with the WireGuard component was reported as carrying AmneziaWG,
-// so the endpoint stayed on NDM and the router refused `wireguard asc` at Apply.
+// KeeneticOS 4.1 with the WireGuard component does not carry AmneziaWG: reported as carrying it, the
+// endpoint would stay on NDM and the router would refuse `wireguard asc` at Apply.
 func TestQA127Keenetic41HasNoNativeAmneziaWG(t *testing.T) {
 	caps := decideKeenetic(hostInputs{ndmcVersion: keeneticVersionText("4.01.C.7.0-0")})
 	if caps.FirmwareRelease != "4.01.C.7.0-0" {
@@ -107,7 +107,9 @@ func TestQA127KeeneticReleaseAWG(t *testing.T) {
 		{"4.02.A.2.0-0", awg.Gen1, true},
 		{"5.0.8", awg.Gen1, true},
 		{"5.01.A.3.0-0", awg.Gen2, true},
-		{"5.2.1", awg.Gen2, true},
+		{"5.1.9", awg.Gen2, true},
+		{"5.2.1", awg.Gen31, true},
+		{"5.02.B.3.0-2", awg.Gen31, true},
 		{"", awg.GenNone, false},
 		{"5", awg.GenNone, false},
 		{"x.1.2", awg.GenNone, false},

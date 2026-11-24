@@ -5,6 +5,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"wayhop/internal/pbr"
 )
 
 // applywan.go answers one question for the Keenetic policy plane: which interface is the uplink?
@@ -62,18 +64,6 @@ func parseWANInterface(r interface{ Read([]byte) (int, error) }) (string, error)
 }
 
 // validWANInterfaceName keeps a parsed name inside what a Linux interface may be called, so a
-// malformed table can never reach a rendered `-o <iface>` argument.
-func validWANInterfaceName(name string) bool {
-	if name == "" || len(name) > 15 {
-		return false
-	}
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		case r == '.' || r == '-' || r == '_' || r == '@':
-		default:
-			return false
-		}
-	}
-	return true
-}
+// malformed table can never reach a rendered `-o <iface>` argument. It is pbr's check, so a name
+// accepted here is never dropped by the renderer.
+func validWANInterfaceName(name string) bool { return pbr.ValidIfaceName(name) }

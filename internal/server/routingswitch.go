@@ -27,7 +27,7 @@ import (
 //     netfilter.d re-assert hook and the dnsmasq ipset= file on KeeneticOS (whose resolver is then
 //     restarted). The redirect and the refusals sit in chains NDM owns, so the teardown deletes
 //     them by name whatever the plane's own switches were; for a plane recorded before it did
-//     (QA-114) the executor adds those deletes from the plane's own program
+// the executor adds those deletes from the plane's own program
 //     (keeneticTeardownProgram).
 //   - A native plan's routing is removed and its tunnels are kept: on KeeneticOS its `ip route`s go
 //     and the `ip global` ladder is lowered below the router's own connections, then saved so a

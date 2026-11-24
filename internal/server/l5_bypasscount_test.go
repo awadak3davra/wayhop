@@ -8,7 +8,7 @@ import (
 // TestDoHBypassCountsDevicesNotPairs (L5): the row counts DEVICES, and it was counting rows.
 //
 // detectDoHClients emits one line per (client, resolver) pair — the evidence — and the summary
-// printed len() of that as a client count. Measured on a live Keenetic: one address talking
+// printed len() of that as a client count. Observed on KeeneticOS: one address talking
 // to both Google and AdGuard produced "2 client(s) may be bypassing the router's DNS (DoH/DoT)" with
 // the same IPv6 address printed twice in the detail directly underneath. The number decides how many
 // gadgets the operator goes and reconfigures, so it has to be a number of gadgets.

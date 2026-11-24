@@ -61,7 +61,7 @@ type Engine struct {
 	// names it. It is set only where a KERNEL path for the same protocol can exist, because that is
 	// the only case where it changes what the operator should do.
 	//
-	// The case that prompted it: a live test router carries AmneziaWG in the kernel
+	// The case that prompted it: a reference OpenWrt router carries AmneziaWG in the kernel
 	// (kmod-amneziawg + amneziawg-tools + luci-proto-amneziawg, module loaded), which is what actually
 	// carries their tunnel. The Updater page nonetheless listed "AmneziaWG (userspace) — not
 	// installed" and offered fifteen GitHub versions it would then refuse to install. Every word true,
@@ -321,13 +321,12 @@ func (u *Updater) NativeManaged(e Engine) bool { _, yes, _ := u.nativeManaged(e)
 
 // NativeManagedInfo is NativeManaged plus the owning package name, so the UI can say
 // "managed by apk (package sing-box) — update it there" up front instead of after a failed click.
-// The third return says whether the probe could answer AT ALL. Dropping it (this used to be
-// `owner, yes, _ = u.nativeManaged(e)`) made an unanswerable probe indistinguishable from a
-// confirmed "not owned by the package manager", and left the read path disagreeing with the write
-// path: engineManagedErr below is deliberately fail-closed and refuses when it cannot verify
-// ownership, while this one reported false and the UI happily drew Remove and Check buttons the
-// panel would then refuse. Observed on the Keenetic, where opkg answers intermittently and the
-// Updater page grew and lost those two buttons between identical page loads.
+// The third return says whether the probe could answer AT ALL. Without it an unanswerable probe is
+// indistinguishable from a confirmed "not owned by the package manager", and the read path would
+// disagree with the write path: engineManagedErr below is deliberately fail-closed and refuses when
+// it cannot verify ownership, so reporting false here would draw Remove and Check buttons the panel
+// then refuses. On Keenetic opkg answers intermittently, so those two buttons would come and go
+// between identical page loads.
 func (u *Updater) NativeManagedInfo(e Engine) (owner string, yes, known bool) {
 	owner, yes, err := u.nativeManaged(e)
 	return owner, yes, err == nil
@@ -935,14 +934,13 @@ func shortfallMiB(avail, need uint64) uint64 {
 // flashRefusal is what the operator reads when the disk pre-flight refuses an engine install, kept
 // in one place so it can be read and tested without a network round trip.
 //
-// The refusal itself is right — the test router's overlay is 60.6 MiB with 23.9 free, and a ~31 MiB
-// binary cannot be written into it by any method. What the sentence used to leave out is what to do
-// about it: it printed two rounded figures and left the subtraction to the reader, then offered
-// "mount external storage", which on its own changes nothing, because engines are installed into
-// the directory of the CONFIGURED sing-box binary (server.go builds the updater with
-// filepath.Dir(cfg.SingBox.Bin)) and mounting a disk does not move that. The path is an editable
-// field on the Settings page, so the lever the old advice gestured at does exist — it is named here
-// instead, along with the number that says when the first option has worked.
+// The refusal itself is right: a typical overlay is 60.6 MiB with 23.9 free, and a ~31 MiB binary
+// cannot be written into it by any method. The message also says what to do about it: it states the
+// shortfall instead of leaving the subtraction to the reader, and it does not offer "mount external
+// storage" alone, which changes nothing, because engines are installed into the directory of the
+// CONFIGURED sing-box binary (server.go builds the updater with filepath.Dir(cfg.SingBox.Bin)) and
+// mounting a disk does not move that. The path is an editable field on the Settings page, so that
+// lever is named here, along with the number that says when the first option has worked.
 func flashRefusal(id, dir string, avail, need uint64) error {
 	return fmt.Errorf("not enough free space to install %s in %s (~%d MiB free, need ~%d MiB for the unpacked binary — free at least %d MiB more there) — or point the “sing-box binary” setting at a directory with room, since the panel installs engines beside it, or install over SSH",
 		id, dir, avail>>20, need>>20, shortfallMiB(avail, need))
@@ -1000,7 +998,7 @@ func (u *Updater) Install(ctx context.Context, e Engine, tag string) (string, er
 	// channel a mirror can't forge: a hostile or MITM'd mirror that could rewrite the binary could
 	// also serve a matching forged digest, and a checksum from the same untrusted source is no trust
 	// anchor at all. The mirror stays useful as pure TRANSPORT for the (large) asset bytes in
-	// streamAssetToFile; it just no longer gets to define the tag, size, URL or digest. Fails closed
+	// streamAssetToFile; it does not get to define the tag, size, URL or digest. Fails closed
 	// when direct GitHub is unreachable — an engine binary is not installed on an unverifiable metadata.
 	rel, err := u.releaseDirect(ctx, e, tag)
 	if err != nil {
@@ -1139,13 +1137,10 @@ func dlCap(size int64) int64 {
 func (u *Updater) download(ctx context.Context, rawURL string, maxBytes int64) ([]byte, error) {
 	// Every path is remembered, not just the last one.
 	//
-	// This returned lastErr, and the default list ends with https://mirror.ghproxy.com/ — a host that
-	// no longer exists: it does not resolve from a live Keenetic or from the dev machine.
-	// So EVERY failed download, whatever actually went wrong, was reported as
-	// "lookup mirror.ghproxy.com: no such host". Measured on the demo: three paths were tried
-	// (direct, ghproxy.net, mirror.ghproxy.com) and the panel showed only the third, which sends the
-	// operator to debug the DNS of a mirror they never chose while the interesting failure — the
-	// direct download their ISP blocked — is the one that got dropped.
+	// Reporting only lastErr would hide the interesting failure: when the last mirror in the list
+	// is a host that does not resolve, EVERY failed download, whatever actually went wrong, would
+	// read "lookup <mirror>: no such host". That sends the operator to debug the DNS of a mirror
+	// they never chose while the direct download their ISP blocked goes unreported.
 	var lastErr error
 	var attempts []string
 	for _, m := range u.Mirrors {
@@ -1153,7 +1148,7 @@ func (u *Updater) download(ctx context.Context, rawURL string, maxBytes int64) (
 		if m != "" {
 			url = strings.TrimRight(m, "/") + "/" + rawURL
 		}
-		note := func(err error) { lastErr = err; attempts = append(attempts, downloadPathLabel(m)+": "+err.Error()) }
+		note := func(err error) { lastErr = err; attempts = append(attempts, downloadPathLabel(m)+": "+scrubErr(err)) }
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			note(err)
@@ -1278,12 +1273,12 @@ func assetScoreFor(e Engine, name, arch string) int {
 //
 // Both platforms WayHop runs on — OpenWrt and Entware on KeeneticOS — are musl. A glibc build has an
 // ELF interpreter (/lib/ld-linux-*.so) that simply does not exist there, and the kernel reports that
-// as ENOENT: measured on a live router, sing-box v1.13.19 installed and then refused to run
-// with "fork/exec /opt/bin/sing-box.new: no such file or directory" — a file that was plainly there.
+// as ENOENT: a glibc sing-box installs and then refuses to run with "fork/exec
+// /opt/bin/sing-box.new: no such file or directory" for a file that is plainly there.
 //
-// This mattered only for arm64 because the old score treated every non-arm asset as equally good, so
-// the FIRST match won, and GitHub happened to list sing-box's -glibc build ahead of the musl one.
-// A static build is safest of all: it needs no interpreter on either kind of host.
+// Scoring matters because GitHub may list sing-box's -glibc build ahead of the musl one, so taking
+// the FIRST match would pick it. A static build is safest of all: it needs no interpreter on either
+// kind of host.
 func libcScore(name string) int {
 	n := strings.ToLower(name)
 	switch {

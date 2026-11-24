@@ -50,8 +50,8 @@ func ndmLine(s string) string {
 // `wireguard asc` command (the 9-arg form validated live on the reference router). ascExt are the
 // AWG-2.0 additions (S3/S4 + the I1-I5 magic headers), appended only when present. The 9-arg base
 // is confirmed. The device prints the 2.0 form as 11 bare arguments then five quoted strings when the
-// headers are unset (measured read-only on the test Keenetic, 2026-11-05, and on a KeeneticOS 5.1.8
-// router, QA-124); that S3/S4 and I1-I5 sit in those slots in this order is still not proven
+// headers are unset (measured read-only on two KeeneticOS routers, one of them
+// 5.1.8); that S3/S4 and I1-I5 sit in those slots in this order is still not proven
 // (wgasc.go keeps the tail uninterpreted).
 var ascBase = []string{"jc", "jmin", "jmax", "s1", "s2", "h1", "h2", "h3", "h4"}
 var ascExt = []string{"s3", "s4", "i1", "i2", "i3", "i4", "i5"}
@@ -61,6 +61,11 @@ var ascExt = []string{"s3", "s4", "i1", "i2", "i3", "i4", "i5"}
 // argument for a 3.x setting, so the native planner keeps such an endpoint off this path, and a test
 // holds the constant to the two lists.
 const AWGGeneration = awg.Gen2
+
+// MaxAWGGeneration is the newest generation the writer can express when the firmware release takes it
+// (KeeneticOS 5.2): ascBase and ascExt plus the 3.x tail of asc31.go. WireguardOpts.AWGGeneration
+// raises the ceiling from AWGGeneration up to it.
+const MaxAWGGeneration = awg.Gen31
 
 // WireguardOpts tune the generated native interface.
 type WireguardOpts struct {
@@ -94,16 +99,28 @@ func WireguardCommands(e model.Endpoint, o WireguardOpts) ([]string, error) {
 	// 3.x settings comes up on the router and is never answered. The native planner refuses such an
 	// endpoint first; this is the writer holding the same line.
 	if e.Protocol == model.ProtoAmneziaWG {
-		if beyond := awg.Beyond(p, AWGGeneration); len(beyond) != 0 {
-			return nil, fmt.Errorf("endpoint %q uses AmneziaWG %s settings (%s), which `wireguard asc` has no arguments for",
+		// The ceiling is the writer's baseline unless the caller proved the firmware takes more
+		// (KeeneticOS 5.2 and the 3.x tail, asc31.go), or less (before 5.1).
+		limit := o.AWGGeneration
+		if limit == awg.GenNone {
+			limit = AWGGeneration
+		} else if limit > MaxAWGGeneration {
+			limit = MaxAWGGeneration
+		}
+		if beyond := awg.Beyond(p, limit); len(beyond) != 0 {
+			if o.AWGGeneration == awg.GenNone {
+				return nil, fmt.Errorf("endpoint %q uses AmneziaWG %s settings (%s), which `wireguard asc` has no arguments for",
+					e.ID, awg.Need(p), strings.Join(beyond, ", "))
+			}
+			return nil, fmt.Errorf("endpoint %q uses AmneziaWG %s settings (%s), which this KeeneticOS release's `wireguard asc` does not take",
 				e.ID, awg.Need(p), strings.Join(beyond, ", "))
 		}
-		// The arguments exist, but this firmware release does not take them (QA-127): KeeneticOS
-		// before 5.1 refuses the AmneziaWG 2 settings, and the whole Apply with them.
-		if o.AWGGeneration != awg.GenNone && o.AWGGeneration < AWGGeneration {
-			if beyond := awg.Beyond(p, o.AWGGeneration); len(beyond) != 0 {
-				return nil, fmt.Errorf("endpoint %q uses AmneziaWG %s settings (%s), which this KeeneticOS release's `wireguard asc` does not take",
-					e.ID, awg.Need(p), strings.Join(beyond, ", "))
+		if awg.Need(p) > awg.Gen2 {
+			if _, missing, err := asc31Tail(p); err != nil {
+				return nil, fmt.Errorf("endpoint %q: %v", e.ID, err)
+			} else if len(missing) != 0 {
+				return nil, fmt.Errorf("endpoint %q has AmneziaWG 3.x settings but no %s, which `wireguard asc` needs and WayHop will not guess",
+					e.ID, strings.Join(missing, ", "))
 			}
 		}
 	}
@@ -147,7 +164,7 @@ func WireguardCommands(e model.Endpoint, o WireguardOpts) ([]string, error) {
 		if err != nil {
 			continue
 		}
-		// QA-123. An IPv6 address is not an `ip address`: KeeneticOS prints a WireGuard interface's
+		// An IPv6 address is not an `ip address`: KeeneticOS prints a WireGuard interface's
 		// as `ipv6 address <addr>/<len>` (read from a live KeeneticOS 5.1.8 router, `/128`, after `ip tcp
 		// adjust-mss pmtu`). `ip address <v6> 128` was sent instead; it is emitted where the router
 		// prints it, below, so the block reads back in the router's own order.
@@ -165,7 +182,7 @@ func WireguardCommands(e model.Endpoint, o WireguardOpts) ([]string, error) {
 		}
 	}
 	// The panel's form writes the top-level fields and drops the params (one source of truth, as
-	// plugin.go reads them); reading only the params lost both on any edit (QA-038).
+	// plugin.go reads them); reading only the params lost both on any edit.
 	if o.MTU > 0 {
 		add("ip mtu " + strconv.Itoa(o.MTU))
 	} else if e.MTU > 0 {
@@ -237,7 +254,7 @@ func ascArgs(p map[string]any) string {
 		args = append(args, v)
 	}
 	ext := make([]string, 0, len(ascExt))
-	hasExt := false
+	hasExt := awg.Need(p) > awg.Gen2
 	for _, k := range ascExt {
 		v := numStr(p[k]) // S3/S4 numeric; I1-I5 are hex strings (numStr returns the string)
 		ext = append(ext, v)
@@ -251,12 +268,12 @@ func ascArgs(p map[string]any) string {
 		// collapse into the surrounding spaces when NDM whitespace-tokenizes the `wireguard asc`
 		// line, shifting every following value into the wrong slot (I1 binding to the S3
 		// position). "0" is the AWG default for the junk-size params (S3/S4). An unset I1-I5 is an
-		// empty string, which KeeneticOS writes as `""` (QA-124: a live KeeneticOS 5.1.8 router prints
+		// empty string, which KeeneticOS writes as `""` (a KeeneticOS 5.1.8 router prints
 		// its 2.0 interfaces as `wireguard asc <9 base> <s3> <s4> "" "" "" "" ""`); "0" there is a
 		// value the operator never set, and not what the router reads back for an unset one.
 		//
 		// A set I1-I5 is a packet description such as `<b 0x…>`, with spaces in it. Sent bare, NDM
-		// splits it into several arguments and every later value lands in the wrong slot (QA-125).
+		// splits it into several arguments and every later value lands in the wrong slot.
 		// It is quoted the way the router prints a value with spaces (`description "<name>"`; the
 		// same router quotes every such value in its configuration).
 		for i, key := range ascExt {
@@ -270,6 +287,14 @@ func ascArgs(p map[string]any) string {
 			}
 		}
 		args = append(args, ext...)
+	}
+	// The 3.x tail follows the full 2.0 head, which a 3.x line therefore always carries.
+	if awg.Need(p) > awg.Gen2 {
+		tail, missing, err := asc31Tail(p)
+		if err != nil || len(missing) != 0 {
+			return ""
+		}
+		args = append(args, tail...)
 	}
 	return strings.Join(args, " ")
 }

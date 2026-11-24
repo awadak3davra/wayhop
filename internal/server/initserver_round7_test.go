@@ -9,8 +9,8 @@ import (
 	"wayhop/internal/importer"
 )
 
-// TestServerjobs_JobSnapshotNoStore is the regression for the missing Cache-Control
-// on the job-snapshot endpoint. The harden-keys job stores the freshly generated
+// TestServerjobs_JobSnapshotNoStore checks Cache-Control on the job-snapshot
+// endpoint. The harden-keys job stores the freshly generated
 // root SSH private key in its Result, and handleServerJob serves that snapshot, so
 // the response must carry no-store like every other credential-bearing response
 // (backup.go / config.go / subscription.go).
@@ -29,15 +29,13 @@ func TestServerjobs_JobSnapshotNoStore(t *testing.T) {
 	}
 }
 
-// TestSanitizeLinkErr_NoCredentialLeak is the regression for the parse-error
-// redaction hole: on a client-config parse failure during provisioning, the raw
-// share link (carrying the live UUID/password/host) was written verbatim into the
-// job console via importer.Parse's err.Error(), bypassing redactSecrets.
+// TestSanitizeLinkErr_NoCredentialLeak: on a client-config parse failure during
+// provisioning, the raw share link (carrying the live UUID/password/host) must not
+// reach the job console via importer.Parse's err.Error(), bypassing redactSecrets.
 // sanitizeLinkErr must surface only the scheme (a public protocol name), never the
 // credential body.
 func TestSanitizeLinkErr_NoCredentialLeak(t *testing.T) {
-	// The leak is now closed AT THE SOURCE (LOOP-021): importer.Parse no longer embeds the raw link
-	// in its error. A literal "%zz" is an invalid percent-escape, so url.Parse — and thus
+	// The leak is closed AT THE SOURCE: importer.Parse does not embed the raw link in its error. A literal "%zz" is an invalid percent-escape, so url.Parse — and thus
 	// importer.Parse — fails, and the error must carry the scheme for debuggability but NOT the
 	// credential. (sanitizeLinkErr below stays as defense-in-depth on the provisioning path.)
 	const secret = "SEKRETpassword"
@@ -46,7 +44,7 @@ func TestSanitizeLinkErr_NoCredentialLeak(t *testing.T) {
 		t.Fatal("expected importer.Parse to fail on the malformed percent-escape")
 	}
 	if strings.Contains(err.Error(), secret) {
-		t.Fatalf("importer.Parse leaked the credential into its error (LOOP-021): %q", err.Error())
+		t.Fatalf("importer.Parse leaked the credential into its error: %q", err.Error())
 	}
 	if !strings.Contains(err.Error(), "trojan") {
 		t.Errorf("importer.Parse error should still name the scheme for debuggability, got %q", err.Error())

@@ -105,8 +105,8 @@ func TestWatcherLastMemberDownSaysSo(t *testing.T) {
 	}
 }
 
-// Found on the demo: with the election unknown, the alert claimed the group had nothing left while
-// other members were up. An unknown election says nothing.
+// With the election unknown, the alert must not claim the group has nothing left while other
+// members are up. An unknown election says nothing.
 func TestWatcherUnknownElectionClaimsNothing(t *testing.T) {
 	w := newWatcher()
 	w.step(testNow, Pulse{}, EventLog{Known: true}, sampleStatus)
@@ -217,8 +217,8 @@ func TestWatcherApplyWindow(t *testing.T) {
 	}
 }
 
-// Found on the demo: a rollback somebody pressed was announced as "connectivity was lost". Only
-// the fail-safe's own rollback, after a failed check, is that news.
+// A rollback somebody pressed is not announced as "connectivity was lost". Only the fail-safe's
+// own rollback, after a failed check, is that news.
 func TestWatcherManualRollbackIsNotAnOutage(t *testing.T) {
 	w := newWatcher()
 	w.step(testNow, Pulse{}, EventLog{}, sampleStatus)
@@ -390,8 +390,8 @@ func TestWatcherRollbackOutstandingAtStartIsTold(t *testing.T) {
 
 // Inside the window the record is marked a moment before the phase turns rollback_failed, and after a
 // failed Roll back the next connectivity tick relabels the phase (degraded, armed, even rolled_back for
-// a rollback the window can no longer dispatch). The phase alone told the failure twice or not at all,
-// went back to a countdown with Keep, and closed the window as rolled back.
+// a rollback the window can no longer dispatch). Followed alone, the phase would tell the failure twice or not at
+// all, go back to a countdown with Keep, and close the window as rolled back.
 func TestWatcherWindowRollbackFailureFollowsTheRecord(t *testing.T) {
 	w := newWatcher()
 	w.step(testNow, Pulse{}, EventLog{}, sampleStatus)

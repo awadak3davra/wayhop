@@ -11,7 +11,7 @@ import "testing"
 //
 // It still costs: the kernel gets "fdfe:dcba:9876::/126 dev wrtun0", NDM cannot map wrtun0 to an
 // interface it manages, and it answers every IPv6 route enumeration with a ~24-frame backtrace.
-// Measured on a live router: 165 of 165 "unable to resolve" records named wrtun0, ~4000 log
+// Observed on a router: 165 of 165 "unable to resolve" records named wrtun0, ~4000 log
 // lines in 9.5 minutes, cutting the bounded native log to under ten minutes - the same log S99wayhop
 // routes this daemon's own output into, so WayHop's own lines were evicted before anyone read them.
 func TestTUNIPv6DroppedWhenAutoRouteOff(t *testing.T) {

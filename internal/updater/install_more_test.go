@@ -266,7 +266,7 @@ func TestUpdaterinstall_InstallNoAssetForArch(t *testing.T) {
 // first mirror is unreachable (the transport 502s for it) and the second serves the asset. We model
 // this with one transport that 502s any URL containing "dead-mirror" but serves the real asset for
 // the direct URL. Both mirrors are tried in order; the install succeeds on the second, proving
-// fall-through. The dead mirror is HTTPS: after LOOP-010 an executable download runs with a
+// fall-through. The dead mirror is HTTPS: an executable download runs with a
 // mandatory digest, which refuses plaintext http:// mirrors outright (they would never be attempted,
 // so an http:// dead mirror could not demonstrate fall-through) — the mirror still carries the bytes,
 // it just has to be TLS.

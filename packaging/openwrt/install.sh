@@ -228,7 +228,19 @@ UPG="/tmp/wayhop-upgrade.$$"
 LEFT="$UPG/leftovers"
 GZ_STAGED=""
 trap 'rm -rf "$UPG" 2>/dev/null' EXIT
-upg_dir() { [ -d "$UPG" ] || (umask 077; mkdir -p "$UPG") || die "could not create $UPG"; }
+# The name is predictable and /tmp world-writable, and this script runs as root and later reads back
+# what it keeps here (the leftovers list, the rollback copy). So an existing $UPG is taken only when it
+# is a real directory of this uid that nobody else can write to: this run made it, a subshell called
+# upg_dir first. Anything else at that name is someone else's and is refused (SEC-03).
+upg_own() {
+  [ -d "$UPG" ] && [ ! -L "$UPG" ] || return 1
+  [ "$(ls -ldn "$UPG" 2>/dev/null | awk '{ print substr($1, 6, 1) substr($1, 9, 1) " " $3 }')" = "-- $(id -u)" ]
+}
+upg_dir() {
+  upg_own && return 0
+  { [ -e "$UPG" ] || [ -L "$UPG" ]; } && die "$UPG already exists and is not this installer's own directory; remove it and retry"
+  (umask 077; mkdir "$UPG") || die "could not create $UPG"
+}
 kib_of() { [ -f "$1" ] || { echo 0; return; }; _b="$(wc -c < "$1" 2>/dev/null | tr -d ' ')"; echo $(( (${_b:-0} + 1023) / 1024 )); }
 mib_of() { echo $(( ($1 + 1023) / 1024 )); }
 avail_kib() { df -Pk "$1" 2>/dev/null | awk 'NR == 2 && $4 ~ /^[0-9]+$/ { print $4 }'; }
@@ -674,16 +686,16 @@ else
   fi
   [ -x "$SB" ] || warn "sing-box not found -- the UI starts, but you cannot Apply a proxy config until it exists at $SB ($PMINST sing-box, or drop the $ARCH build from github.com/SagerNet/sing-box/releases)"
 fi
-# Version compatibility: WayHop supports sing-box 1.12.x-1.13.x (CI validates every protocol on
-# both). Older than 1.12 lacks features WayHop generates; 1.14+ is untested and may change the schema.
+# Version compatibility: WayHop supports sing-box 1.12.x-1.14.x (CI validates every protocol on
+# each). Older than 1.12 lacks features WayHop generates; 1.15+ is untested and may change the schema.
 if [ -x "$SB" ]; then
   SB_VER="$("$SB" version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)"
   SB_MAJOR="$(echo "$SB_VER" | cut -d. -f1)"
   SB_MINOR="$(echo "$SB_VER" | cut -d. -f2)"
   if [ -n "$SB_MAJOR" ] && [ "$SB_MAJOR" -eq 1 ] 2>/dev/null && [ "$SB_MINOR" -lt 12 ] 2>/dev/null; then
-    warn "sing-box $SB_VER is older than the supported 1.12.x-1.13.x — upgrade it ($PMINST sing-box, or a 1.13.x build from github.com/SagerNet/sing-box/releases)"
-  elif { [ -n "$SB_MAJOR" ] && [ "$SB_MAJOR" -gt 1 ] 2>/dev/null; } || { [ "$SB_MAJOR" -eq 1 ] && [ "$SB_MINOR" -ge 14 ] 2>/dev/null; }; then
-    warn "sing-box $SB_VER is newer than the tested 1.12.x-1.13.x — it may work, but if Apply fails, install a 1.13.x build from github.com/SagerNet/sing-box/releases"
+    warn "sing-box $SB_VER is older than the supported 1.12.x-1.14.x — upgrade it ($PMINST sing-box, or a 1.13.x build from github.com/SagerNet/sing-box/releases)"
+  elif { [ -n "$SB_MAJOR" ] && [ "$SB_MAJOR" -gt 1 ] 2>/dev/null; } || { [ "$SB_MAJOR" -eq 1 ] && [ "$SB_MINOR" -ge 15 ] 2>/dev/null; }; then
+    warn "sing-box $SB_VER is newer than the tested 1.12.x-1.14.x — it may work, but if Apply fails, install a 1.13.x build from github.com/SagerNet/sing-box/releases"
   fi
 fi
 

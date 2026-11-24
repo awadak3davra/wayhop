@@ -8,6 +8,7 @@ import (
 	"wayhop/internal/generator"
 	"wayhop/internal/importer"
 	"wayhop/internal/model"
+	"wayhop/internal/server"
 	"wayhop/internal/updatetx"
 )
 
@@ -16,13 +17,29 @@ import (
 //	wayhop import <share-link-or-conf>   # parse a link into the wayhop model (JSON)
 //	wayhop gen    <share-link-or-conf>   # parse + wrap in a profile + emit sing-box config
 //	wayhop update-verifier               # print the update supervisor (internal/updatetx)
+//	wayhop apply-state-v2 <path>         # rewrite apply-state.json for a build before the blob store
 func runTool(args []string) error {
 	switch args[0] {
+	case "backstop-fill":
+		// Run by the kill switch hook once per boot, before the daemon is up (server/killswitchfill.go):
+		// 0 = complete, 3 = partial (the broad hold stays), other = failed.
+		os.Exit(server.BackstopFill(args[1:], os.Stderr))
+		return nil
+
 	case "update-verifier":
 		// The update supervisor, for the installers and the package scripts to write beside the config
 		// (internal/updatetx): one copy, embedded in the build that knows how it is used.
 		_, err := os.Stdout.Write(updatetx.Script())
 		return err
+
+	case "apply-state-v2":
+		// Before installing a build older than the apply-state blob store by hand: rewrite the record in
+		// the inline schema 2 those builds read (the self-update does this itself). Run with the daemon
+		// stopped.
+		if len(args) < 2 {
+			return fmt.Errorf("usage: wayhop apply-state-v2 <path to apply-state.json>")
+		}
+		return server.WriteLegacyApplyState(args[1])
 
 	case "import":
 		if len(args) < 2 {

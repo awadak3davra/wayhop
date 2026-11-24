@@ -215,10 +215,10 @@ func TestPackageFeedsReadsBothFormats(t *testing.T) {
 	})
 }
 
-// One router, one package manager. The install-target card used to run its own exec.LookPath with
-// opkg preferred, while pm.Detect — which the engine rows, the install buttons and every ownership
-// check use — prefers apk. A box carrying both would be described two different ways on one page,
-// and the card is the half that says where things land.
+// One router, one package manager. The install-target card must use pm.Detect, which the engine
+// rows, the install buttons and every ownership check use and which prefers apk; its own lookup
+// preferring opkg would describe a box carrying both two different ways on one page, and the card
+// is the half that says where things land.
 func TestStorageManagerMatchesTheRestOfTheSection(t *testing.T) {
 	// The card also reports which connection downloads leave through, which it reads from the config —
 	// so the fixture carries one rather than a bare struct that no running daemon ever has.

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -55,7 +56,7 @@ func keeneticPBRPreamble(artifact executionKernelIpsetArtifactV1) (string, error
 		executionToolIp6tables: artifact.IP6Tool.ResolvedPath,
 		executionToolIP:        artifact.IPTool.ResolvedPath,
 	}
-	var b strings.Builder
+	var b, pins strings.Builder
 	b.WriteString("# WayHop Keenetic policy plane. Generated — do not edit.\n")
 	b.WriteString("# Every tool below is pinned to the exact binary whose identity the Apply ledger\n")
 	b.WriteString("# authenticated; the bare names in the body resolve to these and nothing else.\n")
@@ -70,17 +71,53 @@ func keeneticPBRPreamble(artifact executionKernelIpsetArtifactV1) (string, error
 		// executionMulticallApplet so the probe, the argv runner and this preamble cannot disagree.
 		// iptables waits for the xtables lock only when asked (-w; 1.4.21 takes no argument). Without
 		// it a `-C ... || -A` that met NDM's own rebuild or the reconcile's run of this same script read
-		// the lock's exit 4 as "rule absent" and appended another jump: four v6 PREROUTING jumps on
-		// the live router after ten hours, and a lost -N left the v4 chain missing (QA-067).
+		// the lock's exit 4 as "rule absent" and appended another jump (duplicate PREROUTING jumps
+		// accumulate over hours), and a lost -N left the v4 chain missing.
 		wait := ""
 		if tool == executionToolIptables || tool == executionToolIp6tables {
 			wait = " -w"
 		}
 		if applet := executionMulticallApplet(resolved, tool); applet != "" {
-			fmt.Fprintf(&b, "%s() { %s %s%s \"$@\"; }\n", tool, resolved, applet, wait)
+			fmt.Fprintf(&pins, "%s() { %s %s%s \"$@\"; }\n", tool, resolved, applet, wait)
 			continue
 		}
-		fmt.Fprintf(&b, "%s() { %s%s \"$@\"; }\n", tool, resolved, wait)
+		fmt.Fprintf(&pins, "%s() { %s%s \"$@\"; }\n", tool, resolved, wait)
+	}
+	b.WriteString(pins.String())
+	// The detached lift uses the authenticated interpreter and, for start-stop-daemon, the same
+	// BusyBox as ip. A resolved /opt/bin/sh is the BusyBox binary on the
+	// target, so it needs the sh applet just like ip needs its own. Empty wr_bb deliberately selects
+	// the last-resort launcher when ip is not BusyBox; both assignments keep the environment out.
+	shell := artifact.ShellTool.ResolvedPath
+	if !validExecutionRouterPath(shell) {
+		return "", fmt.Errorf("%w: %s has no authenticated path", errExactKernelArtifact, executionToolShell)
+	}
+	fmt.Fprintf(&b, "wr_sh=%s\nwr_sha=\n", shell)
+	if applet := executionMulticallApplet(shell, executionToolShell); applet != "" {
+		fmt.Fprintf(&b, "wr_sha=%s\n", applet)
+	}
+	b.WriteString("wr_bb=\n")
+	if filepath.Base(artifact.IPTool.ResolvedPath) == "busybox" {
+		fmt.Fprintf(&b, "wr_bb=%s\n", artifact.IPTool.ResolvedPath)
+	}
+	// The same pins for a detached child shell (the boot hold's lift timer): the child
+	// inherits no functions, and a bare `ip` there would resolve by PATH, not to the authenticated tool.
+	if !strings.Contains(pins.String(), "'") {
+		b.WriteString("wr_fns='" + pins.String() + "'\n")
+	}
+	// The marking chain is replaced by one restore commit (pbr writeMangleChain). On Entware the
+	// restore is an applet of the same authenticated xtables-multi, so it runs as that binary and
+	// nothing else; 1.4.21's restore takes no -w. A router whose iptables is not that multicall host
+	// has no authenticated restore, and the program takes its staged fallback instead.
+	for _, r := range []struct{ fn, tool, applet, path string }{
+		{"iptables_restore", executionToolIptables, "iptables-restore", artifact.IptablesTool.ResolvedPath},
+		{"ip6tables_restore", executionToolIp6tables, "ip6tables-restore", artifact.IP6Tool.ResolvedPath},
+	} {
+		if filepath.Base(r.path) == "xtables-multi" && executionMulticallApplet(r.path, r.tool) != "" {
+			fmt.Fprintf(&b, "%s() { %s %s \"$@\"; }\n", r.fn, r.path, r.applet)
+			continue
+		}
+		fmt.Fprintf(&b, "%s() { return 1; }\n", r.fn)
 	}
 	return b.String(), nil
 }
@@ -106,7 +143,7 @@ var keeneticKernelPBRPresent = func() bool {
 // routing mode: the tools being installed is not enough, the plane is built only in hybrid and fast
 // (apply.go, applymaterialize.go). In tun and mixed - mixed is the default - a router with Entware's
 // ipset and iptables was told its lists rode the plane, so neither NDM routes nor the compatibility
-// core carried them and every list left by the WAN with a clean review (QA-061).
+// core carried them and every list left by the WAN with a clean review.
 func keeneticKernelPlaneCarriesLists(mode string) bool {
 	return (mode == "hybrid" || mode == "fast") && keeneticKernelPBRPresent()
 }
@@ -130,8 +167,7 @@ func keeneticDomainsViaDNSMasq() bool {
 // On KeeneticOS with the resolver wired it does: dnsmasq is handed `ipset=/name/…/set` for every
 // listed name, so each answer becomes a set member at query time, and the mangle rule marks packets
 // to that member. A LAN device is policy-routed on its first connection after the lookup, TUN or no
-// TUN. Measured on a live router: three lookups took wr_list_rl_teamviewer_4 from 15 to 22
-// members and that set's MARK rule counted packets, in routing mode "fast".
+// TUN, in routing mode "fast" too.
 //
 // It reads the CAPTURE rather than probing again, so the answer describes the apply being performed
 // rather than the router a moment later. capture.DomainsViaDNSMasq already implies the kernel plane
@@ -139,9 +175,8 @@ func keeneticDomainsViaDNSMasq() bool {
 // re-tested here.
 //
 // Deliberately NOT consulted: whether the plan materializes a proxy core. It usually does on this
-// router — the DNS plane alone is enough to make keenetic.PlanRequiresCore true — and an earlier cut
-// of this fix keyed on that, which left the false warning firing on the very router that disproved
-// it. A core existing for DNS says nothing about who matches routing-list names; dnsmasq still fills
+// router — the DNS plane alone is enough to make keenetic.PlanRequiresCore true — so keying on it
+// would leave a false warning firing. A core existing for DNS says nothing about who matches routing-list names; dnsmasq still fills
 // the sets and the kernel still marks the packets.
 func keeneticKernelCarriesDomains(capture *executionNativeCaptureV1) bool {
 	return capture != nil && capture.DomainsViaDNSMasq
@@ -152,9 +187,30 @@ func keeneticKernelCarriesDomains(capture *executionNativeCaptureV1) bool {
 //
 // The LAN bridge is recorded even with interception off. The teardown deletes the DNS redirect and
 // the encrypted-DNS refusals on it whatever this plane's own switches were, because the plane it
-// replaces may have had them on, and without an interface it could delete nothing (QA-114).
+// replaces may have had them on, and without an interface it could delete nothing.
+//
+// BootRestore and BackstopReady are the boot paths of the plane: the restore file the
+// program rebuilds missing sets from, written beside the hook at Apply, and the tmpfs stamp the
+// daemon writes once it has filled the kill switch backstop since boot.
 func keeneticPBROptions(wanIface string) pbr.IpsetOptions {
-	return pbr.IpsetOptions{WanIface: wanIface, DNSInterceptLAN: keeneticLANIface}
+	return pbr.IpsetOptions{WanIface: wanIface, DNSInterceptLAN: keeneticLANIface,
+		BootRestore: keeneticPBRRestorePath, BackstopReady: ksBackstopReadyStamp, BootLearned: ksLearnedPath}
+}
+
+// keeneticLANIfaces is the interfaces traffic can be forwarded from, without the WAN uplink and the
+// hand-off TUN, valid interface names only, sorted: the bridges of every segment (Home, Guest, ...)
+// and also the router's VPN servers and tunnels whose traffic is routed on (a kill switch backstop
+// matching the bridges only would not hold a VPN server's clients and a site-to-site tunnel's
+// traffic in NDM's rebuild window).
+func keeneticLANIfaces(ifaces []string, wan string) []string {
+	var out []string
+	for _, b := range ifaces {
+		if b != wan && b != pbr.HandoffIfaceDefault && validWANInterfaceName(b) && !slices.Contains(out, b) {
+			out = append(out, b)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // keeneticLANIface is where clients arrive on KeeneticOS: the bridge every LAN segment joins. DNS
@@ -188,12 +244,19 @@ func buildKeeneticKernelIpsetArtifact(
 	}
 	artifact := tools
 	artifact.WANIface = io.WanIface
+	artifact.DynamicDomainSets = io.DynamicDomainSets
+	artifact.FastDNSEnforce = io.FastDNSEnforce
+	artifact.LANIfaces = append([]string(nil), io.LANIfaces...)
+	artifact.KillSwitchDNS = io.KillSwitchDNS
+	artifact.HandoffIface = io.HandoffIface
+	artifact.BackstopPref = io.BackstopPref
+	artifact.FillTool, artifact.BootHoldLift = io.FillTool, io.BootHoldLift
 	preamble, err := keeneticPBRPreamble(artifact)
 	if err != nil {
 		return nil, err
 	}
 	artifact.Restore = []byte(plan.RenderIpsetRestore(io))
-	artifact.Script = []byte(preamble + plan.RenderIptablesScript(io) + plan.RenderIPScript(opt))
+	artifact.Script = []byte(preamble + plan.RenderKeeneticScript(opt, io))
 	artifact.Teardown = []byte(preamble + plan.RenderTeardownScript(opt, io))
 	artifact.SetNames = append([]string(nil), plan.IpsetNames(io)...)
 	if artifact.SetNames == nil {
@@ -235,8 +298,13 @@ func validExactKernelPresentIpsetArtifact(artifact executionKernelArtifactV1) bo
 	if !validExecutionKernelIpsetArtifact(stored) {
 		return false
 	}
-	rendered, err := buildKeeneticKernelIpsetArtifact(
-		artifact.Plan, exactKernelOptions(), keeneticPBROptions(stored.WANIface), stored)
+	io := keeneticPBROptions(stored.WANIface)
+	io.DynamicDomainSets = stored.DynamicDomainSets
+	io.FastDNSEnforce = stored.FastDNSEnforce
+	io.LANIfaces, io.KillSwitchDNS, io.HandoffIface = stored.LANIfaces, stored.KillSwitchDNS, stored.HandoffIface
+	io.BackstopPref = stored.BackstopPref
+	io.FillTool, io.BootHoldLift = stored.FillTool, stored.BootHoldLift
+	rendered, err := buildKeeneticKernelIpsetArtifact(artifact.Plan, exactKernelOptions(), io, stored)
 	if err != nil {
 		return false
 	}

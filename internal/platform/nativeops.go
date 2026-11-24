@@ -26,6 +26,11 @@ const (
 	// KeeneticReleaseAWG): unsupported, ReasonPlatformUnsupported. Absent, the native writer's own
 	// generation stands, as it did before the release was read.
 	CapNativeAWGGen2 = "native.amneziawg.gen2"
+
+	// CapNativeAWGGen31 is the router's own AmneziaWG taking the 3.x settings (header protection key,
+	// content padding, the timers, RandomTrailers, DisableCookies) on `wireguard asc`: published as
+	// usable where the KeeneticOS release is 5.2 or newer (KeeneticReleaseAWG). Absent below it.
+	CapNativeAWGGen31 = "native.amneziawg.gen31"
 )
 
 var nativeOperations = []NativeOperation{
@@ -49,7 +54,7 @@ func addNativeOperationCapabilities(add func(Capability), caps Capabilities, rt 
 	addKeeneticAWGGeneration(add, caps)
 }
 
-// keeneticAWGTooOld reports a KeeneticOS release that has no `wireguard asc` (before 4.2, QA-127),
+// keeneticAWGTooOld reports a KeeneticOS release that has no `wireguard asc` (before 4.2),
 // with the words the operation capabilities give for it. ok is false on any other platform or
 // protocol, on a newer release and on one that cannot be read.
 func keeneticAWGTooOld(caps Capabilities, protocol string) (detail, evidence, remedy string, ok bool) {
@@ -72,7 +77,13 @@ func addKeeneticAWGGeneration(add func(Capability), caps Capabilities) {
 	if caps.Platform != string(Keenetic) || !caps.Native["amneziawg"] {
 		return
 	}
-	if generation, known := KeeneticReleaseAWG(caps.FirmwareRelease); !known || generation != awg.Gen1 {
+	generation, known := KeeneticReleaseAWG(caps.FirmwareRelease)
+	if known && generation >= awg.Gen31 {
+		add(newCap(CapNativeAWGGen31, VerdictYes, VerdictYes, VerdictYes, ReasonNone, "",
+			"release: "+caps.FirmwareRelease, "", BlocksNothing))
+		return
+	}
+	if !known || generation != awg.Gen1 {
 		return
 	}
 	add(newCap(CapNativeAWGGen2, VerdictNo, VerdictYes, VerdictNo, ReasonPlatformUnsupported,
@@ -88,7 +99,7 @@ func addNativeProtocolOperations(add func(Capability), caps Capabilities, rt Run
 	native := caps.Native[protocol]
 	installable, hasInstall := caps.Installable[protocol]
 	platformKnown := caps.Platform == string(OpenWrt) || caps.Platform == string(Keenetic)
-	// The release outranks the component (QA-127): Native is decided by decideKeenetic already, and
+	// The release outranks the component: Native is decided by decideKeenetic already, and
 	// this holds the evaluator to it for a Capabilities value assembled anywhere else.
 	tooOldDetail, tooOldEvidence, tooOldRemedy, tooOld := keeneticAWGTooOld(caps, protocol)
 	if tooOld {

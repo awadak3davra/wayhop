@@ -81,8 +81,7 @@ func BuildPlan(intended AWGInterface, zoneName, uciNetwork, uciFirewall string) 
 // refused before anything is rendered. A non-nil set is authoritative: a protocol whose handler is
 // absent is refused, or resolved to one the router does carry, BEFORE anything is rendered.
 //
-// Order matters and is the fix for a contradiction the review caught: resolution comes FIRST and the
-// gate then applies to the RESOLVED protocol. Gating on the requested one would refuse the operator's
+// Order matters: resolution comes FIRST and the gate then applies to the RESOLVED protocol. Gating on the requested one would refuse the operator's
 // WireGuard endpoint on a router that can carry it perfectly well as AmneziaWG, which is the whole
 // case this exists for.
 func BuildPlanFor(intended AWGInterface, protos RouterProtos, zoneName, uciNetwork, uciFirewall string) (Plan, error) {
@@ -125,7 +124,7 @@ func BuildPlanFor(intended AWGInterface, protos RouterProtos, zoneName, uciNetwo
 	p := Plan{
 		Iface:          intended.Name,
 		Intended:       intended,
-		Commands:       nil, // filled below, once we know whether the interface already exists
+		Commands:       nil, // filled below, once it is known whether the interface already exists
 		Commit:         CommitCmds(),
 		Proto:          resolved,
 		RequestedProto: requested,

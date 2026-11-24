@@ -51,8 +51,10 @@ func TestBuildScriptMirrorFetch_NilAndGarbage(t *testing.T) {
 }
 
 func TestSafeMirrorPrefix(t *testing.T) {
-	ok := []string{"https://ghproxy.net/", "http://mirror.example/gh/", "https://a.b.c:8443/x/"}
-	bad := []string{"", "ghproxy.net/", "ftp://x/", "https://x/$(id)", "https://x/`id`", "https://x/ y", "https://x/'q"}
+	ok := []string{"https://ghproxy.net/", "https://a.b.c:8443/x/"}
+	// http:// is refused: anyone on the path of a plain-http mirror could hand the
+	// server's root install a binary of their choosing.
+	bad := []string{"", "http://mirror.example/gh/", "ghproxy.net/", "ftp://x/", "https://x/$(id)", "https://x/`id`", "https://x/ y", "https://x/'q"}
 	for _, m := range ok {
 		if !safeMirrorPrefix(m) {
 			t.Errorf("safeMirrorPrefix(%q) = false, want true", m)

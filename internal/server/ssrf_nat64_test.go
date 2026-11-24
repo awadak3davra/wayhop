@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// TestIsInternalDialIP_NAT64_6to4 (#11): the SSRF guard must decode the IPv4 embedded in NAT64
+// TestIsInternalDialIP_NAT64_6to4: the SSRF guard must decode the IPv4 embedded in NAT64
 // (64:ff9b::/96) and 6to4 (2002::/16) and refuse it when internal — otherwise a hostname resolving
 // to e.g. 64:ff9b::7f00:1 (=127.0.0.1) lets the root daemon reach loopback/metadata on a NAT64/CLAT box.
 func TestIsInternalDialIP_NAT64_6to4(t *testing.T) {

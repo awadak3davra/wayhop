@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"wayhop/internal/model"
 )
 
 // hexMark formats a 32-bit fwmark/mask.
@@ -24,7 +26,7 @@ func (pl *Plan) markSet(mark uint32) string {
 // nft mirror of the ipset/iptables plane's `CONNMARK --restore-mark --nfmask M --ctmask M`
 // (render_ipset.go). nft CANNOT express a single masked meta↔ct merge — real `nft -f` rejects
 // `meta mark set meta mark & ~M | ct mark & M` with "Right hand side of binary operation (|) must be
-// constant" (the exact form reverted from 0.3.5). So instead we compare `ct mark` to each egress's
+// constant". So instead the chain compares `ct mark` to each egress's
 // CONSTANT mark and re-apply that constant via the proven markSet form — valid nft AND it preserves
 // non-owned (fw4) bits. Terminating (`accept`): a pinned flow short-circuits the per-zone
 // re-classification below, which is precisely the egress affinity L2 exists to provide. Marks are
@@ -153,6 +155,9 @@ func (pl *Plan) RenderNft() string {
 			fmt.Fprintf(&b, "\tset %s_s6 { type ipv6_addr; flags interval; elements = { %s } }\n", z.Name, nftElements(z.SrcV6))
 		}
 	}
+	// The fast DNS plane's sets (fastdns.go): the resolver-fed dlist sets and the core-only lists'
+	// static sets. None on a plan without names or core-only lists.
+	b.WriteString(pl.fastSetDecls())
 
 	// The classification rules below are rendered ONCE into mb and emitted by BOTH prerouting
 	// chains (wr_mark and wr_mark_late) — see the wr_mark_late comment after them for why this
@@ -195,6 +200,8 @@ func (pl *Plan) RenderNft() string {
 		// bypass re-assert is needed for source+dest zones). pre = the family-agnostic terms
 		// (iface/mac/port); the per-family `ip/ip6 saddr @<name>_s4/_s6` is added after it.
 		pre := z.srcMatchPrefix()
+		// "" unless the plan has resolver-fed sets (fastdns.go dnsGuard): byte-identical otherwise.
+		guard := pl.dnsGuard(z)
 		// Cross-family guard: if the zone carries a source IP but NOT in this family (e.g. a v6
 		// source on a v4 dest line), the source can't constrain this family's traffic — emitting
 		// it would mark the dest for every source (an over-route). Skip that line. A zone with no
@@ -214,7 +221,7 @@ func (pl *Plan) RenderNft() string {
 			if len(z.SrcV4) > 0 {
 				src = fmt.Sprintf("ip saddr %s@%s_s4 ", neg, z.Name)
 			}
-			fmt.Fprintf(&mb, "\t\t%s%sip daddr @%s_4 %s\n", pre, src, z.Name, pl.markSet(z.Mark))
+			fmt.Fprintf(&mb, "\t\t%s%s%sip daddr @%s_4 %s\n", guard, pre, src, z.Name, pl.markSet(z.Mark))
 			classified = true
 		}
 		if len(z.V6) > 0 && (z.SrcNegate || len(z.SrcV6) > 0 || len(z.SrcV4) == 0) {
@@ -222,14 +229,34 @@ func (pl *Plan) RenderNft() string {
 			if len(z.SrcV6) > 0 {
 				src = fmt.Sprintf("ip6 saddr %s@%s_s6 ", neg, z.Name)
 			}
-			fmt.Fprintf(&mb, "\t\t%s%sip6 daddr @%s_6 %s\n", pre, src, z.Name, pl.markSet(z.Mark))
+			fmt.Fprintf(&mb, "\t\t%s%s%sip6 daddr @%s_6 %s\n", guard, pre, src, z.Name, pl.markSet(z.Mark))
+			classified = true
+		}
+		// The zone's remote prefixes (fast DNS plane, rlist sets filled from RAM) are marked as its
+		// static set is, right after it. Its resolver-fed addresses (dlist) are marked in the separate
+		// wayhop_dns table (RenderNftDNS) before this chain runs; every line here carries the guard
+		// that keeps a stronger dlist mark (dnsGuard).
+		if z.RemoteList != "" && !z.RemoteRouted && (z.SrcNegate || len(z.SrcV4) > 0 || len(z.SrcV6) == 0) {
+			src := ""
+			if len(z.SrcV4) > 0 {
+				src = fmt.Sprintf("ip saddr %s@%s_s4 ", neg, z.Name)
+			}
+			fmt.Fprintf(&mb, "\t\t%s%s%sip daddr @%s %s\n", guard, pre, src, RlistSet(z.Name, 4), pl.markSet(z.Mark))
+			classified = true
+		}
+		if z.RemoteList != "" && !z.RemoteRouted && !z.DNSNoV6 && (z.SrcNegate || len(z.SrcV6) > 0 || len(z.SrcV4) == 0) {
+			src := ""
+			if len(z.SrcV6) > 0 {
+				src = fmt.Sprintf("ip6 saddr %s@%s_s6 ", neg, z.Name)
+			}
+			fmt.Fprintf(&mb, "\t\t%s%s%sip6 daddr @%s %s\n", guard, pre, src, RlistSet(z.Name, 6), pl.markSet(z.Mark))
 			classified = true
 		}
 		// Source-only zone (no dest): matches EVERY destination from the matching source. Emit a
 		// per-family saddr line when the source carries IPs; otherwise one family-agnostic line
 		// (iface/mac/port). Never emit a condition-less line (pre=="" with no saddr would mark
 		// everything) — a SrcScoped zone always has at least one matcher, but guard regardless.
-		if len(z.V4) == 0 && len(z.V6) == 0 && z.SrcScoped {
+		if len(z.V4) == 0 && len(z.V6) == 0 && !zoneHasDomains(z) && z.SrcScoped {
 			wrote := false
 			// neg belongs here for the same reason it belongs on the dest lines above: an
 			// "except" zone marks every source NOT in the set. Without it a source-only zone
@@ -237,15 +264,15 @@ func (pl *Plan) RenderNft() string {
 			// except the kids" routed ONLY the kids, and a blocking list blocked precisely the
 			// devices meant to be left alone. The screen said one thing, the kernel did the other.
 			if len(z.SrcV4) > 0 {
-				fmt.Fprintf(&mb, "\t\t%sip saddr %s@%s_s4 %s\n", pre, neg, z.Name, pl.markSet(z.Mark))
+				fmt.Fprintf(&mb, "\t\t%s%sip saddr %s@%s_s4 %s\n", guard, pre, neg, z.Name, pl.markSet(z.Mark))
 				wrote = true
 			}
 			if len(z.SrcV6) > 0 {
-				fmt.Fprintf(&mb, "\t\t%sip6 saddr %s@%s_s6 %s\n", pre, neg, z.Name, pl.markSet(z.Mark))
+				fmt.Fprintf(&mb, "\t\t%s%sip6 saddr %s@%s_s6 %s\n", guard, pre, neg, z.Name, pl.markSet(z.Mark))
 				wrote = true
 			}
 			if !wrote && pre != "" {
-				fmt.Fprintf(&mb, "\t\t%s%s\n", pre, pl.markSet(z.Mark))
+				fmt.Fprintf(&mb, "\t\t%s%s%s\n", guard, pre, pl.markSet(z.Mark))
 				wrote = true
 			}
 			if wrote {
@@ -272,6 +299,9 @@ func (pl *Plan) RenderNft() string {
 	for _, l := range pl.connmarkSaveLines() {
 		fmt.Fprintf(&mb, "\t\t%s\n", l)
 	}
+	if l := pl.scopedDirectSaveLine(); l != "" {
+		fmt.Fprintf(&mb, "\t\t%s\n", l)
+	}
 	// Chain name must NOT be an nft reserved keyword — `chain mark { ... }` fails to
 	// parse ("unexpected mark"), since `mark` is a keyword (meta mark / ct mark). Use a
 	// namespaced identifier instead. (Caught only by a real `nft -f` on-device; the unit
@@ -282,27 +312,33 @@ func (pl *Plan) RenderNft() string {
 	b.WriteString("\t}\n")
 
 	// Second pass at a LATER priority, for ICMP/UDP only. sing-box's own auto_redirect table
-	// (`table inet sing-box`, which we must not edit) ends its `prerouting_udp_icmp` chain —
+	// (`table inet sing-box`, which WayHop must not edit) ends its `prerouting_udp_icmp` chain —
 	// `type filter hook prerouting priority dstnat + 2`, i.e. AFTER our mangle-priority chain —
 	// with `ct mark != <tun mark> meta mark set <exclude mark> ct mark set meta mark`. That is an
 	// ABSOLUTE assignment, not a masked one, so it wipes the egress mark wr_mark just set and
 	// poisons the connmark too (defeating the L2 restore above). The packet then finds no
 	// `fwmark ... lookup <table>` ip rule, falls through to the main table and leaves via the WAN
-	// — measured on a live test router: TCP to a routed CIDR exited the tunnel while ICMP and UDP to
-	// the SAME address exited the WAN, so a traceroute (and Telegram voice, and any UDP service on
-	// a routed list) silently bypassed the tunnel. TCP escapes the clobber because that chain
+	// — on OpenWrt, TCP to a routed CIDR would exit the tunnel while ICMP and UDP to the SAME
+	// address exit the WAN, so a traceroute (and Telegram voice, and any UDP service on a routed
+	// list) would silently bypass the tunnel. TCP escapes the clobber because that chain
 	// returns on `meta l4proto != { icmp, udp, ipv6-icmp }` — hence the same guard here.
 	//
 	// Re-applying our marks after it is safe by construction: the engine's TUN excludes exactly
 	// this plan's Zones ∪ Bypass (generator passes them as route_exclude_address, "single source of
 	// truth"), so every destination these rules match is one the engine has already declined to
 	// handle. The route lookup happens after the whole prerouting hook, so a mark set here still
-	// steers the packet. What we cannot repair is UDP/ICMP egress affinity: the engine overwrites
+	// steers the packet. What this cannot repair is UDP/ICMP egress affinity: the engine overwrites
 	// the connmark on every packet before this chain runs, so the L2 restore can only re-adopt a
 	// flow while its destination is still in the set.
 	if classified || sourceOnly {
 		b.WriteString("\tchain wr_mark_late {\n")
-		b.WriteString("\t\ttype filter hook prerouting priority dstnat + 3; policy accept;\n")
+		// One step later when the plan has resolver-fed sets: their own late chain (wayhop_dns) runs at
+		// dstnat + 3, and this one has to see its marks (fastdns.go RenderNftDNS).
+		late := "dstnat + 3"
+		if len(pl.DlistSets()) > 0 {
+			late = "dstnat + 4"
+		}
+		fmt.Fprintf(&b, "\t\ttype filter hook prerouting priority %s; policy accept;\n", late)
 		b.WriteString("\t\tmeta l4proto != { icmp, udp, ipv6-icmp } return\n")
 		b.WriteString(mb.String())
 		b.WriteString("\t}\n")
@@ -329,9 +365,9 @@ func (pl *Plan) RenderNft() string {
 
 	// Forwarded-LAN MASQUERADE on every tunnel egress dev. Forwarded LAN traffic steered out
 	// an adopted/owned kernel tunnel iface (an EgressInterface egress) keeps its private
-	// (RFC1918) source unless we SNAT it to the tunnel's source — the peer would otherwise have
-	// no route back (the exact black-hole from project history; the Keenetic iptables path
-	// already MASQUERADEs every failover member — this nft path was the gap). We match on
+	// (RFC1918) source unless it is SNATed to the tunnel's source — the peer would otherwise have
+	// no route back (the Keenetic iptables path MASQUERADEs every failover member the same way).
+	// The match is on
 	// oifname (the egress dev), NOT fwmark: by POSTROUTING the packet is already on the tunnel
 	// dev, so masquerade is a harmless no-op for the router's own egress (already tunnel-src'd)
 	// and only rewrites forwarded LAN flows. One line per UNIQUE iface so a failover re-election
@@ -364,7 +400,13 @@ func (pl *Plan) RenderNft() string {
 		b.WriteString("\t}\n")
 	}
 
+	// The fast DNS plane's chains (fastdns.go): the core pin and the LAN DNS enforcement.
+	b.WriteString(pl.fastChains())
+
 	b.WriteString("}\n")
+	// The resolver-fed sets and their marking chains, in a small table of their own (fastdns.go), in
+	// the same transaction, so the two tables are replaced together.
+	b.WriteString(pl.RenderNftDNS())
 	return b.String()
 }
 
@@ -416,14 +458,22 @@ type ipRuleExclude struct {
 // Keenetic. RFC1918 dsts never belong on a tunnel egress (the censored sets are public),
 // so this is safe; priorities sit just under RulePref so they win over the fwmark rules.
 func privateExcludes(opt Options) []ipRuleExclude {
-	return excludesFor(opt, []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"})
+	return excludesFor(opt, planePrivateV4)
 }
+
+// planePrivateV4 and planePrivateV6 are the destinations the plane never sends to a tunnel table:
+// the ip rules above the fwmark rules look them up in the main table. The kill-switch guard lets the
+// same destinations through before any of its drops, from these same lists.
+var (
+	planePrivateV4 = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+	planePrivateV6 = []string{"fc00::/7", "fe80::/10"}
+)
 
 // privateExcludesV6 is the IPv6 analogue: ULA + link-local stay on the main table so a
 // v6 LAN/local-dst reply isn't re-marked onto a tunnel table (same loop the v4 exclusion
 // prevents). Emitted only when the plan actually marks v6.
 func privateExcludesV6(opt Options) []ipRuleExclude {
-	return excludesFor(opt, []string{"fc00::/7", "fe80::/10"})
+	return excludesFor(opt, planePrivateV6)
 }
 
 func excludesFor(opt Options, cidrs []string) []ipRuleExclude {
@@ -465,7 +515,7 @@ const failClosedMetric = 1000
 // failClosedMetricV6 is failClosedMetric for IPv6. The kernel gives an IPv6 route added without a
 // metric 1024 (and treats metric 0 as that default), so the v6 `default dev <iface>` route sits at
 // 1024 and a blackhole at 1000 sorted AHEAD of it: with the kill switch on, all marked IPv6 was
-// dropped while the tunnel was up (QA-096; measured in WSL: blackhole 1000 listed before dev 1024).
+// dropped while the tunnel was up (measured in WSL: blackhole 1000 listed before dev 1024).
 const failClosedMetricV6 = 2048
 
 // RenderIP returns the `ip rule`/`ip route` (and symmetric `ip -6 rule`/`ip -6 route` when the
@@ -473,7 +523,7 @@ const failClosedMetricV6 = 2048
 // falls through to the main table.
 //
 // The list converges a router that already carries an earlier plane in place, with nothing deleted
-// first (RT-01): routes are `replace`d, an `ip rule add` the kernel answers with "File exists" is
+// first: routes are `replace`d, an `ip rule add` the kernel answers with "File exists" is
 // already installed (the executor accepts that), and the only state a replace cannot overwrite, a
 // kill-switch blackhole left in a table whose egress no longer has one, is removed by its own `del`.
 // Rules and tables the new plan no longer names are retired after the install.
@@ -493,6 +543,17 @@ func (pl *Plan) RenderIP(opt Options) []string {
 	if v6 {
 		cmds = append(cmds, pl.unpinCommands(opt, true, "add")...)
 	}
+	// The device-scoped direct names' mark (fast DNS plane) looks up the WAN table by a rule of its own
+	// at WayHop's priority, as a direct egress's traffic reaches it.
+	if pl.scopedDirectNames() {
+		pref := opt.RulePref + len(pl.nonWanEgresses())
+		cmds = append(cmds, fmt.Sprintf("ip rule add fwmark %s/%s table %d priority %d", hexMark(ScopedDirectMark), hexMark(pl.Mask), opt.WANTable, pref))
+		if v6 {
+			cmds = append(cmds, fmt.Sprintf("ip -6 rule add fwmark %s/%s table %d priority %d", hexMark(ScopedDirectMark), hexMark(pl.Mask), opt.WANTable, pref))
+		}
+	}
+	// The large lists' tables, after every fwmark rule (routed.go).
+	cmds = append(cmds, pl.routedRules(opt, "add")...)
 	for i, e := range pl.nonWanEgresses() {
 		pref := opt.RulePref + i
 		cmds = append(cmds, fmt.Sprintf("ip rule add fwmark %s/%s table %d priority %d",
@@ -520,7 +581,7 @@ func (pl *Plan) RenderIP(opt Options) []string {
 					cmds = append(cmds, fmt.Sprintf("ip -6 route replace blackhole default metric %d table %d", failClosedMetricV6, e.Table))
 				}
 			} else {
-				// No kill switch on this egress. The table is no longer flushed before the install, so a
+				// No kill switch on this egress. The table is not flushed before the install, so a
 				// blackhole an earlier plane put here (its kill switch since turned off, or another egress
 				// that held this table) would keep dropping the traffic the operator now wants to fall
 				// back to the WAN. Usually absent; the executor accepts that.
@@ -559,6 +620,15 @@ func (pl *Plan) ipTeardown(opt Options) []string {
 			cmds = append(cmds, fmt.Sprintf("ip -6 route flush table %d", e.Table))
 		}
 	}
+	if pl.scopedDirectNames() {
+		pref := opt.RulePref + len(pl.nonWanEgresses())
+		cmds = append(cmds, fmt.Sprintf("ip rule del fwmark %s/%s table %d priority %d", hexMark(ScopedDirectMark), hexMark(pl.Mask), opt.WANTable, pref))
+		if v6 {
+			cmds = append(cmds, fmt.Sprintf("ip -6 rule del fwmark %s/%s table %d priority %d", hexMark(ScopedDirectMark), hexMark(pl.Mask), opt.WANTable, pref))
+		}
+	}
+	cmds = append(cmds, pl.routedRules(opt, "del")...)
+	cmds = append(cmds, pl.routedFlush(opt)...)
 	cmds = append(cmds, pl.unpinCommands(opt, false, "del")...)
 	if v6 {
 		cmds = append(cmds, pl.unpinCommands(opt, true, "del")...)
@@ -576,7 +646,11 @@ func (pl *Plan) ipTeardown(opt Options) []string {
 
 // RenderTeardown returns the commands to remove everything RenderNft/RenderIP installed.
 func (pl *Plan) RenderTeardown(opt Options) []string {
-	return append([]string{fmt.Sprintf("nft delete table inet %s", pl.Table)}, pl.ipTeardown(opt)...)
+	cmds := []string{fmt.Sprintf("nft delete table inet %s", pl.Table)}
+	if len(pl.DlistSets()) > 0 {
+		cmds = append(cmds, fmt.Sprintf("nft delete table inet %s", pl.DNSTable()))
+	}
+	return append(cmds, pl.ipTeardown(opt)...)
 }
 
 // masqIfaces returns the unique kernel tunnel ifnames that need a forwarded-LAN MASQUERADE.
@@ -613,13 +687,40 @@ func (pl *Plan) masqWanIfaces(skip []string) []string {
 // mssIfaces returns unique sorted kernel tunnel ifnames needing TCP MSS clamping — every
 // EgressInterface egress in this plan. Derives directly from pl.Egresses so it is
 // self-consistent independent of whether MasqIfaces was populated by Compile.
+//
+// A plan with a fastest list's own egress also clamps on every enabled kernel tunnel (MasqIfaces):
+// that egress's device is only the first candidate, and the runtime elector points the table at the
+// others, whose SYNs would leave with the LAN's MSS. Only such a plan: an applied artifact is
+// validated byte for byte against a re-render of its own plan (validExactKernelPresentArtifact), so
+// the render of every plan that exists on a router today must not move. A group's later members are
+// the same gap, left for the day the artifact carries a render version.
 func (pl *Plan) mssIfaces() []string {
 	seen := map[string]bool{}
 	var out []string
+	add := func(iface string) {
+		if iface != "" && !seen[iface] {
+			seen[iface] = true
+			out = append(out, iface)
+		}
+	}
+	lists := false
 	for _, e := range pl.Egresses {
-		if e.Kind == EgressInterface && e.Iface != "" && !seen[e.Iface] {
-			seen[e.Iface] = true
-			out = append(out, e.Iface)
+		if e.Kind == EgressInterface {
+			add(e.Iface)
+			// Every device the elector may point this table at: a group moved to its
+			// fastest member sent that member's SYNs out unclamped. Recorded by Compile; a plan
+			// stored before the field has none, so its render does not move.
+			for _, d := range e.Ifaces {
+				add(d)
+			}
+			if _, ok := model.ListEgressID(e.Tag); ok {
+				lists = true
+			}
+		}
+	}
+	if lists {
+		for _, iface := range pl.MasqIfaces {
+			add(iface)
 		}
 	}
 	sort.Strings(out)

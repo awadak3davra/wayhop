@@ -102,7 +102,7 @@ check_tag() {
 kmod_mk="$feed_src/kmod-amneziawg/Makefile"
 tools_mk="$feed_src/amneziawg-tools/Makefile"
 luci_mk="$feed_src/luci-proto-amneziawg/Makefile"
-check_pin "$kmod_mk" PKG_VERSION "${AWG_KMOD_TAG#v}"
+check_pin "$kmod_mk" PKG_VERSION "${AWG_KMOD_VERSION:-${AWG_KMOD_TAG#v}}"
 check_pin "$kmod_mk" PKG_SOURCE_URL "$AWG_KMOD_REPO.git"
 check_pin "$kmod_mk" PKG_SOURCE_VERSION "$AWG_KMOD_COMMIT"
 check_pin "$kmod_mk" PKG_RELEASE "$AWG_PKG_RELEASE"

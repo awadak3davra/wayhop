@@ -8,7 +8,7 @@ import (
 // TestDetectDoHClients_TheRouterIsNotOneOfItsClients pins the difference between "a device on the LAN
 // resolves names itself" and "this router resolves names the way it was configured to".
 //
-// Found on a live test router. WayHop's own secure default is DoH to 1.1.1.1, and it rides the
+// Observed on an OpenWrt router. WayHop's own secure default is DoH to 1.1.1.1, and it rides the
 // tunnel, so `/proc/net/nf_conntrack` carried `src=10.0.0.30 dst=1.1.1.1 dport=443` — where 10.0.0.30
 // is the address the router holds on its own awg0 device, created by the panel at Apply. The detector
 // took any flow to a listed resolver, so the row titled "LAN clients use the router's DNS" reported

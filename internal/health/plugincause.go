@@ -20,7 +20,7 @@ type pluginStates struct {
 }
 
 // SetPluginStateResolver tells the monitor where to read a plugin-run exit's process state, so a down
-// ByeDPI exit is explained by its process instead of by a network it does not have (QA-041).
+// ByeDPI exit is explained by its process instead of by a network it does not have.
 func (m *Monitor) SetPluginStateResolver(resolve func(id string) (PluginState, bool)) {
 	if m == nil {
 		return

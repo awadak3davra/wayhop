@@ -12,7 +12,7 @@ import (
 	"wayhop/internal/updatetx"
 )
 
-// QA-131. The rollback note reaches the panel (last_update_note) and the bot's boot alert in the
+// The rollback note reaches the panel (last_update_note) and the bot's boot alert in the
 // router's zone, named. time.Local is UTC on Keenetic and OpenWrt, so a rollback at 22:20 router time
 // in UTC+3 read 19:20, next to bot times in router time. The zone is five hours off this host's own,
 // so a time formatted in time.Local cannot pass.

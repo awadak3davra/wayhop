@@ -148,9 +148,9 @@ func (s *Server) lanPrefixes() ([]netip.Prefix, map[string]bool) {
 //
 // The card is headed "per device on your network" and the aggregation filtered only DESTINATIONS, so
 // every conntrack row with a public destination became a "device" - including rows whose SOURCE is
-// the far side of a tunnel. Measured on a live Keenetic: 30 listed devices, of which 23 were
-// on the LAN (192.168.88.0/24, the br0 subnet) and seven were tunnel-side addresses - 10.0.1.x,
-// 10.50.1.x, 10.50.2.x, 10.50.3.x, 10.50.4.x, 172.31.1.x, 172.31.2.x. Nearly a quarter of a
+// the far side of a tunnel. Observed on KeeneticOS: 30 listed devices, of which 23 were
+// on the LAN (the br0 subnet) and seven were tunnel-side addresses from several 10.x and
+// 172.16-31.x tunnel networks. Nearly a quarter of a
 // list someone reads to find which of THEIR devices is leaking.
 //
 // An empty prefix list means the router's own addresses could not be read. That returns true for

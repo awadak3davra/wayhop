@@ -148,16 +148,16 @@ func awgParamKeys() []string {
 var pinFields = []string{"pin_cert_sha256", "pin_pubkey_sha256", "pin_cert_may_be_ca", "pin_cert_beside_chain",
 	"pin_cert_may_be_ca_of", "pin_cert_beside_chain_of"}
 
-// Reimport is what importing a link again does to the connection that link already made (QA-148).
+// Reimport is what importing a link again does to the connection that link already made.
 //
-// A bulk import of the same link used to store the bare parse in its place, so everything the user
-// had set since (the name, the switch, the health target, multiplex) went back to what the link
-// carries. Laying only the values the link carries over the stored connection was not the answer: a
-// value the link no longer carries stayed, so a provider that dropped Vision, allowInsecure, a uTLS
-// fingerprint or a rotated pin left the connection broken, or accepting any certificate, while the
-// import said "unchanged". Taking the link whole was not either: it wiped what no link can carry, an
-// ssh host key added in the form (so the exit then accepted any server key), Hysteria2's QUIC tuning,
-// a WireGuard keepalive set in the form.
+// Storing the bare parse in its place would send everything the user has set since (the name, the
+// switch, the health target, multiplex) back to what the link carries. Laying only the values the
+// link carries over the stored connection is not the answer either: a value the link no longer
+// carries would stay, so a provider that dropped Vision, allowInsecure, a uTLS fingerprint or a
+// rotated pin would leave the connection broken, or accepting any certificate, while the import said
+// "unchanged". Taking the link whole would wipe what no link can carry: an ssh host key added in the
+// form (so the exit would accept any server key), Hysteria2's QUIC tuning, a WireGuard keepalive set
+// in the form.
 //
 // So the link's format decides (sourceFields): what that format can express comes from the link,
 // cleared when the link omits it; everything else stays as stored. The format is the tag the parse
@@ -231,7 +231,7 @@ func Reimport(have, link model.Endpoint) model.Endpoint {
 }
 
 // ClearedWireGuardKnobs names top-level MTU/keepalive values a re-import removed without replacing
-// them. The bulk-import answer includes them so a form-set value never disappears silently (QA-156).
+// them. The bulk-import answer includes them so a form-set value never disappears silently.
 func ClearedWireGuardKnobs(have, merged model.Endpoint) []string {
 	if merged.Protocol != model.ProtoWireGuard && merged.Protocol != model.ProtoAmneziaWG {
 		return nil

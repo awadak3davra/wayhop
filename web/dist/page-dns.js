@@ -1585,6 +1585,14 @@ function dnsQueryPath(nat, tun) {
     const match = parts.length ? parts.join(", ") : t("(no match)");
     const row = branchRow(String(i + 1), match, r.server, false);
     if (r.disabled) row.classList.add("off");
+    // A rule that matches by routing lists needs one of them switched on: with every one off no set
+    // is emitted for it and Apply leaves the rule out (it never widens to its other matchers). The
+    // row said "blocked" or named a resolver all the same. It reads as a rule that is off, with the
+    // mark beside the lists that make it so.
+    if (dnsRuleListsOff(r)) {
+      row.classList.add("off");
+      row.querySelector(".qp-br-m").appendChild(el("span", { class: "pill muted" }, t("off")));
+    }
     // Exactly the controls the removed card carried, on the row they belong to.
     row.appendChild(el("span", { class: "qp-br-a" },
       // Serialize through dnsSaveChain for the reason the rule editor states: a bare PUT here
@@ -1609,11 +1617,12 @@ function dnsQueryPath(nat, tun) {
       el("button", { class: "btn btn-danger btn-sm", "aria-label": t("Delete") + " rule " + match,
         onclick: async () => {
           if (!await modalConfirm(t("Delete this DNS rule?"))) return;
-          let idx = dnsState.rules.indexOf(r);
-          if (idx < 0 && r.id) idx = dnsState.rules.findIndex(x => x && x.id === r.id);
-          if (idx < 0) return;
-          dnsState.rules.splice(idx, 1);
-          saveDNS(t("rule ✕"), true);
+          saveDNSAfter(() => {
+            let idx = dnsState.rules.indexOf(r);
+            if (idx < 0 && r.id) idx = dnsState.rules.findIndex(x => x && x.id === r.id);
+            if (idx < 0) return false;
+            dnsState.rules.splice(idx, 1);
+          }, t("rule ✕"), true);
         } }, t("Delete"))));
     if (qpMore && i >= QP_VISIBLE) qpMore.appendChild(row); else branches.appendChild(row);
   });
@@ -1841,7 +1850,7 @@ function dnsServerRow(s, i) {
       // saveDNS (toggle/strategy/default-resolver) reassigns dnsState to fresh round-tripped
       // instances while the rendered rows still close over the OLD objects, so indexOf(s) alone
       // returns -1 and the confirmed delete silently no-ops until a re-render.
-      el("button", { class: "btn btn-danger btn-sm", onclick: async () => { if (!await modalConfirm(t("Delete DNS resolver {0}?", s.tag))) return; let idx = dnsState.servers.indexOf(s); if (idx < 0) idx = dnsState.servers.findIndex(x => x && x.tag === s.tag); if (idx < 0) return; dnsState.servers.splice(idx, 1); if (dnsState.final === s.tag) dnsState.final = ""; saveDNS(s.tag + " ✕", true); } , "aria-label": t("Delete") + " resolver " + s.tag }, t("Delete"))));
+      el("button", { class: "btn btn-danger btn-sm", onclick: async () => { if (!await modalConfirm(t("Delete DNS resolver {0}?", s.tag))) return; saveDNSAfter(() => { let idx = dnsState.servers.indexOf(s); if (idx < 0) idx = dnsState.servers.findIndex(x => x && x.tag === s.tag); if (idx < 0) return false; dnsState.servers.splice(idx, 1); if (dnsState.final === s.tag) dnsState.final = ""; }, s.tag + " ✕", true); } , "aria-label": t("Delete") + " resolver " + s.tag }, t("Delete"))));
 }
 
 // dnsPlaneNotice says which plane answers clients, as measured. The profile's resolvers and rules are
@@ -2237,6 +2246,14 @@ async function openDNSServer(idx) {
   };
 }
 
+// dnsRuleListsOff reports a rule that names routing lists, every one of them switched off: the
+// generator emits no set for such a list and drops the rule (generator dnsFrom).
+function dnsRuleListsOff(r) {
+  const sets = asList(r.rule_sets).filter(Boolean);
+  const lists = state.profile.routing_lists || [];
+  return sets.length > 0 && sets.every(id => { const rl = lists.find(x => x.id === id); return !!rl && rl.enabled === false; });
+}
+
 function openDNSRule(idx) {
   const editing = idx != null;
   const cur = editing ? dnsState.rules[idx] : { rule_sets: [], domain_suffix: [], query_type: [], server: dnsState.servers[0] ? dnsState.servers[0].tag : "reject" };
@@ -2247,7 +2264,9 @@ function openDNSRule(idx) {
   lists.forEach(rl => {
     const c = el("input", { type: "checkbox" }); if ((cur.rule_sets || []).includes(rl.id)) c.setAttribute("checked", "true");
     listChecks[rl.id] = c;
-    listBox.appendChild(el("label", { class: "check" }, c, el("span", {}, rl.name || rl.id)));
+    // A list that is switched off matches nothing, here as in routing: say so where it is picked.
+    listBox.appendChild(el("label", { class: "check" }, c, el("span", {}, rl.name || rl.id),
+      rl.enabled === false ? el("span", { class: "pill muted" }, t("off")) : null));
   });
   // asList, not `|| []`: these come from the stored rule and a scalar there throws while the form is
   // being built, so the dialog never opens at all — see app.js and the endpoint whose local_address

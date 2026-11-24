@@ -40,7 +40,7 @@ func TestRoutingImportScreensPrefixesNoListShouldCarry(t *testing.T) {
 	}
 }
 
-// QA-111, on the importer's side: the IPv4 default route written as IPv6 (::ffff:0.0.0.0/96) passed
+// On the importer's side: the IPv4 default route written as IPv6 (::ffff:0.0.0.0/96) passed
 // the screen as an ordinary IPv6 /96, and the kernel plane files it as 0.0.0.0/0. A v4-mapped prefix
 // is judged as the IPv4 prefix it stands for.
 func TestRoutingImportJudgesV4MappedPrefixesAsIPv4(t *testing.T) {

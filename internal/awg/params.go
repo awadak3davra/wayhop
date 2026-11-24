@@ -59,6 +59,59 @@ func ParseBool(s string) (bool, error) {
 	return n != 0, nil
 }
 
+// MaxIPacket is the ceiling the kernel module puts on one I-packet, the summed size of its tags.
+const MaxIPacket = 65535
+
+// IPacketProblem names what in an I1-I5 value would corrupt kernel memory on an amneziawg kernel
+// module older than v3.1.20261113: a negative <r>/<rc>/<rd>/<dz> length (fixed upstream in kmod
+// PR #237) or tags summing past MaxIPacket (PR #247, a check the 3.x refactor had lost). It is ""
+// otherwise. Everything else is left to the module, which refuses what it cannot parse, so a value
+// that works today is not refused here; the userspace path checks its own grammar in GoIPacket.
+func IPacketProblem(spec string) string {
+	rest := spec
+	var size int64
+	for {
+		start := strings.IndexByte(rest, '<')
+		if start < 0 {
+			return ""
+		}
+		end := strings.IndexByte(rest[start:], '>')
+		if end < 0 {
+			return ""
+		}
+		fields := strings.Fields(rest[start+1 : start+end])
+		rest = rest[start+end+1:]
+		if len(fields) == 0 {
+			continue
+		}
+		val := ""
+		if len(fields) > 1 {
+			val = fields[1]
+		}
+		switch fields[0] {
+		case "b":
+			size += int64(len(strings.TrimPrefix(val, "0x")) / 2)
+		case "c", "t":
+			size += 4
+		case "r", "rc", "rd", "dz":
+			if digits, neg := strings.CutPrefix(val, "-"); neg && digits != "" && strings.Trim(digits, "0123456789") == "" {
+				return fmt.Sprintf("<%s %s>: a length cannot be negative", fields[0], val)
+			}
+			if val == "" || strings.Trim(val, "0123456789") != "" {
+				continue
+			}
+			n, err := strconv.ParseUint(val, 10, 63)
+			if err != nil {
+				n = MaxIPacket + 1 // all digits, too many of them
+			}
+			size += int64(min(n, MaxIPacket+1))
+		}
+		if size > MaxIPacket {
+			return fmt.Sprintf("the packet's tags add up to more than %d bytes", MaxIPacket)
+		}
+	}
+}
+
 // GoIPacket prepares an I1-I5 value for amneziawg-go: the spec to send ("" when there is nothing to
 // send) and a note for the operator when the value had to be changed.
 //

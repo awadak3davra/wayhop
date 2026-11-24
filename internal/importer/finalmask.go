@@ -10,7 +10,7 @@ import (
 
 // linkFinalMask reads a link's Xray finalmask (fm=, model.ParseFinalMask) into e. It used to be
 // dropped without a word, so a link whose server undoes a mask imported as a connection that failed
-// every handshake with nothing to say why (QA-136). Now such a link is refused, naming the mask, and
+// every handshake with nothing to say why. Now such a link is refused, naming the mask, and
 // so is one whose fm Xray itself would refuse. The rest imports and keeps fm as it came, to be
 // exported again; the Apply review names the masks that only the sending side applies, which
 // sing-box leaves out.

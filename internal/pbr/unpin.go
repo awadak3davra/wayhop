@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// RT-09: privateExcludes pin every RFC1918/ULA destination to the main table ahead of the fwmark
+// PrivateExcludes pin every RFC1918/ULA destination to the main table ahead of the fwmark
 // rules, so a zone that NAMES such a destination (an office 10.77.0.0/16 behind an AmneziaWG, a ULA
 // site) was marked and then sent out of the main table's default route, the WAN. The pin exists for
 // LAN replies and router-local traffic, which reach their destination through the main table's
@@ -51,10 +51,35 @@ func (pl *Plan) UnpinnedPrivate() []netip.Prefix {
 	for _, e := range pl.nonWanEgresses() {
 		tabled[e.Tag] = true
 	}
-	var out []netip.Prefix
+	return pl.unpinnedPrivateOf(func(z Zone) bool { return tabled[z.EgressTag] })
+}
+
+// unpinnedPrivateOf is UnpinnedPrivate over the zones keep selects.
+func (pl *Plan) unpinnedPrivateOf(keep func(Zone) bool) []netip.Prefix {
+	named, swept := pl.unpinnedSplit(keep)
+	return compactPrefixes(append(named, swept...))
+}
+
+// OverlapsUnpinnable reports whether p shares addresses with a private range a zone can name: the
+// only destinations UnpinnedPrivate ever returns.
+func OverlapsUnpinnable(p netip.Prefix) bool {
+	for _, r := range unpinnablePrivate {
+		if p.Overlaps(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// unpinnedSplit is unpinnedPrivateOf in two parts. named: the prefixes a zone states
+// inside a private range, an office network behind a tunnel; the operator wrote that network down.
+// swept: the private ranges a zone covers only by a broader prefix (0.0.0.0/0, a supernet of a
+// range); the operator meant the internet, and private space came with it. Each part is sorted with
+// any prefix inside another of the same part dropped; a named prefix inside a swept range is in both.
+func (pl *Plan) unpinnedSplit(keep func(Zone) bool) (named, swept []netip.Prefix) {
 	for _, z := range pl.Zones {
 		// An access-policy zone is routed by NDM's own rules, ahead of all of these.
-		if z.NDMPolicy != "" || !tabled[z.EgressTag] {
+		if z.NDMPolicy != "" || !keep(z) {
 			continue
 		}
 		for _, c := range append(append([]string(nil), z.V4...), z.V6...) {
@@ -66,13 +91,18 @@ func (pl *Plan) UnpinnedPrivate() []netip.Prefix {
 				switch {
 				case !p.Overlaps(r):
 				case p.Bits() >= r.Bits():
-					out = append(out, p) // inside the range
+					named = append(named, p) // inside the range
 				default:
-					out = append(out, r) // a supernet names the whole range, and no more of private space
+					swept = append(swept, r) // a supernet names the whole range, and no more of private space
 				}
 			}
 		}
 	}
+	return compactPrefixes(named), compactPrefixes(swept)
+}
+
+// compactPrefixes sorts prefixes, v4 before v6, and drops any that lies inside another.
+func compactPrefixes(out []netip.Prefix) []netip.Prefix {
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Addr().Is4() != out[j].Addr().Is4() {
 			return out[i].Addr().Is4()
@@ -130,7 +160,7 @@ func (pl *Plan) unpinCommands(opt Options, v6 bool, verb string) []string {
 
 // unpinScript is the carve-out on the KeeneticOS shell plane, delete-then-add like every rule there.
 // The per-egress rules are chained on the guard's add: an ip that refuses suppress_prefixlength
-// leaves the pin in force (the behaviour before RT-09) instead of a listed destination that is also a
+// leaves the pin in force instead of a listed destination that is also a
 // LAN prefix being routed into a tunnel without its guard.
 func (pl *Plan) unpinScript(opt Options, v6 bool) string {
 	ip := "ip"

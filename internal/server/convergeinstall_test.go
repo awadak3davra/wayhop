@@ -12,7 +12,7 @@ import (
 //
 // It did not, and the panel could not help either: installing a binary changes neither profile nor
 // config, so nothing is pending, no Apply control exists, and the page's "Open Review & Apply" line
-// pointed at something that was not there. Measured on a live Keenetic after removing and
+// pointed at something that was not there. Observed on KeeneticOS after removing and
 // reinstalling sing-box — the binary was back, the core stayed down, encrypted DNS stayed dark, and
 // only restarting the daemon fixed it, because a restart converges to the committed materialization.
 //
@@ -56,7 +56,7 @@ func TestConvergeAfterInstallRefusesWhenThereIsNothingToConvergeTo(t *testing.T)
 	}
 }
 
-// QA-142: while a Test runs unsaved, what was applied is the Test. Installing sing-box converged the
+// While a Test runs unsaved, what was applied is the Test. Installing sing-box converged the
 // committed revision instead: its core and kernel plane ran under a record and a panel that named the
 // Test, and Keep then saved the Test as if it ran.
 func TestConvergeAfterInstallConvergesTheLiveTest(t *testing.T) {

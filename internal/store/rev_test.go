@@ -32,7 +32,7 @@ func revOf(t *testing.T, s *Store, id string) string {
 	return model.EndpointRev(*e)
 }
 
-// QA-152: a write made At the revision its copy was read at commits only while the stored object
+// A write made At the revision its copy was read at commits only while the stored object
 // still has it. A stale one is refused with ErrStale and leaves the object as it was; a current one
 // commits and reports the revisions before and after it.
 func TestRev_StaleWriteIsRefusedAndCurrentOneCommits(t *testing.T) {
@@ -186,7 +186,7 @@ func TestRev_EveryFormWriterChecksTheRevision(t *testing.T) {
 	}
 }
 
-// QA-150: a rule-set format carried over to a new URL stays when the new URL's file name says nothing
+// A rule-set format carried over to a new URL stays when the new URL's file name says nothing
 // (a mirror with no extension, a query-string feed: dropped, the generator would skip the list) or
 // names the same format, and goes, to be inferred from the URL again, when the new URL names the other
 // format or is a plain-text list such as .lst (kept, sing-box reads the file as what it is not, and a

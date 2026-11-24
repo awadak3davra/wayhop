@@ -11,8 +11,8 @@ import (
 // TestGroupDeleteBlockersMatchTheRefusal (L5): the list the panel is shown must be the list the store
 // actually refuses on.
 //
-// DeleteGroup answered with a sentence and nothing else, so the panel could only print it raw —
-// measured on the demo: with the default route pointed at a group, Delete produced the toast
+// DeleteGroup answered with a sentence and nothing else, so the panel could only print it raw:
+// with the default route pointed at a group, Delete produced the toast
 // `group "grp-order-probe" is used by rule "default"; repoint it first`, with nothing to act on.
 // GroupDeleteBlockers is what replaces that, and its whole value depends on agreeing with the
 // refusal: a blocker list that is shorter promises a delete the store rejects, and one that is

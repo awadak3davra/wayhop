@@ -14,7 +14,7 @@ import (
 // back at `direct`. The target then has no interfaces, no routes and no ladder, and the previous
 // version of this path reported "no native mutation" and returned before touching the router —
 // leaving the tunnel WayHop had raised still sitting on top of the ip-global ladder, still carrying
-// every client. Measured on a live Keenetic; the priorities had to be restored by hand.
+// every client. Observed on KeeneticOS; the priorities had to be restored by hand.
 func ladderRestoreTarget() nativeplan.Plan {
 	return nativeplan.Plan{
 		Platform: platform.Keenetic,

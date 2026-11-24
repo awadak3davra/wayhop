@@ -12,7 +12,7 @@ import (
 	"wayhop/internal/model"
 )
 
-// QA-136: sing-box has no finalmask, so a link's fm= changes nothing in the config: each connection
+// Sing-box has no finalmask, so a link's fm= changes nothing in the config: each connection
 // renders byte for byte as the same link without it.
 func TestFinalMaskNotRendered(t *testing.T) {
 	const uuid = "00000000-0000-4000-8000-000000000136"

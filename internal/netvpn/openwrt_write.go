@@ -17,7 +17,7 @@ import (
 // + network reload) is a separate, user-gated, device-mutating step — the operator asked to be shown
 // the exact commands before anything is written.
 //
-// The schema below is not from documentation; it was read off a live OpenWrt 25.12.2 test router running
+// The schema below is not from documentation; it was read off a live OpenWrt 25.12.2 reference router running
 // luci-proto-amneziawg, whose /etc/config/network carries:
 //
 //	config interface 'awg0'
@@ -52,7 +52,7 @@ type AWGPeer struct {
 	// `@amneziawg_awg0[0]` for an anonymous one. It is set only by the parser and never rendered.
 	//
 	// Without it, removal guesses. RemoveUCI derives `<iface>_peerN` from a COUNT, so on the
-	// operator's own test router — whose hand-made awg0 carries an ANONYMOUS peer — it emitted a delete
+	// reference OpenWrt router — whose hand-made awg0 carries an ANONYMOUS peer — it emitted a delete
 	// for `awg0_peer1`, a section that does not exist, and never touched `@amneziawg_awg0[0]`. The
 	// interface would go and its peer would be left behind pointing at nothing.
 	Ref string

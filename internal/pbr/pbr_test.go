@@ -457,7 +457,7 @@ func TestRenderNft_OffloadRejectsInjectionDevice(t *testing.T) {
 		"eth0; flush ruleset; #",         // command separators + comment
 		"br-lan\nadd rule inet x y drop", // embedded newline injects a second statement
 		"a b",                            // whitespace
-		"toolonginterfacename",           // > 15 chars (IFNAMSIZ-1)
+		"toolonginterfacename",           // > 15 chars
 	}
 	// One good device mixed with the hostile ones: only the good one survives.
 	plan, warns, err := Compile(offloadProfile(), Options{

@@ -15,7 +15,7 @@ import (
 // surface early. Pure for unit-testing.
 //
 // The "enough" threshold is what an UPDATE actually needs, not a round number. It was a fixed
-// 10 MiB, and on a live test router that produced two answers to one question on one panel:
+// 10 MiB, and on an OpenWrt router that produced two answers to one question on one panel:
 // Diagnostics said "enough free space" over 12.6 MB while the Components page, which knows what an
 // install costs, said "Little room on internal flash" about the same filesystem. Components was
 // right — WayHop's own binary is ~13 MB, so that router cannot replace it, and nothing but the

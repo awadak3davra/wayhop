@@ -91,7 +91,7 @@ func clashsurface_newServer(t *testing.T, addr string) http.Handler {
 	return authenticatedTestHandler(t, srv)
 }
 
-// TestClashControllerNotReachableThroughPanel is the LOOP-009 boundary: the
+// TestClashControllerNotReachableThroughPanel is the boundary: the
 // panel must expose NO route that forwards to the sing-box Clash controller.
 // The controller's bearer secret exists so that only the daemon itself may
 // speak to the controller; a pass-through mount under /api/clash/ handed that
@@ -130,7 +130,7 @@ func TestClashControllerNotReachableThroughPanel(t *testing.T) {
 	for _, p := range gets {
 		code, body, _ := routing_do(t, ts, http.MethodGet, p)
 		if code != http.StatusNotFound {
-			t.Errorf("GET %s: got %d (%.60q), want 404 — a reachable Clash surface reopens LOOP-009", p, code, body)
+			t.Errorf("GET %s: got %d (%.60q), want 404 — a reachable Clash surface is reopened", p, code, body)
 		}
 	}
 

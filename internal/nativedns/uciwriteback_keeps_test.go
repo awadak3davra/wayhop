@@ -267,7 +267,7 @@ dhcp.lan.interface='lan'
 `
 )
 
-// QA-116: the write-back plan ran `uci -q delete dhcp.@dnsmasq[0].server` and deleted and recreated
+// The write-back plan ran `uci -q delete dhcp.@dnsmasq[0].server` and deleted and recreated
 // every https-dns-proxy instance. ReadUCI does not model split-DNS entries or any instance option but
 // the resolver URL and port, so a user who ran the previewed commands lost their split-DNS entries,
 // every bootstrap_dns and every other per-instance option, with nothing in the preview saying so.

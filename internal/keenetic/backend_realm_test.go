@@ -9,7 +9,7 @@ import (
 
 // A Server left beside a Hysteria2 realm is not where the connection goes; the KeeneticOS plan used to
 // route it to the ISP as the tunnel's anti-loop bypass, pulling LAN traffic for that address out of the
-// tunnel a list chose (QA-060).
+// tunnel a list chose.
 func TestCompileRoutesNoBypassForARealmsStaleServer(t *testing.T) {
 	hy := model.Endpoint{ID: "hy-realm", Enabled: true, Engine: model.EngineSingBox, Protocol: model.ProtoHysteria2,
 		Server: "203.0.113.5", Port: 443,

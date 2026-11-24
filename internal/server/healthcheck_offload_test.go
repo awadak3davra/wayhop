@@ -13,7 +13,7 @@ import (
 // verdicts. They cannot, structurally, because both render the same platform.OffloadState — this
 // pins the rendering so a future edit to the row cannot reintroduce the contradiction.
 //
-// The fixture is the test router's: the firewall config says offload is off while the same router has
+// The fixture is a small OpenWrt router's: the firewall config says offload is off while the same router has
 // connections carrying an offload mark. The old row read only the config and said "flow offload is
 // off … the hardware fast path is unused" while capabilities reported the offloaded flows.
 func TestFlowOffloadCheck_AgreesWithCapabilities(t *testing.T) {

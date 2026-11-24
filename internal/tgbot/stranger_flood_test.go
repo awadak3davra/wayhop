@@ -9,7 +9,7 @@ import (
 
 // An unpaired chat sending "/start x" over and over was answered every time: five "not valid", then
 // "too many wrong codes" for every further message, with no throttle, although an unknown chat is
-// promised one polite refusal (QA-099). Wrong codes are still answered (the attempt limit bounds them
+// promised one polite refusal. Wrong codes are still answered (the attempt limit bounds them
 // and a person who mistyped must hear it); the lockout is told once per refusal interval, and then
 // nothing until that passes.
 func TestPairingFloodFromAStrangerIsAnsweredBoundedly(t *testing.T) {
@@ -49,7 +49,7 @@ func TestPairingFloodFromAStrangerIsAnsweredBoundedly(t *testing.T) {
 // Each of those answers went through the interactive path, which waits out Telegram's flood control
 // (up to 30 s) inside one of the four handler slots that the poll loop blocks on. A stranger provoking
 // 429s for its own chat thereby queued an owner's Keep behind minutes of sleeps, long enough for the
-// test window to roll back (QA-099). An unpaired chat's answer is tried once and dropped on 429.
+// test window to roll back. An unpaired chat's answer is tried once and dropped on 429.
 func TestStrangerRepliesNeverWaitOutFloodControl(t *testing.T) {
 	h := newHarness(t, owner)
 	var strangerCalls atomic.Int32

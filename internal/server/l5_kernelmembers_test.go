@@ -6,13 +6,14 @@ import (
 
 	"wayhop/internal/config"
 	"wayhop/internal/model"
+	"wayhop/internal/platform"
 	"wayhop/internal/store"
 )
 
 // TestKernelElectableMembers (L5): a group can hold more names than the kernel plane can route to,
 // and the Failover card must be told which.
 //
-// A live test router runs group-failover = [tunnel-a (kernel link awg1), proxy-member (socks through
+// An OpenWrt router runs group-failover = [tunnel-a (kernel link awg1), proxy-member (socks through
 // sing-box)] with four routing lists on it. electMember skips a member with no kernel link, so when
 // awg1 dies there is no candidate at all: the table keeps a route through a dead interface, the
 // fwmark lookup finds nothing usable and falls through to main — the provider. Meanwhile the card
@@ -58,8 +59,17 @@ func TestKernelElectableMembers(t *testing.T) {
 	namesOnly := mixed
 	namesOnly.RoutingLists = []model.RoutingList{{ID: "l", Name: "L", Outbound: "grp", Enabled: true,
 		Manual: []string{"example.com"}}}
-	if got := serverFor(t, namesOnly).kernelElectableMembers(); len(got) != 0 {
+	hyb := serverFor(t, namesOnly)
+	hyb.cfg.RoutingMode = "hybrid"
+	if got := hyb.kernelElectableMembers(); len(got) != 0 {
 		t.Errorf("a group the kernel does not route must not be reported, got %v", got)
+	}
+	// In fast mode on the nft plane the resolver fills the list's sets (the fast DNS plane): the kernel
+	// does route the group, so it is reported.
+	owrt := serverFor(t, namesOnly)
+	owrt.platformOf = func() platform.Platform { return platform.OpenWrt }
+	if got := owrt.kernelElectableMembers(); len(got["grp"]) != 1 {
+		t.Errorf("fast DNS plane: the names-only list's group is kernel-routed, got %v", got)
 	}
 }
 

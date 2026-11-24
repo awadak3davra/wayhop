@@ -42,7 +42,7 @@ func TestManagerSpecsTracksLastSync(t *testing.T) {
 }
 
 // After StopAll nothing may start again: an Apply or a Components install still running past the
-// daemon's shutdown called Sync, which created procs nobody would ever stop (QA-097).
+// daemon's shutdown called Sync, which created procs nobody would ever stop.
 func TestSyncAfterStopAllStartsNothing(t *testing.T) {
 	m := New(t.TempDir(), t.TempDir())
 	m.StopAll()

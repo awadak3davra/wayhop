@@ -23,7 +23,7 @@ type lineMatch struct {
 
 // ansiSeq is the CSI escape a colourising engine writes around its level word and tags. sing-box
 // colours its output whether or not a terminal is attached, so the lines the daemon reads from it
-// carry the raw bytes — and they were handed to the panel untouched. Measured on a live
+// carry the raw bytes — and they were handed to the panel untouched. Observed on a
 // Keenetic: "Load sing-box log" rendered its one line as
 //
 //	ESC[33mWARN ESC[0m inbound/tun[tun-in]: enable offload: set udp offload: TUNSETOFFLOAD: invalid argument

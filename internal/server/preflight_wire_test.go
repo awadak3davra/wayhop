@@ -69,8 +69,22 @@ func TestPreflightWiring_IgnoresDisabledRules(t *testing.T) {
 	if err := s.store.Replace(prof); err != nil {
 		t.Fatalf("replace profile: %v", err)
 	}
+	// Off OpenWrt fast mode has no resolver plane: the Domain rule is inert and said so.
 	if f := preflightSetting(s.preflight(keeneticLikeCaps, platform.OffloadState{}), "routing_mode"); f == nil {
-		t.Error("an enabled domain rule in fast mode must be reported")
+		t.Error("an enabled domain rule in fast mode off OpenWrt must be reported")
+	}
+	// On OpenWrt fast mode routes a rule's names through the resolver (the fast DNS plane), so a
+	// Domain rule is no longer "inert"; a geosite rule still is.
+	s.platformOf = func() platform.Platform { return platform.OpenWrt }
+	if f := preflightSetting(s.preflight(keeneticLikeCaps, platform.OffloadState{}), "routing_mode"); f != nil {
+		t.Errorf("a Domain rule the fast DNS plane carries was reported: %+v", f)
+	}
+	prof.Rules = []model.Rule{{ID: "r1", GeoSite: []string{"netflix"}, Outbound: model.OutboundDirect}}
+	if err := s.store.Replace(prof); err != nil {
+		t.Fatalf("replace profile: %v", err)
+	}
+	if f := preflightSetting(s.preflight(keeneticLikeCaps, platform.OffloadState{}), "routing_mode"); f == nil {
+		t.Error("an enabled geosite rule in fast mode must be reported")
 	}
 }
 

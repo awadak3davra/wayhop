@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// LOOP-021: a share link IS the secret — the UUID/password/private key rides in it — and a malformed
+// A share link IS the secret — the UUID/password/private key rides in it — and a malformed
 // one used to be echoed verbatim into the importer's error, which /api/import returns as its response
 // body and the subscription path folds into its error list (reaching toasts, last_error, logs). These
 // tests use unique credential sentinels and assert none of them survive into any error, while the

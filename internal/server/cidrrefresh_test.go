@@ -209,7 +209,7 @@ func TestHandleRoutingRefresh(t *testing.T) {
 	}
 }
 
-// QA-032: naming one list refreshes that list only, and its failure is the one reported - not a
+// Naming one list refreshes that list only, and its failure is the one reported - not a
 // failing neighbour's.
 func TestHandleRoutingRefresh_OneList(t *testing.T) {
 	s, _ := sharehandlers_server(t)

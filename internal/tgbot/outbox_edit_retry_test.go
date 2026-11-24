@@ -10,7 +10,7 @@ import (
 // A quiet outcome (kept, passed, a Roll back somebody pressed) rewrites the test Apply's message. When
 // that edit failed for a network reason the alert stayed queued, but the incident had already been
 // closed, so the retry found no message to edit and dropped the outcome: the phone kept "rolls back by
-// itself in 1:40" with Keep / Roll back for good (QA-101). Right after a rollback restarts the core is
+// itself in 1:40" with Keep / Roll back for good. Right after a rollback restarts the core is
 // exactly when the bot's path to Telegram is likely to fail once.
 func TestQuietOutcomeEditIsRetriedAfterANetworkFailure(t *testing.T) {
 	h := newHarness(t, owner)

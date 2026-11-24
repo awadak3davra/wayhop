@@ -23,7 +23,7 @@ import (
 //   - the rollback copy is a HARD LINK to the running binary, so writing it costs nothing: when the
 //     new binary is renamed over the old name, the old inode lives on as the .bak. The update then
 //     needs room for the new binary alone, where it used to need the new binary plus a full copy of
-//     the old one while the previous rollback copy still sat there (~31 MiB on the test router, with
+//     the old one while the previous rollback copy still sat there (~31 MiB on the reference OpenWrt router, with
 //     13-20 MiB free);
 //   - the rollback copy it supersedes (.bak, or the .bak.gz the installer keeps on a full overlay)
 //     counts as room, because it goes before the new binary is written.

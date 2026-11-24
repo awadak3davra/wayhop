@@ -8,7 +8,7 @@ import (
 	"wayhop/internal/platform"
 )
 
-// QA-127. The capability set a KeeneticOS release produces decides where an AmneziaWG endpoint runs.
+// The capability set a KeeneticOS release produces decides where an AmneziaWG endpoint runs.
 // Release strings are invented; only their shape is the firmware's.
 func keeneticReleaseSet(release string) platform.CapabilitySet {
 	caps := platform.Capabilities{Platform: string(platform.Keenetic), FirmwareRelease: release,
@@ -52,8 +52,8 @@ func ascLines(plan *Plan) []string {
 	return out
 }
 
-// The hunt's repro, with the release the platform now reads: an AmneziaWG 1 endpoint on KeeneticOS
-// 4.1 was planned as an NDM create with a `wireguard asc` line, which that firmware has no command for.
+// With the release the platform reads, an AmneziaWG 1 endpoint on KeeneticOS 4.1 must not be planned
+// as an NDM create with a `wireguard asc` line, which that firmware has no command for.
 func TestQA127Keenetic41AWGRunsOnTheEngine(t *testing.T) {
 	plan := compileKeeneticFor(t, awg1Endpoint(), keeneticReleaseSet("4.01.C.7.0-0"))
 	if got := plan.Decisions[0].Path; got != PathEnginePlugin {

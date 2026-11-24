@@ -218,7 +218,7 @@ func TestNamedHead_StopsWhereTheEvidenceDoes(t *testing.T) {
 }
 
 // HeadMatches is the cross-device comparison that identified the head in the first place: the
-// Keenetic's positional line against the test router's named uci options for a tunnel to the same host.
+// Keenetic's positional line against the reference router's named uci options for a tunnel to the same host.
 func TestHeadMatches_ComparesOnlyWhatItCan(t *testing.T) {
 	a, err := ParseWGAsc("5 49 998 17 110 1 2 3 4")
 	if err != nil {
@@ -238,5 +238,32 @@ func TestHeadMatches_ComparesOnlyWhatItCan(t *testing.T) {
 	}
 	if a.HeadMatches(map[string]string{}) {
 		t.Error("an empty comparison reported a match")
+	}
+}
+
+// KeeneticOS 5.02.B.3 prints the AmneziaWG 3.1 set as 31 arguments; the order below is the one its
+// RCI named (values here are made up, the key is a placeholder).
+func TestNamed31_MapsEveryPositionTheRouterNamed(t *testing.T) {
+	line := `6 26 64 20 21 1 2 3 4 22 23 "" "" "" "" "" KEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEY= 0 1 100 120 3 7 150 180 5 15 15 20 1 0`
+	a, err := ParseWGAsc(line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := a.Named31()
+	want := map[string]string{
+		"jc": "6", "s2": "21", "h4": "4", "s3": "22", "s4": "23", "i5": `""`,
+		"header-protection-key":    "KEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEYKEY=",
+		"content-padding-addition": "0-1", "rekey-after-time": "100-120", "rekey-timeout": "3-7",
+		"reject-after-time": "150-180", "keepalive-timeout": "5-15", "max-handshake-attempts": "15-20",
+		"random-trailers": "1", "disable-cookies": "0",
+	}
+	for k, w := range want {
+		if got[k] != w {
+			t.Errorf("%s = %q, want %q", k, got[k], w)
+		}
+	}
+	short, _ := ParseWGAsc(`4 10 34 10 34 1 2 3 4`)
+	if short.Named31() != nil {
+		t.Error("a 9-argument line was named as 3.1")
 	}
 }

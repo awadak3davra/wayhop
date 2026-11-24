@@ -429,7 +429,7 @@ func (b *Bot) chatRecord(id int64) (config.TelegramChat, bool) {
 // is alerts-only whatever its record says: a callback is authorised by the chat, not by who pressed,
 // and anyone who can see a channel (a public one: anyone at all) can press the buttons on its posts.
 // A channel the panel had made a viewer let any subscriber mute it, switch its alerts off in
-// config.json and post the LAN's device list into it (QA-102). Telegram's word on the type is read,
+// config.json and post the LAN's device list into it. Telegram's word on the type is read,
 // not only the record's, which chats paired before the type was recorded lack.
 func (b *Bot) pairedChat(chat Chat) (config.TelegramChat, bool) {
 	rec, ok := b.chatRecord(chat.ID)
@@ -566,7 +566,7 @@ func (b *Bot) onMessage(ctx context.Context, m *Message) {
 	}
 	// An alerts-only group's members are nobody the bot answers to, and any of them can send commands
 	// as fast as they like: each answer that waited out Telegram's flood control sat in one of the
-	// handler slots the poll loop blocks on, as a stranger's did (QA-099), delaying an owner's Keep.
+	// handler slots the poll loop blocks on, as a stranger's did, delaying an owner's Keep.
 	// Their answers are tried once.
 	say := func(text string) { b.reply(ctx, m.Chat.ID, text, nil) }
 	if rec.Role == roleAlerts {
@@ -643,7 +643,7 @@ func (b *Bot) pair(ctx context.Context, m *Message, code string) {
 	role, res := b.gate.Redeem(m.Chat, code)
 	switch res {
 	case RedeemLimited:
-		// Told once per refusal interval: every further message used to be answered (QA-099).
+		// Told once per refusal interval: every further message used to be answered.
 		if b.gate.tellLimited(m.Chat.ID) {
 			b.replyStranger(ctx, m.Chat.ID, T(lang, "pair.limited"))
 		}
@@ -659,7 +659,7 @@ func (b *Bot) pair(ctx context.Context, m *Message, code string) {
 		name = m.From.DisplayName()
 	}
 	// The type is recorded so the panel can tell a channel, which may only be alerts-only, from a group:
-	// both have negative ids (QA-102).
+	// both have negative ids.
 	rec := config.TelegramChat{ID: m.Chat.ID, Name: name, Type: m.Chat.Type, Role: role, Lang: lang, PairedAt: b.now().Unix()}
 	err := b.st.UpdateTelegram(func(t *config.Telegram) error {
 		for i := range t.Chats {
@@ -744,7 +744,7 @@ func (b *Bot) reply(ctx context.Context, chat int64, text string, render func() 
 // answer instead of waiting it out. Such a chat chooses how often it writes, and each wait of up to
 // interactiveWait sat in one of the maxInflight handler slots the poll loop blocks on, so a stranger
 // provoking 429s for its own chat queued an owner's Keep behind minutes of sleeps, long enough for
-// the test window to roll back (QA-099).
+// the test window to roll back.
 func (b *Bot) replyStranger(ctx context.Context, chat int64, text string) {
 	if err := b.sendOnce(ctx, chat, text); err != nil {
 		b.logf("telegram: send to unpaired chat %d: %v", chat, err)
@@ -1086,7 +1086,7 @@ func (b *Bot) decideApply(ctx context.Context, q *CallbackQuery, v view, rec con
 	// decision while the first was still under way (handlers run in parallel, and the window looks
 	// open until the first one's outcome is recorded): the daemon refused it, or the fail-safe did
 	// ("a rollback is already in progress"), and the chat read "Did not work" right under "Kept by
-	// Sam" (QA-103). The first press's outcome answers the second.
+	// Sam". The first press's outcome answers the second.
 	if !b.claimDecision(window) {
 		return
 	}
@@ -1112,7 +1112,7 @@ func (b *Bot) decideApply(ctx context.Context, q *CallbackQuery, v view, rec con
 		}
 		// Decided elsewhere meanwhile (the panel, a press just before this one's check): the daemon
 		// refuses a decision with nothing left to decide, which is not a failure. The window's own
-		// outcome reaches this chat as the watcher's closing edit (QA-103).
+		// outcome reaches this chat as the watcher's closing edit.
 		if !b.windowOpen(ctx, window) {
 			return
 		}

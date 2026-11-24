@@ -7,7 +7,7 @@ import (
 )
 
 // model.DNSSettings.DefaultServer is what the leak checks judge as the resolver for unmatched
-// queries (QA-105). It mirrors this generator: the emitted `final`, else the first emitted server,
+// queries. It mirrors this generator: the emitted `final`, else the first emitted server,
 // which sing-box makes the default when `final` is absent. If the emission rules here change (order,
 // which servers are dropped), the checks must change with them, so the two are compared directly.
 func TestDNSDefaultServerMatchesTheEmittedDefault(t *testing.T) {

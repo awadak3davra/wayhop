@@ -12,7 +12,7 @@ import (
 	"wayhop/internal/model"
 )
 
-// The live shape from a live router: WayHop's own table 151 defaulting to the elected
+// The shape from a real router: WayHop's own table 151 defaulting to the elected
 // tunnel, alongside the firmware's per-interface tables and a via-gateway default that belongs to a
 // different question.
 const routeShowFixture = `default via 172.30.0.1 dev eth3  metric 1000

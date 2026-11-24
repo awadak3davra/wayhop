@@ -78,6 +78,8 @@ foreach ($t in $targets) {
   CopyLF (Join-Path $root "packaging\openwrt\install.sh")    (Join-Path $owstage "install.sh")
   CopyLF (Join-Path $root "packaging\openwrt\uninstall.sh")  (Join-Path $owstage "uninstall.sh")
   CopyLF (Join-Path $root "packaging\openwrt\wayhop.init") (Join-Path $owstage "wayhop.init")
+  # install.sh refuses a package without it: a sysupgrade would otherwise delete /etc/wayhop.
+  CopyLF (Join-Path $root "packaging\openwrt\wayhop.keep") (Join-Path $owstage "wayhop.keep")
   CopyLF (Join-Path $root "packaging\identity-match.sh") (Join-Path $owstage "identity-match.sh")
   CopyLF (Join-Path $root "packaging\retire-iptv.sh") (Join-Path $owstage "retire-iptv.sh")
   CopyLF (Join-Path $root "packaging\harden-state.sh") (Join-Path $owstage "harden-state.sh")

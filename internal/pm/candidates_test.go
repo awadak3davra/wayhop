@@ -163,7 +163,7 @@ func TestInstallVersion_RefusesUnsafeTokens(t *testing.T) {
 	}
 }
 
-// apk prints ONE version on TWO lines. Verbatim from the test router:
+// apk prints ONE version on TWO lines. Verbatim from the reference OpenWrt router:
 //
 //	sing-box-1.12.17-r1 aarch64_cortex-a53 {feeds/…/net/sing-box} (GPL-3.0-or-later) [installed]
 //	sing-box-1.12.17-r1 aarch64_cortex-a53 {feeds/…/net/sing-box} (GPL-3.0-or-later)

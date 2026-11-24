@@ -11,11 +11,11 @@ import (
 	"wayhop/internal/platform"
 )
 
-// QA-128. The hunt's repro, through the production fold: OpenWrt in fast mode with offload auto and no
-// device list, and the IPv4 WAN down while Apply captures the host, so `ip -o -4 route show default`
-// prints nothing. The offload-device probe failure used to join ProbeErrors, every native operation
-// became unknown, and materialize silently moved the reviewed native plan to the generic path, the
-// previous native interface left in UCI under the name the plugin then took.
+// Through the production fold: OpenWrt in fast mode with offload auto and no device list, and the
+// IPv4 WAN down while Apply captures the host, so `ip -o -4 route show default` prints nothing. If
+// the offload-device probe failure joined ProbeErrors, every native operation would become unknown,
+// and materialize would silently move the reviewed native plan to the generic path, leaving the
+// previous native interface in UCI under the name the plugin then takes.
 func TestQA128OffloadDeviceProbeStaysWithOffload(t *testing.T) {
 	desired0, _, capture := executionNativeTestTuple(t)
 	cfg := desired0.Config

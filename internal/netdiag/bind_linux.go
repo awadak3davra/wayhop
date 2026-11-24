@@ -26,3 +26,14 @@ func bindToDevice(iface string) func(network, address string, c syscall.RawConn)
 		return opErr
 	}
 }
+
+// setSocketMark sets the socket's fwmark (SO_MARK).
+func setSocketMark(c syscall.RawConn, mark int) error {
+	var opErr error
+	if err := c.Control(func(fd uintptr) {
+		opErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_MARK, mark)
+	}); err != nil {
+		return err
+	}
+	return opErr
+}

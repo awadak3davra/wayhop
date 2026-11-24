@@ -594,7 +594,7 @@ func (r *redirectSeen) get() http.Header {
 	return r.last
 }
 
-// Finding 4 and QA-126: a redirected subscription fetch sent the subscription URL (its token) as
+// A redirected subscription fetch sent the subscription URL (its token) as
 // Referer, and x-hwid with x-device-os to whatever host the provider redirected to. The import and the
 // refresh alike: neither sends a Referer now, and the device headers go only to the host given.
 func TestSubscriptionRedirect_NoRefererNoHWIDToAnotherHost(t *testing.T) {

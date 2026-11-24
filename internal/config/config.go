@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -59,6 +60,23 @@ type Clash struct {
 type SingBox struct {
 	Bin    string `json:"bin"`    // path to the sing-box executable
 	Config string `json:"config"` // path to the generated config.json
+}
+
+// Flash tunes flash-wear protection (internal/ramdir, internal/writebehind, store feed caches).
+// Every zero value means the default; hand-edited in config.json, not exposed in Settings.
+type Flash struct {
+	// RuntimeDir is the RAM (tmpfs) directory for runtime-only state; "" = /tmp/wayhop/state. A
+	// directory that is not tmpfs/ramfs is not used (the state stays in memory).
+	RuntimeDir string `json:"runtime_dir,omitempty"`
+	// RAMBudgetMB caps the RAM WayHop spends to spare flash (RAM-dir files + write-behind buffers);
+	// 0 = 4 MB.
+	RAMBudgetMB int `json:"ram_budget_mb,omitempty"`
+	// MinFreeMB: below this MemAvailable nothing is buffered in RAM, writes go straight to flash;
+	// 0 = 32 MB.
+	MinFreeMB int `json:"min_free_mb,omitempty"`
+	// CacheFlushHours is the shortest gap between two flash writes of the routing-list feed caches
+	// (list-cache.json); they are also written on shutdown and when Apply commits. 0 = 24.
+	CacheFlushHours int `json:"cache_flush_hours,omitempty"`
 }
 
 // Updater configures engine-binary version management (see internal/updater).
@@ -259,6 +277,25 @@ type FeatureConfig struct {
 	Settings json.RawMessage `json:"settings,omitempty"`
 }
 
+// Throughput configures interface-bound download measurements. Zero values use the defaults in
+// Default; scheduled measurements are opt-in because every sample spends the parent's traffic.
+type Throughput struct {
+	Scheduled      bool  `json:"scheduled"`
+	ScheduleHours  int   `json:"schedule_hours,omitempty"`   // 0 = 6; never below 6
+	MaxBytes       int64 `json:"max_bytes,omitempty"`        // 0 = 100000000
+	MaxDurationSec int   `json:"max_duration_sec,omitempty"` // 0 = 20
+	// CoreMaxBytes caps a measurement through the proxy core (a connection without a kernel link,
+	// OpenWrt): both ends and the TLS of the download run on the router there, so it is held lower
+	// than MaxBytes. CoreMinFreeMB: below this MemAvailable such a measurement does not start.
+	CoreMaxBytes    int64    `json:"core_max_bytes,omitempty"`    // 0 = 25000000
+	CoreMinFreeMB   int64    `json:"core_min_free_mb,omitempty"`  // 0 = 48
+	MonthlyBudgetMB int64    `json:"monthly_budget_mb,omitempty"` // 0 = 3072
+	WANIdleKbps     int64    `json:"wan_idle_kbps,omitempty"`     // 0 = 1024, five-minute RX+TX average
+	Sources         []string `json:"sources,omitempty"`           // empty = Cloudflare, OVH, Hetzner, Google
+	CustomURL       string   `json:"custom_url,omitempty"`        // tried before Sources when set
+	TelegramChannel string   `json:"telegram_channel,omitempty"`  // public /s/ page for media lists
+}
+
 // Config is the full daemon configuration, persisted as JSON.
 type Config struct {
 	Listen      string `json:"listen"`                    // UI bind address, e.g. :8088
@@ -285,6 +322,24 @@ type Config struct {
 	// keep working (see docs/ARCHITECTURE_NATIVE_FIRST.md (development repository) "Phase 1a/1b"). Deploy-gated —
 	// validate TG/VoWiFi survive before relying on it.
 	Offload string `json:"offload,omitempty"`
+	// FastDNSEnforce is the fast DNS plane's DNS enforcement (routing mode "fast" on OpenWrt with a
+	// list or rule that matches names): LAN DNS not addressed to the router is redirected to its
+	// dnsmasq, and DoT (TCP 853) from the LAN is rejected, so no client resolves around the sets that
+	// carry the lists' names. nil (absent) = on; false = off, which Review reports as a warning. DoH
+	// cannot be closed by port; the resolver's canary blocks (use-application-dns.net, iCloud
+	// Private Relay) remain the answer to it.
+	FastDNSEnforce *bool `json:"fast_dns_enforce,omitempty"`
+	// KillSwitchBackstopMax caps the kill switch backstop's blackhole routes on KeeneticOS (static
+	// CIDRs of kill-switched lists after aggregation, plus the addresses mirrored from their domain
+	// sets). 0 = the default, 60000 (about 8 MB of kernel memory by estimate). Review refuses a plan
+	// whose static part is larger and warns past 80%.
+	KillSwitchBackstopMax int `json:"kill_switch_backstop_max,omitempty"`
+	// KillSwitchBootHoldLift is how many seconds after a boot the netfilter.d hook lifts the broad
+	// kill switch hold (every unlisted forwarded connection to a public address) when neither the
+	// boot fill nor the daemon has put the kill-switched destinations into the backstop table. Those
+	// destinations stay held either way. 0 = the default, 600; negative = never (strict: a daemon
+	// that never starts keeps the LAN's unlisted traffic held). Takes effect at the next Apply.
+	KillSwitchBootHoldLift int `json:"kill_switch_boot_hold_lift,omitempty"`
 	// IgnoredDrift holds endpoint IDs the user has explicitly dismissed as "not a problem" — the
 	// spec's "ignore this unmanaged object" drift action. A tunnel deliberately removed from the
 	// router would otherwise be reported as missing on every refresh, forever, and a warning that
@@ -322,16 +377,23 @@ type Config struct {
 	// e.g. ["wan","br-lan"]); awg* tunnels are intentionally absent (carve-out traffic must
 	// not be offloaded). Empty → offload is skipped (a future auto-probe will fill these
 	// from the default route + br-lan).
-	OffloadDevices []string     `json:"offload_devices,omitempty"`
-	Ports          Ports        `json:"ports"`
-	Clash          Clash        `json:"clash"`
-	SingBox        SingBox      `json:"singbox"`
-	Updater        Updater      `json:"updater"`
-	FailSafe       FailSafe     `json:"failsafe"`
-	Watchdog       Watchdog     `json:"watchdog"`
-	Auth           Auth         `json:"auth,omitempty"`
-	Subscription   Subscription `json:"subscription"`
-	Backup         Backup       `json:"backup,omitempty"`
+	OffloadDevices []string   `json:"offload_devices,omitempty"`
+	Throughput     Throughput `json:"throughput"`
+	// ExperimentalHandoff hands addresses shared by a domain list and a stronger list to sing-box, which
+	// routes them by name. Off by default: its return path is unproven on KeeneticOS; off, the stronger
+	// list carries the shared addresses.
+	ExperimentalHandoff bool         `json:"experimental_handoff,omitempty"`
+	Ports               Ports        `json:"ports"`
+	Clash               Clash        `json:"clash"`
+	SingBox             SingBox      `json:"singbox"`
+	Updater             Updater      `json:"updater"`
+	FailSafe            FailSafe     `json:"failsafe"`
+	Watchdog            Watchdog     `json:"watchdog"`
+	Auth                Auth         `json:"auth,omitempty"`
+	Subscription        Subscription `json:"subscription"`
+	Backup              Backup       `json:"backup,omitempty"`
+	// Flash is the flash-wear protection tuning (read at start; a change takes a restart).
+	Flash Flash `json:"flash,omitempty"`
 	// Telegram is the built-in bot. HOT and written only by /api/telegram/* and by pairing, so —
 	// like Subscription — it is NOT copied by applyConfigFields.
 	Telegram Telegram `json:"telegram,omitempty"`
@@ -356,6 +418,9 @@ type Config struct {
 	path string // source file, used by Save()
 }
 
+// FastDNSEnforceOn reports the effective fast_dns_enforce: on unless set to false.
+func (c Config) FastDNSEnforceOn() bool { return c.FastDNSEnforce == nil || *c.FastDNSEnforce }
+
 // Path is the file this config was loaded from ("" for one built in memory). The update supervisor
 // keeps its records beside it, on the same flash that survives a reboot.
 func (c *Config) Path() string {
@@ -368,13 +433,15 @@ func (c *Config) Path() string {
 // Default returns a Config with router-friendly defaults.
 func Default() *Config {
 	return &Config{
-		Listen:   ":8088",
-		DataDir:  "/opt/var/wayhop",
-		Demo:     false,
+		Listen:  ":8088",
+		DataDir: "/opt/var/wayhop",
+		Demo:    false,
+		Throughput: Throughput{ScheduleHours: 6, MaxBytes: 100_000_000, MaxDurationSec: 20,
+			MonthlyBudgetMB: 3072, WANIdleKbps: 1024, TelegramChannel: "https://t.me/s/telegram"},
 		Ports:    Ports{UI: 8088, Clash: 9090, DNS: 5353, Mixed: 7890},
 		Clash:    Clash{Controller: "127.0.0.1:9090", Secret: ""},
 		SingBox:  SingBox{Bin: "/opt/sbin/sing-box", Config: "/opt/etc/wayhop/singbox.json"},
-		Updater:  Updater{Arch: "", Mirrors: []string{"", "https://ghproxy.net/", "https://mirror.ghproxy.com/"}},
+		Updater:  Updater{Arch: "", Mirrors: []string{"", "https://ghproxy.net/"}},
 		FailSafe: FailSafe{Target: "1.1.1.1", AutoReboot: false},
 	}
 }
@@ -482,6 +549,37 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("offload_devices entry %q must be a valid interface name (letters, digits, . _ -, 1-15 chars)", d)
 		}
 	}
+	t := c.Throughput
+	if t.ScheduleHours != 0 && (t.ScheduleHours < 6 || t.ScheduleHours > 24*30) {
+		return errors.New("throughput schedule_hours must be 0 or 6-720")
+	}
+	if t.MaxBytes != 0 && (t.MaxBytes < 1_000_000 || t.MaxBytes > 1_000_000_000) {
+		return errors.New("throughput max_bytes must be 0 or 1000000-1000000000")
+	}
+	if t.CoreMaxBytes != 0 && (t.CoreMaxBytes < 1_000_000 || t.CoreMaxBytes > 1_000_000_000) {
+		return errors.New("throughput core_max_bytes must be 0 or 1000000-1000000000")
+	}
+	if t.CoreMinFreeMB < 0 || t.CoreMinFreeMB > 4096 {
+		return errors.New("throughput core_min_free_mb must be 0-4096")
+	}
+	if t.MaxDurationSec != 0 && (t.MaxDurationSec < 5 || t.MaxDurationSec > 120) {
+		return errors.New("throughput max_duration_sec must be 0 or 5-120")
+	}
+	if t.MonthlyBudgetMB < 0 || t.MonthlyBudgetMB > 10_000_000 || t.WANIdleKbps < 0 || t.WANIdleKbps > 10_000_000 {
+		return errors.New("throughput budget and WAN idle threshold are out of range")
+	}
+	if len(t.Sources) > 8 {
+		return errors.New("throughput accepts at most 8 sources")
+	}
+	for _, raw := range append(append([]string(nil), t.Sources...), t.CustomURL, t.TelegramChannel) {
+		if raw == "" {
+			continue
+		}
+		u, err := url.ParseRequestURI(raw)
+		if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Fragment != "" || len(raw) > 2048 {
+			return fmt.Errorf("throughput source %q must be an http(s) URL without credentials or a fragment", raw)
+		}
+	}
 	if c.GatewayMTU != 0 && (c.GatewayMTU < 576 || c.GatewayMTU > 9000) {
 		return fmt.Errorf("gateway_mtu %d is out of range (576-9000, or 0 for default)", c.GatewayMTU)
 	}
@@ -566,6 +664,7 @@ func (c Config) Redacted() Config {
 	if c.Watchdog.NotifyURL != "" {
 		c.Watchdog.NotifyURL = RedactedMark
 	}
+	c.Updater.Mirrors = redactMirrors(c.Updater.Mirrors)
 	if c.Auth.PasswordHash != "" {
 		c.Auth.PasswordHash = RedactedMark
 	}
@@ -578,6 +677,39 @@ func (c Config) Redacted() Config {
 	c.Telegram = c.Telegram.Redacted()
 	c.TelegramBridge = c.TelegramBridge.Redacted()
 	return c
+}
+
+// redactMirrors returns a copy of the mirror prefixes that keeps the scheme and host and masks the
+// rest, because a prefix is operator-supplied and may carry a token in its userinfo, path or query.
+// The "" entry (direct download) is kept. The slice is never aliased.
+func redactMirrors(in []string) []string {
+	if in == nil {
+		return nil
+	}
+	out := make([]string, len(in))
+	for i, m := range in {
+		out[i] = m
+		if m == "" {
+			continue
+		}
+		if u, err := url.Parse(strings.TrimSpace(m)); err == nil && u.Host != "" {
+			out[i] = u.Scheme + "://" + u.Hostname() + "/" + RedactedMark
+		} else {
+			out[i] = RedactedMark
+		}
+	}
+	return out
+}
+
+// MirrorsRedacted reports whether a mirror list carries the redaction mark, that is, came from a
+// redacted export and holds no usable prefixes.
+func MirrorsRedacted(mirrors []string) bool {
+	for _, m := range mirrors {
+		if strings.Contains(m, RedactedMark) {
+			return true
+		}
+	}
+	return false
 }
 
 // Redacted returns a copy with the bot token masked. The chat list is copied, not aliased.

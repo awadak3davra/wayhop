@@ -9,8 +9,8 @@ import (
 
 // A Keenetic with Entware's ipset and iptables installed has the kernel plane's tools, but the plane
 // is built only in hybrid and fast. In tun and mixed the capture said the lists rode it anyway, so no
-// NDM route and no compatibility core carried them: every list left by the WAN behind a clean review
-// (QA-061). The capture now says so only where the plane exists.
+// NDM route and no compatibility core carried them: every list left by the WAN behind a clean review.
+// The capture now says so only where the plane exists.
 func TestCaptureKeeneticListsViaIpsetFollowsTheRoutingMode(t *testing.T) {
 	orig := keeneticKernelPBRPresent
 	t.Cleanup(func() { keeneticKernelPBRPresent = orig })

@@ -6,6 +6,7 @@
 package atomicfile
 
 import (
+	"bytes"
 	"log"
 	"os"
 	"path/filepath"
@@ -59,6 +60,13 @@ var beforeRename func(tmp string)
 // replace stages data in a unique temp in stageDir, fsyncs it, renames it over path and fsyncs path's
 // directory. The temp is removed on every in-process failure; one a crash leaves is RemoveStale's.
 func replace(stageDir, pattern, path string, data []byte, perm os.FileMode) error {
+	// Flash wear: a rewrite of identical bytes costs a temp, two fsyncs and a journal commit for
+	// nothing, and most of the daemon's stores rewrite the whole file on every save whether or not the
+	// save changed it. Equal bytes keep the file; only a differing mode is put right.
+	if unchanged(path, data, perm) {
+		noteSkip(path, len(data))
+		return nil
+	}
 	// UNIQUE temp name (not a fixed path+".tmp"): two goroutines writing the SAME target concurrently
 	// (e.g. a manual "refresh now" racing the scheduled refresh of one IPTV list) must not share one
 	// temp file — a shared O_TRUNC temp would interleave their bytes into a torn file before rename.
@@ -67,8 +75,8 @@ func replace(stageDir, pattern, path string, data []byte, perm os.FileMode) erro
 		return err
 	}
 	tmp := tf.Name()
-	_ = tf.Close() // WriteSynced re-opens it (O_TRUNC) and fsyncs the contents
-	if err := WriteSynced(tmp, data, perm); err != nil {
+	_ = tf.Close() // writeSynced re-opens it (O_TRUNC) and fsyncs the contents
+	if err := writeSynced(tmp, data, perm); err != nil {
 		os.Remove(tmp)
 		return err
 	}
@@ -80,7 +88,28 @@ func replace(stageDir, pattern, path string, data []byte, perm os.FileMode) erro
 		return err
 	}
 	SyncDir(filepath.Dir(path)) // make the file's entry in the leaf directory durable
+	noteWrite(path, len(data))
 	return nil
+}
+
+// unchanged reports whether path is already a regular file holding exactly data. A differing mode
+// is corrected in place (a chmod is an inode update, not a data rewrite). Anything unusual — a
+// symlink, a directory, an unreadable file — answers false, so the caller writes as it always did.
+func unchanged(path string, data []byte, perm os.FileMode) bool {
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() != int64(len(data)) {
+		return false
+	}
+	cur, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(cur, data) {
+		return false
+	}
+	if fi.Mode().Perm() != perm.Perm() && runtime.GOOS != "windows" {
+		if err := os.Chmod(path, perm); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // RemoveStale deletes the temps that a Write or WriteOutsideDir of path left behind when the process
@@ -166,6 +195,14 @@ func dirsMissing(dir string) []string {
 // committing it with a rename (see server.handleApply, which runs `sing-box check`
 // on the temp config first).
 func WriteSynced(path string, data []byte, perm os.FileMode) error {
+	if err := writeSynced(path, data, perm); err != nil {
+		return err
+	}
+	noteWrite(path, len(data))
+	return nil
+}
+
+func writeSynced(path string, data []byte, perm os.FileMode) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
 	if err != nil {
 		return err

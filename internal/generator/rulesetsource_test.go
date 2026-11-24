@@ -17,6 +17,12 @@ func TestSingboxConsumableSource(t *testing.T) {
 		{"compiled srs", "https://example.test/list.srs", "", true},
 		{"rule-set json", "https://example.test/list.json", "", true},
 		{"srs with query", "https://example.test/list.srs?v=2", "", true},
+		// The extension is read as the model and the panel read it (model.RuleSetURLKind), whatever
+		// its case: read here case-sensitively, a list both of them call a rule set was left out of
+		// the core with no word said, and matched nothing.
+		{"upper-case srs", "https://example.test/LIST.SRS", "", true},
+		{"mixed-case json with query", "https://example.test/list.Json?token=x", "", true},
+		{"upper-case text list", "https://example.test/domains.TXT", "", false},
 		// Real-world plain-text lists that MUST be skipped (these bricked a live router).
 		{"v2fly text list, no extension", "https://raw.githubusercontent.com/v2fly/domain-list-community/master/data/anthropic", "", false},
 		{"itdoginfo .lst", "https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Categories/news.lst", "", false},
@@ -97,5 +103,21 @@ func TestRoutingFrom_TextSourceKeepsManualEntries(t *testing.T) {
 	}
 	if len(rules) == 0 {
 		t.Error("the list should still route via its manual entries")
+	}
+}
+
+// A typed entry with a "/" that is not an IP prefix is no name either (no name holds one). It
+// was emitted as a domain suffix; it is left out, as the kernel plane leaves it out.
+func TestSplitDomainsIPsLeavesOutASlashEntryThatIsNoPrefix(t *testing.T) {
+	domains, ips := splitDomainsIPs([]string{"example.com", "10.0.0.0/99", "192.0.2.0/24", "example.org/path", "192.0.2.7"})
+	if len(domains) != 1 || domains[0] != "example.com" {
+		t.Errorf("domains = %v, want only example.com", domains)
+	}
+	if len(ips) != 2 || ips[0] != "192.0.2.0/24" || ips[1] != "192.0.2.7/32" {
+		t.Errorf("ips = %v, want the prefix and the address", ips)
+	}
+	p := &model.Profile{RoutingLists: []model.RoutingList{{ID: "r", Enabled: true, Outbound: "direct", Manual: []string{"10.0.0.0/99"}}}}
+	if sets, rules := routingFrom(p, false, ""); len(sets) != 0 || len(rules) != 0 {
+		t.Errorf("a list of one unreadable entry gave sets=%v rules=%v, want none", sets, rules)
 	}
 }

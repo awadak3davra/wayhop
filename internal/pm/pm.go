@@ -213,7 +213,7 @@ func (m Manager) Owner(ctx context.Context, path string) (pkg string, owned bool
 //
 // They had drifted, and the drift was the whole defect. Upgrade was written as an alias of Install
 // — "same argv as Install by design" — and on apk that is not an upgrade at all: `apk add <pkg>` on
-// an already-installed package keeps the build that is there and exits 0. Measured on the test router,
+// an already-installed package keeps the build that is there and exits 0. Measured on the reference OpenWrt router,
 // where the panel's Update button ran `apk add sing-box` at 22:02:52 and apk answered
 // "OK: 76.6 MiB in 189 packages" with sing-box still at 1.12.17-r1 while the feed offered
 // 1.13.21-r1. The daemon logged an upgrade, the panel toasted a success, and nothing had changed.

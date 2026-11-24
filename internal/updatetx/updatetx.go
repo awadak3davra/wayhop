@@ -107,7 +107,7 @@ const SupervisorPIDFile = "/tmp/wayhop-update-verify.pid"
 // SupervisorAlive reports whether pidFile names a live process, and which: the supervisor is still at
 // work. The marker alone cannot say so, because the supervisor drops it first and works on after it:
 // rollback() removes it before it stops the service, restores the copy and waits up to 60 s for the
-// old build; proven() removes it before it compresses the rollback copy, 10-40 s on a test router. The
+// old build; proven() removes it before it compresses the rollback copy, 10-40 s on a reference OpenWrt router. The
 // liveness test is the init script's `kill -0`.
 func SupervisorAlive(pidFile string) (pid int, alive bool) {
 	b, err := os.ReadFile(pidFile)

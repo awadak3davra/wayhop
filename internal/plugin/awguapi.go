@@ -182,7 +182,7 @@ func awgUAPI(e model.Endpoint, endpoint netip.AddrPort) (lines []awg.KV, warning
 	if dcSet {
 		add("disable_cookies", boolUAPI(dc))
 	}
-	// Measured 2026-08-29 on 3.1.20260812, module and tools on both ends: RandomTrailers together with
+	// Measured on 3.1.20260812, module and tools on both ends: RandomTrailers together with
 	// junk packets, paddings and header ranges lost 37-55% of packets; drop any one of the four and
 	// loss was 0. Not refused - the server decides whether trailers are on.
 	if rt && jc > 0 && s != [4]uint64{} && hRange {

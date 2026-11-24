@@ -5,10 +5,8 @@ import "errors"
 // refproblems.go answers "what else is broken?" without writing a second validator.
 //
 // Validate returns the FIRST failure and stops, which is right for a gate — Apply either proceeds or
-// it does not. It is wrong for a review: the panel showed one broken object at a time, so an operator
-// fixed it, re-reviewed, and met the next one. Measured on the demo profile: rules st-rule-6,
-// st-rule-7 and st-rule-12 were each a separate round trip, and nothing anywhere said how many were
-// left.
+// it does not. It is wrong for a review: a panel showing one broken object at a time makes an operator
+// fix it, re-review, and meet the next one, with nothing saying how many are left.
 //
 // The enumeration asks the REAL validator repeatedly rather than re-implementing its rules. A second
 // copy of "what counts as a broken reference" would be a second answer the day one of them learns
@@ -88,7 +86,18 @@ func neutralizeRef(p *Profile, kind, id, target string) bool {
 			}
 			// Which FIELD is broken is not in the error, and does not need to be: the target value
 			// identifies it. DownloadVia is cleared rather than pointed at direct because "" already
-			// means the ordinary path there.
+			// means the ordinary path there. A tunnel of a fastest list is dropped from its tunnels
+			// first: Outbound follows the first tunnel, so pointing only Outbound at direct would trade
+			// this problem for "outbound must be the first candidate", which is not a reference problem
+			// and would stop the count.
+			if containsID(rl.Candidates, target) {
+				RepointListCandidates(&Profile{RoutingLists: p.RoutingLists[i : i+1]}, target, "")
+				if len(rl.Candidates) == 0 {
+					rl.Outbound = OutboundDirect
+				}
+				TidyListFastest(&Profile{RoutingLists: p.RoutingLists[i : i+1], Endpoints: p.Endpoints, Groups: p.Groups})
+				return true
+			}
 			if rl.Outbound == target {
 				rl.Outbound = OutboundDirect
 				return true

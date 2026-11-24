@@ -40,8 +40,8 @@ type listMemoryEntry struct {
 // words those differently, so they are ABSENT here rather than reported as 0.
 func (s *Server) handlePBRListMemory(w http.ResponseWriter, r *http.Request) {
 	// OpenWrt keeps the sets in nftables, which reports no memory per set, and `ipset` is not there.
-	// The page read that as "the kernel routing plane is not installed" beside an installed, verified
-	// plane holding both lists' sets (a hunter on an emulated 25.12). Say which it is.
+	// The page would read that as "the kernel routing plane is not installed" beside an installed,
+	// verified plane holding the lists' sets. Say which it is.
 	if s.detectedPlatform() == platform.OpenWrt && !s.config().Demo {
 		writeJSON(w, http.StatusOK, map[string]any{"measured": false, "lists": nil, "reason": "nft"})
 		return
@@ -74,6 +74,8 @@ func (s *Server) kernelListMemory(ctx context.Context, listIDs []string) ([]list
 		zone := pbr.ListZoneName(id)
 		want[opts.ZoneSetName(zone, "4")] = id
 		want[opts.ZoneSetName(zone, "6")] = id
+		want[opts.DynamicSetName(zone, "4")] = id
+		want[opts.DynamicSetName(zone, "6")] = id
 	}
 	text, err := runHostCommandBounded(ctx, kernelCounterTimeout, listMemoryOutputLimit,
 		applyHostCommandWaitDelay, "ipset", "list", "-t")

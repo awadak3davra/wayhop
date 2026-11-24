@@ -11,7 +11,7 @@ import (
 //
 // Without a zone that device is not forwarded at all. fw4's forward chain has policy drop, and a LAN
 // packet leaving through an interface no zone names falls to `jump handle_reject` - measured on the
-// test router (OpenWrt 25.12.2), whose forward chain accepts only per-zone traffic plus sing-box's own
+// reference OpenWrt router (OpenWrt 25.12.2), whose forward chain accepts only per-zone traffic plus sing-box's own
 // tun0 rules.
 //
 // The zone lists it by DEVICE, not by network interface. fw4 matches a zone's `device` list against

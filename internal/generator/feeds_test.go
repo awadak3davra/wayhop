@@ -47,7 +47,7 @@ func feedSetHas(set map[string]any, key, want string) bool {
 // A list fed only by a fetched feed had no rule in the core: the generator read Manual alone, while
 // the feeds reached only pbr and KeeneticOS's resolver. On OpenWrt a domain preset (seen live: "RU
 // outside", 39 names, enabled for weeks) and any IP feed sent to a proxy routed nothing, with a clean
-// review (QA-066).
+// review.
 func TestFetchedFeedsReachTheCore(t *testing.T) {
 	p := hybridProfile()
 	p.RoutingLists = append(p.RoutingLists, feedLists("p-vless")...)

@@ -226,7 +226,7 @@ func TestEnoughFlashFor(t *testing.T) {
 		{70 * MiB, true, 10 * MiB, "core.tar.gz", true, true},   // 64 <= 70 -> ok
 		// BARE binary (no archive ext) is NOT inflated 3x: a 27 MiB bare binary needs ~27+4, not ~85.
 		{40 * MiB, true, 27 * MiB, "amneziawg-go-linux-arm64", false, true},  // 27+4=31 <= 40 -> ok (3x would wrongly block: 85 > 40)
-		{20 * MiB, true, 27 * MiB, "amneziawg-go-linux-arm64", false, false}, // 31 > 20 -> still block (genuinely too big, e.g. test router overlay)
+		{20 * MiB, true, 27 * MiB, "amneziawg-go-linux-arm64", false, false}, // 31 > 20 -> still block (genuinely too big, e.g. reference OpenWrt router overlay)
 	}
 	for i, c := range cases {
 		if got := enoughFlashFor(c.avail, c.known, c.size, c.name, c.backup); got != c.want {

@@ -64,6 +64,9 @@ func reachableFor(bin string, uid int) (string, error) {
 	if uid <= 0 || os.Geteuid() != 0 {
 		return bin, nil
 	}
+	if err := binstore.EnsureRunDir(stageDir); err != nil {
+		return "", fmt.Errorf("stage for uid %d: %w", uid, err)
+	}
 	dir := filepath.Join(stageDir, "uid-"+strconv.Itoa(uid))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("stage for uid %d: %w", uid, err)

@@ -8,9 +8,9 @@ import (
 // TestCollectRefProblemsEnumeratesAll (L5): the review must be able to say how much is broken.
 //
 // Validate stops at the first failure, which is correct for a gate and wrong for a review: the panel
-// named one object, the operator fixed it, re-reviewed, and met the next. Measured on the demo
-// profile — st-rule-6 and st-rule-12 both point at "st-grp-0", which is not in the profile, and
-// st-rule-7 points at a disabled endpoint. Three round trips, and no count anywhere.
+// would name one object, the operator would fix it, re-review, and meet the next. In the demo
+// profile st-rule-6 and st-rule-12 both point at "st-grp-0", which is not in the profile, and
+// st-rule-7 points at a disabled endpoint: three round trips, and no count anywhere.
 func TestCollectRefProblemsEnumeratesAll(t *testing.T) {
 	p := Profile{
 		Endpoints: []Endpoint{

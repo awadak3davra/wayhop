@@ -255,7 +255,7 @@ func TestBackupRestoreRejectsWrongSchema(t *testing.T) {
 	}
 }
 
-// QA-134: a backup past the request cap is answered 413 with the limit, not "invalid JSON", on
+// A backup past the request cap is answered 413 with the limit, not "invalid JSON", on
 // both restore routes, and the profile is left as it was.
 func TestRestoreOverTheBodyCapSaysSo(t *testing.T) {
 	srv, h := backup_newServer(t)

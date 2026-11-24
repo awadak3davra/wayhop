@@ -25,7 +25,7 @@ import (
 
 // urlParseReason returns WHY a URL failed to parse, without the URL itself. url.Parse wraps its
 // failures in *url.Error, whose Error() embeds the raw input — which for a share link is the
-// credential. We surface only the inner reason ("missing protocol scheme", "invalid port …", …) so a
+// credential. Only the inner reason is surfaced ("missing protocol scheme", "invalid port …", …) so a
 // malformed paste can never carry a UUID/password/private key into an error string.
 func urlParseReason(err error) string {
 	var ue *url.Error
@@ -58,10 +58,10 @@ func Parse(raw string) (*model.Endpoint, error) {
 	}
 	// Detect a URI scheme prefix (a single whitespace-free token before "://") FIRST. A pasted
 	// WireGuard .conf or an olcRTC YAML blob is NOT a URI — it has no such prefix — whereas a proxy
-	// share link always does. We then gate the .conf / olcRTC content-sniffs on the ABSENCE of a
+	// share link always does. The .conf / olcRTC content-sniffs are then gated on the ABSENCE of a
 	// scheme, so a crafted #fragment in a share link (the node name, which is provider/attacker-
-	// controlled) can't be misread as "[Interface]" (→ .conf parser, import FAILS: #15) or as olcRTC
-	// keys like "provider:…crypto" (→ the real proxy refused as a retired olcRTC config: #14).
+	// controlled) can't be misread as "[Interface]" (→ .conf parser, import FAILS) or as olcRTC
+	// keys like "provider:…crypto" (→ the real proxy refused as a retired olcRTC config).
 	// The whitespace guard means a "://" sitting inside a multi-line config blob (preceded by a
 	// newline, e.g. an olcRTC signaling URL) is NOT mistaken for a scheme.
 	scheme := ""
@@ -82,8 +82,8 @@ func Parse(raw string) (*model.Endpoint, error) {
 			return tagged(FormatOpenVPN)(finalize(parseOpenVPN(raw)))
 		}
 		// A Clash / mihomo config pasted (or opened with Import file, which accepts .yaml) under Paste
-		// link used to fall through to the URL parser and fail as "malformed share link: invalid
-		// control character", naming neither the format nor where it imports. One proxy imports
+		// link would otherwise fall through to the URL parser and fail as "malformed share link:
+		// invalid control character", naming neither the format nor where it imports. One proxy imports
 		// here; several need the Subscription tab, which lets the operator choose.
 		if looksLikeClash(raw) {
 			return tagged(FormatClash)(parseClashSingle(raw))
@@ -167,10 +167,10 @@ func finalize(e *model.Endpoint, err error) (*model.Endpoint, error) {
 	if e.Engine != model.EngineExternal && !realm && (e.Port < 1 || e.Port > 65535) {
 		return nil, fmt.Errorf("port %d out of range (must be 1-65535)", e.Port)
 	}
-	// A link that yielded no server is not an endpoint. Parse used to return one anyway — with an
-	// empty Server, a DEFAULTED port and Enabled=true — so `vless://`, `trojan://pass@` and a
-	// truncated vmess payload all imported "successfully". model.Validate does reject it later, so
-	// nothing broken reaches the profile, but the user is told `endpoint "x": empty server` from the
+	// A link that yielded no server is not an endpoint. Returning one anyway (an empty Server, a
+	// DEFAULTED port and Enabled=true) would let `vless://`, `trojan://pass@` and a truncated vmess
+	// payload import "successfully". model.Validate does reject it later, so nothing broken reaches
+	// the profile, but the user would be told `endpoint "x": empty server` from the
 	// store: an error about the endpoint, several layers below the thing that was actually wrong.
 	// The link is what failed, and this is where that is still known.
 	//
@@ -838,9 +838,9 @@ func parseReserved(s string) []int {
 
 // --- query/transport/tls helpers ---
 
-// unsupportedTransport is the error for a stream transport sing-box has no client for. A link
-// naming one used to import as raw TCP - a well-formed endpoint the server can never accept, with
-// nothing to say why - so the import now fails and says which transport it was.
+// unsupportedTransport is the error for a stream transport sing-box has no client for. Importing a
+// link naming one as raw TCP would make a well-formed endpoint the server can never accept, with
+// nothing to say why, so the import fails and says which transport it was.
 func unsupportedTransport(name string) error {
 	if len(name) > 24 {
 		name = name[:24] + "..."
@@ -1140,7 +1140,7 @@ func genID(e *model.Endpoint) string {
 	if r, _ := model.Hy2RealmOf(e); r != nil {
 		// The realm name stays out of the id, as out of the name, but the rendezvous alone is not an
 		// identity: two home servers on one public rendezvous made one id, and the second import could
-		// only replace the first (QA-058). A short hash of the whole realm address tells them apart.
+		// only replace the first. A short hash of the whole realm address tells them apart.
 		sum := sha256.Sum256([]byte(r.URI()))
 		host = "realm-" + r.Host + "-" + hex.EncodeToString(sum[:4])
 	}

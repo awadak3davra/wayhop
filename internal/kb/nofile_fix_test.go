@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// QA-132. The open-files fix told OpenWrt owners to add `limits { nofile = '16384 16384'; }` to the
+// The open-files fix told OpenWrt owners to add `limits { nofile = '16384 16384'; }` to the
 // init script. procd has no such syntax, and in shell the "}" closes start_service early, so the
 // script stops parsing and WayHop does not start at boot. procd's only form is
 // `procd_set_param limits nofile="soft hard"` inside the instance, and the shipped OpenWrt script now

@@ -72,9 +72,8 @@ type DNSSettings struct {
 	// when we can't".
 	LeakProof bool `json:"leak_proof,omitempty"`
 	// Intercept answers clients' plain DNS from THIS router whatever server they addressed, so a
-	// device with a hardcoded resolver stops walking past every rule on the DNS page. Measured on a
-	// real LAN: a NAS configured with 1.1.1.1 resolved directly and no domain rule could ever apply
-	// to it. Kernel-plane only (it is a netfilter redirect); the page states what it cannot cover.
+	// device with a hardcoded resolver (say, a NAS configured with 1.1.1.1) stops walking past every
+	// rule on the DNS page. Kernel-plane only (it is a netfilter redirect); the page states what it cannot cover.
 	Intercept bool `json:"intercept,omitempty"`
 	// InterceptRejectEncrypted additionally refuses DoT and the well-known public DoH addresses so a
 	// client that hardcodes an ENCRYPTED resolver falls back to plain 53 and is then intercepted.
@@ -140,9 +139,9 @@ func IsEncryptedDNSType(t string) bool {
 // That is Final when the generator emits it. Otherwise it is the first server the generator emits:
 // with no `final`, sing-box 1.12 makes the first DNS transport it creates the default
 // (dns/transport_manager.go), and the generator emits servers in order, dropping disabled ones and,
-// without TUN, fakeip ones (generator.dnsFrom). The leak checks used to read an empty Final as "no
-// default" and skip themselves, while sing-box sent every unmatched lookup to servers[0]: a plaintext
-// `local` resolver passed leak protection and the Apply gate that refuse it by name (QA-105).
+// without TUN, fakeip ones (generator.dnsFrom). Leak checks that read an empty Final as "no default"
+// and skip themselves would miss that sing-box sends every unmatched lookup to servers[0]: a
+// plaintext `local` resolver would pass leak protection and the Apply gate that refuse it by name.
 func (d *DNSSettings) DefaultServer(tun bool) *DNSServer {
 	if d == nil {
 		return nil
@@ -395,7 +394,7 @@ func validateDNS(dns *DNSSettings, ids map[string]string, enabled map[string]boo
 		}
 	}
 	// No final chosen: the first emitted server is the default (DefaultServer), and leak protection
-	// holds it to the same rule as a named final (QA-105). Judged as generated without TUN, where a
+	// holds it to the same rule as a named final. Judged as generated without TUN, where a
 	// leading fakeip server is dropped and the resolver behind it answers; with TUN a leading fakeip
 	// server answers instead and sends no query anywhere, so this is the case that can leak.
 	if dns.LeakProof && dns.Final == "" {
@@ -406,7 +405,7 @@ func validateDNS(dns *DNSSettings, ids map[string]string, enabled map[string]boo
 	// The `final` must name an ENABLED server. The generator DROPS a disabled server and, with it, a
 	// `final` that pointed at one (singbox.go: `if d.Final != "" && !dropped[d.Final]`), leaving the
 	// DNS plane with NO default resolver and no error at all — the user's chosen default silently
-	// vanishes and unmatched queries go nowhere (LOOP-029). Reject it at save instead. Checked after
+	// vanishes and unmatched queries go nowhere. Reject it at save instead. Checked after
 	// the unknown-tag and leak-protection checks above so a more specific error still wins when both
 	// apply; by here dns.Final is known to exist (the unknown-tag check returned otherwise).
 	if dns.Final != "" && !serverEnabled[dns.Final] {
@@ -436,7 +435,7 @@ func validateDNS(dns *DNSSettings, ids map[string]string, enabled map[string]boo
 		}
 		// An ENABLED rule must route to an ENABLED server (or "reject"). A disabled target is dropped
 		// by the generator along with the servers it names, so the rule's queries silently fall through
-		// to `final` instead of the resolver the user aimed them at (LOOP-029). Checked last so a
+		// to `final` instead of the resolver the user aimed them at. Checked last so a
 		// missing matcher or an unknown rule_set is reported first when both apply; by here r.Server is
 		// known to be "reject" or a defined tag.
 		if r.Server != "reject" && !serverEnabled[r.Server] {

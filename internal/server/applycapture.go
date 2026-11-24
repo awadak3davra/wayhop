@@ -52,7 +52,7 @@ func readKeeneticRunningConfigWith(
 }
 
 // The access-policy listing prints each policy's whole route table: 10,761 B for 29 routes over two
-// policies on a live Keenetic, about 370 B a route. 8 MiB is some 22,000 routes, so a router with large
+// policies on a Keenetic, about 370 B a route. 8 MiB is some 22,000 routes, so a router with large
 // tables does not have every Apply that uses a policy refused for an over-long answer (gap 6 review).
 const (
 	keeneticPolicyTimeout = 10 * time.Second
@@ -185,6 +185,15 @@ func (s *Server) captureExecutionHostFacts(
 		if err != nil {
 			return ExecutionHostFactsV1{}, fmt.Errorf("%w: WAN uplink", errExecutionCaptureUnavailable)
 		}
+		facts.KernelLANIfaces = keeneticLANIfaces(probeForwardIfaces(), facts.KernelWANIface)
+		// The live rule list places the kill switch backstop ahead of NDM's own rules.
+		rules, ruleErr := exactKeeneticKernelRunner{tools: executionKernelIpsetArtifactV1{IPTool: facts.KernelIP}}.
+			Run(ctx, "", executionToolIP, "rule")
+		if ruleErr != nil {
+			log.Printf("apply: Keenetic kernel capture: ip rule: %v", ruleErr)
+			return ExecutionHostFactsV1{}, fmt.Errorf("%w: policy rules", errExecutionCaptureUnavailable)
+		}
+		facts.KernelRules = rules
 	}
 	return facts, nil
 }
@@ -303,6 +312,13 @@ func captureExecutionNativeFrom(
 	}
 	adopt := make(map[string]string, len(host.ExternalBindings))
 	for _, binding := range host.ExternalBindings {
+		// Said with the connection and the way out: the vague answer left the operator to guess which of
+		// their tunnels was at fault.
+		if binding.EndpointID != "" && binding.Interface != "" && !binding.Ready {
+			return executionNativeCaptureV1{}, fmt.Errorf("%w: connection %q is on interface %s, which is switched off on the router; "+
+				"turn that interface on in KeeneticOS, or switch the connection off on the Connections page, then retry",
+				errExecutionCaptureUnavailable, binding.EndpointID, binding.Interface)
+		}
 		if binding.EndpointID == "" || binding.Interface == "" || !binding.Ready ||
 			adopt[binding.EndpointID] != "" {
 			return executionNativeCaptureV1{}, errExecutionCaptureUnavailable
@@ -413,7 +429,7 @@ func validKeeneticAdoptEvidence(
 // foreignKeeneticDevice reports an adopted external endpoint whose tunnel the router runs outside
 // KeeneticOS, and its kernel device.
 //
-// Measured on a live Keenetic: AmneziaWG 3.1 runs there from Entware (amneziawg-go as `awg1`),
+// Observed on KeeneticOS: AmneziaWG 3.1 runs there from Entware (amneziawg-go as `awg1`),
 // because NDM's own AmneziaWG stops at generation 2. Discovery sees that link in the WireGuard-family
 // runtime dump and nowhere in NDM's listing, so the endpoint has no NDM name, and Apply refused it
 // as an NDM tunnel awaiting re-adoption — a repair that cannot exist for it.

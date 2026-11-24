@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"wayhop/internal/config"
+	"wayhop/internal/failover"
 	"wayhop/internal/health"
 	"wayhop/internal/model"
 	"wayhop/internal/pbr"
@@ -51,6 +52,9 @@ type fakeTables struct {
 	up      map[string]bool
 	noV6    map[string]bool // devices with no IPv6 at all; nil leaves the io's v6 check unset
 	writes  []string
+	// probes is what the elector's handshakes measured; nil measures nothing, and every candidate
+	// then stands on the monitor's verdict.
+	probes map[failover.ProbeKey]failover.ProbeResult
 }
 
 func (f *fakeTables) io() *routeTableIO {
@@ -71,6 +75,9 @@ func (f *fakeTables) io() *routeTableIO {
 			return nil
 		},
 		up: func(iface string) bool { return f.up[iface] },
+		probe: func(context.Context, []failover.ProbeKey) map[failover.ProbeKey]failover.ProbeResult {
+			return f.probes
+		},
 	}
 	if f.noV6 != nil {
 		io.v6 = func(iface string) bool { return !f.noV6[iface] }
@@ -92,7 +99,9 @@ func restoreServer(t *testing.T, plan *pbr.Plan, tables *fakeTables) *Server {
 	}
 	// The restore runs inside the list failover tick, which needs a store and a monitor; this one has
 	// measured nothing, so no group elects and only the restore can write.
-	s := &Server{cfg: config.Default(), routeTables: tables.io(), store: st, monitor: health.NewMonitor(nil, st, nil, false)}
+	cfg := config.Default()
+	cfg.SingBox.Config = filepath.Join(t.TempDir(), "singbox.json") // state files here
+	s := &Server{cfg: cfg, routeTables: tables.io(), store: st, monitor: health.NewMonitor(nil, st, nil, false)}
 	profile := restoreProfile()
 	s.applyState.rec = applyStateRecord{Committed: &appliedRevision{
 		Rev: "r1", Desired: &appliedDesired{Profile: profile},

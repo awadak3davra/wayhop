@@ -10,7 +10,7 @@ import (
 //
 // The per-object writers replace a whole connection, group or routing list with what the caller sent.
 // A form or a switch builds that from the object it loaded, so a page left open while another tab,
-// device or script saved a newer version of it wrote the older one back with a 200 (QA-152): a
+// device or script saved a newer version of it wrote the older one back with a 200: a
 // connection's switch put back the server another tab had just changed. A write made At the
 // revision its copy came from commits only while the stored object still has it.
 //

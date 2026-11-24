@@ -41,6 +41,9 @@ type Event struct {
 	From      string `json:"from,omitempty"`       // previous state, or previous elected member
 	To        string `json:"to,omitempty"`         // new state, or new elected member
 	LatencyMS int    `json:"latency_ms,omitempty"` // latency at the moment of the change, when known
+	// Quiet keeps the event in the log but out of the Telegram bot's alerts (a routing list whose
+	// owner did not ask to be told, or a repeat inside the list's 10-minute alert window).
+	Quiet bool `json:"quiet,omitempty"`
 }
 
 // pushEvent appends to the ring. The caller must hold m.mu — record() already does, and keeping the
@@ -206,6 +209,20 @@ func (m *Monitor) nameForLocked(id string) string {
 		return s.name
 	}
 	return id
+}
+
+// RecordListSwitch logs a routing list's own switch ("fastest" mode): id is "list:<id>", from/to are
+// tunnel ids ("" = none, the list fell through or is blocked). quiet keeps it from the bot.
+func (m *Monitor) RecordListSwitch(id, name, from, to string, latencyMs int, quiet bool) {
+	if m == nil || id == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pushEvent(Event{
+		At: time.Now().UnixMilli(), Kind: "switch",
+		ID: id, Name: name, From: from, To: to, LatencyMS: latencyMs, Quiet: quiet,
+	})
 }
 
 // RecordSwitch logs an election the DAEMON made — as opposed to one the proxy core reported. The

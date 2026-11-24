@@ -132,6 +132,40 @@ function testTuningFields(test) {
   return { node, read };
 }
 
+// wanFallbackRow is the line under a group's members for what happens when every one of them is down:
+// the traffic goes out the router's own WAN, unless the kill switch is on, which drops it instead. It
+// is not a member (it cannot be moved or unticked), it shows the rule in force, so it is struck
+// through while the kill switch is ticked and follows that checkbox live.
+function wanFallbackRow(killSwitch) {
+  const name = el("span", { class: "member-n" }, t("WAN (direct)"));
+  const note = el("span", { class: "member-m" });
+  const row = el("div", { class: "check member-row wan-fallback", style: "opacity:.85;border-top:1px dashed var(--border,#8884);margin-top:4px;padding-top:6px" },
+    el("span", { class: "insp-dot muted", "aria-hidden": "true" }), name, note);
+  const sync = () => {
+    const off = killSwitch.checked;
+    name.style.textDecoration = off ? "line-through" : "";
+    row.style.opacity = off ? ".55" : ".85";
+    note.textContent = off ? t("not used: kill switch drops traffic") : t("last resort when every member is down");
+  };
+  killSwitch.addEventListener("change", sync);
+  sync();
+  return row;
+}
+
+// electionField is "Choose by" for a urltest group: delay (as always), measured download speed, or
+// both. It shows only for urltest, the one type that chooses by a measurement.
+function electionField(type, value) {
+  const sel = el("select", {}, el("option", { value: "" }, t("Delay (latency)")),
+    el("option", { value: "throughput" }, t("Download speed")),
+    el("option", { value: "mixed" }, t("Both: drop the slow to answer, then the highest speed")));
+  sel.value = value === "throughput" || value === "mixed" ? value : "";
+  const node = el("div", { class: "field", "data-note": t("Speed is what Measure speed last found for each member; a measurement older than 24 hours is not used, and the group then chooses by delay. Applies where the router itself switches the group (KeeneticOS).") },
+    el("label", {}, t("Choose by")), sel);
+  const sync = () => { node.style.display = type.value === "urltest" ? "" : "none"; };
+  type.addEventListener("change", sync); sync();
+  return { node, read: () => (type.value === "urltest" ? sel.value : "") };
+}
+
 function openNewGroup() {
   if (!state.profile.endpoints.length) { toast("Add some connections first", "err"); return; }
   const name = el("input", { type: "text", placeholder: "Main failover" });
@@ -139,9 +173,11 @@ function openNewGroup() {
     el("option", { value: "fallback" }, "fallback — strict order"),
     el("option", { value: "selector" }, "selector — manual"));
   const checks = memberPicker(state.profile.endpoints.map(e => ({ e, checked: false })));
+  const election = electionField(type, "");
   const tuning = testTuningFields();
   const asDefault = el("input", { type: "checkbox" });
   const killSwitch = el("input", { type: "checkbox" });
+  const wanRow = wanFallbackRow(killSwitch);
 
   async function create(btn) {
     const members = $$("input[type=checkbox]:checked", checks).map(c => c.value);
@@ -154,6 +190,7 @@ function openNewGroup() {
     // kill_switch is omitted from the payload when unchecked (omitempty / false =
     // current behavior: WAN fallback when all members are down).
     const g = { id, name: name.value.trim(), type: type.value, members, test: tuning.read() };
+    if (election.read()) g.election_mode = election.read();
     if (killSwitch.checked) g.kill_switch = true;
     try { await api.post("/api/groups", g); }
     catch (e) { if (btn) btn.disabled = false; return toast(e.message, "err"); } // group not created — re-enable, modal stays open for retry
@@ -174,7 +211,8 @@ function openNewGroup() {
   const body = notes.wire(el("div", {},
     el("div", { class: "field" }, el("label", {}, "Group name"), name),
     el("div", { class: "field" }, el("label", {}, "Type"), type),
-    el("div", { class: "field", "data-note": t(MEMBER_ORDER_HINT) }, el("label", {}, t("Members (priority order)")), checks),
+    election.node,
+    el("div", { class: "field", "data-note": t(MEMBER_ORDER_HINT) }, el("label", {}, t("Members (priority order)")), checks, wanRow),
     tuning.node,
     el("label", { class: "check" }, asDefault, el("span", {}, "Set as default route (all traffic)")),
     el("label", { class: "check", "data-note": t("When on, traffic is dropped instead of falling back to the open WAN if every member is down — no leak to the unprotected internet.") },
@@ -206,9 +244,11 @@ function openEditGroup(g) {
     { id: m, name: nameOf(m), enabled: true, member: findGroup(m) ? "nested group" : m === "direct" ? "direct" : "" })
     .concat(state.profile.endpoints.filter(e => !have.has(e.id)));
   const checks = memberPicker(ordered.map(e => ({ e, checked: have.has(e.id) })));
+  const election = electionField(type, g.election_mode);
   const tuning = testTuningFields(g.test);
   const killSwitch = el("input", { type: "checkbox" });
   if (g.kill_switch) killSwitch.setAttribute("checked", "true");
+  const wanRow = wanFallbackRow(killSwitch);
 
   async function save(btn) {
     const members = $$("input[type=checkbox]:checked", checks).map(c => c.value);
@@ -219,6 +259,7 @@ function openEditGroup(g) {
       // Spread g first so unedited fields round-trip unchanged; test is rebuilt from the tuning
       // block (seeded from g.test, so untouched values round-trip and no Health field is dropped).
       const out = { ...g, name: name.value.trim(), type: type.value, members, kill_switch: killSwitch.checked, test: tuning.read() };
+      if (election.read()) out.election_mode = election.read(); else delete out.election_mode;
       await api.post("/api/groups", out, ifMatch(g)); // refused if g changed since it was loaded (QA-152)
       back.remove(); await loadProfile(); route(); toast(t("Saved {0}", name.value.trim()), "ok");
     } catch (e) { if (btn) btn.disabled = false; toast(e.message, "err"); }
@@ -228,7 +269,8 @@ function openEditGroup(g) {
   const body = notes.wire(el("div", {},
     el("div", { class: "field" }, el("label", {}, "Group name"), name),
     el("div", { class: "field" }, el("label", {}, "Type"), type),
-    el("div", { class: "field", "data-note": t(MEMBER_ORDER_HINT) }, el("label", {}, t("Members (priority order)")), checks),
+    election.node,
+    el("div", { class: "field", "data-note": t(MEMBER_ORDER_HINT) }, el("label", {}, t("Members (priority order)")), checks, wanRow),
     tuning.node,
     el("label", { class: "check", "data-note": t("When on, traffic is dropped instead of falling back to the open WAN if every member is down — no leak to the unprotected internet.") },
       killSwitch, el("span", {}, t("Kill switch (drop when all members down)")))));

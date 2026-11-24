@@ -10,7 +10,7 @@ import (
 
 // TestListsInForce (L5): a battery that answers every question except the one the operator asked.
 //
-// Measured on a live OpenWrt: every row passed while eleven of fifteen routing lists matched
+// Observed on OpenWrt: every row passed while eleven of fifteen routing lists matched
 // nothing. The rows were each true — tunnels up, DNS answering, "Kernel routing (PBR): active — 4
 // zone(s) applied" over the four IP/CIDR lists. The other eleven are domain lists, which only the
 // proxy core can match, and "fast" mode builds no TUN, so no LAN packet ever reaches the core. The

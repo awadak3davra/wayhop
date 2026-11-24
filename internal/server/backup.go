@@ -154,8 +154,8 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 	cand.Gateway = bundle.Gateway
 	if _, why := s.gateRoutingMode(r.Context(), cur, cand); why != "" {
 		mode = cur.RoutingMode
-		// A whole sentence, because the panel shows it as it is beside the restore's own message
-		// (QA-153): that one says the routing mode was restored, so this one has to say it was not.
+		// A whole sentence, because the panel shows it as it is beside the restore's own message:
+		// that one says the routing mode was restored, so this one has to say it was not.
 		modeNote = fmt.Sprintf("The backup's routing mode (%s) was not restored; this router stays in %s mode: %s",
 			s.routingMode(cand), s.routingMode(cur), why)
 	}

@@ -7,7 +7,7 @@ import (
 	"wayhop/internal/pbr"
 )
 
-// TestHybridScopedKernelListStays (RT-06): a device-scoped pure-IP list at a kernel egress compiles
+// TestHybridScopedKernelListStays: a device-scoped pure-IP list at a kernel egress compiles
 // into a SrcScoped zone, and the hybrid TUN does not exclude those, so the scoped devices' TCP is
 // captured by auto_redirect and matched by sing-box. The list must therefore stay in sing-box
 // ("only" with its source_ip_cidr; "except" dest-only, the documented P8 limit) and keep its kernel

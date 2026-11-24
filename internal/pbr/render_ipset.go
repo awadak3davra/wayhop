@@ -27,12 +27,15 @@ type IpsetOptions struct {
 	WanIface      string // WAN uplink for the WAN-fallback MASQUERADE (default eth3)
 	DomainMaxElem int    // maxelem for DNS-populated (domain) sets (default 131072)
 	DomainTimeout int    // seconds; entries expire so a DNS-set can't grow unbounded (default 86400)
-	S86Mark       uint32 // skip-marking guard: a packet already carrying this exact mark RETURNs (S86 RU-routing 0x250); 0 = no guard
+	// DynamicDomainSets splits new resolver answers into wd_ hash:ip sets. The wr_ sets and their
+	// existing members stay in place until their own timeouts expire, which makes migration additive.
+	DynamicDomainSets bool
+	S86Mark           uint32 // skip-marking guard: a packet already carrying this exact mark RETURNs (S86 RU-routing 0x250); 0 = no guard
 
 	// DNSIntercept redirects clients' plain DNS (udp/tcp 53) to the router's own resolver, so a
 	// device with a hardcoded 8.8.8.8 is answered by the resolver this router actually manages.
-	// Measured need: the NAS on a live LAN resolves through 1.1.1.1 directly, which walks
-	// past every domain rule the DNS page shows — the page even says so, and could do nothing about it.
+	// Without it, a LAN device that resolves through 1.1.1.1 directly walks past every domain rule
+	// the DNS page shows.
 	DNSIntercept bool
 	// DNSInterceptLAN is the interface clients arrive on (default br0 on KeeneticOS). Redirecting on
 	// the WAN side would capture the router's own upstream queries and loop them back into itself.
@@ -45,6 +48,9 @@ type IpsetOptions struct {
 	// nobody can distinguish without breaking TLS, and pretending otherwise would be a lie about
 	// what this feature covers.
 	DNSRejectEncrypted bool
+	// FastDNSEnforce redirects plain DNS and refuses DoT on every captured LAN interface. Unlike the
+	// legacy interception above, its redirect leaves packets addressed to the router itself untouched.
+	FastDNSEnforce bool
 
 	// MasqDevices are tunnel devices NDM does not own - the ones WayHop's userspace AmneziaWG
 	// creates - that need forwarded-LAN MASQUERADE. NDM NATs its own interfaces; nobody NATs these,
@@ -52,6 +58,36 @@ type IpsetOptions struct {
 	// routing drops (the peer's allowed IPs are the tunnel address). The router's own tunnels are
 	// deliberately not listed: their NAT stays NDM's. v4 only, like every MASQUERADE on this plane.
 	MasqDevices []string
+
+	// LANIfaces are the interfaces LAN clients arrive on, from the host facts. The kill switch
+	// backstop's ip rules match them by `iif`, which is what keeps the router's own traffic out of
+	// them. Empty: no backstop rules can be rendered (the caller refuses a kill switch then).
+	LANIfaces []string
+	// KillSwitchDNS is the sing-box DNS listener as dnsmasq names a server ("127.0.0.1#5353"). The
+	// names of a kill-switched domain list are pinned to it with `server=/name/...`, so dnsmasq asks
+	// that server alone for them and fails with it instead of moving on to a direct row of its chain.
+	KillSwitchDNS string
+	// HandoffIface is the sing-box hand-off TUN (handoff.go); "" when no core runs, and then an
+	// overlap stays with the stronger list.
+	HandoffIface string
+	// BackstopPref is the priority of the kill switch backstop's rules, derived from the router's live
+	// rule list (BackstopPrefFromRules); 0 = ahead of every WayHop rule.
+	BackstopPref int
+	// BootRestore is a file holding the plane's ipset restore stream: the program restores the sets
+	// from it when one is missing (after a reboot, before the daemon runs). "" = none.
+	BootRestore string
+	// BackstopReady is the tmpfs stamp the daemon writes once it has filled the backstop table since
+	// boot; while it is absent the program holds forwarded traffic in that table. "" = no hold.
+	BackstopReady string
+	// BootLearned is the daemon's file of learned members of kill-switched domain sets (ipset restore
+	// format, remaining timeouts), restored with the sets at boot. "" = none.
+	BootLearned string
+	// FillTool is the WayHop binary the hook runs once per boot as `backstop-fill` to put the
+	// kill-switched destinations into the backstop table before the daemon is up.
+	FillTool string
+	// BootHoldLift is how many seconds after boot the hook lifts the broad hold when no full fill or
+	// daemon sync happened; 0 = never (strict).
+	BootHoldLift int
 }
 
 // masqDevices is MasqDevices de-duplicated and sorted, so a re-render is byte-identical.
@@ -87,6 +123,7 @@ var WellKnownDoHEndpoints = []string{
 // render from dnsRedirectRules and dnsRejectRules, so every rule the script can add is one the
 // teardown deletes.
 type dnsRule struct {
+	v6    bool   // ip6tables (fast mode's IPv6 refusals) instead of iptables
 	table string // "nat" or "filter"
 	chain string
 	add   string // -A or -I
@@ -103,11 +140,22 @@ func dnsRedirectRules(lan string) []dnsRule {
 	return out
 }
 
+// dnsFastRedirectRules are the fast-mode redirects: the legacy interception's rules. No addrtype match:
+// KeeneticOS does not load xt_addrtype (live 22.11, the rule never landed and every Apply's postcheck
+// failed), and a redirect of a lookup already addressed to the router's own :53 is a no-op.
+func dnsFastRedirectRules(lan string) []dnsRule {
+	return dnsRedirectRules(lan)
+}
+
+func dnsDoTRejectRule(lan string) dnsRule {
+	return dnsRule{table: "filter", chain: "FORWARD", add: "-I",
+		spec: "-i " + lan + " -p tcp --dport 853 -j REJECT --reject-with tcp-reset"}
+}
+
 // dnsRejectRules refuse DoT and DoH to WellKnownDoHEndpoints for clients arriving on lan.
 func dnsRejectRules(lan string) []dnsRule {
 	// DoT has a port of its own, so it can be refused precisely.
-	out := []dnsRule{{table: "filter", chain: "FORWARD", add: "-I",
-		spec: "-i " + lan + " -p tcp --dport 853 -j REJECT --reject-with tcp-reset"}}
+	out := []dnsRule{dnsDoTRejectRule(lan)}
 	// DoH cannot be, except at the few addresses everyone hardcodes.
 	for _, ip := range WellKnownDoHEndpoints {
 		out = append(out, dnsRule{table: "filter", chain: "FORWARD", add: "-I",
@@ -127,16 +175,72 @@ func iptablesTableArg(table string) string {
 
 // writeAdd renders the idempotent check-then-add the netfilter.d hook can re-run after every rebuild.
 func (r dnsRule) writeAdd(b *strings.Builder) {
-	t := iptablesTableArg(r.table)
-	fmt.Fprintf(b, "iptables %s-C %s %s 2>/dev/null || iptables %s%s %s %s\n", t, r.chain, r.spec, t, r.add, r.chain, r.spec)
+	t, tool := iptablesTableArg(r.table), r.tool()
+	fmt.Fprintf(b, "%s %s-C %s %s 2>/dev/null || %s %s%s %s %s\n", tool, t, r.chain, r.spec, tool, t, r.add, r.chain, r.spec)
+}
+
+func (r dnsRule) tool() string {
+	if r.v6 {
+		return "ip6tables"
+	}
+	return "iptables"
+}
+
+// deleteEveryCopy is the rule's teardown line, in its own family.
+func (r dnsRule) deleteEveryCopy() string {
+	return DeleteEveryCopy(r.tool(), r.table, r.chain, r.spec)
+}
+
+// dnsV6RefuseRules refuse forwarded IPv6 DNS (53) and DoT (853) from clients on lan, in fast mode. Only
+// forwarded traffic: the router's own resolver, reached by INPUT, stays reachable. A client set to an
+// outside IPv6 resolver falls back to IPv4, which the redirect catches. No ip6tables REDIRECT: a
+// KeeneticOS kernel need not have IPv6 NAT.
+func dnsV6RefuseRules(lan string) []dnsRule {
+	return []dnsRule{
+		{v6: true, table: "filter", chain: "FORWARD", add: "-I", spec: "-i " + lan + " -p udp --dport 53 -j REJECT --reject-with icmp6-port-unreachable"},
+		{v6: true, table: "filter", chain: "FORWARD", add: "-I", spec: "-i " + lan + " -p tcp --dport 53 -j REJECT --reject-with tcp-reset"},
+		{v6: true, table: "filter", chain: "FORWARD", add: "-I", spec: "-i " + lan + " -p tcp --dport 853 -j REJECT --reject-with tcp-reset"},
+	}
 }
 
 // IptablesDeleteEveryCopy renders the teardown line that deletes one rule of a chain NDM owns, every
 // copy of it: a lock race or an older build can have added the rule twice, and one -D would leave the
 // other. The executor matches a teardown against it, so the two cannot spell the delete differently.
 func IptablesDeleteEveryCopy(table, chain, spec string) string {
-	return "while iptables " + iptablesTableArg(table) + "-D " + chain + " " + spec + " 2>/dev/null; do :; done\n"
+	return DeleteEveryCopy("iptables", table, chain, spec)
 }
+
+// DeleteEveryCopy is IptablesDeleteEveryCopy for tool (iptables or ip6tables).
+func DeleteEveryCopy(tool, table, chain, spec string) string {
+	return "while " + tool + " " + iptablesTableArg(table) + "-D " + chain + " " + spec + " 2>/dev/null; do :; done\n"
+}
+
+// fastDNSLANs is the validated, stable interface set for fast enforcement. An explicitly enabled
+// legacy intercept keeps its interface in the set even if the host's LAN capture was incomplete.
+func (o IpsetOptions) fastDNSLANs() []string {
+	if !o.FastDNSEnforce {
+		return nil
+	}
+	ifaces := append([]string(nil), o.LANIfaces...)
+	if o.DNSIntercept && o.DNSInterceptLAN != "" {
+		ifaces = append(ifaces, o.DNSInterceptLAN)
+	}
+	return lanIfaces(ifaces)
+}
+
+// FastDNSOpenFlag, when it exists, suspends fast mode's DNS enforcement: the daemon
+// creates it in tmpfs when the router's dnsmasq has stopped answering, so the LAN's devices can use
+// their own resolvers, and removes it when dnsmasq is back. The program and the netfilter.d hook skip
+// the enforcement rules while it is there; a reboot clears it.
+const FastDNSOpenFlag = "/tmp/wayhop-dns-open"
+
+const (
+	fastDNSOpenIf = "if [ ! -e " + FastDNSOpenFlag + " ]; then\n"
+	fastDNSOpenFi = "fi\n"
+)
+
+// EnforcedLANs is the interfaces fast DNS enforcement is rendered on (none when it is off).
+func (o IpsetOptions) EnforcedLANs() []string { return o.fastDNSLANs() }
 
 // FilterSectionEnd closes the filter-table section RenderIptablesScript puts first when it refuses
 // encrypted DNS. NDM rebuilds the filter table on its own and drops the FORWARD refusals with it, so
@@ -144,6 +248,10 @@ func IptablesDeleteEveryCopy(table, chain, spec string) string {
 // here on that event: the mangle flush and rebuild below would be work for a table that has none of
 // it. Apply runs the script without $table, so it never stops here.
 const FilterSectionEnd = "case \"$table:$type\" in filter:iptables) exit 0 ;; esac\n"
+
+// FastFilterSectionEnd closes the filter section of a Keenetic fast-mode program, which also refuses
+// IPv6 DNS in ip6tables' filter table: a filter rebuild of either family re-runs only that section.
+const FastFilterSectionEnd = "case \"$table:$type\" in filter:iptables|filter:ip6tables) exit 0 ;; esac\n"
 
 func (o *IpsetOptions) withDefaults() {
 	if o.Chain == "" {
@@ -163,17 +271,31 @@ func (o *IpsetOptions) withDefaults() {
 	}
 }
 
-// setName returns the kernel ipset name for a zone+family, capped to ipset's 31-char limit
-// (a long id is truncated and disambiguated with a short hash so two long ids never collide).
-func (io IpsetOptions) setName(zone, fam string) string {
-	n := io.SetPrefix + zone + "_" + fam // e.g. wr_list_youtube_4
+// DynamicDomainTimeout is the six-hour lifetime of a resolver-learned address. A new flow to an
+// active address refreshes it through the xt_SET rule rendered beside the zone's mark rule.
+const DynamicDomainTimeout = 21600
+
+// prefixedSetName returns a kernel ipset name capped to ipset's 31-char limit. A long id is
+// truncated and disambiguated with a short hash so two long ids never collide.
+func prefixedSetName(prefix, zone, fam string) string {
+	n := prefix + zone + "_" + fam
 	if len(n) <= 31 {
 		return n
 	}
 	h := sha1.Sum([]byte(zone))
 	suf := "_" + hex.EncodeToString(h[:])[:6] + "_" + fam
 	keep := 31 - len(suf)
-	return (io.SetPrefix + zone)[:keep] + suf
+	return (prefix + zone)[:keep] + suf
+}
+
+// setName returns the kernel ipset name for a zone+family.
+func (io IpsetOptions) setName(zone, fam string) string {
+	return prefixedSetName(io.SetPrefix, zone, fam)
+}
+
+// dynamicSetName returns the separate hash:ip set that receives new dnsmasq answers.
+func (io IpsetOptions) dynamicSetName(zone, fam string) string {
+	return prefixedSetName("wd_", zone, fam)
 }
 
 // srcSetName returns the kernel ipset name holding a source-scoped zone's SOURCE CIDRs (matched
@@ -258,7 +380,7 @@ func staticSizing(n int) (hashsize, maxelem int) {
 }
 
 // hasDomains reports whether the zone is DNS-populated (dnsmasq fills its ipset at query-time).
-func zoneHasDomains(z Zone) bool { return len(z.Domains) > 0 }
+func zoneHasDomains(z Zone) bool { return len(z.Domains) > 0 || z.RemoteList != "" }
 
 // IpsetNames returns every kernel set name this plan owns (for teardown `ipset destroy`).
 func (pl *Plan) IpsetNames(io IpsetOptions) []string {
@@ -276,6 +398,9 @@ func (pl *Plan) IpsetNames(io IpsetOptions) []string {
 		}
 		if len(z.V6) > 0 || zoneHasDomains(z) { // a domain zone also owns an inet6 set (dual-stack)
 			out = append(out, io.setName(z.Name, "6"))
+		}
+		if io.DynamicDomainSets && zoneHasDomains(z) {
+			out = append(out, io.dynamicSetName(z.Name, "4"), io.dynamicSetName(z.Name, "6"))
 		}
 		if len(z.SrcV4) > 0 {
 			out = append(out, io.srcSetName(z.Name, "4"))
@@ -353,6 +478,16 @@ func (pl *Plan) RenderIpsetRestore(io IpsetOptions) string {
 				}
 			}
 		}
+		if io.DynamicDomainSets && dns {
+			for _, fam := range []string{"4", "6"} {
+				family := "inet"
+				if fam == "6" {
+					family = "inet6"
+				}
+				fmt.Fprintf(&b, "create %s hash:ip family %s hashsize 1024 maxelem %d timeout %d -exist\n",
+					io.dynamicSetName(z.Name, fam), family, io.DomainMaxElem, DynamicDomainTimeout)
+			}
+		}
 		// Source sets (Phase C): a source-scoped zone's SOURCE CIDRs get their own `_s4`/`_s6`
 		// set, matched with `--match-set ... src` in the mangle chain (the dest set, if any,
 		// still bounds the rule).
@@ -382,35 +517,146 @@ func (pl *Plan) RenderIpsetRestore(io IpsetOptions) string {
 // connmark for Dashboard attribution, and ensure the PREROUTING jump exists. v6 via ip6tables.
 func (pl *Plan) RenderIptablesScript(io IpsetOptions) string {
 	io.withDefaults()
-	mask := hexMark(pl.Mask)
 	var b strings.Builder
-	// The encrypted-DNS refusals are the plane's only filter-table rules, so they come first, as a
-	// section of their own that ends at FilterSectionEnd (see there).
-	if io.DNSIntercept && io.DNSInterceptLAN != "" && io.DNSRejectEncrypted {
+	pl.renderFilterSection(&b, io)
+	pl.renderMangleAndNat(&b, io)
+	return b.String()
+}
+
+// renderFilterSection writes the encrypted-DNS refusals. They are the plane's only filter-table rules,
+// so they come first, as a section of their own that ends at FilterSectionEnd (see there).
+func (pl *Plan) renderFilterSection(b *strings.Builder, io IpsetOptions) {
+	legacy := io.DNSIntercept && io.DNSInterceptLAN != "" && io.DNSRejectEncrypted
+	fastLANs := io.fastDNSLANs()
+	if !legacy && len(fastLANs) == 0 {
+		return
+	}
+	if legacy {
 		b.WriteString("# filter: refuse DoT and the well-known DoH addresses. A filter rebuild re-runs only this part.\n")
 		for _, r := range dnsRejectRules(io.DNSInterceptLAN) {
-			r.writeAdd(&b)
+			r.writeAdd(b)
 		}
-		b.WriteString(FilterSectionEnd)
+	} else {
+		b.WriteString("# filter: refuse DNS over TLS. A filter rebuild re-runs only this part.\n")
 	}
+	if len(fastLANs) > 0 {
+		b.WriteString(fastDNSOpenIf)
+	}
+	for _, lan := range fastLANs {
+		if legacy && lan == io.DNSInterceptLAN {
+			continue
+		}
+		dnsDoTRejectRule(lan).writeAdd(b)
+	}
+	for _, lan := range fastLANs {
+		for _, r := range dnsV6RefuseRules(lan) {
+			r.writeAdd(b)
+		}
+	}
+	if len(fastLANs) > 0 {
+		b.WriteString(fastDNSOpenFi)
+		b.WriteString(FastFilterSectionEnd)
+		return
+	}
+	b.WriteString(FilterSectionEnd)
+}
+
+// MangleStageSuffix names the staging chain of the restore fallback (see writeMangleChain).
+const MangleStageSuffix = "_S"
+
+// iptablesRestoreDefault gives a script that has no pinned restore (the OpenWrt fw3 include) the
+// PATH one. The Keenetic preamble always defines its own first, so this line never replaces it there.
+const iptablesRestoreDefault = "command -v iptables_restore >/dev/null 2>&1 || iptables_restore() { iptables-restore \"$@\"; }\n" +
+	"command -v ip6tables_restore >/dev/null 2>&1 || ip6tables_restore() { ip6tables-restore \"$@\"; }\n"
+
+// writeMangleChain replaces the marking chain's rules without a moment in which it is empty.
+//
+// Flushing and refilling the chain rule by rule would leave a gap: between the -F and the last -A, a
+// packet to a listed destination is not marked and goes by the main table, the WAN, kill switch or not.
+// So the whole chain is one `iptables-restore --noflush` commit: the declared
+// chain is flushed and refilled inside a single table replacement, so the kernel switches from the old
+// rules to the new ones at once and every other chain of the table stays as it is. iptables 1.4.21
+// (KeeneticOS) has the restore in xtables-multi; it takes no -w, and a table changed under it is
+// refused by the kernel (EAGAIN) instead of being overwritten.
+//
+// When the restore is unavailable or refused, the fallback is still never empty: the new rules go into
+// a staging chain first, jumped to right after the live chain, so while the live chain is flushed and
+// refilled the staging chain marks every packet; then the staging jump and chain go.
+//
+// hook is the built-in chain that jumps to ch (PREROUTING, or OUTPUT for the hand-off's return traffic)
+// and match the jump's match ("" for none); the staging chain is jumped to the same way.
+func writeMangleChain(b *strings.Builder, ipt, hook, match, ch string, specs []string) {
+	restore := strings.ReplaceAll(ipt, "-", "_") + "_restore"
+	stage := ch + MangleStageSuffix
+	jump := func(c string) string {
+		if match == "" {
+			return "-j " + c
+		}
+		return match + " -j " + c
+	}
+	fmt.Fprintf(b, "%s --noflush <<'WR_MANGLE' || {\n", restore)
+	b.WriteString("*mangle\n")
+	fmt.Fprintf(b, ":%s - [0:0]\n", ch)
+	for _, s := range specs {
+		fmt.Fprintf(b, "-A %s %s\n", ch, s)
+	}
+	b.WriteString("COMMIT\nWR_MANGLE\n")
+	fmt.Fprintf(b, "%s -t mangle -N %s 2>/dev/null || %s -t mangle -F %s\n", ipt, stage, ipt, stage)
+	for _, s := range specs {
+		fmt.Fprintf(b, "%s -t mangle -A %s %s\n", ipt, stage, s)
+	}
+	fmt.Fprintf(b, "if %s -t mangle -C %s %s 2>/dev/null; then\n", ipt, hook, jump(ch))
+	fmt.Fprintf(b, "%s -t mangle -C %s %s 2>/dev/null || %s -t mangle -A %s %s\n", ipt, hook, jump(stage), ipt, hook, jump(stage))
+	b.WriteString("fi\n")
+	fmt.Fprintf(b, "%s -t mangle -N %s 2>/dev/null || true\n", ipt, ch)
+	fmt.Fprintf(b, "%s -t mangle -F %s\n", ipt, ch)
+	for _, s := range specs {
+		fmt.Fprintf(b, "%s -t mangle -A %s %s\n", ipt, ch, s)
+	}
+	fmt.Fprintf(b, "while %s -t mangle -D %s %s 2>/dev/null; do :; done\n", ipt, hook, jump(stage))
+	fmt.Fprintf(b, "%s -t mangle -F %s 2>/dev/null || true\n", ipt, stage)
+	fmt.Fprintf(b, "%s -t mangle -X %s 2>/dev/null || true\n", ipt, stage)
+	b.WriteString("}\n")
+}
+
+// renderMangleAndNat writes the marking chains, the NAT and MSS rules and the DNS redirect.
+func (pl *Plan) renderMangleAndNat(b *strings.Builder, io IpsetOptions) {
+	mask := hexMark(pl.Mask)
+	b.WriteString(iptablesRestoreDefault)
 	emit := func(ipt, fam string) {
 		ch := io.Chain
-		fmt.Fprintf(&b, "%s -t mangle -N %s 2>/dev/null || true\n", ipt, ch)
-		fmt.Fprintf(&b, "%s -t mangle -F %s\n", ipt, ch)
+		var specs []string
+		add := func(format string, args ...any) { specs = append(specs, fmt.Sprintf(format, args...)) }
+		dynamicMark := func(z Zone, source string) {
+			if !io.DynamicDomainSets || !zoneHasDomains(z) {
+				return
+			}
+			set := io.dynamicSetName(z.Name, fam)
+			add("%s", strings.TrimPrefix(fmt.Sprintf("%s -m set --match-set %s dst -j MARK --set-xmark %s/%s",
+				source, set, hexMark(z.Mark), mask), " "))
+		}
+		dynamicRefresh := func(z Zone) {
+			if !io.DynamicDomainSets || !zoneHasDomains(z) {
+				return
+			}
+			set := io.dynamicSetName(z.Name, fam)
+			add("-m set --match-set %s dst -m conntrack --ctstate NEW -j SET --add-set %s dst --exist --timeout %d",
+				set, set, DynamicDomainTimeout)
+		}
 		// Anti-loop bypass first: tunnel server IPs RETURN (unmarked → main table → WAN).
 		bypass := io.SetPrefix + "bypass_" + fam
 		if (fam == "4" && len(pl.BypassV4) > 0) || (fam == "6" && len(pl.BypassV6) > 0) {
-			fmt.Fprintf(&b, "%s -t mangle -A %s -m set --match-set %s dst -j RETURN\n", ipt, ch, bypass)
+			add("-m set --match-set %s dst -j RETURN", bypass)
 		}
 		// Preserve the kept S86 RU-routing: a packet it already marked skips WR marking.
 		if io.S86Mark != 0 {
-			fmt.Fprintf(&b, "%s -t mangle -A %s -m mark --mark %s/0xffffffff -j RETURN\n", ipt, ch, hexMark(io.S86Mark))
+			add("-m mark --mark %s/0xffffffff -j RETURN", hexMark(io.S86Mark))
 		}
 		// Restore an established connection's previously-chosen egress mark BEFORE the per-zone
 		// match, so a long-lived flow keeps its tunnel even if its destination later leaves the
 		// ipset — e.g. a DNS-populated domain entry expiring after its timeout — instead of
 		// silently falling back to the WAN default mid-connection (a censored-traffic leak).
-		fmt.Fprintf(&b, "%s -t mangle -A %s -j CONNMARK --restore-mark --nfmask %s --ctmask %s\n", ipt, ch, mask, mask)
+		add("-j CONNMARK --restore-mark --nfmask %s --ctmask %s", mask, mask)
 		for _, z := range pl.Zones {
 			if z.SrcScoped {
 				// Source-scoped zone: the bypass RETURN above already exited peer-dst traffic, so a
@@ -468,8 +714,10 @@ func (pl *Plan) RenderIptablesScript(io IpsetOptions) string {
 					if hasDest {
 						destMatch = " -m set --match-set " + io.setName(z.Name, fam) + " dst"
 					}
-					fmt.Fprintf(&b, "%s -t mangle -A %s%s%s -j MARK --set-xmark %s/%s\n",
-						ipt, ch, srcNeg.String(), destMatch, hexMark(z.Mark), mask)
+					add("%s", strings.TrimPrefix(fmt.Sprintf("%s%s -j MARK --set-xmark %s/%s",
+						srcNeg.String(), destMatch, hexMark(z.Mark), mask), " "))
+					dynamicMark(z, srcNeg.String())
+					dynamicRefresh(z)
 					continue
 				}
 				// The IP source (if any) must be satisfiable in this family; otherwise an opposite-
@@ -487,9 +735,11 @@ func (pl *Plan) RenderIptablesScript(io IpsetOptions) string {
 					destMatch = " -m set --match-set " + io.setName(z.Name, fam) + " dst"
 				}
 				for _, sm := range z.iptablesSourceMatchCombos() {
-					fmt.Fprintf(&b, "%s -t mangle -A %s%s%s%s -j MARK --set-xmark %s/%s\n",
-						ipt, ch, sm, srcMatch, destMatch, hexMark(z.Mark), mask)
+					add("%s", strings.TrimPrefix(fmt.Sprintf("%s%s%s -j MARK --set-xmark %s/%s",
+						sm, srcMatch, destMatch, hexMark(z.Mark), mask), " "))
+					dynamicMark(z, sm+srcMatch)
 				}
+				dynamicRefresh(z)
 				continue
 			}
 			has := (fam == "4" && (len(z.V4) > 0 || zoneHasDomains(z))) || (fam == "6" && (len(z.V6) > 0 || zoneHasDomains(z)))
@@ -497,21 +747,37 @@ func (pl *Plan) RenderIptablesScript(io IpsetOptions) string {
 				continue
 			}
 			set := io.setName(z.Name, fam)
-			fmt.Fprintf(&b, "%s -t mangle -A %s -m set --match-set %s dst -j MARK --set-xmark %s/%s\n",
-				ipt, ch, set, hexMark(z.Mark), mask)
+			add("-m set --match-set %s dst -j MARK --set-xmark %s/%s", set, hexMark(z.Mark), mask)
+			dynamicMark(z, "")
+			dynamicRefresh(z)
 		}
 		// Mirror the chosen egress mark into the connmark (conntrack attribution; routing-inert).
-		fmt.Fprintf(&b, "%s -t mangle -A %s -j CONNMARK --save-mark --nfmask %s --ctmask %s\n", ipt, ch, mask, mask)
+		add("-j CONNMARK --save-mark --nfmask %s --ctmask %s", mask, mask)
 		// A KeeneticOS access policy's slot becomes the policy's whole mark only now, after the save: the
 		// connection keeps the slot, so a packet whose destination left the set is restored onto the slot
 		// above and rewritten here like the first one. NDM's own rule then routes it, by the table and
 		// ladder NDM keeps for that policy.
 		for _, ps := range pl.NDMPolicySlots() {
-			fmt.Fprintf(&b, "%s -t mangle -A %s -m mark --mark %s/%s -j MARK --set-xmark %s/0xffffffff\n",
-				ipt, ch, hexMark(ps.Slot), mask, hexMark(ps.Mark))
+			add("-m mark --mark %s/%s -j MARK --set-xmark %s/0xffffffff", hexMark(ps.Slot), mask, hexMark(ps.Mark))
 		}
-		// Ensure the jump from PREROUTING exists (appended → runs AFTER S86's pos-1 mark).
-		fmt.Fprintf(&b, "%s -t mangle -C PREROUTING -j %s 2>/dev/null || %s -t mangle -A PREROUTING -j %s\n", ipt, ch, ipt, ch)
+		if fam == "4" && pl.handoffOn(io) {
+			specs = append(specs, pl.handoffChainSpecs(io)...)
+		}
+		if fam == "4" {
+			b.WriteString(legacyOutputJumpDelete(ch))
+		}
+		writeMangleChain(b, ipt, "PREROUTING", "", ch, specs)
+		// Ensure the jump from PREROUTING exists (appended → runs AFTER S86's pos-1 mark). The chain is
+		// complete before the jump is first added.
+		fmt.Fprintf(b, "%s -t mangle -C PREROUTING -j %s 2>/dev/null || %s -t mangle -A PREROUTING -j %s\n", ipt, ch, ipt, ch)
+		if fam == "4" && pl.handoffOn(io) {
+			// The hand-off's return traffic, classified by a chain OUTPUT can carry (no device match).
+			out := HandoffOutputChain(io)
+			match := strings.TrimSuffix(handoffOutputJump(""), " -j ")
+			writeMangleChain(b, ipt, "OUTPUT", match, out, pl.handoffOutputSpecs(io))
+			j := handoffOutputJump(out)
+			fmt.Fprintf(b, "%s -t mangle -C OUTPUT %s 2>/dev/null || %s -t mangle -A OUTPUT %s\n", ipt, j, ipt, j)
+		}
 	}
 	emit("iptables", "4")
 	if len(pl.BypassV6) > 0 || pl.hasV6Zone() {
@@ -524,11 +790,11 @@ func (pl *Plan) RenderIptablesScript(io IpsetOptions) string {
 		if e.Kind != EgressInterface {
 			continue
 		}
-		fmt.Fprintf(&b, "iptables -t nat -C POSTROUTING -o %s -m mark --mark %s/%s -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o %s -m mark --mark %s/%s -j MASQUERADE\n",
+		fmt.Fprintf(b, "iptables -t nat -C POSTROUTING -o %s -m mark --mark %s/%s -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o %s -m mark --mark %s/%s -j MASQUERADE\n",
 			io.WanIface, hexMark(e.Mark), mask, io.WanIface, hexMark(e.Mark), mask)
 	}
 	for _, dev := range io.masqDevices() {
-		fmt.Fprintf(&b, "iptables -t nat -C POSTROUTING -o %s -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o %s -j MASQUERADE\n", dev, dev)
+		fmt.Fprintf(b, "iptables -t nat -C POSTROUTING -o %s -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o %s -j MASQUERADE\n", dev, dev)
 	}
 	// DNS interception: clients' plain DNS is answered by THIS router, whatever server they asked
 	// for. REDIRECT (not DNAT) because the destination is the router itself — it rewrites to the
@@ -536,9 +802,17 @@ func (pl *Plan) RenderIptablesScript(io IpsetOptions) string {
 	// the operator can change. Idempotent check→append, like every rule here, because the netfilter.d
 	// hook re-runs this script after each NDM firewall rebuild. The encrypted-DNS refusals that go
 	// with it are at the top of the script, in the filter section.
-	if io.DNSIntercept && io.DNSInterceptLAN != "" {
+	if fastLANs := io.fastDNSLANs(); len(fastLANs) > 0 {
+		b.WriteString(fastDNSOpenIf)
+		for _, lan := range fastLANs {
+			for _, r := range dnsFastRedirectRules(lan) {
+				r.writeAdd(b)
+			}
+		}
+		b.WriteString(fastDNSOpenFi)
+	} else if io.DNSIntercept && io.DNSInterceptLAN != "" {
 		for _, r := range dnsRedirectRules(io.DNSInterceptLAN) {
-			r.writeAdd(&b)
+			r.writeAdd(b)
 		}
 	}
 	// TCP MSS clamping (QW1): iptables FORWARD mangle TCPMSS per kernel tunnel egress.
@@ -552,16 +826,15 @@ func (pl *Plan) RenderIptablesScript(io IpsetOptions) string {
 		}
 		seenMSS[e.Iface] = true
 		for _, ipt := range []string{"iptables", "ip6tables"} {
-			fmt.Fprintf(&b, "%s -t mangle -C FORWARD -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || %s -t mangle -A FORWARD -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\n",
+			fmt.Fprintf(b, "%s -t mangle -C FORWARD -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || %s -t mangle -A FORWARD -o %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\n",
 				ipt, e.Iface, ipt, e.Iface)
 		}
 	}
-	return b.String()
 }
 
 func (pl *Plan) hasV6Zone() bool {
 	for _, z := range pl.Zones {
-		if len(z.V6) > 0 || len(z.SrcV6) > 0 {
+		if len(z.V6) > 0 || len(z.SrcV6) > 0 || len(z.RouteV6) > 0 {
 			return true
 		}
 		// A DOMAIN zone is dual-stack: dnsmasq populates both an inet and an inet6 set from the
@@ -569,7 +842,7 @@ func (pl *Plan) hasV6Zone() bool {
 		// emitted for it too — else the AAAA-resolved addresses of a tunnel-routed domain are
 		// never marked and IPv6 leaks direct to the WAN. (Domains are only collected on the
 		// Keenetic ipset plane, so this is a no-op for the OpenWrt nft path.)
-		if zoneHasDomains(z) {
+		if zoneHasDomains(z) && !z.DNSNoV6 {
 			return true
 		}
 		// A source-only zone with only iface/mac/port (no source IP) applies to BOTH families,
@@ -594,15 +867,21 @@ func (pl *Plan) RenderIPScript(opt Options) string {
 	// LAN/private-dst replies must reach the bridge, not loop back out the tunnel (see
 	// privateExcludes). These sit just below the fwmark rules so they win for LAN dsts.
 	for _, x := range privateExcludes(opt) {
-		fmt.Fprintf(&b, "ip rule del to %s lookup main priority %d 2>/dev/null || true\n", x.CIDR, x.Priority)
-		fmt.Fprintf(&b, "ip rule add to %s lookup main priority %d\n", x.CIDR, x.Priority)
+		writeRule(&b, "ip", "to "+x.CIDR+" lookup main", x.Priority)
 	}
-	// Private destinations a zone names explicitly are carved out of that pin (RT-09, unpin.go).
+	// Private destinations a zone names explicitly are carved out of that pin (unpin.go).
 	b.WriteString(pl.unpinScript(opt, false))
 	for i, e := range pl.nonWanEgresses() {
 		pref := opt.RulePref + i
-		fmt.Fprintf(&b, "ip rule del fwmark %s/%s table %d priority %d 2>/dev/null || true\n", hexMark(e.Mark), mask, e.Table, pref)
-		fmt.Fprintf(&b, "ip rule add fwmark %s/%s table %d priority %d\n", hexMark(e.Mark), mask, e.Table, pref)
+		if e.Kind == EgressInterface && e.FailClosed {
+			// Kill switch, before the table's rule is (re)written: the table's own blackhole and the
+			// mark's backstop rule exist first, so neither the del-then-add of the rule below nor an
+			// empty table (link down, the elector's all-down clear, a reinstall) can send the marked
+			// traffic on to the main table.
+			fmt.Fprintf(&b, "ip route replace blackhole default metric %d table %d 2>/dev/null || true\n", failClosedMetric, e.Table)
+			b.WriteString(failClosedBackstop(e, mask, opt, false))
+		}
+		writeTableRule(&b, "ip", fmt.Sprintf("fwmark %s/%s table %d", hexMark(e.Mark), mask, e.Table), pref, tableRuleStagePref(opt))
 		switch e.Kind {
 		case EgressInterface:
 			// SEED only (add-not-replace): a re-assert after an NDM netfilter rebuild must NOT clobber
@@ -626,14 +905,14 @@ func (pl *Plan) RenderIPScript(opt Options) string {
 			fmt.Fprintf(&b, "ip route replace blackhole default table %d\n", e.Table)
 		}
 	}
-	// An access policy's own rule is NDM's (priority 100-109 on a live router), and so is the blackhole
+	// An access policy's own rule is NDM's (priority 100-109), and so is the blackhole
 	// that follows it. This is the backstop for the hours between Applies: a policy deleted or renumbered
 	// in NDM takes its rule with it, and a packet still carrying its mark would fall through every
 	// WayHop rule to the main table - the WAN. While NDM's rule exists it matches first and this never
-	// fires. BusyBox ip parses the "blackhole" rule type (rtm_map.c).
+	// fires. BusyBox ip 1.37 on KeeneticOS accepts the rule type only as "type blackhole" (measured: a bare
+	// "blackhole" is "invalid argument") and prints it as "lookup main blackhole".
 	for _, ps := range pl.NDMPolicySlots() {
-		fmt.Fprintf(&b, "ip rule del fwmark %s blackhole priority %d 2>/dev/null || true\n", hexMark(ps.Mark), ndmPolicyBackstopPref(opt))
-		fmt.Fprintf(&b, "ip rule add fwmark %s blackhole priority %d\n", hexMark(ps.Mark), ndmPolicyBackstopPref(opt))
+		writeRule(&b, "ip", "fwmark "+hexMark(ps.Mark)+" type blackhole", ndmPolicyBackstopPref(opt))
 	}
 	// IPv6 datapath, symmetric with v4 — a MARKED v6 packet to a censored dst must route
 	// THROUGH the tunnel table, not fall through to the main v6 table (which on a device
@@ -643,14 +922,16 @@ func (pl *Plan) RenderIPScript(opt Options) string {
 	// forwarded flow fails CLOSED in the tunnel table rather than ever leaking to the WAN.
 	if pl.hasV6Zone() || len(pl.BypassV6) > 0 {
 		for _, x := range privateExcludesV6(opt) {
-			fmt.Fprintf(&b, "ip -6 rule del to %s lookup main priority %d 2>/dev/null || true\n", x.CIDR, x.Priority)
-			fmt.Fprintf(&b, "ip -6 rule add to %s lookup main priority %d\n", x.CIDR, x.Priority)
+			writeRule(&b, "ip -6", "to "+x.CIDR+" lookup main", x.Priority)
 		}
 		b.WriteString(pl.unpinScript(opt, true))
 		for i, e := range pl.nonWanEgresses() {
 			pref := opt.RulePref + i
-			fmt.Fprintf(&b, "ip -6 rule del fwmark %s/%s table %d priority %d 2>/dev/null || true\n", hexMark(e.Mark), mask, e.Table, pref)
-			fmt.Fprintf(&b, "ip -6 rule add fwmark %s/%s table %d priority %d\n", hexMark(e.Mark), mask, e.Table, pref)
+			if e.Kind == EgressInterface && e.FailClosed {
+				fmt.Fprintf(&b, "ip -6 route replace blackhole default metric %d table %d 2>/dev/null || true\n", failClosedMetricV6, e.Table)
+				b.WriteString(failClosedBackstop(e, mask, opt, true))
+			}
+			writeTableRule(&b, "ip -6", fmt.Sprintf("fwmark %s/%s table %d", hexMark(e.Mark), mask, e.Table), pref, tableRuleStagePref(opt))
 			switch e.Kind {
 			case EgressInterface:
 				fmt.Fprintf(&b, "ip -6 route add default dev %s table %d 2>/dev/null || true\n", e.Iface, e.Table)
@@ -662,12 +943,57 @@ func (pl *Plan) RenderIPScript(opt Options) string {
 				fmt.Fprintf(&b, "ip -6 route replace blackhole default table %d\n", e.Table)
 			}
 		}
-		// The v6 backstop matters more: on a live router some NDM policy marks have v4 rules only.
+		// The v6 backstop matters more: on KeeneticOS some NDM policy marks have v4 rules only.
 		for _, ps := range pl.NDMPolicySlots() {
-			fmt.Fprintf(&b, "ip -6 rule del fwmark %s blackhole priority %d 2>/dev/null || true\n", hexMark(ps.Mark), ndmPolicyBackstopPref(opt))
-			fmt.Fprintf(&b, "ip -6 rule add fwmark %s blackhole priority %d\n", hexMark(ps.Mark), ndmPolicyBackstopPref(opt))
+			writeRule(&b, "ip -6", "fwmark "+hexMark(ps.Mark)+" type blackhole", ndmPolicyBackstopPref(opt))
 		}
 	}
+	return b.String()
+}
+
+// failClosedRulePref is the priority of a kill-switched mark's backstop rule: after every table rule
+// (RulePref + egress index; the mark space holds fewer than 256 egresses) and long before the main
+// table's rule (32766). The table's own metric-1000 blackhole already drops the marked traffic when
+// the tunnel's route is gone; the backstop also covers a table with no route at all, which the
+// table-level blackhole cannot: a flush, a hand-deleted route, the window of a reinstall. A table
+// lookup that finds nothing goes on to the next rule, and for this mark that is the backstop.
+func failClosedRulePref(opt Options) int { return opt.RulePref + 300 }
+
+// writeTableRule rewrites one egress's table rule make-before-break: a copy at the staging priority
+// first, then the rule at its own priority deleted (every copy) and added, then the copy goes. The add
+// at the own priority is not best-effort: MissingIPRules reads it back.
+func writeTableRule(b *strings.Builder, ip, spec string, pref, stage int) {
+	var body strings.Builder
+	fmt.Fprintf(&body, "%s rule add %s priority %d 2>/dev/null || true\n", ip, spec, stage)
+	fmt.Fprintf(&body, "while %s rule del %s priority %d 2>/dev/null; do :; done\n", ip, spec, pref)
+	fmt.Fprintf(&body, "%s rule add %s priority %d\n", ip, spec, pref)
+	fmt.Fprintf(&body, "while %s rule del %s priority %d 2>/dev/null; do :; done\n", ip, spec, stage)
+	guardRule(b, ip, spec, pref, body.String())
+}
+
+// writeRule rewrites a rule whose short del-then-add gap is covered otherwise (a private exclude, a
+// blackhole rule), only when it is missing.
+func writeRule(b *strings.Builder, ip, spec string, pref int) {
+	body := fmt.Sprintf("%s rule del %s priority %d 2>/dev/null || true\n%s rule add %s priority %d\n", ip, spec, pref, ip, spec, pref)
+	guardRule(b, ip, spec, pref, body)
+}
+
+// tableRuleStagePref holds a copy of an egress's table rule while the rule at its own priority is
+// rewritten, so a re-run of the program never has a moment without one. Marks are
+// exclusive, so one shared priority serves every egress; it sits after every egress rule and before
+// the fail-closed rules.
+func tableRuleStagePref(opt Options) int { return opt.RulePref + 299 }
+
+// failClosedBackstop installs a kill-switched egress's backstop rule. It runs right after the table's
+// blackhole was written, so the short del-then-add here is covered by that route. The add is not
+// best-effort: MissingIPRules reads it back, and a kill switch the kernel did not take fails the Apply.
+func failClosedBackstop(e Egress, mask string, opt Options, v6 bool) string {
+	ip := "ip"
+	if v6 {
+		ip = "ip -6"
+	}
+	var b strings.Builder
+	writeRule(&b, ip, fmt.Sprintf("fwmark %s/%s type blackhole", hexMark(e.Mark), mask), failClosedRulePref(opt))
 	return b.String()
 }
 
@@ -683,12 +1009,18 @@ func (pl *Plan) RenderTeardownScript(opt Options, io IpsetOptions) string {
 	io.withDefaults()
 	mask := hexMark(pl.Mask)
 	var b strings.Builder
+	// Reverse of the install order: everything that sets a mark goes first, the jumps
+	// from OUTPUT and PREROUTING and the chains, then the ip rules and tables that route the marks.
+	pl.renderHandoffChainTeardown(&b, io)
 	for _, ipt := range []string{"iptables", "ip6tables"} {
-		// Delete every jump, not one: duplicates left by lock races before QA-067 kept the chain
+		// Delete every jump, not one: duplicates left by lock races in older versions kept the chain
 		// referenced, so -X failed quietly and the extras outlived routing-off until a reboot.
-		fmt.Fprintf(&b, "while %s -t mangle -D PREROUTING -j %s 2>/dev/null; do :; done\n", ipt, io.Chain)
-		fmt.Fprintf(&b, "%s -t mangle -F %s 2>/dev/null || true\n", ipt, io.Chain)
-		fmt.Fprintf(&b, "%s -t mangle -X %s 2>/dev/null || true\n", ipt, io.Chain)
+		// The restore fallback's staging chain too: a script killed half-way leaves it jumped to.
+		for _, ch := range []string{io.Chain, io.Chain + MangleStageSuffix} {
+			fmt.Fprintf(&b, "while %s -t mangle -D PREROUTING -j %s 2>/dev/null; do :; done\n", ipt, ch)
+			fmt.Fprintf(&b, "%s -t mangle -F %s 2>/dev/null || true\n", ipt, ch)
+			fmt.Fprintf(&b, "%s -t mangle -X %s 2>/dev/null || true\n", ipt, ch)
+		}
 	}
 	for _, e := range pl.nonWanEgresses() {
 		if e.Kind != EgressInterface {
@@ -708,6 +1040,12 @@ func (pl *Plan) RenderTeardownScript(opt Options, io IpsetOptions) string {
 			b.WriteString(IptablesDeleteEveryCopy(r.table, r.chain, r.spec))
 		}
 	}
+	for _, lan := range io.fastDNSLANs() {
+		rules := append(append(dnsFastRedirectRules(lan), dnsDoTRejectRule(lan)), dnsV6RefuseRules(lan)...)
+		for _, r := range rules {
+			b.WriteString(r.deleteEveryCopy())
+		}
+	}
 	// TCP MSS clamping teardown (QW1): remove TCPMSS rules from the FORWARD chain.
 	seenMSS := map[string]bool{}
 	for _, e := range pl.nonWanEgresses() {
@@ -723,29 +1061,39 @@ func (pl *Plan) RenderTeardownScript(opt Options, io IpsetOptions) string {
 	for i, e := range pl.nonWanEgresses() {
 		pref := opt.RulePref + i
 		fmt.Fprintf(&b, "ip rule del fwmark %s/%s table %d priority %d 2>/dev/null || true\n", hexMark(e.Mark), mask, e.Table, pref)
+		fmt.Fprintf(&b, "ip rule del fwmark %s/%s table %d priority %d 2>/dev/null || true\n", hexMark(e.Mark), mask, e.Table, tableRuleStagePref(opt))
 		fmt.Fprintf(&b, "ip route flush table %d 2>/dev/null || true\n", e.Table)
+		if e.Kind == EgressInterface && e.FailClosed {
+			fmt.Fprintf(&b, "ip rule del fwmark %s/%s type blackhole priority %d 2>/dev/null || true\n", hexMark(e.Mark), mask, failClosedRulePref(opt))
+		}
 	}
 	b.WriteString(pl.unpinTeardownScript(opt, false))
 	for _, x := range privateExcludes(opt) {
 		fmt.Fprintf(&b, "ip rule del to %s lookup main priority %d 2>/dev/null || true\n", x.CIDR, x.Priority)
 	}
 	for _, ps := range pl.NDMPolicySlots() {
-		fmt.Fprintf(&b, "ip rule del fwmark %s blackhole priority %d 2>/dev/null || true\n", hexMark(ps.Mark), ndmPolicyBackstopPref(opt))
+		fmt.Fprintf(&b, "ip rule del fwmark %s type blackhole priority %d 2>/dev/null || true\n", hexMark(ps.Mark), ndmPolicyBackstopPref(opt))
 	}
 	if pl.hasV6Zone() || len(pl.BypassV6) > 0 {
 		for i, e := range pl.nonWanEgresses() {
 			pref := opt.RulePref + i
 			fmt.Fprintf(&b, "ip -6 rule del fwmark %s/%s table %d priority %d 2>/dev/null || true\n", hexMark(e.Mark), mask, e.Table, pref)
+			fmt.Fprintf(&b, "ip -6 rule del fwmark %s/%s table %d priority %d 2>/dev/null || true\n", hexMark(e.Mark), mask, e.Table, tableRuleStagePref(opt))
 			fmt.Fprintf(&b, "ip -6 route flush table %d 2>/dev/null || true\n", e.Table)
+			if e.Kind == EgressInterface && e.FailClosed {
+				fmt.Fprintf(&b, "ip -6 rule del fwmark %s/%s type blackhole priority %d 2>/dev/null || true\n", hexMark(e.Mark), mask, failClosedRulePref(opt))
+			}
 		}
 		for _, ps := range pl.NDMPolicySlots() {
-			fmt.Fprintf(&b, "ip -6 rule del fwmark %s blackhole priority %d 2>/dev/null || true\n", hexMark(ps.Mark), ndmPolicyBackstopPref(opt))
+			fmt.Fprintf(&b, "ip -6 rule del fwmark %s type blackhole priority %d 2>/dev/null || true\n", hexMark(ps.Mark), ndmPolicyBackstopPref(opt))
 		}
 		b.WriteString(pl.unpinTeardownScript(opt, true))
 		for _, x := range privateExcludesV6(opt) {
 			fmt.Fprintf(&b, "ip -6 rule del to %s lookup main priority %d 2>/dev/null || true\n", x.CIDR, x.Priority)
 		}
 	}
+	pl.renderHandoffTeardown(&b, opt, io)
+	pl.renderBackstopTeardown(&b, opt, io)
 	for _, n := range pl.IpsetNames(io) {
 		fmt.Fprintf(&b, "ipset destroy %s 2>/dev/null || true\n", n)
 	}
@@ -762,8 +1110,15 @@ func (pl *Plan) DnsmasqIpsetConfig(io IpsetOptions, maxLine int) string {
 		maxLine = 1024
 	}
 	type dz struct {
-		sets    string // comma-separated set names — v4,v6 so dnsmasq adds A→inet, AAAA→inet6
-		domains []string
+		sets       string // comma-separated set names — v4,v6 so dnsmasq adds A→inet, AAAA→inet6
+		domains    []string
+		failClosed bool
+	}
+	failClosed := map[string]bool{}
+	for _, e := range pl.Egresses {
+		if e.Kind == EgressInterface && e.FailClosed {
+			failClosed[e.Tag] = true
+		}
 	}
 	var zones []dz
 	for _, z := range pl.Zones {
@@ -771,7 +1126,12 @@ func (pl *Plan) DnsmasqIpsetConfig(io IpsetOptions, maxLine int) string {
 			// Target BOTH the inet and inet6 sets: dnsmasq routes each resolved A record to the
 			// matching-family (inet) set and each AAAA to the inet6 set, so a tunnel-routed
 			// domain's IPv6 traffic is marked/routed instead of leaking direct to the WAN.
-			zones = append(zones, dz{sets: io.setName(z.Name, "4") + "," + io.setName(z.Name, "6"), domains: z.Domains})
+			set4, set6 := io.setName(z.Name, "4"), io.setName(z.Name, "6")
+			if io.DynamicDomainSets {
+				set4, set6 = io.dynamicSetName(z.Name, "4"), io.dynamicSetName(z.Name, "6")
+			}
+			zones = append(zones, dz{sets: set4 + "," + set6, domains: z.Domains,
+				failClosed: failClosed[z.EgressTag]})
 		}
 	}
 	if len(zones) == 0 {
@@ -780,23 +1140,97 @@ func (pl *Plan) DnsmasqIpsetConfig(io IpsetOptions, maxLine int) string {
 	sort.Slice(zones, func(i, j int) bool { return zones[i].sets < zones[j].sets })
 	var b strings.Builder
 	b.WriteString("# Generated by WayHop (dnsmasq-ipset domain routing) — do not edit.\n")
-	for _, z := range zones {
-		// Build "ipset=/d1/d2/.../<set4>,<set6>" lines, each ≤ maxLine bytes.
-		suffix := "/" + z.sets
-		line := "ipset="
-		for _, d := range z.domains {
+	if io.DynamicDomainSets {
+		// Fast mode's canary (as in the nft snippet): only the resolver that loaded this file answers
+		// it, so the restart guard and the watch prove the LAN's resolver took the file, not just that
+		// some dnsmasq answers on 127.0.0.1:53 (HUNT-K #10, #11).
+		b.WriteString("address=/" + FastCanaryName + "/" + FastCanaryAddr + "\n")
+	}
+	batch := func(directive string, domains []string, suffix string) {
+		// Build "<directive>=/d1/d2/.../<suffix>" lines, each ≤ maxLine bytes.
+		head := directive + "="
+		line := head
+		for _, d := range domains {
 			add := "/" + d
-			if len(line)+len(add)+len(suffix) > maxLine && line != "ipset=" {
+			if len(line)+len(add)+len(suffix) > maxLine && line != head {
 				b.WriteString(line + suffix + "\n")
-				line = "ipset="
+				line = head
 			}
 			line += add
 		}
-		if line != "ipset=" {
+		if line != head {
 			b.WriteString(line + suffix + "\n")
 		}
 	}
+	for _, z := range zones {
+		batch("ipset", z.domains, "/"+z.sets)
+	}
+	// A kill-switched list's names are asked of the sing-box DNS listener alone. With a domain server
+	// dnsmasq uses only the servers given for that domain, so when the tunnel is down the lookup fails
+	// there instead of moving on to the next row of the chain, which may resolve by the provider.
+	if io.KillSwitchDNS != "" {
+		var pinned []string
+		seen := map[string]bool{}
+		for _, z := range zones {
+			if !z.failClosed {
+				continue
+			}
+			for _, d := range z.domains {
+				if !seen[d] {
+					seen[d] = true
+					pinned = append(pinned, d)
+				}
+			}
+		}
+		if len(pinned) > 0 {
+			sort.Strings(pinned)
+			b.WriteString("# Kill switch: these names are resolved by the WayHop DNS listener only.\n")
+			batch("server", pinned, "/"+io.KillSwitchDNS)
+		}
+	}
 	return b.String()
+}
+
+// KillSwitchDomains reports whether a fail-closed zone carries domain names: their lookups need the
+// sing-box DNS listener (IpsetOptions.KillSwitchDNS), and without it the plane must be refused.
+func (pl *Plan) KillSwitchDomains() bool { return len(pl.KillSwitchDomainZones()) > 0 }
+
+// KillSwitchDomainZones names the fail-closed zones that carry domain names.
+func (pl *Plan) KillSwitchDomainZones() []string {
+	failClosed := map[string]bool{}
+	for _, e := range pl.Egresses {
+		if e.Kind == EgressInterface && e.FailClosed {
+			failClosed[e.Tag] = true
+		}
+	}
+	var out []string
+	for _, z := range pl.Zones {
+		if zoneHasDomains(z) && failClosed[z.EgressTag] {
+			out = append(out, z.Name)
+		}
+	}
+	return out
+}
+
+// KillSwitchScopedZones names the fail-closed zones scoped to some devices: the backstop cannot cover
+// them (an ip rule does not see MACs, and the other devices reach those destinations directly). Both
+// routing lists and routing rules with a source matcher. The NDMPolicy clause cannot
+// fire today (a policy zone has no egress, so no fail-closed one); it is kept so a
+// future kill-switched policy egress is refused rather than silently uncovered.
+func (pl *Plan) KillSwitchScopedZones() []string {
+	failClosed := map[string]bool{}
+	for _, e := range pl.Egresses {
+		if e.Kind == EgressInterface && e.FailClosed {
+			failClosed[e.Tag] = true
+		}
+	}
+	var out []string
+	for _, z := range pl.Zones {
+		if (z.SrcScoped || z.NDMPolicy != "") && failClosed[z.EgressTag] { // A policy's list too
+			out = append(out, z.Name)
+		}
+	}
+	return out
 }
 
 // ListZoneName is the zone a routing list compiles into, and ZoneSetName is the kernel set that zone
@@ -808,4 +1242,37 @@ func ListZoneName(listID string) string { return "list_" + nftName(listID) }
 func (io IpsetOptions) ZoneSetName(zone, fam string) string {
 	io.withDefaults()
 	return io.setName(zone, fam)
+}
+
+// DynamicSetName names the resolver-fed hash:ip set for a zone and family.
+func (io IpsetOptions) DynamicSetName(zone, fam string) string {
+	return io.dynamicSetName(zone, fam)
+}
+
+// DynamicSets names the plan's wd_ sets (none unless io.DynamicDomainSets), and which of them belong
+// to a zone that sends its addresses somewhere other than the WAN (a tunnel or block): a flow to such an
+// address that a direct list had saved with the WAN mark is stale once the name takes it, like
+// DlistSetsBeyondWAN on the nft plane. Access-policy zones are left out of beyondWAN, as there.
+func (pl *Plan) DynamicSets(io IpsetOptions) (names []string, beyondWAN map[string]bool) {
+	beyondWAN = map[string]bool{}
+	if pl == nil || !io.DynamicDomainSets {
+		return nil, beyondWAN
+	}
+	kind := map[string]EgressKind{}
+	for _, e := range pl.Egresses {
+		kind[e.Tag] = e.Kind
+	}
+	for _, z := range pl.Zones {
+		if !zoneHasDomains(z) {
+			continue
+		}
+		for _, fam := range []string{"4", "6"} {
+			n := io.dynamicSetName(z.Name, fam)
+			names = append(names, n)
+			if z.NDMPolicy == "" && kind[z.EgressTag] != EgressWAN {
+				beyondWAN[n] = true
+			}
+		}
+	}
+	return names, beyondWAN
 }

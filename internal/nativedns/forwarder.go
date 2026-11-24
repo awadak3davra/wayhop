@@ -6,7 +6,7 @@ import (
 )
 
 // A DNS loop is judged from where the router's forwarder (dnsmasq) sends the queries it cannot
-// answer itself, never from /etc/resolv.conf (QA-117).
+// answer itself, never from /etc/resolv.conf.
 //
 // /etc/resolv.conf is for the router's own programs. On OpenWrt it is the libc stub,
 // `nameserver 127.0.0.1` and `nameserver ::1`, which hands their lookups to the local dnsmasq; dnsmasq

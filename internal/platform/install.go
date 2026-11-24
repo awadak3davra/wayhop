@@ -14,7 +14,7 @@ import (
 //
 // Every refusal here comes from something measured on a real router rather than imagined:
 //
-//   - The test router's overlay is 60.6 MB and 89% full: 6.1 MB free. Package installs land there. A
+//   - The reference router's overlay is 60.6 MB and 89% full: 6.1 MB free. Package installs land there. A
 //     failed install that fills it does not merely fail — it leaves a router that cannot write its
 //     own config.
 //   - Its kmod feed is pinned to the exact kernel build,

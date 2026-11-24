@@ -204,7 +204,7 @@ func TestNetDiagServicesAsksAGroupThroughItsLiveMember(t *testing.T) {
 		t.Errorf("kernel group = %v %q %q %q, want its table's live device wg0", c != nil, via, iface, why)
 	}
 	// Tables unreadable and no probe user: nothing says which member it is on, and its first member
-	// with an interface (wg9) is a guess that answers for another exit - it says so instead (QA-049).
+	// with an interface (wg9) is a guess that answers for another exit - it says so instead.
 	tables.readErr = map[bool]error{false: errors.New("no ip")}
 	if c, _, iface, why := s.serviceClient(context.Background(), "list", probe, true, true); c != nil || iface != "" || why != servicesNotReadable {
 		t.Errorf("unreadable tables = %v %q %q, want not readable", c != nil, iface, why)

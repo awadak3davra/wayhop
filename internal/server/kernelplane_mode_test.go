@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"wayhop/internal/config"
+	"wayhop/internal/model"
 )
 
 // The kernel-plane findings only mean something in the modes that ask the kernel to route.
@@ -69,6 +70,8 @@ func TestKernelPlaneFindings_HybridReportsOnceWithTheCount(t *testing.T) {
 func TestKernelPlaneFindings_FastDoesNotPromiseASingBoxFallback(t *testing.T) {
 	s := dnsSeed(t)
 	prof := kernelPlaneProfile()
+	// The fast DNS plane carries a domain rule to a proxy through the core pin; geosite it cannot.
+	prof.Rules[0] = model.Rule{ID: "r-dom", GeoSite: []string{"example"}, Outbound: "vless1"}
 
 	got := s.kernelPlaneFindings(modeCfg("fast"), &prof, nil)
 	if len(got) == 0 {

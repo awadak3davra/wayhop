@@ -53,7 +53,7 @@ package: all-arch
 	  echo "packaged dist/$(BIN)-$(VERSION)-$$a.tar.gz"; \
 	  o="dist/pkg-$$a-openwrt"; rm -rf $$o; mkdir -p $$o; \
 	  cp dist/$(BIN)-$$a $$o/$(BIN)-$$a; \
-	  cp packaging/openwrt/install.sh packaging/openwrt/uninstall.sh packaging/openwrt/wayhop.init packaging/identity-match.sh packaging/retire-iptv.sh packaging/harden-state.sh $$o/; \
+	  cp packaging/openwrt/install.sh packaging/openwrt/uninstall.sh packaging/openwrt/wayhop.init packaging/openwrt/wayhop.keep packaging/identity-match.sh packaging/retire-iptv.sh packaging/harden-state.sh $$o/; \
 	  tar -C $$o -czf dist/$(BIN)-$(VERSION)-$$a-openwrt.tar.gz .; rm -rf $$o; \
 	  echo "packaged dist/$(BIN)-$(VERSION)-$$a-openwrt.tar.gz"; \
 	done

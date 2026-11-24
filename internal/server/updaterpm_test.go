@@ -419,10 +419,10 @@ func TestPMApplyEndpoint_ReloadsTheCoreAfterReplacingItsBinary(t *testing.T) {
 		stopPlugin: func(string) int { return 0 },
 		reload:     func() (bool, error) { reloads++; return true, nil },
 	}
-	// apk's own verb. The mock used to answer `apk add sing-box` with "OK: 1 package upgraded",
-	// which is a sentence the real apk never prints for that command — it keeps the installed build
-	// and says "OK: 76.6 MiB in 189 packages". A fake that lies in the direction of the code is how
-	// an upgrade path that could not upgrade anything passed its tests for its whole life.
+	// apk's own verb. The mock must not answer `apk add sing-box` with "OK: 1 package upgraded":
+	// the real apk never prints that for that command, it keeps the installed build and says
+	// "OK: 76.6 MiB in 189 packages". A fake that lies in the direction of the code lets an upgrade
+	// path that cannot upgrade anything pass its tests.
 	sc.answers["apk upgrade sing-box"] = "OK: 1 package upgraded"
 
 	body := `{"action":"upgrade","argv":["apk","upgrade","sing-box"],"steps":[["apk","upgrade","sing-box"]]}`
@@ -454,10 +454,10 @@ func TestPMApplyEndpoint_AFailedReloadIsReportedNotSwallowed(t *testing.T) {
 		stopPlugin: func(string) int { return 0 },
 		reload:     func() (bool, error) { return false, errors.New("config rejected by the new build") },
 	}
-	// apk's own verb. The mock used to answer `apk add sing-box` with "OK: 1 package upgraded",
-	// which is a sentence the real apk never prints for that command — it keeps the installed build
-	// and says "OK: 76.6 MiB in 189 packages". A fake that lies in the direction of the code is how
-	// an upgrade path that could not upgrade anything passed its tests for its whole life.
+	// apk's own verb. The mock must not answer `apk add sing-box` with "OK: 1 package upgraded":
+	// the real apk never prints that for that command, it keeps the installed build and says
+	// "OK: 76.6 MiB in 189 packages". A fake that lies in the direction of the code lets an upgrade
+	// path that cannot upgrade anything pass its tests.
 	sc.answers["apk upgrade sing-box"] = "OK: 1 package upgraded"
 
 	body := `{"action":"upgrade","argv":["apk","upgrade","sing-box"],"steps":[["apk","upgrade","sing-box"]]}`
@@ -677,9 +677,9 @@ func restorableCore(s *Server, restoreErr error) (stops, restores *int) {
 }
 
 // The window this whole path is careful about: the core is stopped between the two preflights, and
-// the package manager then FAILS the removal. Before the fix the handler returned 502 with the core
-// still down and nothing removed — routing dead on a box whose sing-box the remove did not even
-// delete. The stop must be compensated: the binary is still there, so the core comes back.
+// the package manager then FAILS the removal. Answering 502 there would leave the core down and
+// nothing removed: routing dead on a box whose sing-box the remove did not even delete. The stop
+// must be compensated: the binary is still there, so the core comes back.
 func TestPMApplyEndpoint_ARemoveThatFailsAfterTheStopRestartsTheCore(t *testing.T) {
 	s, sc := pmServer(t)
 	stops, restores := restorableCore(s, nil)
@@ -820,9 +820,9 @@ func TestPMApplyEndpoint_APluginRemoveThatFailsAfterTheStopReSyncsIt(t *testing.
 }
 
 // On a manager that cannot install a named build, the rollback flow must decline BEFORE it offers a
-// choice. The panel used to list the feed's builds on an opkg router, let the operator pick one, and
-// only then answer that opkg cannot install a named version — the refusal arriving after the choice.
-// The Keenetic is an opkg router.
+// choice: listing the feed's builds on an opkg router, letting the operator pick one, and only then
+// answering that opkg cannot install a named version puts the refusal after the choice. The
+// Keenetic is an opkg router.
 func TestPMCandidatesEndpoint_SaysUpFrontWhenTheManagerCannotPin(t *testing.T) {
 	up := updater.New("/usr/bin", "aarch64", nil)
 	sc := &pmScript{answers: map[string]string{}, errs: map[string]error{}}
@@ -862,7 +862,7 @@ func TestPMCandidatesEndpoint_SaysUpFrontWhenTheManagerCannotPin(t *testing.T) {
 	}
 }
 
-// The apk side must keep its picker, or the fix above is just a way of never rolling anything back.
+// The apk side must keep its picker, or the refusal above is just a way of never rolling anything back.
 func TestPMCandidatesEndpoint_StillOffersBuildsWhereThePinWorks(t *testing.T) {
 	s, _ := pmServer(t)
 	r := httptest.NewRequest(http.MethodGet, "/api/updater/sing-box/pm/candidates", nil)

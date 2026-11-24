@@ -37,7 +37,7 @@ func postRefresh(t *testing.T, s *Server, id string) refreshAnswer {
 	return a
 }
 
-// QA-111. A fetched feed reaches the kernel plane unreviewed: the refresh stages its cache and the
+// A fetched feed reaches the kernel plane unreviewed: the refresh stages its cache and the
 // review shows only a count. One line covering the whole address space (a typo's "/0", the v4-mapped
 // spelling of the default route, two /1 halves) turned the list into a full tunnel or, with a direct
 // outbound, a full bypass, and on the ipset plane, which refuses a /0, every Apply failed until the

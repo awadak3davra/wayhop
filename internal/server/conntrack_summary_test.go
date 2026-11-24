@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"wayhop/internal/clash"
 )
 
 // conntrackSummary must cap the returned rows to the maxRows HEAVIEST flows (bytes-descending)
@@ -39,7 +41,7 @@ func TestConntrackSummaryBounded(t *testing.T) {
 	}
 
 	const maxRows = 5
-	conns, total, exits, clients := conntrackSummary(b.String(), markExit, leases, maxRows)
+	conns, total, exits, clients := conntrackSummary(b.String(), traceLabels{markExit: markExit}, leases, maxRows)
 
 	if total != n {
 		t.Fatalf("total = %d, want %d (pre-cap count)", total, n)
@@ -92,13 +94,59 @@ func TestConntrackSummaryBounded(t *testing.T) {
 	}
 }
 
+// The Dashboard labels a flow the core terminates by the core's own route, as the trace does
+// (connLabels): not "direct" by its mark. The core is asked once, and only when such a flow is in the
+// table; without its answer the flow reads "core".
+func TestConntrackSummaryCoreTerminatedExit(t *testing.T) {
+	markExit := func(m uint32) string {
+		if m == 0x00020000 {
+			return "awg2"
+		}
+		return "direct"
+	}
+	local := localIfaceFrom(map[string]string{"192.168.77.1": "br-lan"})
+	row := func(src string, sport int, dst, replySrc string, mark, bytes int) string {
+		return fmt.Sprintf("ipv4 2 tcp 6 100 ESTABLISHED src=%s dst=%s sport=%d dport=443 packets=1 bytes=%d "+
+			"src=%s dst=%s sport=7890 dport=%d packets=1 bytes=0 mark=%d zone=0 use=2\n", src, dst, sport, bytes, replySrc, src, sport, mark)
+	}
+	table := row("192.168.77.50", 51000, "198.51.100.80", "127.0.0.1", 0x00010000, 300) + // redirected, routed to awg-eu
+		row("192.168.77.51", 52000, "198.51.100.81", "192.168.77.1", 0, 200) + // redirected, the core lists it no more
+		row("192.168.77.52", 53000, "198.51.100.82", "198.51.100.82", 0x00020000, 100) // kernel-routed (pinned)
+	asked := 0
+	labels := traceLabels{markExit: markExit, localIface: local, coreFetch: func() map[string]string {
+		asked++
+		return coreRoutes([]clash.Conn{{Chains: []string{"awg-eu"}, Metadata: clash.ConnMeta{SourceIP: "192.168.77.50", SourcePort: "51000"}}})
+	}}
+	conns, _, exits, _ := conntrackSummary(table, labels, nil, 80)
+	got := map[string]string{}
+	for _, c := range conns {
+		got[c.Dst] = c.Exit
+	}
+	if got["198.51.100.80"] != "awg-eu" || got["198.51.100.81"] != traceExitCore || got["198.51.100.82"] != "awg2" {
+		t.Errorf("exits per flow %v", got)
+	}
+	if exits["awg-eu"] != 300 || exits[traceExitCore] != 200 || exits["awg2"] != 100 || exits["direct"] != 0 {
+		t.Errorf("exit totals %v", exits)
+	}
+	if asked != 1 {
+		t.Errorf("the core was asked %d times, want once", asked)
+	}
+	asked = 0
+	labels.coreRoute = nil
+	labels.coreFetch = func() map[string]string { asked++; return nil }
+	_, _, _, _ = conntrackSummary(row("192.168.77.52", 53000, "198.51.100.82", "198.51.100.82", 0x00020000, 100), labels, nil, 80)
+	if asked != 0 {
+		t.Error("the core was asked for a table with no flow it terminates")
+	}
+}
+
 // Under maxRows, every flow is returned, still bytes-descending; empty input yields a non-nil
 // empty slice (marshals to [] not null).
 func TestConntrackSummaryUnderCapAndEmpty(t *testing.T) {
 	markExit := func(uint32) string { return "wan" }
 	sample := "ipv4 2 tcp 6 100 ESTABLISHED src=192.168.1.5 dst=1.1.1.1 sport=5 dport=443 packets=1 bytes=500 src=1.1.1.1 dst=192.168.1.5 sport=443 dport=5 packets=1 bytes=100 mark=0 zone=0 use=2\n" +
 		"ipv4 2 udp 17 30 src=192.168.1.6 dst=2.2.2.2 sport=6 dport=53 packets=1 bytes=50 src=2.2.2.2 dst=192.168.1.6 sport=53 dport=6 packets=1 bytes=900 mark=0 zone=0 use=2\n"
-	conns, total, _, clients := conntrackSummary(sample, markExit, nil, 80)
+	conns, total, _, clients := conntrackSummary(sample, traceLabels{markExit: markExit}, nil, 80)
 	if total != 2 || len(conns) != 2 {
 		t.Fatalf("total=%d conns=%d, want 2/2", total, len(conns))
 	}
@@ -110,7 +158,7 @@ func TestConntrackSummaryUnderCapAndEmpty(t *testing.T) {
 		t.Errorf("clients = %d, want 2", len(clients))
 	}
 
-	empty, total0, _, cl0 := conntrackSummary("", markExit, nil, 80)
+	empty, total0, _, cl0 := conntrackSummary("", traceLabels{markExit: markExit}, nil, 80)
 	if total0 != 0 {
 		t.Errorf("empty total = %d, want 0", total0)
 	}

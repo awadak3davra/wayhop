@@ -20,10 +20,10 @@ import (
 )
 
 // validTarget guards against shell-metacharacter injection (exec.Command does
-// not use a shell, but we still reject anything that isn't a host/IP). The first
+// not use a shell, but this still rejects anything that isn't a host/IP). The first
 // character may NOT be a hyphen: a target like "-f" or "--help" passes the
 // character-class test but is parsed by ping/traceroute as a FLAG, not a host
-// (argument injection, CWE-88). Real hostnames/IPs never start with "-"
+// (argument injection). Real hostnames/IPs never start with "-"
 // (RFC 1123), so the leading-char class simply omits it.
 var validTarget = regexp.MustCompile(`^[a-zA-Z0-9._:\[\]][a-zA-Z0-9._:\-\[\]]{0,252}$`)
 
@@ -54,11 +54,11 @@ type PingResult struct {
 	Output  string  `json:"output"`
 
 	// Ran reports whether this result is a MEASUREMENT at all — whether ping executed and returned
-	// a loss figure we could read. It is not the same question as Ok.
+	// a readable loss figure. It is not the same question as Ok.
 	//
-	// Ok=false previously meant both "the target did not answer" and "the probe never ran" (a
-	// missing ping binary, a PATH the init system does not share, an invalid target). The exec
-	// error was discarded outright. That mattered far beyond diagnostics: the fail-safe treats a
+	// Ok=false alone cannot tell "the target did not answer" from "the probe never ran" (a
+	// missing ping binary, a PATH the init system does not share, an invalid target). That matters
+	// far beyond diagnostics: the fail-safe treats a
 	// false as lost connectivity, rolls the configuration back, and then REBOOTS the router — so on
 	// a device without ping in PATH every Apply would roll back and reboot a box whose internet was
 	// working fine. A verdict has to be able to say it has no verdict.
@@ -128,7 +128,7 @@ func Ping(ctx context.Context, host string, count int) PingResult {
 		res.AvgMs, _ = strconv.ParseFloat(m[1], 64)
 	}
 	// A parsed loss figure is the proof that a measurement happened. Output that ping produced but
-	// we could not parse leaves Ran false: we would be guessing, and guessing is what this field
+	// that does not parse leaves Ran false: anything else would be guessing, and guessing is what this field
 	// exists to stop.
 	res.Ran = res.LossPct >= 0
 	res.Ok = res.Ran && res.LossPct < 100
@@ -183,8 +183,8 @@ func DNSLookup(ctx context.Context, host string) Lookup {
 // --- reachability through a specific outbound (tunnel or WAN) ---
 //
 // ICMP ping/traceroute cannot traverse a proxy, so "test target X through tunnel
-// Y" is necessarily an HTTP(S) GET that sing-box routes through outbound Y. We
-// reuse the Clash API delay probe (GET /proxies/{tag}/delay) for that.
+// Y" is necessarily an HTTP(S) GET that sing-box routes through outbound Y. This
+// reuses the Clash API delay probe (GET /proxies/{tag}/delay) for that.
 
 // Delayer issues an HTTP-GET latency probe through a named sing-box outbound (the
 // Clash API /proxies/{name}/delay). *clash.Client satisfies it; keeping it an
@@ -356,11 +356,10 @@ func ReachViaIface(ctx context.Context, iface, target string, timeoutMS int) Rea
 	}
 	// The probe is made HERE, in Go, rather than by shelling out to curl.
 	//
-	// It used to run `curl --interface …`, and mapped EVERY execution error to "unreachable via this
-	// exit". On a router with no curl — this one, and any Entware box that never installed it — that
-	// turned a missing binary into a network verdict: seven exits reported unreachable for a target
-	// the router could ping in 39 ms, including the WAN itself. A diagnostic that invents outages is
-	// worse than no diagnostic.
+	// Shelling out to `curl --interface …` maps EVERY execution error to "unreachable via this exit".
+	// On a router with no curl (any Entware box that never installed it) that turns a missing binary
+	// into a network verdict: every exit, the WAN included, reported unreachable for a target the
+	// router can ping. A diagnostic that invents outages is worse than no diagnostic.
 	//
 	// The SSRF guard survives intact: the vetted public IP is DIALLED directly (no second lookup, so
 	// no rebind), while the Host header and TLS SNI keep the requested name.

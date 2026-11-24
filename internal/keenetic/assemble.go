@@ -49,7 +49,7 @@ func hasDomain(entries []string) bool {
 
 // InlineCIDRSources fetches each list's CIDRSource feed and inlines the CIDRs into Manual,
 // clearing CIDRSource and the cached copy. The generator reads Manual plus the cached feeds
-// (generator.listEntries, QA-066), so a feed fetched here must not also stay in CIDRCache or every
+// (generator.listEntries), so a feed fetched here must not also stay in CIDRCache or every
 // prefix is emitted twice. fetch is injected (the daemon fetches the feed THROUGH a tunnel at
 // pre-flight). Must run before AssembleSingboxConfig.
 func InlineCIDRSources(p *model.Profile, fetch func(url string) ([]string, error)) error {

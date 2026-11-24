@@ -96,7 +96,7 @@ func (s *Server) handleSpeedtest(w http.ResponseWriter, r *http.Request) {
 // or "" to let the router choose) and route, where the rules send the test's site (speedRoute).
 //
 // A run through the core goes wherever the core's rules send the site, so the name comes from that
-// route and not from the request (QA-112). On a split-tunnel profile, with no default rule or a list
+// route and not from the request. On a split-tunnel profile, with no default rule or a list
 // sending Cloudflare straight out, the core sends speed.cloudflare.com out by the provider's line, and
 // the answer called that line "proxy": the tunnel's throughput, as far as the panel could tell. Left
 // to choose, the router now measures such a route as a direct test does, past the core, since that is

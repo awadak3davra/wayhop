@@ -9,13 +9,13 @@ import (
 	"testing"
 )
 
-// LOOP-010: an engine binary is installed with router privileges, so it is held to the SAME trust
+// An engine binary is installed with router privileges, so it is held to the SAME trust
 // contract as the root self-update — the digest is MANDATORY and comes from a channel a mirror
 // cannot forge. These tests pin the two halves of that contract that regressed before the fix:
 // (1) a release whose asset carries no digest is refused rather than installed on trust, and
 // (2) the digest-bearing release metadata is fetched over the DIRECT GitHub API, never a mirror.
 
-// TestInstall_RefusesEngineAssetWithoutDigest: before LOOP-010 the engine install streamed with
+// TestInstall_RefusesEngineAssetWithoutDigest: without a digest check the engine install streamed with
 // requireDigest=false, so a release asset that declares no sha256 digest was accepted and an
 // unverified binary was written into BinDir and later run as root. It must now fail closed and leave
 // nothing behind.

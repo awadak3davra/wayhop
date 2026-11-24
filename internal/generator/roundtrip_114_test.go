@@ -9,7 +9,7 @@ import (
 	"wayhop/internal/model"
 )
 
-// QA-019: the sing-box 1.14 protocols, and Hysteria2's 1.14 options, survive Generate -> ParseSingbox -> Generate. The importer
+// The sing-box 1.14 protocols, and Hysteria2's 1.14 options, survive Generate -> ParseSingbox -> Generate. The importer
 // rejected snell outbounds and openvpn-client / openconnect endpoints, so a config WayHop wrote could
 // not be read back, nor a sing-box config carrying them imported.
 func TestRoundTrip114Protocols(t *testing.T) {

@@ -12,7 +12,7 @@ import (
 
 // #1/#10/#15 (HIGH): "Discard all" must revert only what the review REPORTED. Config fields outside
 // the reviewable settings are never shown, so they must survive — returning the baseline verbatim
-// silently destroyed them. Rules, device groups and the DNS plane ARE reported now (QA-088), so
+// silently destroyed them. Rules, device groups and the DNS plane ARE reported now, so
 // discard-all must revert them: it used to answer "undone" while those rows stayed pending.
 func TestUndoAll_PreservesUnreviewedState(t *testing.T) {
 	base := model.Profile{

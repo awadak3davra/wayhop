@@ -153,7 +153,7 @@ func TestUpgradeDowngrade_TenScenarios(t *testing.T) {
 		// 2. DOWNGRADE: OLDER tag over newer — must be allowed (no downgrade block).
 		{name: "02_downgrade_amd64_targz_digest", arch: "amd64", tag: "v1.8.0", pre: v112, wantBytes: v18, wantTag: "v1.8.0",
 			assets: []udAsset{{"sing-box-1.8.0-linux-amd64.tar.gz", tgz("sing-box-1.8.0-linux-amd64", v18), "ok"}}},
-		// 3. DOWNGRADE to a pre-digest-era release (no Digest field) — REFUSED (LOOP-010). An engine
+		// 3. DOWNGRADE to a pre-digest-era release (no Digest field) — REFUSED. An engine
 		//    binary runs as root, so a release with nothing to verify against is not installed on
 		//    trust; the existing good binary must survive untouched.
 		{name: "03_downgrade_no_digest_refused", arch: "amd64", tag: "v0.9.0", pre: v112, wantErr: "no sha256 digest",

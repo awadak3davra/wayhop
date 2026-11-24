@@ -61,7 +61,7 @@ func ClassifyStartFailure(lines []string) StartFailure {
 			}
 			// srs.Read refuses a binary rule-set whose format byte is newer than this core's ceiling
 			// (1.12 reads up to v3, 1.13 v4, 1.14 v5). The file is intact, so a re-download fetches the
-			// same bytes and the cache advice above would loop the operator (QA-064).
+			// same bytes and the cache advice above would loop the operator.
 			if strings.Contains(ln, "unsupported version") {
 				newer := "update the core in Components, or point the list at a source published in an older format (clearing the cache does not help a rule-set that is too new: the same file is downloaded again)"
 				if strings.Count(ln, "initial rule-set:") > strings.Count(ln, "unsupported version") {

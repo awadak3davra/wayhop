@@ -230,7 +230,7 @@ func TestAWGUserspace(t *testing.T) {
 		for _, k := range []string{"GOMEMLIMIT", "GOMAXPROCS", "AWG_GO_BUFFERS_PER_POOL", "AWG_GO_QUEUE_SIZE", "AWG_SOCKET_DIR"} {
 			t.Setenv(k, "") // nor any of these
 		}
-		// A router with 239 MiB, the test router's MemTotal, unless a subtest sets another.
+		// A router with 239 MiB, the reference router's MemTotal, unless a subtest sets another.
 		awgus_meminfo(t, "MemTotal:         244736 kB\nMemFree:           53000 kB\n")
 		r.m = New(t.TempDir(), bins)
 		r.m.awgProbe = func() awg.Probe { return probe }
@@ -850,7 +850,7 @@ func TestAWGTierFor(t *testing.T) {
 		{124000, low},
 		{128<<10 - 1, low},
 		{128 << 10, small},
-		{244736, small}, // the test router
+		{244736, small}, // the reference OpenWrt router
 		{256<<10 - 1, small},
 		{256 << 10, normal},
 		{16 << 20, normal},

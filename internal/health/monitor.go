@@ -113,7 +113,7 @@ type View struct {
 	RateDownBps  int64  `json:"rate_down_bps"`
 	BytesUp      int64  `json:"bytes_up"`
 	BytesDown    int64  `json:"bytes_down"`
-	Cause        string `json:"cause,omitempty"` // why it's down (R6)
+	Cause        string `json:"cause,omitempty"` // why it's down
 	CauseFix     string `json:"cause_fix,omitempty"`
 	// CauseID names the cause for a reader that words it itself: causeEngineMissing, causeNoResponse,
 	// or the kb entry's id.

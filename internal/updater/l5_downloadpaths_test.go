@@ -14,7 +14,7 @@ import (
 // The shipped default list ends with https://mirror.ghproxy.com/, and that host no longer exists —
 // it does not resolve from a live Keenetic (`nslookup: can't resolve`) or from the dev
 // machine. Since download() returned lastErr, every failure on every router ended with
-// "lookup mirror.ghproxy.com: no such host", whatever had actually gone wrong: measured on the demo,
+// "lookup mirror.ghproxy.com: no such host", whatever had actually gone wrong:
 // three paths were tried and the panel showed the third. The operator is then debugging the DNS of
 // a mirror they never chose, while the failure that matters — the direct download — is not on screen.
 func TestDownloadNamesEveryPathItTried(t *testing.T) {

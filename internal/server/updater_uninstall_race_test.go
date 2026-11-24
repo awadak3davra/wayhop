@@ -12,7 +12,7 @@ import (
 	"wayhop/internal/pm"
 )
 
-// TestUninstall_SerializesDeleteWithApply is the LOOP-024 guard. handleUpdaterUninstall stops the
+// TestUninstall_SerializesDeleteWithApply guards it. handleUpdaterUninstall stops the
 // engine and then deletes its binary; handleApply, which restarts the core, takes applyMu end-to-end.
 // If the delete runs OUTSIDE applyMu, a concurrent Apply can restart the core onto the binary between
 // the stop and the unlink, and the uninstall then reports removed while the old inode keeps running.
@@ -64,7 +64,7 @@ func TestUninstall_SerializesDeleteWithApply(t *testing.T) {
 	select {
 	case code := <-done:
 		s.applyMu.Unlock()
-		t.Fatalf("uninstall completed (status %d) while an Apply held applyMu — the delete is not serialized (LOOP-024)", code)
+		t.Fatalf("uninstall completed (status %d) while an Apply held applyMu — the delete is not serialized", code)
 	case <-time.After(300 * time.Millisecond):
 	}
 	if _, err := os.Stat(binPath); err != nil {

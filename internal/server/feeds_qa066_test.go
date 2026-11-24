@@ -31,7 +31,7 @@ func TestDomainPresetsNeedTheCoreOffKeenetic(t *testing.T) {
 	}
 }
 
-// QA-122: off KeeneticOS a domain preset carries the "needs sing-box" badge, so its description must
+// Off KeeneticOS a domain preset carries the "needs sing-box" badge, so its description must
 // not say "no proxy core needed"; on KeeneticOS, where that is true, the text is left as written.
 func TestDomainPresetTextMatchesTheCoreBadge(t *testing.T) {
 	keen := map[string]string{}
@@ -92,7 +92,7 @@ func TestDomainFeedCountsAsDomainRouted(t *testing.T) {
 	}
 }
 
-// A refilter-sized feed sent to a proxy now lands in the core inline (QA-066), where it costs memory,
+// A refilter-sized feed sent to a proxy now lands in the core inline, where it costs memory,
 // check time and flash. The review says so; the same feed at a kernel egress in hybrid costs the core
 // nothing and draws no warning.
 func TestReviewWarnsWhenTheCoreHoldsALargeFeed(t *testing.T) {

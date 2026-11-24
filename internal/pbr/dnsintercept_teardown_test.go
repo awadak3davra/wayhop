@@ -25,7 +25,7 @@ func dnsTeardownProfile() *model.Profile {
 // line or the part after a `-C ... ||` check.
 var iptablesAddRE = regexp.MustCompile(`(?:^|\|\| )(iptables|ip6tables)((?: -t \S+)?) -(?:A|I) (\S+) (.*)$`)
 
-// QA-114: the teardown left the DNS redirect and the encrypted-DNS refusals in place, so turning
+// The teardown left the DNS redirect and the encrypted-DNS refusals in place, so turning
 // interception off, leaving the kernel plane or switching routing off kept hijacking clients' DNS.
 // Every rule the script can add must have its delete: rules in a chain NDM owns by an exact -D, rules
 // in the plane's own chain by the flush and delete of that chain.
@@ -48,7 +48,7 @@ func TestKeeneticTeardownDeletesEveryRuleTheScriptAdds(t *testing.T) {
 		}
 		ipt, table, chain, spec := m[1], m[2], m[3], m[4]
 		chains[ipt+table+" "+chain] = true
-		if chain == "WR_PREROUTING" {
+		if chain == "WR_PREROUTING" || chain == "WR_PREROUTING"+MangleStageSuffix {
 			for _, want := range []string{ipt + " -t mangle -F " + chain, ipt + " -t mangle -X " + chain} {
 				if !strings.Contains(down, want) {
 					t.Errorf("the script fills %s but the teardown never runs %q", chain, want)
@@ -106,7 +106,7 @@ func TestKeeneticTeardownRemovesDNSRulesWhateverTheSwitches(t *testing.T) {
 	}
 }
 
-// QA-115: the refusals are filter-table rules, so the script carries them as a section of their own at
+// The refusals are filter-table rules, so the script carries them as a section of their own at
 // the top, closed by FilterSectionEnd, where a filter:iptables run of the hook stops before the mangle
 // flush and rebuild.
 func TestKeeneticScriptPutsTheRefusalsInAFilterSectionFirst(t *testing.T) {

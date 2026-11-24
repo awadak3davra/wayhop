@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// SEC-07: a manual entry is written into dnsmasq's configuration on KeeneticOS, so a line break
+// A manual entry is written into dnsmasq's configuration on KeeneticOS, so a line break
 // inside one would add a configuration line (an upstream resolver, say) nobody reviewed.
 func TestValidateRefusesControlCharactersInManualEntries(t *testing.T) {
 	list := func(entries ...string) Profile {

@@ -226,6 +226,11 @@ type ConnMeta struct {
 	DestinationIP   string `json:"destinationIP"`
 	DestinationPort string `json:"destinationPort"`
 	Network         string `json:"network"`
+	// SourceIP and SourcePort are the client's side as the core accepted it: for a LAN flow the core
+	// terminates (auto_redirect), the conntrack row's original source, which is how the trace finds
+	// the core's route for that row.
+	SourceIP   string `json:"sourceIP"`
+	SourcePort string `json:"sourcePort"`
 }
 
 // Connections is the Clash /connections payload.

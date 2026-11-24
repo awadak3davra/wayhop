@@ -25,6 +25,7 @@ const (
 	ctMsgGet     = 1
 	ctMsgDelete  = 2
 	ctaTupleOrig = 1
+	ctaTupleRepl = 2
 	ctaMark      = 8
 	ctaID        = 12
 	ctaZone      = 18
@@ -141,6 +142,30 @@ func parseEntry(family uint8, payload []byte) (Entry, error) {
 						e.Dst = netip.AddrFrom4([4]byte(ip.payload))
 					case ip.typ == ctaIPv6Dst && len(ip.payload) == 16:
 						e.Dst = netip.AddrFrom16([16]byte(ip.payload))
+					}
+				}
+			}
+		case ctaTupleRepl:
+			// Only the reply's source is kept: it differs from the original destination exactly when
+			// the flow was destination-NATed (a port forward, the core's TCP redirect to itself).
+			inner, err := parseAttrs(a.payload)
+			if err != nil {
+				return e, err
+			}
+			for _, t := range inner {
+				if t.typ != ctaTupleIP {
+					continue
+				}
+				ips, err := parseAttrs(t.payload)
+				if err != nil {
+					return e, err
+				}
+				for _, ip := range ips {
+					switch {
+					case ip.typ == ctaIPv4Src && len(ip.payload) == 4:
+						e.ReplySrc = netip.AddrFrom4([4]byte(ip.payload))
+					case ip.typ == ctaIPv6Src && len(ip.payload) == 16:
+						e.ReplySrc = netip.AddrFrom16([16]byte(ip.payload))
 					}
 				}
 			}

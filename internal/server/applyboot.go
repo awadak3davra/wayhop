@@ -29,9 +29,9 @@ const applyReconcileInterval = 30 * time.Second
 // applyReconcileSettle is how long the reconcile loop waits before it believes a missing plane.
 // KeeneticOS rebuilds its firewall every 150 s and its netfilter.d hook puts WayHop's rules back
 // within a second. A tick that read the tables inside that gap took the plane for missing and
-// reinstalled it while the hook was doing the same, the two interleaving: the live router logged "the
+// reinstalled it while the hook was doing the same, the two interleaving: the router logged "the
 // kernel routing plane is missing" five times in twenty minutes, each at a rebuild, with the hook's
-// "No chain/target/match by that name" beside them (QA-118). A second read after the settle tells a
+// "No chain/target/match by that name" beside them. A second read after the settle tells a
 // rebuild in progress from a plane that is really gone. A var so tests need not wait.
 var applyReconcileSettle = 3 * time.Second
 
@@ -88,6 +88,14 @@ func (s *Server) StartApply(ctx context.Context, startupConfigPath string) {
 	s.reapStrayCore()
 	s.reapStrayPlugins()
 	go func() {
+		// The kill switch backstop's first sync does not wait for converge: it works from
+		// the committed record, bounded, and the mirror runs beside converge (which holds applyMu only
+		// while an attempt runs, not through its retry waits).
+		s.reportKillSwitchBoot()
+		bootCtx, cancel := context.WithTimeout(ctx, 2*ksMirrorInterval)
+		s.killSwitchMirrorTick(bootCtx)
+		cancel()
+		go s.killSwitchMirrorLoop(ctx)
 		s.convergeOnBoot(ctx)
 		s.reconcileLoop(ctx)
 	}()
@@ -97,11 +105,16 @@ func (s *Server) StartApply(ctx context.Context, startupConfigPath string) {
 	// wait out its first minute. See listfailover.go for why nothing else does this today.
 	go s.listFailoverLoop(ctx)
 	go s.coreRestartLoop(ctx)
+	// The addresses of kill-switched names on the nft plane, on a faster timer than the reconcile
+	// pass (killswitchlearn.go). Idle wherever there is no such plan.
+	go s.learnNamesLoop(ctx)
+	// Throughput measurements: the panel's queue, and the opt-in schedule (off by default).
+	go s.throughputLoop(ctx)
 }
 
 // reapStrayPlugins ends a ciadpi an earlier daemon left running (a SIGKILL, a panic, the OOM killer):
 // it still holds its SOCKS port, so the new daemon's ByeDPI exits at every start with "Address in use",
-// and it keeps the old strategy flags nobody can change (QA-097). ByeDPI runs as a uid nothing else on
+// and it keeps the old strategy flags nobody can change. ByeDPI runs as a uid nothing else on
 // the router uses, so only WayHop's own ciadpi matches. amneziawg-go has its own per-interface cleanup
 // (awgClearStale) and sing-box its own (reapStrayCore). It runs before converge starts any plugin. The
 // demo leaves the host's processes alone.
@@ -112,7 +125,7 @@ func (s *Server) reapStrayPlugins() {
 	s.plugins.ReapStrays("ciadpi", model.ByeDPIUID)
 }
 
-// reapStrayCore ends a sing-box an earlier daemon left running on this daemon's config (QA-109). A
+// reapStrayCore ends a sing-box an earlier daemon left running on this daemon's config. A
 // core that outlives its daemon holds the cache-file lock, the Clash and mixed ports and the TUN, and
 // keeps routing by the old config; the core this daemon starts then dies at every start with
 // "initialize cache-file: timeout" and the watchdog restarts it in a loop. The core now dies with
@@ -234,7 +247,7 @@ func (s *Server) convergeRetryLoop(ctx context.Context, committed *appliedRevisi
 // record and the routing switch under applyMu: the retry used to re-execute the revision read before
 // the first attempt, so routing switched off, or an Apply recorded, during the 30 s wait was undone by
 // the retry, which put the core and the kernel plane back or ran the old core config under the new
-// record (QA-139).
+// record.
 func (s *Server) convergeOnBootOnce(ctx context.Context, committed *appliedRevision) (bool, error) {
 	return s.convergeOnBootOnceNoting(ctx, committed, nil)
 }
@@ -269,8 +282,8 @@ func (s *Server) convergeOnBootOnceNoting(ctx context.Context, committed *applie
 // found the Test's values, refused at native prepare — before the core step, so no sing-box — and
 // the Test's own interfaces stayed as unrecorded orphans. A daemon restart, on any platform, leaves
 // all of the Test running. A Keenetic reboot loses the core and kernel plane, but NDM starts from
-// startup-config, which the routing switch may have saved with the Test's native tunnels still in it
-// (QA-145). A native revision therefore rolls back even across that reboot; without one, the usual
+// startup-config, which the routing switch may have saved with the Test's native tunnels still in it.
+// A native revision therefore rolls back even across that reboot; without one, the usual
 // boot-id check decides, and without both ids the discard stays as it was.
 func (s *Server) liveNeedsRollbackOnBoot(live *appliedRevision) bool {
 	if live == nil || !live.Materialization.known() || materializationIsDemo(&live.Materialization) ||
@@ -443,6 +456,7 @@ func (s *Server) reconcileKernelPlane(ctx context.Context) {
 	defer cancel()
 	if err := ops.kernelPostcheck(tickCtx, kernel); err == nil {
 		s.markKernelPlane(kernelPlanePresent)
+		s.renewKernelNamesHold(tickCtx, kernel, ops.coreRunning != nil && ops.coreRunning())
 		return
 	}
 	select {
@@ -463,6 +477,15 @@ func (s *Server) reconcileKernelPlane(ctx context.Context) {
 	if err := ops.kernelPostcheck(tickCtx, kernel); err != nil {
 		log.Printf("apply: kernel plane reinstalled but not verified: %v", err)
 		return
+	}
+	if kernel.Ipset != nil {
+		s.sweepLeakedFlows(tickCtx, kernel.Plan, *kernel.Ipset, true, "the reinstall")
+	} else {
+		// The nft plane classifies every packet by its destination, so a flow that left by the
+		// provider while the plane was gone is marked again from its next packet. What keeps it on the
+		// provider is its conntrack entry: the NAT binding made when it left that way (IPv4), and the
+		// "direct" connmark the restore line re-adopts. The same flush an Apply runs, old plane = none.
+		s.flushStaleFlows(nil, kernel.Plan)
 	}
 	s.markKernelPlane(kernelPlanePresent)
 	log.Printf("apply: kernel routing plane reinstalled")
@@ -529,8 +552,8 @@ func (s *Server) convergeAfterInstall(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	// What was applied is the Test while a window is open: converging the committed revision ran its
-	// core and plane under a record and a panel that named the Test, and Keep then saved the Test
-	// (QA-142). A Test whose rollback failed part way runs as neither; Roll back finishes it.
+	// core and plane under a record and a panel that named the Test, and Keep then saved the Test.
+	// A Test whose rollback failed part way runs as neither; Roll back finishes it.
 	base := s.appliedBaseline()
 	if base == nil || !base.Materialization.known() || s.liveRollbackFailed() != nil {
 		return false, nil

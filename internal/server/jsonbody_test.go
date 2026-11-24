@@ -39,8 +39,8 @@ func TestDecodeJSONBody(t *testing.T) {
 	}
 }
 
-// A write with a second document used to save the first one and answer 200 (found by an API hunter on an
-// emulated OpenWrt: a group, the DNS plane, the profile, endpoint bulk and others).
+// A write with a second document must not save the first one and answer 200 (a group, the DNS plane,
+// the profile, endpoint bulk and others).
 func TestWriteRefusesTrailingJSON(t *testing.T) {
 	s := bindTestServer(t, feedProfile(), "")
 	before := len(s.store.Profile().Groups)

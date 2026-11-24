@@ -2,6 +2,8 @@ package server
 
 import (
 	"os"
+
+	"wayhop/internal/atomicfile"
 )
 
 // coreCheckStagePrefix names the candidate staged for `sing-box check`; boot sweeps the ones a crash
@@ -29,9 +31,10 @@ func stageExactCoreConfig(dir string, config []byte) (string, func(), error) {
 	if _, err := staged.Write(config); err != nil {
 		return fail(err)
 	}
-	if err := staged.Sync(); err != nil {
-		return fail(err)
-	}
+	// No fsync: `sing-box check` reads the page cache, and the file is deleted right after. An fsync
+	// forced a flash write of a file that lives for milliseconds, on every Apply; without it ext4/ubifs
+	// delayed allocation normally never writes the data at all.
+	atomicfile.Note(stagedPath, len(config))
 	if err := staged.Close(); err != nil {
 		cleanup()
 		return "", nil, err

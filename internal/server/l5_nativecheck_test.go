@@ -16,7 +16,7 @@ import (
 //
 // A connection with Owner external is routed by pbr through an OS interface WayHop does not manage,
 // and the whole of its configuration is that interface name. The handler asked sing-box instead.
-// Measured on a live Keenetic: `sing-box check -c` over
+// Observed on KeeneticOS: `sing-box check -c` over
 // {"type":"direct","bind_interface":"iface-that-does-not-exist"} exits 0, exactly as it does over
 // the real nwg1 — so the panel said "configuration is valid" for a connection whose only field was
 // wrong. The verdict has to come from the router's interface list, which is the thing that decides.

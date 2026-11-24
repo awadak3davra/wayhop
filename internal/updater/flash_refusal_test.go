@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// The refusal the test router actually produced, and what was wrong with it.
+// The refusal the reference OpenWrt router actually produced, and what was wrong with it.
 //
 //	not enough free space to install olcrtc in /usr/bin (~24 MiB free, need ~31 MiB for the
 //	unpacked binary) — free space, mount external storage, or install over SSH

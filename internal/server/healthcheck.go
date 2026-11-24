@@ -27,11 +27,9 @@ type healthRow struct {
 	//
 	// `na` is "this check did not run" — either there was nothing here to check (no dialable
 	// endpoints, no subscription configured) or the measurement was impossible (a /proc file this
-	// host does not have). It exists because the other three could not say it, and both substitutes
-	// were lies: `pass` made "nothing was checked" indistinguishable from "checked and fine", and
-	// `warn` put an unmeasurable thing on the operator's to-do list. Measured on the dev host, where
-	// 6 of 11 "things to look at" were checks that never ran, and on a live Keenetic, where 3
-	// of 19 greens had verified nothing.
+	// host does not have). The other three cannot say it: `pass` would make "nothing was checked"
+	// indistinguishable from "checked and fine", and `warn` would put an unmeasurable thing on the
+	// operator's to-do list.
 	//
 	// An `na` row is never a finding: it is not counted in the verdict and never colours the page.
 	Status  string `json:"status"`
@@ -72,7 +70,11 @@ func (s *Server) healthBattery(parent context.Context) []healthRow {
 		func(ctx context.Context) healthRow { return flowOffloadCheck(ctx, offload) },
 		conntrackCheck,
 		func(ctx context.Context) healthRow { return s.pbrKernelCheck(ctx) },
+		func(ctx context.Context) healthRow { return s.killSwitchBootCheck(ctx) },
+		func(ctx context.Context) healthRow { return s.killSwitchRoutesCheck(ctx) },
+		func(ctx context.Context) healthRow { return s.wanDriftCheck(ctx) },
 		func(ctx context.Context) healthRow { return s.listsInForceCheck(ctx) },
+		func(ctx context.Context) healthRow { return s.fastDNSCheck(ctx) },
 		func(ctx context.Context) healthRow { return s.nativeOnlyCheck(ctx) },
 		func(ctx context.Context) healthRow { return s.keeneticLeftAsIsCheck(ctx) },
 		func(ctx context.Context) healthRow { return s.endpointReachCheck(ctx) },
@@ -162,10 +164,9 @@ func ipv6LeakCheck(ctx context.Context) healthRow {
 	}
 	// Before probing the internet, ask the router where its v6 default route POINTS. The question this
 	// row exists for is whether v6 goes AROUND the tunnels, and a default route that egresses a tunnel
-	// answers it directly — no reachability needed. Measured on a live router: v6 defaults out nwg3
-	// and nwg4 (the tunnels), while the ipify probe timed out because v6 inside those tunnels does not
-	// carry traffic. The old code called that "could not complete" and left a permanent warning on a
-	// router with nothing to leak.
+	// answers it directly — no reachability needed. With v6 defaults out the tunnels, the external
+	// probe can time out because v6 inside those tunnels carries no traffic; reading the route avoids
+	// a permanent "could not complete" warning on a router with nothing to leak.
 	if devs := ipv6DefaultRouteDevices(); len(devs) > 0 {
 		wan, _ := probeWANInterface()
 		bypass := false
@@ -188,17 +189,17 @@ func ipv6LeakCheck(ctx context.Context) healthRow {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api6.ipify.org", nil)
 	resp, err := cl.Do(req)
 	if err != nil {
-		// A probe that did not COMPLETE is not evidence that the path is closed, and this row used to
-		// say it was: a failed request produced `pass` — "IPv6 present but firewalled (OK)" — which
-		// announces the absence of the exact leak the request failed to test.
+		// A probe that did not COMPLETE is not evidence that the path is closed: reporting `pass`
+		// ("IPv6 present but firewalled (OK)") would announce the absence of the exact leak the
+		// request failed to test.
 		//
 		// The request can fail for reasons that say nothing about the router's v6 egress: api6.ipify.org
 		// down or blocked, its AAAA not resolving, or the 6-second deadline expiring on a loaded 256 MB
 		// router. In every one of those the global v6 address is still there and may still be carrying
 		// traffic around the v4-only tunnels.
 		//
-		// This is the branch where guessing wrong costs the most, and it was the only one guessing in
-		// the reassuring direction. Not the same case as the /proc/net/if_inet6 read above, which
+		// This is the branch where guessing wrong costs the most, so it must not guess in the
+		// reassuring direction. Not the same case as the /proc/net/if_inet6 read above, which
 		// reports "na": a host with no IPv6 state at all has nothing to warn ABOUT, while here a
 		// global v6 address demonstrably exists and only the egress verdict is missing.
 		row.Status, row.Summary = "warn", "global IPv6 present; the leak test could not complete"
@@ -237,12 +238,11 @@ func ipv6HasGlobal(ifInet6 string) bool {
 
 // flowOffloadCheck reports what the kernel flow-offload fast path is ACTUALLY doing.
 //
-// It reads the shared platform.OffloadState rather than probing on its own. Its own probe used to be
-// `/etc/config/firewall` alone, which measures intent and not the datapath: on the test router that made
-// this row say "flow offload is off … the hardware fast path is unused" while /api/native/capabilities
-// reported 54 of 225 sampled connections offloaded, from the same router, at the same moment. Two
-// endpoints cannot describe one datapath differently, so there is now one resolver and this row
-// renders it. Advisory only — it never changes a setting.
+// It reads the shared platform.OffloadState rather than probing on its own. `/etc/config/firewall`
+// alone measures intent and not the datapath, and could make this row say "flow offload is off"
+// while /api/native/capabilities reports connections offloaded on the same router. Two endpoints
+// cannot describe one datapath differently, so there is one resolver and this row renders it.
+// Advisory only — it never changes a setting.
 func flowOffloadCheck(ctx context.Context, st platform.OffloadState) healthRow {
 	row := healthRow{ID: "offload", Label: "Flow offload (fast path)"}
 	if ctx.Err() != nil {
@@ -273,19 +273,12 @@ func flowOffloadCheck(ctx context.Context, st platform.OffloadState) healthRow {
 // dnsHealthCheck probes whether encrypted DNS (DoH) is REACHABLE from the router, and — separately —
 // whether the router's own lookups actually take an encrypted path.
 //
-// The two are not the same measurement, and this row used to make the second claim from the first.
-// It was labelled "DNS is private (DoH)" and printed a green "encrypted DNS (DoH) working · 3/3
-// resolvers" whenever three outbound HTTPS calls to Cloudflare, Google and AdGuard succeeded. Nothing
-// in it read /etc/resolv.conf, the listeners, or the adopted upstreams — the function took no profile
-// and no effective path — so on a router forwarding every query in plaintext to the ISP the row was
-// green, provided :443 worked. The three probes had to resolve cloudflare-dns.com through the very
-// resolver they were judging.
+// The two are not the same measurement. Three successful outbound HTTPS calls to public DoH
+// resolvers say nothing about /etc/resolv.conf, the listeners or the adopted upstreams: a router
+// forwarding every query in plaintext to the ISP would still pass, provided :443 works. The probes
+// even resolve the DoH hostnames through the very resolver they would be judging.
 //
-// Measured on a live test router while this said "DNS is private": the neighbouring row on the
-// same screen read "1 client(s) may be bypassing the router's DNS (DoH/DoT)". Two rows, one page,
-// opposite stories.
-//
-// So: the probes keep their meaning and lose the borrowed one. Reachability is stated as
+// So the probes keep their meaning and nothing more. Reachability is stated as
 // reachability, and the privacy half is answered from what the router actually resolves through —
 // which the daemon already computes for the DNS page (nativedns.RunEffectivePath). When that cannot
 // be read, the row says the encrypted path is reachable and stops there rather than inferring.
@@ -361,8 +354,7 @@ func dnsHealthCheck(ctx context.Context, upstreams []string, pathKnown bool) hea
 
 // effectiveDNSUpstreams reads the resolvers this router actually uses, and says whether it could be
 // read at all. The second return is the difference between "no plaintext upstream" and "we never
-// looked" — collapsing them is how a row ends up asserting privacy it never measured, which is the
-// defect this whole path was changed for.
+// looked" — collapsing them would let a row assert privacy it never measured.
 //
 // nil hook is production (the same reader the DNS page uses); tests inject, because no development
 // host has a router's resolv.conf and the interesting cases are the ones a dev box cannot produce.
@@ -387,7 +379,7 @@ func (s *Server) effectiveDNSUpstreams() ([]string, bool) {
 // A loopback address is NOT one of them: it names a local resolver (dnsmasq, https-dns-proxy, or
 // WayHop's own listener) whose upstream is a separate question this row does not answer — reporting
 // 127.0.0.1 as a leak would cry wolf on the commonest correct setup, including the operator's own
-// test router. Anything else in resolv.conf is a plaintext nameserver by definition: resolv.conf has no
+// OpenWrt router. Anything else in resolv.conf is a plaintext nameserver by definition: resolv.conf has no
 // way to express DoH or DoT.
 func plaintextUpstreams(upstreams []string) []string {
 	var out []string
@@ -519,12 +511,10 @@ func (s *Server) endpointReachCheck(ctx context.Context) healthRow {
 
 	// An endpoint with nothing to dial is not an endpoint with nothing to say.
 	//
-	// Measured on a live Keenetic: all five exits are adopted NDM tunnels, so every one has
-	// server "", port 0 and no endpoint_ip, this row reported "no dialable endpoints" and it would
-	// have reported exactly that with all five tunnels DOWN. Meanwhile the monitor held state alive,
-	// handshake ok and a latency for each. A row titled "VPN servers reachable" that cannot go red on
-	// the only exits a router has is the lists_in_force defect over again: every answer true in
-	// isolation, the question the operator asked left unanswered.
+	// Adopted NDM tunnels have server "", port 0 and no endpoint_ip. On a router whose exits are all
+	// adopted, a dial-only row would report "no dialable endpoints" even with every tunnel DOWN, while
+	// the monitor holds state, handshake and latency for each. A row titled "VPN servers reachable"
+	// must be able to go red on the only exits a router has.
 	//
 	// The monitor's verdict is READ, never re-probed. It is the same measurement the Failover page
 	// shows and the election loop acts on, so a second opinion here could only disagree with the one
@@ -605,8 +595,8 @@ func (s *Server) pbrKernelCheck(ctx context.Context) healthRow {
 
 	c := s.config()
 	mode := s.routingMode(c)
-	// "mixed" is a local proxy and nothing else: no TUN and no kernel plane. This row used to answer
-	// "TUN mode" for it, beside the lists row saying (rightly) that no LAN traffic reaches the core.
+	// "mixed" is a local proxy and nothing else: no TUN and no kernel plane. Answering "TUN mode"
+	// for it would contradict the lists row, which says (rightly) that no LAN traffic reaches the core.
 	if mode == "mixed" {
 		row.Status, row.Summary = "na", "Local proxy only, no gateway (mixed)"
 		return row
@@ -708,8 +698,8 @@ func (s *Server) nativeOnlyCheck(ctx context.Context) healthRow {
 	row.Summary = "sing-box core is part of the datapath"
 	row.Detail = "The profile is not native-only, so sing-box carries part of the traffic; the core/clash checks govern whether it is actually running."
 	// WHICH part, when this platform can answer. Saying only that the core is in the datapath leaves
-	// "run without sing-box" as a goal with no first step: on a live router everything except
-	// the DNS plane is carried natively, and nothing on this page said so.
+	// "run without sing-box" as a goal with no first step: often everything except the DNS plane is
+	// carried natively, and the page should say so.
 	if why := s.datapathCoreReasons(s.config(), p); len(why) > 0 {
 		row.Detail = "sing-box is required by: " + strings.Join(why, "; ") +
 			". Everything else in this profile is carried by the kernel plane and the resolver."

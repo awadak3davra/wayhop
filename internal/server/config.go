@@ -86,7 +86,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	// browser/proxy cache, matching handleConfigExport / subscription / backup / job-snapshot.
 	w.Header().Set("Cache-Control", "no-store")
 	cfg := s.config()
-	// The revision a save of these settings sends back in If-Match (QA-152), of the copy being served
+	// The revision a save of these settings sends back in If-Match, of the copy being served
 	// and before its secrets are masked.
 	rev := configRev(&cfg)
 	if cfg.Subscription.URL != "" {
@@ -116,7 +116,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 // EVERY field is present, including the ones whose default is the zero value. Marshalling the struct
 // directly does not do that: most fields carry `omitempty`, so a default of "" or 0 vanished from the
 // payload — and the Settings index, which reads this to answer "is this still the default", could
-// then only say "cannot be compared". Measured on a live router: `routing_mode`,
+// then only say "cannot be compared". Observed on a router: `routing_mode`,
 // `flow_offload` and `flow_offload_devices` were all absent, so the filter was blind to the routing
 // mode, which is the most consequential setting on the page. Their defaults are not unknown; they are
 // empty, and empty is an answer.
@@ -197,7 +197,7 @@ func completeValue(rv reflect.Value) any {
 // restartNeeded); hot fields apply on the next Apply or immediately.
 func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	old := s.config() // snapshot BEFORE persist (cfgMu is non-reentrant) for the restart diff
-	// If-Match, when sent, is the configRev the page's copy was read at (QA-152). Checked here so a
+	// If-Match, when sent, is the configRev the page's copy was read at. Checked here so a
 	// stale page hears that before any complaint about the values it holds, and again under cfgMu
 	// where the save commits.
 	want := ifMatchValue(r)
@@ -314,7 +314,7 @@ func (s *Server) persistConfigThen(in *config.Config, then func(live *config.Con
 
 // persistConfigAt is persistConfigThen committed only while the saved settings are still at rev, a
 // configRev ("" commits whatever they are), checked under the same cfgMu hold as the save so no
-// other write can land between the two (QA-152). It returns the revision the save produced.
+// other write can land between the two. It returns the revision the save produced.
 func (s *Server) persistConfigAt(in *config.Config, rev string, then func(live *config.Config)) (string, error) {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
@@ -345,6 +345,7 @@ func cloneConfig(c *config.Config) config.Config {
 	snap := *c
 	snap.OffloadDevices = cloneStrings(c.OffloadDevices)
 	snap.AllowedHosts = cloneStrings(c.AllowedHosts)
+	snap.Throughput.Sources = cloneStrings(c.Throughput.Sources)
 	snap.Updater.Mirrors = cloneStrings(c.Updater.Mirrors)
 	return snap
 }
@@ -389,11 +390,21 @@ func applyConfigFields(dst, in *config.Config) {
 	dst.GatewayAddr = in.GatewayAddr
 	dst.RoutingMode = in.RoutingMode
 	dst.Offload = in.Offload
+	// Absent from a client that does not know the field: kept, so a save from such a page does not
+	// turn an operator's explicit false back into the default.
+	if in.FastDNSEnforce != nil {
+		v := *in.FastDNSEnforce
+		dst.FastDNSEnforce = &v
+	}
+	dst.KillSwitchBackstopMax = in.KillSwitchBackstopMax
+	dst.KillSwitchBootHoldLift = in.KillSwitchBootHoldLift
 	dst.RuleSetDetour = in.RuleSetDetour
 	dst.CoreRestart = in.CoreRestart
 	dst.CoreOverride = in.CoreOverride
 	dst.NativeFirewallZone = in.NativeFirewallZone
 	dst.OffloadDevices = in.OffloadDevices
+	dst.Throughput = in.Throughput
+	dst.ExperimentalHandoff = in.ExperimentalHandoff
 	dst.Ports = in.Ports
 	dst.Clash = in.Clash
 	dst.SingBox = in.SingBox
@@ -408,6 +419,7 @@ func applyConfigFields(dst, in *config.Config) {
 	// TelegramBridge (PUT /api/telegram-bridge; the page holds its masked secret the same way).
 	// NOT copied: Auth (credential setup/rotation only) + Subscription (managed by its import settings endpoint) + Features (per-plugin
 	// toggles/settings persisted via PUT /api/features/{id}, never the bulk Settings PUT)
+	// + Flash (flash-wear tuning, hand-edited in config.json and read at start; the page never sends it)
 	// + IgnoredDrift (dismissed drift warnings, written by setIgnoredDrift). The Settings page
 	// never sends `ignored_drift`, so copying it here would silently wipe every dismissal on the
 	// next save of an unrelated setting — the same silent-drop class from the other direction.
@@ -484,6 +496,9 @@ func (s *Server) handleConfigImport(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.CoreOverride == config.RedactedMark {
 		in.CoreOverride = old.CoreOverride
+	}
+	if config.MirrorsRedacted(in.Updater.Mirrors) {
+		in.Updater.Mirrors = cloneStrings(old.Updater.Mirrors)
 	}
 	// Subscription is never applied (see applyConfigFields), so its sentinel is moot - except the
 	// two HWIDs, which the provider knows this router by: a router restored after a reflash with a

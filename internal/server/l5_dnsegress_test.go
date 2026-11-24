@@ -14,7 +14,7 @@ import (
 //
 // handleNetDiagStream resolves the Egress selector to an interface and hands it to ping (-I) and
 // traceroute (-i). netdiag.DNSLookup takes no interface at all, so the lookup goes out the router's
-// ordinary resolver path whatever the operator picked. Measured on a live Keenetic with the
+// ordinary resolver path whatever the operator picked. Observed on KeeneticOS with the
 // egress set to WgProvider_Malta: "Resolve (DNS)" for rutracker.org returned the WAN resolver's
 // records with nothing on screen saying the exit had been ignored — which is exactly the question
 // someone selects a tunnel to ask (geo-DNS, a resolver that answers differently per region).
@@ -46,7 +46,7 @@ func TestDNSToolSaysItIgnoresTheExit(t *testing.T) {
 		t.Errorf("and must name the exit it did not use:\n%s", withExit)
 	}
 	// And it must not claim a POSITION. The same closure runs standalone and inside the Full run,
-	// where DNS is emitted first and ping/traceroute appear underneath it — measured on a live
+	// where DNS is emitted first and ping/traceroute appear underneath it — observed on a
 	// Keenetic, the note read "ping and traceroute above" with nothing above it.
 	if strings.Contains(withExit, "above") || strings.Contains(withExit, "below") {
 		t.Errorf("the note must name the tools, not where they sit on screen:\n%s", withExit)

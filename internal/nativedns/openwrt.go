@@ -57,7 +57,7 @@ func ReadUCI(httpsDNSProxy, dhcp string) NativeDNS {
 		}
 		// Port and ListenAddr are where the instance listens. RenderUCI updates this instance in place
 		// and points dnsmasq there, so the write-back neither moves the proxies nor recreates their
-		// sections (which cost every option it does not model, QA-116). Without listen_port the package
+		// sections (which cost every option it does not model). Without listen_port the package
 		// starts the instance on its counter: 5053, plus one for each instance started before it, so
 		// 5053+N for @https-dns-proxy[N] (net/https-dns-proxy init script, 21.02 to master).
 		addr := in.addr

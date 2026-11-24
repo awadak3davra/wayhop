@@ -13,7 +13,7 @@ import (
 // wayhop entry. So WayHop's own row offered "Update now" with no idea whether the router had room,
 // and the refusal arrived only after the click.
 //
-// That is not academic on a small-flash box: on a live test router (OpenWrt, /overlay 13 MiB
+// That is not academic on a small-flash box: on an OpenWrt router (OpenWrt, /overlay 13 MiB
 // free) a self-update needs ~27 MiB — the new binary plus the mandatory rollback backup plus slack —
 // so refusing is the routine outcome there.
 //

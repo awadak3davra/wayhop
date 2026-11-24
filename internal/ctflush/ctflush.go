@@ -43,9 +43,12 @@ type Entry struct {
 	Src    netip.Addr // original-direction source
 	Dst    netip.Addr // original-direction destination
 	Mark   uint32     // CTA_MARK
-	tuple  []byte     // the raw CTA_TUPLE_ORIG attribute, sent back to delete it
-	zone   []byte     // the raw CTA_ZONE attribute, when the entry is not in the default zone
-	id     []byte     // the raw CTA_ID attribute: the delete then removes this entry and no other
+	// ReplySrc is the reply direction's source: the original destination unless the flow was
+	// destination-NATed. Invalid when the dump did not carry a reply tuple.
+	ReplySrc netip.Addr
+	tuple    []byte // the raw CTA_TUPLE_ORIG attribute, sent back to delete it
+	zone     []byte // the raw CTA_ZONE attribute, when the entry is not in the default zone
+	id       []byte // the raw CTA_ID attribute: the delete then removes this entry and no other
 }
 
 // Table is the conntrack table: the netlink one on Linux, a fake in tests. Dump hands each entry to
@@ -127,7 +130,7 @@ func newView(p *pbr.Plan, mask uint32) view {
 	// A KeeneticOS access policy's slot is what its flows' connmark holds (the rewrite into NDM's mark
 	// comes after the save), so the plan owns it like an egress mark. Without it, routing off or a
 	// rollback to no plane left policy flows on their NAT binding to the tunnel while the main table now
-	// sent them out of the WAN - dead until the app gave up (QA-062).
+	// sent them out of the WAN - dead until the app gave up.
 	for _, ps := range p.NDMPolicySlots() {
 		if m := ps.Slot & mask; m != 0 {
 			v.tags[m] = "ndm-policy:" + ps.Name
@@ -378,3 +381,215 @@ func Flush(t Table, old, cur *pbr.Plan, opt Options) (Result, error) {
 
 // errNoEntry is the kernel's ENOENT for a delete: the flow ended between the dump and the delete.
 var errNoEntry = errors.New("conntrack entry already gone")
+
+// FlushMark deletes the flows whose saved egress mark is mark (under mask), both families: what a
+// routing list in "fastest" mode asks for when its table moves to another tunnel and the operator
+// chose to reset its connections rather than let them break on the old tunnel's NAT. The router's
+// own flows (opt.Local) are kept, and opt.Limit bounds the deletions like a plan flush.
+func FlushMark(t Table, mark, mask uint32, opt Options) (Result, error) {
+	var res Result
+	if mark == 0 || mark&^mask != 0 {
+		return res, fmt.Errorf("mark %#x is not a mark under %#x", mark, mask)
+	}
+	var doomed []Entry
+	for _, fam := range []uint8{2, 10} {
+		err := t.Dump(fam, func(e Entry) {
+			res.Seen++
+			if e.Mark&mask != mark || (opt.Local != nil && (opt.Local(e.Src) || opt.Local(e.Dst))) {
+				return
+			}
+			if opt.Limit <= 0 || len(doomed) <= opt.Limit {
+				doomed = append(doomed, e.detach())
+			}
+		})
+		if err != nil {
+			if errors.Is(err, ErrNoModule) {
+				return res, err
+			}
+			return res, fmt.Errorf("conntrack dump (family %d): %w", fam, err)
+		}
+	}
+	var firstErr error
+	for _, e := range doomed {
+		if opt.Limit > 0 && res.Deleted+res.Gone >= opt.Limit {
+			res.Capped = true
+			break
+		}
+		switch err := t.Delete(e); {
+		case err == nil:
+			res.Deleted++
+		case errors.Is(err, errNoEntry):
+			res.Gone++
+		default:
+			if firstErr == nil {
+				firstErr = fmt.Errorf("conntrack delete: %w", err)
+			}
+		}
+	}
+	return res, firstErr
+}
+
+// FlushUnrouted deletes the flows the plan sends to a tunnel (or drops) whose connection carries no
+// mark of the plan's (or the WAN egress's): flows created while the marking chain was absent, between
+// KeeneticOS rebuilding its firewall and the netfilter.d hook putting the chain back, or before an
+// Apply's chain went in. They took the main table and the WAN's NAT binding on their first packet,
+// and the router's fast NAT keeps forwarding them by that binding: a QUIC or long-lived TCP flow
+// stayed on the provider after the rules were back (measured on a Keenetic router). Deleted, it
+// starts again and is marked like any new flow. Domain zones are judged by the members the caller
+// put into p (their live sets); a zone still holding names it cannot judge keeps its flows.
+func FlushUnrouted(t Table, p *pbr.Plan, opt Options) (Result, error) {
+	var res Result
+	if p == nil {
+		return res, nil
+	}
+	mask := p.Mask
+	if mask == 0 {
+		mask = 0x00ff0000
+	}
+	v := newView(p, mask)
+	local := func(a netip.Addr) bool { return opt.Local != nil && opt.Local(a) }
+	leaked := func(e Entry) bool {
+		e.Src, e.Dst = e.Src.Unmap(), e.Dst.Unmap()
+		if !e.Dst.IsValid() || e.Dst.IsLoopback() || containsAny(v.bypass, e.Dst) || containsAny(privateDst, e.Dst) ||
+			local(e.Dst) || (e.Src.IsValid() && local(e.Src)) {
+			return false
+		}
+		m := e.Mark & mask
+		if m != 0 && v.owns(m) && !v.wan[m] {
+			return false // routed by a mark of the plan's
+		}
+		// Unmarked, the WAN's mark, or a mark the plan no longer has (a retired or renumbered egress:
+		// the chain restores it from the connmark and, once the old plane's rule is retired, no rule
+		// routes it, so it takes the main table): judged by where the plan sends it now.
+		nm, matched, known := v.eval(e)
+		return matched && known && nm != 0 && !v.wan[nm]
+	}
+	var doomed []Entry
+	for _, fam := range []uint8{2, 10} {
+		err := t.Dump(fam, func(e Entry) {
+			res.Seen++
+			if (opt.Limit <= 0 || len(doomed) <= opt.Limit) && leaked(e) {
+				doomed = append(doomed, e.detach())
+			}
+		})
+		if err != nil {
+			if errors.Is(err, ErrNoModule) {
+				return res, err
+			}
+			return res, fmt.Errorf("conntrack dump (family %d): %w", fam, err)
+		}
+	}
+	var firstErr error
+	for _, e := range doomed {
+		if opt.Limit > 0 && res.Deleted+res.Gone >= opt.Limit {
+			res.Capped = true
+			break
+		}
+		switch err := t.Delete(e); {
+		case err == nil:
+			res.Deleted++
+		case errors.Is(err, errNoEntry):
+			res.Gone++
+		default:
+			if firstErr == nil {
+				firstErr = fmt.Errorf("conntrack delete: %w", err)
+			}
+		}
+	}
+	return res, firstErr
+}
+
+// Direct steers FlushDirect.
+type Direct struct {
+	// CoreMark is the connection mark of a flow the core's TUN took (the redirect's input mark).
+	CoreMark uint32
+	// LAN reports the LAN's own devices: only flows they opened are judged.
+	LAN func(netip.Addr) bool
+	// V6 says the core's TUN carries IPv6. Without it every IPv6 flow passes beside the core by
+	// design, and none is touched.
+	V6 bool
+}
+
+// FlushDirect deletes the flows a LAN device opened straight to the provider while the core was not
+// running, in a mode where the core carries everything the kernel plane does not route by address.
+// Such a flow is not looked at again when the core returns: its redirect takes new
+// connections only, an offloaded flow never reaches the forward hook where the kill-switch guard
+// sits, and a UDP flow the core did not mark itself is marked "bypass" by the core's own chain for
+// the rest of its life. So a connection to a kill-switched name, opened in a lapse of the names
+// hold, stayed on the provider until it ended. Deleted, it starts again and the core takes it.
+//
+// A flow is left alone when the kernel plane routes its destination (a zone matches, or it carries a
+// mark of the plan's), when the core holds it (its mark, or a destination NAT: the TCP redirect),
+// when it was not opened by a LAN device, and when its destination is private, a tunnel's own
+// server, or the router.
+func FlushDirect(t Table, p *pbr.Plan, opt Options, d Direct) (Result, error) {
+	var res Result
+	if p == nil || d.LAN == nil {
+		return res, nil
+	}
+	mask := p.Mask
+	if mask == 0 {
+		mask = 0x00ff0000
+	}
+	v := newView(p, mask)
+	local := func(a netip.Addr) bool { return opt.Local != nil && opt.Local(a) }
+	direct := func(e Entry) bool {
+		e.Src, e.Dst, e.ReplySrc = e.Src.Unmap(), e.Dst.Unmap(), e.ReplySrc.Unmap()
+		if !e.Dst.IsValid() || !e.Src.IsValid() || !e.ReplySrc.IsValid() || (e.Dst.Is6() && !d.V6) {
+			return false
+		}
+		if e.Dst.IsLoopback() || e.Dst.IsMulticast() || e.Dst.IsLinkLocalUnicast() || containsAny(v.bypass, e.Dst) ||
+			containsAny(privateDst, e.Dst) || local(e.Dst) || local(e.Src) || !d.LAN(e.Src) {
+			return false
+		}
+		if e.ReplySrc != e.Dst {
+			return false // destination NAT: the core's redirect, or a forward
+		}
+		if m := e.Mark & mask; m != 0 && v.owns(m) {
+			return false // the kernel plane's flow
+		}
+		if e.Mark&^mask == d.CoreMark && d.CoreMark != 0 {
+			return false // the core's TUN has it
+		}
+		if _, matched, known := v.eval(e); matched || !known {
+			return false // a zone decides this destination, not the core
+		}
+		return true
+	}
+	var doomed []Entry
+	for _, fam := range []uint8{2, 10} {
+		if fam == 10 && !d.V6 {
+			continue
+		}
+		err := t.Dump(fam, func(e Entry) {
+			res.Seen++
+			if (opt.Limit <= 0 || len(doomed) <= opt.Limit) && direct(e) {
+				doomed = append(doomed, e.detach())
+			}
+		})
+		if err != nil {
+			if errors.Is(err, ErrNoModule) {
+				return res, err
+			}
+			return res, fmt.Errorf("conntrack dump (family %d): %w", fam, err)
+		}
+	}
+	var firstErr error
+	for _, e := range doomed {
+		if opt.Limit > 0 && res.Deleted+res.Gone >= opt.Limit {
+			res.Capped = true
+			break
+		}
+		switch err := t.Delete(e); {
+		case err == nil:
+			res.Deleted++
+		case errors.Is(err, errNoEntry):
+			res.Gone++
+		default:
+			if firstErr == nil {
+				firstErr = fmt.Errorf("conntrack delete: %w", err)
+			}
+		}
+	}
+	return res, firstErr
+}

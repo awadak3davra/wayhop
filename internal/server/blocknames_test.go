@@ -7,9 +7,9 @@ import (
 )
 
 // A block list made of names cannot stop a connection the kernel already routed: in hybrid the
-// kernel takes its lists' address ranges before the core sees them. Seen live: MAX listed to block,
-// every MAX address in another list's range, MAX left by the tunnel and the review said "No action
-// needed" (QA-065). The review now names the block list; with no kernel ranges it says nothing.
+// kernel takes its lists' address ranges before the core sees them. A service listed to
+// block, with every address in another list's range, leaves by the tunnel; the review must not say
+// "No action needed". It names the block list; with no kernel ranges it says nothing.
 func TestReviewNamesABlockListTheKernelCanBypass(t *testing.T) {
 	s := dnsSeed(t)
 	prof := model.Profile{

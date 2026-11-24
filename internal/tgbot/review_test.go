@@ -7,8 +7,7 @@ import (
 	"time"
 )
 
-// Regressions for the findings of the review of 2026-09-24 (docs/TELEGRAM_BOT.md in the
-// development repository, iteration 15).
+// Regression tests for the Telegram bot.
 
 // The monitor holds exits' failures back for the whole uplink outage, so a tunnel that stays dead
 // is marked down a probe round or two after the internet returns. That is news, and it was

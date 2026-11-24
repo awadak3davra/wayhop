@@ -351,7 +351,11 @@ var slowBodyReadTimeout = 2 * time.Minute
 func limitBody(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
-			if r.Body != nil {
+			// Only a request with a body to read gets the deadline. net/http clears it when a body
+			// reaches EOF; with no body it lands on the server's own background read instead, and when
+			// it fires the server takes the connection for dead and cancels r.Context(): an
+			// `curl -X POST /api/apply` running past it was rolled back mid-step (SRV-04).
+			if r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0 {
 				r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 				// Best-effort: SetReadDeadline returns an error on a ResponseWriter whose connection
 				// does not support deadlines (e.g. httptest.ResponseRecorder), where there is no socket
@@ -365,7 +369,7 @@ func limitBody(next http.Handler) http.Handler {
 
 // writeBodyTooLarge answers 413 when err is limitBody's cap tripping, and reports whether it did. A
 // backup with large feed caches can outgrow the cap, and "invalid JSON" would then call the router's
-// own file corrupt (QA-134).
+// own file corrupt.
 func writeBodyTooLarge(w http.ResponseWriter, err error, what string) bool {
 	var tooBig *http.MaxBytesError
 	if !errors.As(err, &tooBig) {

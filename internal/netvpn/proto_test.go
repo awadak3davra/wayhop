@@ -53,7 +53,7 @@ func TestProto_WireGuardRendersItsOwnShape(t *testing.T) {
 	}
 }
 
-// The capability gate. The test router has amneziawg and NOT wireguard — measured — so a plan that asks
+// The capability gate. The reference OpenWrt router has amneziawg and NOT wireguard — measured — so a plan that asks
 // for a handler the router does not have must refuse, and say what to install.
 func TestBuildPlanFor_RefusesAProtocolTheRouterCannotCarry(t *testing.T) {
 	iface := AWGInterface{

@@ -11,7 +11,7 @@ import (
 	"wayhop/internal/model"
 )
 
-// QA-136: a link's Xray finalmask is exported as it came, on every format that carries it, and reads
+// A link's Xray finalmask is exported as it came, on every format that carries it, and reads
 // back the same; a VMess link carries it as 3x-ui writes it, a string in the JSON.
 func TestFinalMask_RoundTrip(t *testing.T) {
 	const fm = `{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","length":"100-200"}}],"udp":[{"type":"noise"}]}`

@@ -95,7 +95,7 @@ func mustLink(t *testing.T, e model.Endpoint) string {
 	return link
 }
 
-// QA-135: pcs= and vcn= (Xray's pinnedPeerCertSha256 and verifyPeerCertByName, as v2rayN writes
+// Pcs= and vcn= (Xray's pinnedPeerCertSha256 and verifyPeerCertByName, as v2rayN writes
 // them) survive import and export on every link that carries them, Reality included (kept, not
 // used), and the verify name never moves into the SNI.
 func TestPinShareLinksRoundTrip(t *testing.T) {

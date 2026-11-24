@@ -16,7 +16,7 @@ import (
 //
 // The commands are the easy half. The half that can break in silence is reading: ParseUCIShow has
 // to understand whatever `uci show` prints, and the list formatting it relies on ("one line,
-// space-separated single-quoted values") had only been measured on 25.12. An older uci printing
+// space-separated single-quoted values") is what 25.12 prints. An older uci printing
 // lists one-per-line would make the parser see a single value, and the post-write verification
 // would then compare the wrong thing and report a match.
 //
@@ -82,8 +82,8 @@ func fixture(t *testing.T, release string) string {
 	return string(b)
 }
 
-// What a real uci printed, read back through our parser, must be what we asked it to store — on
-// every release, not just the one in front of us.
+// What a real uci printed, read back through the parser, must be what it was asked to store — on
+// every release, not just the current one.
 func TestParseUCIShow_RoundTripsThroughEveryRelease(t *testing.T) {
 	want := sampleForFixtures()
 
@@ -145,7 +145,7 @@ func TestParseUCIShow_RoundTripsThroughEveryRelease(t *testing.T) {
 }
 
 // route_allowed_ips='0' is what keeps netifd out of the route table. Checking the rendered command
-// proves we asked; checking what uci gave back proves it was stored.
+// proves it was asked for; checking what uci gave back proves it was stored.
 func TestUCIRoundTrip_RouteAllowedIPsStaysOffOnEveryRelease(t *testing.T) {
 	for _, rel := range releases {
 		text := fixture(t, rel)

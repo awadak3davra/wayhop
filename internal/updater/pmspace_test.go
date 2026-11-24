@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// The test router figures, which is the point of using them: /overlay 20.2 MiB free, the installed
+// The reference OpenWrt router figures, which is the point of using them: /overlay 20.2 MiB free, the installed
 // sing-box 38.7 MiB, the build the feed offers 42.4 MiB. No arrangement of those numbers lets apk
 // write the new build beside the old one, and every one of them came off the live box.
 const (

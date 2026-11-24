@@ -166,7 +166,7 @@ func (s *Server) handleServerScript(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "enter a valid host or IP")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"script": initserver.BuildScript(b.Protocols, b.Host, s.config().Updater.Mirrors...)})
+	writeJSON(w, http.StatusOK, map[string]any{"script": initserver.BuildScriptPinned(b.Protocols, b.Host, s.singBoxPin(r.Context(), ""), s.config().Updater.Mirrors...)})
 }
 
 // ---- provisioning (job-based, with smart console) ----
@@ -287,7 +287,7 @@ func (s *Server) runProvision(job *initserver.Job, b provisionReq) {
 		}
 		ep.Name = name + " · " + label
 		// The installer's self-signed certificate is checked by the pins it printed beside the link,
-		// not accepted unchecked (QA-138); a pin that is not a SHA-256 hash was left out, and is said so.
+		// not accepted unchecked; a pin that is not a SHA-256 hash was left out, and is said so.
 		pinNotes := tc.ApplyPins(ep)
 		// The remote end provisioned fine; the question here is whether THIS router can carry the
 		// client side. A protocol it cannot run would otherwise be created enabled and only fail at
@@ -341,8 +341,7 @@ func (s *Server) runProvision(job *initserver.Job, b provisionReq) {
 	// servers list never claims a protocol whose install failed.
 	s.saveProvisionedServer(job, b, addedProtos)
 
-	// "protocols" used to carry the REQUESTED list while added_endpoints carried the delivered one,
-	// so the two disagreed under the same key-ish name. Name both for what they are.
+	// The requested list and the delivered one are different things; name both for what they are.
 	ok, partial := provisionVerdict(len(b.Protocols), len(addedProtos))
 	job.Finish(ok, map[string]any{
 		"server_id":             serverIDFor(b),
@@ -356,9 +355,8 @@ func (s *Server) runProvision(job *initserver.Job, b provisionReq) {
 
 // provisionVerdict decides how a provisioning run should be reported.
 //
-// The job was previously OK whenever a single protocol came up, and the panel rendered that as a
-// plain "Done — client added to Connections". Ask for three, get one, and the headline still read as
-// success; only the console said otherwise. A run that delivered part of what was asked for is
+// Reporting OK whenever a single protocol came up would render a plain "Done — client added to
+// Connections" for a run that asked for three and got one, with only the console saying otherwise. A run that delivered part of what was asked for is
 // neither a success nor a failure, and the summary has to be able to say so — the same rule as a
 // connection check that could not run the engine.
 func provisionVerdict(requested, provisioned int) (ok, partial bool) {
@@ -378,7 +376,7 @@ func (s *Server) provisionReal(ctx context.Context, job *initserver.Job, b provi
 	job.OK("SSH port " + itoa(b.Port) + " open")
 
 	job.Start("Install " + strings.Join(protoNames(b.Protocols), " + "))
-	script := initserver.BuildScript(b.Protocols, b.Host, s.config().Updater.Mirrors...)
+	script := initserver.BuildScriptPinned(b.Protocols, b.Host, s.singBoxPin(ctx, ""), s.config().Updater.Mirrors...)
 	creds := initserver.Creds{Host: b.Host, Port: b.Port, User: b.User, Password: b.Password, Key: b.Key, KnownHostsFile: s.sshKnownHostsPath()}
 	out, ran, err := initserver.Provision(ctx, creds, script)
 	if !ran {
@@ -430,18 +428,18 @@ func (s *Server) provisionDemo(job *initserver.Job, b provisionReq) string {
 	return sb.String()
 }
 
-// saveProvisionedServer records or refreshes the saved server. Two things it must not do, both
-// learned here: merge OUTSIDE the store lock, and swallow the write error.
+// saveProvisionedServer records or refreshes the saved server. Two things it must not do: merge
+// OUTSIDE the store lock, and swallow the write error.
 //
-// The merge used to be Get -> mergeStrings -> Upsert with the store unlocked in between, so two
-// jobs provisioning different protocols on the same host both read the old list and the later
-// Upsert dropped the other one's protocol - the servers list then under-claimed what is installed.
-// Patch does the same read-modify-write INSIDE the store mutex, with the persist-then-commit and
-// deep-clone the store already implements. On a host the list does not know yet, Patch's miss and the
-// create were two lock acquisitions, and the create replaced the whole record - two first provisions
-// lost a protocol the same way. PatchOrCreate finds or creates under that one hold.
+// A Get -> mergeStrings -> Upsert with the store unlocked in between would let two jobs provisioning
+// different protocols on the same host both read the old list, and the later Upsert would drop the
+// other one's protocol, so the servers list would under-claim what is installed. Patch does the same
+// read-modify-write INSIDE the store mutex, with the persist-then-commit and deep-clone the store
+// already implements. On a host the list does not know yet, a miss followed by a separate create would
+// be two lock acquisitions, and the create replaces the whole record, so two first provisions would
+// lose a protocol the same way. PatchOrCreate finds or creates under that one hold.
 //
-// And a discarded error was the job handing back a server_id for a record that does not exist:
+// A discarded error would be the job handing back a server_id for a record that does not exist:
 // the store persists before it commits, so a failed write leaves the server missing from disk AND
 // memory, while the panel offers to harden a server it cannot resolve. Say so instead.
 func (s *Server) saveProvisionedServer(job *initserver.Job, b provisionReq, installedProtos []string) {
@@ -762,6 +760,9 @@ func (s *Server) runUpdateServerBinary(job *initserver.Job, b serverBinUpdateReq
 		return
 	}
 	script, _ := initserver.UpdateScriptFor(b.Binary, b.Version, s.config().Updater.Mirrors...)
+	if b.Binary == "singbox" {
+		script = initserver.UpdateSingBoxScriptPinned(b.Version, s.singBoxPin(ctx, b.Version), s.config().Updater.Mirrors...)
+	}
 	creds := initserver.Creds{Host: b.Host, Port: b.Port, User: b.User, Password: b.Password, Key: b.Key, KnownHostsFile: s.sshKnownHostsPath()}
 	job.Logf("the current binary is backed up as <path>.wayhop.bak on the server before the swap")
 	out, ran, err := initserver.Provision(ctx, creds, script)
@@ -905,7 +906,7 @@ func redactSecrets(out string) string {
 // sanitizeLinkErr renders a client share-link parse failure WITHOUT leaking the
 // link itself. importer.Parse wraps the raw link into its error via
 // fmt.Errorf("parse %q", raw) (and net/url does the same), so err.Error() carries
-// the live UUID/password/host. We name only the scheme — a public protocol name,
+// the live UUID/password/host. Only the scheme is named — a public protocol name,
 // never a secret, and only when a clean scheme token actually precedes "://" — so
 // the credential body after "://" never reaches the job console/snapshot.
 func sanitizeLinkErr(raw string) string {

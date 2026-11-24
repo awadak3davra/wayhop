@@ -314,7 +314,7 @@ func TestDiff_SSHSecretsNeverRevealed(t *testing.T) {
 	}
 }
 
-// QA-104: the Snell psk and the OpenConnect TOTP secret showed in the change review in the clear, and
+// The Snell psk and the OpenConnect TOTP secret showed in the change review in the clear, and
 // so did an OpenVPN profile's client key, tls-auth / tls-crypt key and static key. Each diffs like a
 // password: a change row that names the field and never its value.
 func TestDiff_ProtocolSecretsNeverRevealed(t *testing.T) {

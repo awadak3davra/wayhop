@@ -164,7 +164,7 @@ func TestProvisionSSHArgs(t *testing.T) {
 	}
 
 	// Defense-in-depth: a "--" end-of-options marker must immediately precede the user@host
-	// destination so a leading-hyphen user/host can never be reparsed by ssh as an option (CWE-88).
+	// destination so a leading-hyphen user/host can never be reparsed by ssh as an option.
 	for name, args := range map[string][]string{"withKH": withKH, "noKH": noKH, "dflt": dflt} {
 		guarded := false
 		for i := 1; i < len(args); i++ {

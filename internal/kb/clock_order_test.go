@@ -44,7 +44,7 @@ func verifyError(t *testing.T, notBefore, notAfter, now time.Time) string {
 	return (&tls.CertificateVerificationError{Err: err}).Error()
 }
 
-// QA-130. The first entry a line matches is the cause the panel and the bot show. A clock-driven
+// The first entry a line matches is the cause the panel and the bot show. A clock-driven
 // failure matches the certificate-trust entries too, and theirs is the advice to turn certificate
 // checking off, so the clock entry has to come first for Go's real text, in both directions.
 func TestClockFailureIsFirstMatchedAsTheClock(t *testing.T) {

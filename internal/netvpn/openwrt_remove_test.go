@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// The exact shape the test router reports: a named peer section, and a vpn zone that lists the tunnel.
+// The exact shape the reference OpenWrt router reports: a named peer section, and a vpn zone that lists the tunnel.
 const removeNetUCI = `network.wrprobe0=interface
 network.wrprobe0.proto='amneziawg'
 network.wrprobe0.private_key='cHJpdmF0ZQ=='

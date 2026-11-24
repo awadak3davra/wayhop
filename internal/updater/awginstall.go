@@ -199,7 +199,7 @@ func (i AWGInstaller) run(parent context.Context, op, mode string, timeout time.
 	}
 	// The run directory is tmpfs on OpenWrt and KeeneticOS: the script never touches flash, and a
 	// copy left behind by a crash is gone at the next boot.
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := binstore.EnsureRunDir(dir); err != nil {
 		return fail("could not prepare %s for the installer: %v", dir, err)
 	}
 	f, err := os.CreateTemp(dir, "install-awg-*.sh")

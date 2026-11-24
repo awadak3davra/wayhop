@@ -10,7 +10,7 @@ import (
 
 // A channel's subscribers can press the buttons on its posts, and Telegram does not say who may: a
 // channel made a viewer in the panel carried Status and Mute on every alert, for anyone who can see it
-// to press (QA-102). Pairing forces a channel to alerts and records its type; the panel's role change
+// to press. Pairing forces a channel to alerts and records its type; the panel's role change
 // refuses viewer and owner for a chat recorded as a channel, as it refuses owner for any group.
 func TestTelegramChannelStaysAlertsOnly(t *testing.T) {
 	s := tgServer(t)

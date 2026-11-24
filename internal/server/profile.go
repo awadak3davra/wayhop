@@ -58,7 +58,7 @@ func (s *Server) handleGetProfile(w http.ResponseWriter, r *http.Request) {
 	p := s.store.Profile()
 	if r.URL.Query().Get("lite") == "1" {
 		// The panel's form carries each object's revision, which an edit of it sends back in If-Match
-		// (QA-152; see revision.go). The full form is the backup format and does not.
+		// (see revision.go). The full form is the backup format and does not.
 		lp := liteProfileOf(p, s.cidrCheckedAt)
 		lp.Revs = profileRevsOf(p)
 		writeJSON(w, http.StatusOK, lp)
@@ -70,9 +70,8 @@ func (s *Server) handleGetProfile(w http.ResponseWriter, r *http.Request) {
 // liteList is a routing list without its feed cache, carrying the cache's SIZE instead.
 //
 // The panel reloads the profile on every page render and after every mutation — around thirty call
-// sites — and the caches are by far the largest thing in it: on a live router one list held
-// 15 866 CIDRs, and /api/profile answered 275 KB where the panel needed a few kilobytes of names,
-// ids and toggles. Nothing in the UI reads the cache CONTENTS; two places read its length, to show
+// sites — and the caches are by far the largest thing in it: one list of about 16k CIDRs makes
+// /api/profile answer some 275 KB where the panel needs a few kilobytes of names, ids and toggles. Nothing in the UI reads the cache CONTENTS; two places read its length, to show
 // "12 043 entries" and "not fetched yet". So the count is sent and the array is not.
 // omitempty on both counts, because most lists have no feed at all: the stress profile carries 66
 // lists and none of them a cache, where two always-present zero fields added 1.7 KB to a payload
@@ -99,7 +98,7 @@ type liteProfile struct {
 	model.Profile
 	RoutingLists []liteList `json:"routing_lists"`
 	// Revs is each connection's, group's and routing list's revision as read here, the If-Match of an
-	// edit made from it (QA-152).
+	// edit made from it.
 	Revs *profileRevs `json:"revs,omitempty"`
 }
 
@@ -170,8 +169,8 @@ func (s *Server) handleRestoreProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A body of null decodes into an empty profile without an error, and replacing the profile with it
-	// erased every connection, group, rule, list and DNS setting with a 200 "restored" (found by an API
-	// hunter on an emulated OpenWrt). A restore is a profile object or nothing.
+	// would erase every connection, group, rule, list and DNS setting with a 200 "restored". A restore
+	// is a profile object or nothing.
 	if t := bytes.TrimSpace(raw); len(t) == 0 || t[0] != '{' {
 		writeErr(w, http.StatusBadRequest, "invalid profile JSON: the body must be a profile object")
 		return
@@ -204,11 +203,11 @@ func (s *Server) handleUpsertEndpoint(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, body)
 }
 
-// handlePatchEndpoint switches one connection on or off and changes nothing else (QA-152).
+// handlePatchEndpoint switches one connection on or off and changes nothing else.
 //
-// The switch used to post the whole connection as the page had loaded it, so a switch flipped in a
-// page left open put back whatever another tab had changed since. It sends only {"enabled": bool}
-// now; the rest is read here, from the profile as it is, and saved through the same checks as a full
+// Posting the whole connection as the page had loaded it would let a switch flipped in a page left
+// open put back whatever another tab had changed since. The switch sends only {"enabled": bool};
+// the rest is read here, from the profile as it is, and saved through the same checks as a full
 // save (the capability gate, ?detach=1 and ?replace_with= for an exit something still routes
 // through). The read and the write are one revision of the connection: one that loses a race to
 // another write of it is read again rather than saved over it. Any field but "enabled" is refused, so
@@ -254,7 +253,7 @@ func (s *Server) saveEndpoint(ctx context.Context, e model.Endpoint, q url.Value
 		return fail(code, msg)
 	}
 	// Enabled, an endpoint the core cannot load fails model.Validate and with it every Apply of the
-	// whole profile (QA-028). Refuse it here, where the caller can still fix it, as the gate does.
+	// whole profile. Refuse it here, where the caller can still fix it, as the gate does.
 	if e.Enabled {
 		if p := model.EndpointParamProblem(&e); p != "" {
 			name := e.Name
@@ -391,8 +390,8 @@ func (s *Server) gateCapabilities(e model.Endpoint, requirements []string, set p
 			msg += " " + cap.Remedy
 		}
 		// The router's own AmneziaWG definitely cannot create it, and the planner then runs it on
-		// WayHop's AmneziaWG engine, which needs none of these operations (QA-133: before KeeneticOS
-		// 4.2 no new AmneziaWG connection could be saved at all). Refused only when that engine cannot
+		// WayHop's AmneziaWG engine, which needs none of these operations (otherwise no new
+		// AmneziaWG connection could be saved at all before KeeneticOS 4.2). Refused only when that engine cannot
 		// run it here either.
 		if _, onPlugin := s.enginePluginLane(e, set); onPlugin {
 			why := s.awgPluginCannotRun(e)
@@ -536,8 +535,8 @@ func (s *Server) handleUpsertGroup(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid group JSON")
 		return
 	}
-	// The form asks for five seconds at least. A hunter on an emulated OpenWrt typed 1, the server kept
-	// it, and the card promised a probe through every member every second.
+	// The form asks for five seconds at least. The server enforces it too: an interval of 1 would
+	// promise a probe through every member every second.
 	if g.Test != nil && g.Test.Interval != 0 && g.Test.Interval < minGroupProbeInterval {
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("the probe interval must be at least %d seconds", minGroupProbeInterval))
 		return
@@ -556,15 +555,19 @@ func (s *Server) handleUpsertGroup(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteGroup(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := s.store.DeleteGroup(id); err != nil {
+	// ?replace_with=<outbound> moves what points at the group there; ?detach=1 parks it switched off.
+	// Neither keeps the refusal, which now carries the choices (see delGroup in the panel).
+	replacement := strings.TrimSpace(r.URL.Query().Get("replace_with"))
+	if err := s.store.DeleteGroupReplacing(id, replacement, r.URL.Query().Get("detach") == "1"); err != nil {
 		// Structured, like the endpoint path: the sentence alone left the panel with nothing to render
 		// but the raw error. The panel asks its own question before offering the destructive confirm;
 		// this is what it falls back to when that check has not learned about a condition yet.
 		if blockers := s.store.GroupDeleteBlockers(id); len(blockers) != 0 {
 			writeJSON(w, http.StatusConflict, map[string]any{
-				"error":      err.Error(),
-				"code":       "GROUP_IN_USE",
-				"dependents": blockers,
+				"error":        err.Error(),
+				"code":         "GROUP_IN_USE",
+				"dependents":   blockers,
+				"replacements": s.store.GroupReplacements(id),
 			})
 			return
 		}
@@ -608,6 +611,10 @@ func (s *Server) handleUpsertRoutingList(w http.ResponseWriter, r *http.Request)
 	// Bound the auto-refresh cadence at the write boundary (400), NOT in Validate — a hard Validate
 	// failure would brick Apply for profiles persisted before the bounds existed. The ticker clamps
 	// legacy values; new writes are rejected here.
+	// Outbound follows the first candidate, and "fastest" with one tunnel is switched off: there is
+	// nothing to choose from, and the review says so instead of an error.
+	cur := s.store.Profile()
+	model.NormalizeRoutingList(&cur, &rl)
 	if !model.ValidRefreshHours(rl) {
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("refresh_hours must be 0 (default 24h) or %d–%d hours for a CIDR-source list (flash protection)", model.MinCIDRRefreshHours, model.MaxCIDRRefreshHours))
 		return
@@ -616,6 +623,13 @@ func (s *Server) handleUpsertRoutingList(w http.ResponseWriter, r *http.Request)
 	// with a line break in it would otherwise be saved and only block Apply later.
 	if err := model.ValidateManualEntries(rl); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// So is an entry with a "/" that is not an IP prefix, which no plane can match and none reports.
+	// Only entries this save adds: a list that already holds one keeps working as it did, and a change
+	// of its outbound from the row's select is not refused over an entry it does not touch.
+	if bad := model.MalformedManualPrefix(newManualEntries(&cur, rl)); bad != "" {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("routing list %q: entry %q is not an IP prefix such as 192.0.2.0/24, and a name cannot hold \"/\" (type a site as example.com, without its address path)", rl.ID, bad))
 		return
 	}
 	saved, err := s.store.UpsertRoutingListAt(rl, rev)
@@ -627,8 +641,8 @@ func (s *Server) handleUpsertRoutingList(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// The answer is the list as stored, which the store may have adjusted (a carried format dropped,
-	// QA-150), so a page that keeps its copy as saved.Rev keeps what that revision is. Its feed caches
+	// The answer is the list as stored, which the store may have adjusted (a carried format dropped),
+	// so a page that keeps its copy as saved.Rev keeps what that revision is. Its feed caches
 	// are left out, as in the lite profile. A write that landed in between leaves the list as sent.
 	p := s.store.Profile()
 	for i := range p.RoutingLists {
@@ -640,9 +654,34 @@ func (s *Server) handleUpsertRoutingList(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, savedRev[model.RoutingList]{Object: rl, Saved: saved})
 }
 
+// newManualEntries are the typed entries of rl that the stored list of the same id does not hold.
+func newManualEntries(p *model.Profile, rl model.RoutingList) []string {
+	var stored []string
+	for i := range p.RoutingLists {
+		if p.RoutingLists[i].ID == rl.ID {
+			stored = p.RoutingLists[i].Manual
+			break
+		}
+	}
+	if len(stored) == 0 {
+		return rl.Manual
+	}
+	had := make(map[string]bool, len(stored))
+	for _, e := range stored {
+		had[e] = true
+	}
+	var out []string
+	for _, e := range rl.Manual {
+		if !had[e] {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // handlePatchRoutingList switches one routing list on or off and changes nothing else, for the same
-// reason and in the same way as handlePatchEndpoint (QA-152): the switch posted the list as the page
-// had loaded it, so it put back the entries, outbound or URL another tab had saved since. The
+// reason and in the same way as handlePatchEndpoint: posting the list as the page had loaded it
+// would put back the entries, outbound or URL another tab had saved since. The
 // refresh-hours bound is not checked again: this write does not change them, and a list saved before
 // the bound existed must still be switchable.
 func (s *Server) handlePatchRoutingList(w http.ResponseWriter, r *http.Request) {
@@ -686,7 +725,21 @@ func (s *Server) handlePatchRoutingList(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleDeleteRoutingList(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if r.URL.Query().Get("detach") == "1" {
+		if err := s.store.DeleteRoutingListDetaching(id); err != nil {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"deleted": id, "detached": true})
+		return
+	}
 	if err := s.store.DeleteRoutingList(id); err != nil {
+		if rules := s.store.RoutingListDNSRules(id); len(rules) != 0 {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error": err.Error(), "code": "ROUTING_LIST_IN_USE", "dependents": rules,
+			})
+			return
+		}
 		writeErr(w, http.StatusConflict, err.Error())
 		return
 	}
@@ -733,8 +786,8 @@ var (
 
 // routingPresetsFor is the catalog as this platform can carry it. A domain feed needs no core only
 // where a resolver plane turns its names into set members: KeeneticOS's dnsmasq ipset. Elsewhere the
-// names reach no kernel plane and the core matches them (QA-066), so offering such a preset as coreless
-// on a router without sing-box saved a list that then blocked every Apply.
+// names reach no kernel plane and the core matches them, so offering such a preset as coreless on a
+// router without sing-box would save a list that then blocks every Apply.
 func routingPresetsFor(p platform.Platform) []model.RoutingPreset {
 	presets := model.RoutingPresets()
 	if p == platform.Keenetic {
@@ -744,8 +797,7 @@ func routingPresetsFor(p platform.Platform) []model.RoutingPreset {
 		if presets[i].DomainSource != "" {
 			presets[i].RequiresCore = true
 			// The catalog text describes KeeneticOS, where the resolver carries these feeds. Here
-			// the badge says "needs sing-box", so the description must not promise the opposite
-			// (QA-122).
+			// the badge says "needs sing-box", so the description must not promise the opposite.
 			presets[i].Description = coreRequiredText.Replace(presets[i].Description)
 		}
 	}
@@ -904,9 +956,9 @@ func (s *Server) handleRoutingStatus(w http.ResponseWriter, r *http.Request) {
 				res[i] = cur
 				return
 			}
-			// The status line is the whole answer. The body used to be read to the end, so every
-			// visit to the Dashboard or to Routing downloaded every rule set in full (megabytes,
-			// through the tunnel, up to 12 s each) to colour a dot.
+			// The status line is the whole answer. Reading the body to the end would download every
+			// rule set in full (megabytes, through the tunnel, up to 12 s each) on every Dashboard or
+			// Routing visit, just to colour a dot.
 			resp.Body.Close()
 			cur.Status = resp.StatusCode
 			cur.OK = resp.StatusCode >= 200 && resp.StatusCode < 400
@@ -976,8 +1028,8 @@ func (s *Server) handleEndpointCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A Hysteria2 realm or gecko obfuscation the known core cannot carry is rendered without it, so
-	// the config is valid while the connection can never come up: on 1.13 a realm connection checked
-	// "configuration is valid" and Apply then raised an exit with no address (QA-059). Say so here,
+	// the config is valid while the connection can never come up: on 1.13 a realm connection checks
+	// "configuration is valid" and Apply then raises an exit with no address. Say so here,
 	// as the Apply review does. An unknown core version says nothing, there as here.
 	if generator.RealmNeedsNewerCore(&e, opts.CoreVersion) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "checked_by": checkedByGenerator,
@@ -1021,11 +1073,10 @@ func (s *Server) handleEndpointCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// An endpoint routed through an interface WayHop does not manage is configured by exactly one
-	// field — that interface name — and the engine never looks at it. Measured on a live
-	// Keenetic: sing-box check -c with bind_interface "iface-that-does-not-exist" exits 0, the same
-	// as with the real nwg1. So the engine's opinion of a config the engine does not carry (pbr
-	// routes these, not sing-box) was reported as "configuration is valid" while the one field that
-	// can actually be wrong went unexamined — a typo'd interface name checked out clean.
+	// field — that interface name — and the engine never looks at it: `sing-box check -c` with
+	// bind_interface "iface-that-does-not-exist" exits 0, the same as with a real interface. The
+	// engine's opinion of a config it does not carry (pbr routes these, not sing-box) would report
+	// "configuration is valid" while a typo'd interface name went unexamined.
 	//
 	// EngineExternal only: netifd/NDM owns these, so the interface must already exist. An AmneziaWG
 	// endpoint is WayHop-managed and its device legitimately does not exist until Apply brings it
@@ -1139,11 +1190,9 @@ func fastModeDomainWarning(p *model.Profile, mode string, kernelCarriesDomains b
 		// ipset members at query time and the kernel routes them; without it the list would route
 		// nothing at all in fast mode, which is exactly what this warning exists to say.
 		//
-		// Measured on a live Keenetic: a list carrying teamviewer.com took its set from 15
-		// to 22 members across three lookups and the set's MARK rule counted packets, in fast mode,
-		// with no TUN anywhere. The warning fired anyway and advised switching routing mode to fix
-		// something that already worked. Advice that talks a user out of a correct configuration is
-		// worse than silence.
+		// On KeeneticOS in fast mode, with no TUN anywhere, a domain list's set grows as names are
+		// looked up and its MARK rule counts packets. Warning there would talk the user out of a
+		// configuration that already works, which is worse than silence.
 		if kernelCarriesDomains {
 			continue
 		}
@@ -1275,7 +1324,7 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 // tests that point at a loopback httptest server.)
 // subscriptionUserAgent is the User-Agent a subscription is fetched with: the configured one, or
 // "wayhop". Provider panels pick the format by it and some refuse a client they do not know
-// (OpenClash and Passwall2 let the user set it; competitor gap 2).
+// (OpenClash and Passwall2 let the user set it too).
 func subscriptionUserAgent(ua string) string {
 	if ua = strings.TrimSpace(ua); ua != "" {
 		return ua
@@ -1395,7 +1444,7 @@ func (s *Server) handleBulkEndpoints(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// One snapshot for the merge AND the write (At its generation): an import that loses a race to
-	// another save is merged again from what that save left, not written over it (QA-152).
+	// another save is merged again from what that save left, not written over it.
 	for attempt := 0; ; attempt++ {
 		p, gen := s.store.Snapshot()
 		status, out := s.bulkImport(r.Context(), p.Endpoints, body.Endpoints, gen)
@@ -1417,7 +1466,7 @@ func (s *Server) bulkImport(ctx context.Context, existing, incoming []model.Endp
 	eps, dupes := importer.DedupeNew(existing, incoming)
 
 	// An in-place update is the link's connection with what the user owns carried over
-	// (importer.Reimport, QA-148), so the user's edits survive it. One whose link-derived part is
+	// (importer.Reimport), so the user's edits survive it. One whose link-derived part is
 	// exactly as stored is not written and is counted as unchanged; the answer says how many were
 	// added, updated and unchanged instead of calling all of them "imported".
 	byID := make(map[string]*model.Endpoint, len(existing))
@@ -1484,8 +1533,8 @@ func (s *Server) bulkImport(ctx context.Context, existing, incoming []model.Endp
 			eps[i].Enabled = false
 			gated = append(gated, eps[i].Name+" ("+string(eps[i].Protocol)+"): "+msg)
 		}
-		// The same holds for an entry that cannot load at all (QA-028: a sing-box openvpn-client with
-		// no certificate). Stored enabled it fails model.Validate, and that blocks every Apply.
+		// The same holds for an entry that cannot load at all (for example a sing-box openvpn-client
+		// with no certificate). Stored enabled it fails model.Validate, and that blocks every Apply.
 		if eps[i].Enabled {
 			if p := model.EndpointParamProblem(&eps[i]); p != "" {
 				eps[i].Enabled = false
@@ -1547,11 +1596,11 @@ func (s *Server) routingMode(c config.Config) string {
 
 // hostVerdictCache keeps the kernel-PBR and accelerator verdicts for as long as a capability
 // observation stays trustworthy (capStaleAfter), and takes the fresh answer whenever the capability
-// set is probed again - an explicit ?refresh=1 included. They used to be detected once for the
-// daemon's lifetime (QA-129): the remedy the review prints for a refused fast or hybrid mode
-// (`opkg install nftables`, `opkg install ipset iptables`) never lifted the refusal until a
-// restart, while /api/native/capabilities, which probes fresh, already reported the mode usable; and
-// a flow-offload module installed later was never compiled for.
+// set is probed again - an explicit ?refresh=1 included. Detected once for the daemon's lifetime,
+// the remedy the review prints for a refused fast or hybrid mode (`opkg install nftables`,
+// `opkg install ipset iptables`) would not lift the refusal until a restart, while
+// /api/native/capabilities, which probes fresh, already reports the mode usable; and a flow-offload
+// module installed later would never be compiled for.
 //
 // A stale accelerator is probed again inside the request that asks (/api/health among them), and
 // the probe is a full platform.DetectCapabilities: accelProbe makes the requests that find it stale
@@ -1703,9 +1752,21 @@ func (s *Server) pbrCompileOptions(c config.Config) pbr.Options {
 	if platform.Detect() == platform.Keenetic {
 		opts.CollectDomainZones = true
 	}
+	// A routing list in "fastest" mode gets its own mark and table, which the kernel elector re-points
+	// (listfastest.go), on both kernel planes. A profile without such a list compiles to the same
+	// marks and tables as before: list egresses are numbered after every other one.
+	opts.ListEgresses = true
+	// Marks and tables stay where the installed plane has them, on the nft plane: a list going into
+	// fastest mode, or an outbound no list uses any more, does not renumber every later egress. KeeneticOS keeps its numbering by tag: its plane, its backstop and its hook's
+	// stored program are all derived from it.
+	if platform.Detect() != platform.Keenetic && s.detectedPlatform() != platform.Keenetic {
+		opts.Slots = pbr.SlotsOf(s.installedKernelPlan(), opts)
+	}
 	if s.routingMode(c) != "fast" {
 		return opts
 	}
+	// The fast DNS plane (fastdns.go): names through dnsmasq's nftset, core-only lists pinned.
+	s.fastDNSCompileOptions(c, &opts)
 	// "auto" is resolved against the capability probe FIRST, so everything downstream sees a concrete
 	// mode. Resolution is a pure function of the probe, so preview, apply and reconcile cannot
 	// disagree about what auto meant on this host.
@@ -1781,7 +1842,7 @@ func (s *Server) genOptionsWithPlan(p *model.Profile, c config.Config) (generato
 		// (nothing excluded, nothing kernel-routed).
 		log.Printf("genOptions: pbr.Compile failed, falling back to non-hybrid: %v", err)
 		// Fail SAFE, not open: capture everything through the TUN so nothing leaks while the
-		// kernel plane is absent. We only reach here for hybrid/fast (past the early return);
+		// kernel plane is absent. Only hybrid/fast reach here (past the early return);
 		// keying this off c.Gateway could yield TunEnabled=false and silently egress the
 		// censored traffic clear on a compile error.
 		opts.TunEnabled = true
@@ -1794,10 +1855,17 @@ func (s *Server) genOptionsWithPlan(p *model.Profile, c config.Config) (generato
 		// carve-outs like TG-calls/VoWiFi) steers LAN traffic via fwmark. Domain carve-outs
 		// are inactive for LAN here (no TUN to sniff them) — they'd only affect the local
 		// mixed-proxy inbound. No route_exclude needed (there is no TUN to exclude from);
-		// the plan is still returned so handleApply installs the kernel routes. Phase 1b
-		// will additionally enable HW flow-offload (excluding carve-out marks).
-		opts.TunEnabled = false
-		return opts, plan
+		// the plan is still returned so handleApply installs the kernel routes.
+		// With the TUN back (core-only lists), the core keeps every list as hybrid emits it: a flow that
+		// reaches it anyway (an unpinned source, an address a core list shares with a tunnel list) is
+		// still routed by name. Without a TUN the kernel lists leave it.
+		opts.FastDNS = plan.FastDNS && !plan.CorePin
+		if !plan.CorePin {
+			opts.TunEnabled = false
+			return opts, plan
+		}
+		// Phase 2: lists only the core carries keep the hybrid TUN; pbr's wr_corepin pins every
+		// other LAN flow past its redirect. Excluded as in hybrid below.
 	}
 	opts.TunEnabled = true // hybrid always keeps the TUN, regardless of c.Gateway
 	// Exclude the CIDRs the kernel plane routes — every zone EXCEPT blackhole — plus

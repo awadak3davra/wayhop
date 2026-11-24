@@ -47,7 +47,7 @@ func dnsDefaultFixture() model.Profile {
 	}
 }
 
-// QA-105. No DNS rule covers a tunnelled list and no default resolver is chosen, so sing-box answers
+// No DNS rule covers a tunnelled list and no default resolver is chosen, so sing-box answers
 // the list's lookups with the first server: the router's plaintext `local` resolver. The audit skipped
 // every uncovered list when `final` was empty, so the plaintext gate never fired; the same plane with
 // final set to that resolver was refused.
@@ -72,7 +72,7 @@ func TestDNSPath_EmptyFinalIsJudgedAsTheFirstResolver(t *testing.T) {
 	}
 }
 
-// QA-106. A FakeIP server sends no query anywhere: it hands out a synthetic address and the name is
+// A FakeIP server sends no query anywhere: it hands out a synthetic address and the name is
 // resolved at the tunnel exit. The audit read its empty detour as "direct" and its type as plaintext,
 // so the catalog's FakeIP domain-routing preset was refused as a plaintext leak in every mode. Outside
 // TUN the generator drops the fakeip rule and the list falls through to the default resolver, which is

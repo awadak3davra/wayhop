@@ -409,7 +409,7 @@ func (b *Bot) deliverTo(ctx context.Context, t config.Telegram, rec config.Teleg
 		err := b.api.EditMessage(cctx, rec.ID, openID, text, kb)
 		// The incident stays open while the edit can still land: a retryable failure keeps the alert
 		// queued, and the retry needs the message to edit. Closing it anyway made the retry find nothing
-		// and drop the outcome, so the phone kept "rolls back by itself" with Keep / Roll back (QA-101).
+		// and drop the outcome, so the phone kept "rolls back by itself" with Keep / Roll back.
 		if a.Resolves && (err == nil || !retryable(err)) {
 			closeAll()
 		}

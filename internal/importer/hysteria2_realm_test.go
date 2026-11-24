@@ -44,7 +44,7 @@ func TestParseHysteria2Realm_UpstreamExample(t *testing.T) {
 	if !strings.HasPrefix(e.ID, "hysteria2-realm-rendezvous-example-com-") {
 		t.Errorf("id = %q", e.ID)
 	}
-	// Two realms on one rendezvous are two connections, not one to be replaced by the other (QA-058);
+	// Two realms on one rendezvous are two connections, not one to be replaced by the other;
 	// the same link twice is still the same one.
 	other, err := Parse("hysteria2+realm://mytoken@rendezvous.example.com/group-0a1b2c3d4e?auth=pw")
 	again, err2 := Parse(link)

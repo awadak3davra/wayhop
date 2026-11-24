@@ -60,7 +60,7 @@ var resolverCatalog = map[string]*operatorCatalog{
 		dotSNI:        "dns.quad9.net",
 		dohURL:        "https://9.9.9.9/dns-query",
 	},
-	// Seen on a test router as "unknown operator": the second address OpenWrt's own lists carry for Quad9.
+	// Seen on a reference OpenWrt router as "unknown operator": the second address OpenWrt's own lists carry for Quad9.
 	"149.112.112.112": {
 		name:          "quad9",
 		identityName:  "id.server",
@@ -130,3 +130,7 @@ func addressInRanges(address string, ranges []netip.Prefix) bool {
 	}
 	return false
 }
+
+// CloudflareRanges is Cloudflare's published address ranges, the measurement contract's list. Other
+// callers use it to recognise shared anycast addresses (many sites on one address).
+func CloudflareRanges() []netip.Prefix { return cloudflareRanges() }

@@ -3,7 +3,7 @@ package nativedns
 import "testing"
 
 // Fixtures are shaped like real `nft list ruleset` output from OpenWrt fw4, which is what the test
-// test router runs. The point of each is a distinction the iptables scanner never had to make, because
+// reference OpenWrt router runs. The point of each is a distinction the iptables scanner never had to make, because
 // `iptables -t nat -S` prints only the nat table while nft prints everything at once.
 
 const fw4Redirect = `table inet fw4 {
@@ -106,7 +106,7 @@ func TestDetectFromNft_DoTHandledAnywhere(t *testing.T) {
 }
 
 // Nothing usable in, nothing asserted out. Parsed=false is what stops an empty read being reported
-// as "this router has no redirect" — the absence-as-evidence mistake AUD-43 was about.
+// as "this router has no redirect" — the absence-as-evidence mistake.
 func TestDetectFromNft_UnparseableInputAssertsNothing(t *testing.T) {
 	for _, in := range []string{
 		"",
@@ -136,7 +136,7 @@ func TestDetectFromNft_EmptyRulesetParsesButFindsNothing(t *testing.T) {
 	}
 }
 
-// Captured verbatim from the test test router (OpenWrt 25.12.2, fw4, https-dns-proxy installed). This
+// Captured verbatim from the reference OpenWrt router (OpenWrt 25.12.2, fw4, https-dns-proxy installed). This
 // is the shape the synthetic fixtures above got WRONG: fw4 does not put per-zone dstnat rules in the
 // base chain. The base `dstnat` chain carries only a jump, and the redirect lives in `dstnat_lan`,
 // a regular chain with no hook declaration of its own.

@@ -14,6 +14,23 @@ import (
 	"time"
 )
 
+// The helper-process tests start a second copy of this (large) test binary. Under a full parallel
+// `go test ./...` on Windows that start alone took longer than the 2 s the command was given, so the
+// tests failed with the timeout sentinel instead of the one they check. Their bounds are now set by
+// what each proves, not by how fast a process starts:
+//   - hostIOHelperBudget is the command timeout where the timeout is not the subject; the output and
+//     pipe sentinels are reached long before it;
+//   - hostIOHangLife is how long the "hang" helper sleeps and hostIOHangBound how soon a 100 ms
+//     command timeout must have ended it: well before the helper would end on its own;
+//   - hostIOPipeHolderLife is how long the descendant helper's grandchild holds the inherited pipes; a
+//     Wait that waited for them could not return before it.
+const (
+	hostIOHelperBudget   = 30 * time.Second
+	hostIOHangLife       = 20 * time.Second
+	hostIOHangBound      = 10 * time.Second
+	hostIOPipeHolderLife = 10 * time.Second
+)
+
 func TestRunHostCommandBounded_Timeout(t *testing.T) {
 	setApplyHostIOHelper(t)
 	started := time.Now()
@@ -24,7 +41,7 @@ func TestRunHostCommandBounded_Timeout(t *testing.T) {
 	if !errors.Is(err, errApplyHostCommandTimeout) {
 		t.Fatalf("error = %v, want fixed timeout sentinel", err)
 	}
-	if elapsed := time.Since(started); elapsed > 2*time.Second {
+	if elapsed := time.Since(started); elapsed > hostIOHangBound {
 		t.Fatalf("timeout took %v; command was not context-bounded", elapsed)
 	}
 }
@@ -32,7 +49,7 @@ func TestRunHostCommandBounded_Timeout(t *testing.T) {
 func TestRunHostCommandBounded_OutputCap(t *testing.T) {
 	setApplyHostIOHelper(t)
 	_, err := runHostCommandBounded(
-		context.Background(), 2*time.Second, 4<<10, 100*time.Millisecond,
+		context.Background(), hostIOHelperBudget, 4<<10, 100*time.Millisecond,
 		os.Args[0], "-test.run=^TestApplyHostIOHelperProcess$", "--", "flood",
 	)
 	if !errors.Is(err, errApplyHostCommandOutput) {
@@ -44,15 +61,16 @@ func TestRunHostCommandBounded_DescendantPipeHasWaitBound(t *testing.T) {
 	setApplyHostIOHelper(t)
 	started := time.Now()
 	_, err := runHostCommandBounded(
-		context.Background(), 2*time.Second, 8<<10, 100*time.Millisecond,
+		context.Background(), hostIOHelperBudget, 8<<10, 100*time.Millisecond,
 		os.Args[0], "-test.run=^TestApplyHostIOHelperProcess$", "--", "descendant",
 	)
 	if !errors.Is(err, errApplyHostCommandPipes) {
 		t.Fatalf("error = %v, want fixed inherited-pipe sentinel", err)
 	}
-	// A -race child has an approximately one-second exit delay of its own. Stay below the
-	// command's two-second deadline while allowing that instrumentation overhead.
-	if elapsed := time.Since(started); elapsed > 1800*time.Millisecond {
+	// The grandchild starts after this call did and holds the pipes for hostIOPipeHolderLife, so a
+	// return before that did not wait for them, however slowly the helper (a -race child has about a
+	// second of exit delay of its own) started or stopped.
+	if elapsed := time.Since(started); elapsed >= hostIOPipeHolderLife {
 		t.Fatalf("inherited pipe held Wait for %v; WaitDelay was not effective", elapsed)
 	}
 }
@@ -70,8 +88,11 @@ func TestApplyHostIOHelperProcess(t *testing.T) {
 	}
 	mode := os.Args[len(os.Args)-1]
 	switch mode {
-	case "hang", "sleeper":
-		time.Sleep(5 * time.Second)
+	case "hang":
+		time.Sleep(hostIOHangLife)
+		os.Exit(0)
+	case "sleeper":
+		time.Sleep(hostIOPipeHolderLife)
 		os.Exit(0)
 	case "flood":
 		_, _ = os.Stdout.Write([]byte(strings.Repeat("x", 256<<10)))
@@ -82,7 +103,8 @@ func TestApplyHostIOHelperProcess(t *testing.T) {
 			// A grandchild running this same *.test.exe would keep the image locked after the parent
 			// test exits, and `go test` could not remove it. cmd.exe is a separate disposable image
 			// while still exercising an inherited stdout/stderr pipe.
-			child = exec.Command("cmd.exe", "/c", "ping -n 3 127.0.0.1 >nul")
+			// ping -n N waits about N-1 seconds.
+			child = exec.Command("cmd.exe", "/c", fmt.Sprintf("ping -n %d 127.0.0.1 >nul", int(hostIOPipeHolderLife/time.Second)+1))
 		} else {
 			child = exec.Command(os.Args[0], "-test.run=^TestApplyHostIOHelperProcess$", "--", "sleeper")
 		}

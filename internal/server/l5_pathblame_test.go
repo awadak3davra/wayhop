@@ -11,7 +11,7 @@ import (
 // TestBoundPathIsBlamedOnlyOnEvidence (L5): a failure message that names the wrong culprit costs the
 // operator the change it advises plus the time to discover it changed nothing.
 //
-// Measured on a live Keenetic. /api/updater/self/fit answered:
+// Observed on KeeneticOS. /api/updater/self/fit answered:
 //
 //	release metadata: 3 source(s) tried, all failed; 2 of them with an HTTP error status, the last
 //	with a name that did not resolve — downloads are bound to "grp-primary" (nwg3); if that

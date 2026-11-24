@@ -27,7 +27,7 @@ func TestRollbackNowFailureSurfaces(t *testing.T) {
 	}
 }
 
-// QA-147: the ticks after a failed manual Roll back keep its verdict. Healthy, unknown and bad
+// The ticks after a failed manual Roll back keep its verdict. Healthy, unknown and bad
 // observations used to relabel it "armed", "unverified" or "degraded", and the window closed at its
 // deadline as "live_unsaved" while the Test was still partly on the router.
 func TestFailedManualRollbackVerdictSurvivesTicks(t *testing.T) {

@@ -1,1 +1,3 @@
 /etc/wayhop
+/etc/init.d/wayhop-guard
+/etc/rc.d/S18wayhop-guard

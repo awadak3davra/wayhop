@@ -11,7 +11,7 @@ import (
 // pmspace.go decides HOW a package write can be made to fit on a router that has no room for it.
 //
 // The problem is specific and measurable. apk installs an upgrade by writing the new files beside
-// the old ones and renaming over them, so at the peak both builds are on disk. On the test router the
+// the old ones and renaming over them, so at the peak both builds are on disk. On the reference OpenWrt router the
 // core is 38.7 MiB installed, the feed's next build is 42.4 MiB, and /overlay has 20.2 MiB free:
 // `apk upgrade sing-box` cannot work there by any amount of retrying, and the only reason it has
 // never been seen failing is that the panel was sending `apk add` and changing nothing at all.
@@ -117,7 +117,7 @@ func (u *Updater) planWrite(ctx context.Context, p *PMPlan, pkg, path, installed
 	case PMSpaceBlocked:
 		// What is reclaimable belongs in the sentence only when there IS something to reclaim. An
 		// install has no installed build behind it, and "removing the installed build would give back
-		// 0.0 MiB" is a true statement that reads as a broken one — seen on the test router's own install
+		// 0.0 MiB" is a true statement that reads as a broken one — seen on the reference router's own install
 		// plan before this branch existed.
 		room := fmt.Sprintf("%s is free in %s", MiB(sp.Avail), sp.Dir)
 		if sp.Reclaim > 0 {

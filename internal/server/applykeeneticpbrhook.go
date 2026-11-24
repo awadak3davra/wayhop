@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -19,15 +20,20 @@ import (
 // $table (filter/nat/mangle/raw) and $type (iptables/ip6tables).
 //
 // The hook carries the SAME authenticated script bytes the Apply executed, so a re-assert cannot
-// drift from what was reviewed. It deliberately does NOT re-run the ipset restore: kernel sets
-// survive a netfilter rebuild, and re-loading thousands of members on every interface flap would
-// turn a routine event into seconds of CPU.
+// drift from what was reviewed. It does not re-load the sets on a rebuild: kernel sets survive a
+// netfilter rebuild, and re-loading thousands of members on every interface flap would turn a routine
+// event into seconds of CPU. Only when a set is MISSING (after a reboot) does the program restore them
+// from keeneticPBRRestorePath, one `ipset list -n` per run deciding that.
 
 const (
 	keeneticPBRHookPath        = "/opt/etc/ndm/netfilter.d/50-wayhop-policy.sh"
 	keeneticPBRDnsmasqConfPath = "/opt/etc/dnsmasq.d/wayhop-policy.conf"
-	keeneticPBRHookPerm        = os.FileMode(0o755)
-	keeneticPBRConfPerm        = os.FileMode(0o644)
+	// keeneticPBRRestorePath holds the plane's ipset restore stream for the hook to rebuild missing sets
+	// from after a reboot. Outside netfilter.d: NDM runs what is in there. On flash, so
+	// it is written only when its content changes: one write per Apply that changed a set's members.
+	keeneticPBRRestorePath = "/opt/etc/ndm/wayhop-policy.ipset"
+	keeneticPBRHookPerm    = os.FileMode(0o755)
+	keeneticPBRConfPerm    = os.FileMode(0o644)
 )
 
 // renderKeeneticPBRHook wraps the authenticated program in NDM's calling convention.
@@ -37,13 +43,15 @@ const (
 // redundant executions. Only the tables the plane actually writes are answered.
 //
 // The filter table is answered only for a program that refuses encrypted DNS, whose FORWARD rules
-// a filter rebuild drops (QA-115). Such a program starts with its filter section and stops at
+// a filter rebuild drops. Such a program starts with its filter section and stops at
 // pbr.FilterSectionEnd on that event, so a filter rebuild never re-runs the mangle flush.
 func renderKeeneticPBRHook(script []byte) (string, error) {
 	if len(script) == 0 {
 		return "", errExactKernelArtifact
 	}
-	filter := strings.Contains(string(script), pbr.FilterSectionEnd)
+	// A fast-mode program also refuses IPv6 DNS in ip6tables' filter table (pbr.FastFilterSectionEnd).
+	filter6 := strings.Contains(string(script), pbr.FastFilterSectionEnd)
+	filter := filter6 || strings.Contains(string(script), pbr.FilterSectionEnd)
 	var b strings.Builder
 	b.WriteString("#!/opt/bin/sh\n")
 	b.WriteString("# WayHop policy plane — re-asserted after an NDM firewall rebuild.\n")
@@ -56,7 +64,9 @@ func renderKeeneticPBRHook(script []byte) (string, error) {
 		b.WriteString("# A filter rebuild runs only the filter section at the top of the program.\n")
 	}
 	b.WriteString("case \"$table:$type\" in\n")
-	if filter {
+	if filter6 {
+		b.WriteString("\tmangle:iptables|nat:iptables|mangle:ip6tables|filter:iptables|filter:ip6tables) ;;\n")
+	} else if filter {
 		b.WriteString("\tmangle:iptables|nat:iptables|mangle:ip6tables|filter:iptables) ;;\n")
 	} else {
 		b.WriteString("\tmangle:iptables|nat:iptables|mangle:ip6tables) ;;\n")
@@ -67,6 +77,9 @@ func renderKeeneticPBRHook(script []byte) (string, error) {
 	if !strings.HasSuffix(string(script), "\n") {
 		b.WriteString("\n")
 	}
+	// Tells the daemon the plane was re-asserted, so it resets the flows that left by the WAN while
+	// the chain was gone (leaksweep.go). A builtin redirect into tmpfs: no tool, nothing on flash.
+	b.WriteString(": > " + keeneticHookStamp + " 2>/dev/null\n")
 	b.WriteString("exit 0\n")
 	return b.String(), nil
 }
@@ -93,13 +106,21 @@ func installKeeneticPBRHook(artifact executionKernelIpsetArtifactV1) (restore fu
 		}
 		return firstErr
 	}
-	writeStep, err := replaceFilePreservingPrevious(keeneticPBRHookPath, []byte(hook), keeneticPBRHookPerm)
+	// The restore file first: the hook reads it at boot.
+	restoreStep, err := replaceFileIfChanged(keeneticPBRRestorePath, keeneticBootRestoreFile(artifact), keeneticPBRConfPerm)
 	if err != nil {
+		return nil, fmt.Errorf("%w: set restore file: %v", errExactProductionKernelApply, err)
+	}
+	undo = append(undo, restoreStep)
+	// Unchanged files are not rewritten: flash writes, and a hook NDM might be reading.
+	writeStep, err := replaceFileIfChanged(keeneticPBRHookPath, []byte(hook), keeneticPBRHookPerm)
+	if err != nil {
+		_ = rollback()
 		return nil, fmt.Errorf("%w: netfilter.d hook: %v", errExactProductionKernelApply, err)
 	}
 	undo = append(undo, writeStep)
 	if len(artifact.DnsmasqConf) != 0 {
-		confStep, confErr := replaceFilePreservingPrevious(
+		confStep, confErr := replaceFileIfChanged(
 			keeneticPBRDnsmasqConfPath, artifact.DnsmasqConf, keeneticPBRConfPerm)
 		if confErr != nil {
 			_ = rollback()
@@ -108,6 +129,13 @@ func installKeeneticPBRHook(artifact executionKernelIpsetArtifactV1) (restore fu
 		undo = append(undo, confStep)
 	}
 	return rollback, nil
+}
+
+// keeneticBootRestoreFile is the restore file as it goes to disk: the artifact's restore stream under
+// its drain header. The hook's shell fallback ties its progress to the key in that line
+// and tells a cut file by its count; ipset restore skips the line as a comment.
+func keeneticBootRestoreFile(artifact executionKernelIpsetArtifactV1) []byte {
+	return pbr.KeyedRestore(artifact.Restore)
 }
 
 // keeneticDnsmasqInitScript is where Entware installs dnsmasq's service control. Unlike the tools in
@@ -123,13 +151,7 @@ const keeneticDnsmasqInitScript = "/opt/etc/init.d/S56dnsmasq"
 // success. Domain zones only start filling from the moment the resolver knows about them — entries
 // already cached by clients keep their old path until they expire.
 func reloadKeeneticDnsmasq(ctx context.Context, runner exactKeeneticKernelRunner) error {
-	if _, err := os.Stat(keeneticDnsmasqInitScript); err != nil {
-		return fmt.Errorf("%w: dnsmasq service script is absent", errExactProductionKernelApply)
-	}
-	if _, err := runner.Run(ctx, "", executionToolShell, keeneticDnsmasqInitScript, "restart"); err != nil {
-		return fmt.Errorf("%w: dnsmasq restart: %v", errExactProductionKernelApply, err)
-	}
-	return nil
+	return reloadKeeneticDnsmasqWith(ctx, runner.Run)
 }
 
 // removeKeeneticPBRHook takes the plane's files back off the router. A hook left behind would keep
@@ -137,7 +159,7 @@ func reloadKeeneticDnsmasq(ctx context.Context, runner exactKeeneticKernelRunner
 // clean teardown of everything else.
 func removeKeeneticPBRHook() error {
 	var firstErr error
-	for _, path := range []string{keeneticPBRHookPath, keeneticPBRDnsmasqConfPath} {
+	for _, path := range []string{keeneticPBRHookPath, keeneticPBRDnsmasqConfPath, keeneticPBRRestorePath, ksLearnedPath} {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) && firstErr == nil {
 			firstErr = err
 		}
@@ -146,6 +168,16 @@ func removeKeeneticPBRHook() error {
 		atomicfile.RemoveStale(path)
 	}
 	return firstErr
+}
+
+// replaceFileIfChanged is replaceFilePreservingPrevious for a file on flash that is often unchanged:
+// identical content is not rewritten (and its undo does nothing).
+func replaceFileIfChanged(path string, content []byte, perm os.FileMode) (func() error, error) {
+	if current, err := os.ReadFile(path); err == nil && bytes.Equal(current, content) {
+		atomicfile.NoteSkip(path, len(content))
+		return func() error { return nil }, nil
+	}
+	return replaceFilePreservingPrevious(path, content, perm)
 }
 
 // replaceFilePreservingPrevious writes content and returns the function that puts the previous state

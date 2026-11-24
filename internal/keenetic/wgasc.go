@@ -16,7 +16,7 @@ import (
 //
 // The first five are Jc, Jmin, Jmax, S1, S2. That is not read off the protocol spec, it was measured
 // across two firmwares: the Keenetic's tunnels to 203.0.113.10 carry `asc 5 49 998 17 110`, and the
-// test router's tunnel to the same host carries `awg_jc='5' awg_jmin='49' awg_jmax='998' awg_s1='17'
+// the reference router's tunnel to the same host carries `awg_jc='5' awg_jmin='49' awg_jmax='998' awg_s1='17'
 // awg_s2='110'` as NAMED uci options. Five values, same order, two independent config systems.
 //
 // The next four are the H values, as single numbers in the shorter form and as `min-max` RANGES in
@@ -26,7 +26,7 @@ import (
 // so they are separate tunnel instances that happen to share a J/S profile.
 //
 // What the long form's remaining seven arguments mean is NOT established here. It is tempting: 16 is
-// exactly the size of the AmneziaWG parameter set measured on the test router's uci (jc jmin jmax s1 s2
+// exactly the size of the AmneziaWG parameter set measured on the reference router's uci (jc jmin jmax s1 s2
 // h1..h4 s3 s4 i1..i5), and five empty strings sit precisely where i1..i5 would be. That is a good
 // guess and it stays a guess — nothing consulted here says which position is which, and this file
 // keeps them as raw tokens rather than writing the guess down as a fact.
@@ -60,7 +60,7 @@ const ascFixedArgs = 9
 // refusal, because the tunnel it produces negotiates and fails in a way that looks like a network
 // problem.
 func ParseWGAsc(args string) (WGAsc, error) {
-	fields := strings.Fields(strings.TrimSpace(args))
+	fields := splitASC(strings.TrimSpace(args))
 	if len(fields) < ascFixedArgs {
 		return WGAsc{}, fmt.Errorf("wireguard asc: %d argument(s), need at least %d (Jc Jmin Jmax S1 S2 H1 H2 H3 H4): %q",
 			len(fields), ascFixedArgs, args)
@@ -159,4 +159,65 @@ func (a WGAsc) HeadMatches(named map[string]string) bool {
 		}
 	}
 	return compared > 0
+}
+
+// ascArgs31 is the argument count of the AmneziaWG 3.1 line KeeneticOS 5.2 prints: the 16 of the 2.0
+// form, the header protection key, the content padding range (2), five timer ranges (10) and the two
+// 3.1 switches.
+const ascArgs31 = 31
+
+// Named31 names every position of the 31-argument form, keyed as NDM's own RCI names them
+// (`GET /rci/interface/WireguardN/wireguard/asc` on KeeneticOS 5.02.B.3, measured read-only,
+// where each key answered with the value at the same place of the CLI line). Ranges are
+// `start-end` pairs. It answers nil for any other arity: this is the one form whose positions the
+// router itself spelled out, so the 9- and 16-argument forms keep the restraint of the file comment.
+func (a WGAsc) Named31() map[string]string {
+	if len(a.Args) != ascArgs31 {
+		return nil
+	}
+	v := a.Args
+	out := map[string]string{
+		"jc": v[0], "jmin": v[1], "jmax": v[2], "s1": v[3], "s2": v[4],
+		"h1": v[5], "h2": v[6], "h3": v[7], "h4": v[8],
+		"s3": v[9], "s4": v[10],
+		"i1": v[11], "i2": v[12], "i3": v[13], "i4": v[14], "i5": v[15],
+		"header-protection-key": v[16],
+		"random-trailers":       v[29], "disable-cookies": v[30],
+	}
+	for i, name := range []string{
+		"content-padding-addition", "rekey-after-time", "rekey-timeout",
+		"reject-after-time", "keepalive-timeout", "max-handshake-attempts",
+	} {
+		out[name] = v[17+2*i] + "-" + v[18+2*i]
+	}
+	return out
+}
+
+// splitASC splits on whitespace outside double quotes: an I1-I5 value is one quoted argument even when
+// it holds spaces ("<b 0xdead>"), and the quotes stay on it, as NDM prints it.
+func splitASC(s string) []string {
+	var out []string
+	var cur strings.Builder
+	quoted, has := false, false
+	for _, r := range s {
+		switch {
+		case r == '"':
+			quoted = !quoted
+			has = true
+			cur.WriteRune(r)
+		case !quoted && (r == ' ' || r == '	'):
+			if has {
+				out = append(out, cur.String())
+				cur.Reset()
+				has = false
+			}
+		default:
+			has = true
+			cur.WriteRune(r)
+		}
+	}
+	if has {
+		out = append(out, cur.String())
+	}
+	return out
 }

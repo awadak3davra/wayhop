@@ -17,7 +17,7 @@ func byedpiEndpoint() model.Endpoint {
 	return model.Endpoint{ID: "bye", Name: "ByeDPI", Engine: model.EngineByeDPI, Protocol: model.ProtoSOCKS, Enabled: true}
 }
 
-// QA-043: one ByeDPI connection next to a native AmneziaWG tunnel made the OpenWrt planner refuse the
+// One ByeDPI connection next to a native AmneziaWG tunnel made the OpenWrt planner refuse the
 // whole profile, and every native tunnel moved to sing-box and the engine plugins with the warning
 // "router-native tunnels are not used". The native plan now stays: the tunnel is still the router's
 // own interface, and ByeDPI is the core's SOCKS outbound to the ciadpi the plugin manager runs.
@@ -144,8 +144,8 @@ func TestReviewBlocksByeDPIOnKeenetic(t *testing.T) {
 	}
 }
 
-// A router QA-043 already hit ran its AmneziaWG on WayHop's engine (the generic path, no native plan).
-// The first Apply after the fix takes it native on the SAME device name - the move the planner refuses
+// A router whose native plan did not compile ran its AmneziaWG on WayHop's engine (the generic path, no native plan).
+// The first Apply that compiles takes it native on the SAME device name - the move the planner refuses
 // within one Apply, because the new interface comes up while the old plugin still holds the link. A
 // generic previous carries no native plan, so it went unseen; now it is refused with the two-Apply way.
 func TestMaterializeRefusesTheMoveFromAGenericPrevious(t *testing.T) {

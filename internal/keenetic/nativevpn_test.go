@@ -128,7 +128,7 @@ func TestWireguardCommands_MatchesLiveNDM(t *testing.T) {
 	}
 }
 
-// QA-038: the panel saves mtu and keepalive as top-level fields and removes the params, so the
+// The panel saves mtu and keepalive as top-level fields and removes the params, so the
 // native renderer must read the top-level fields first; it used to read only the params and the
 // values vanished after any edit.
 func TestWireguardCommands_TopLevelMTUAndKeepalive(t *testing.T) {
@@ -212,7 +212,7 @@ func TestWireguardCommands_AWG2PartialExtKeepsAlignment(t *testing.T) {
 	}
 }
 
-// QA-125. A set I1-I5 is a packet description with spaces in it. Bare, NDM splits it into several
+// A set I1-I5 is a packet description with spaces in it. Bare, NDM splits it into several
 // arguments and every later value shifts; it is quoted the way the router prints values with spaces.
 func TestWireguardCommands_AWG2HeadersWithSpacesAreQuoted(t *testing.T) {
 	e := awgEndpoint()
@@ -226,7 +226,7 @@ func TestWireguardCommands_AWG2HeadersWithSpacesAreQuoted(t *testing.T) {
 	}
 }
 
-// QA-124. A 2.0 set with S3/S4 and no I1-I5 is written the way KeeneticOS itself prints such an
+// A 2.0 set with S3/S4 and no I1-I5 is written the way KeeneticOS itself prints such an
 // interface (read from a live KeeneticOS 5.1.8 router): the unset headers as empty strings, `""`, not
 // "0", which is a value nobody set and is not what the router reads back.
 func TestWireguardCommands_AWG2UnsetHeadersAreEmptyStrings(t *testing.T) {
@@ -323,7 +323,7 @@ func TestWireguardCommands_BareV6AllowIPs(t *testing.T) {
 		t.Errorf("a bare IPv6 local_address must still emit `allow-ips :: 0` (else v6 leaks to WAN):\n%s", joined)
 	}
 	// The bare v6 address is also configured on the interface (synthesized /128), as `ipv6 address`
-	// and where KeeneticOS prints it: after `ip tcp adjust-mss pmtu` (QA-123, read from a live router
+	// and where KeeneticOS prints it: after `ip tcp adjust-mss pmtu` (read from a live router
 	// on KeeneticOS 5.1.8). `ip address` takes only the v4 address.
 	v6 := slices.Index(cmds, "ipv6 address fd00::2/128")
 	if v6 < 0 || v6 < slices.Index(cmds, "ip tcp adjust-mss pmtu") {
@@ -335,7 +335,7 @@ func TestWireguardCommands_BareV6AllowIPs(t *testing.T) {
 }
 
 // NDM keeps an interface's IPv6 address under `ipv6 address <addr>/<len>` and prints it after the
-// MSS clamp, before the WireGuard settings (measured read-only on the test Keenetic, 2026-11-05); `ip
+// MSS clamp, before the WireGuard settings (measured read-only on a Keenetic router); `ip
 // address` carries the IPv4 one only.
 func TestWireguardCommands_IPv6AddressUsesNDMsOwnCommand(t *testing.T) {
 	e := awgEndpoint()
@@ -356,8 +356,8 @@ func TestWireguardCommands_IPv6AddressUsesNDMsOwnCommand(t *testing.T) {
 }
 
 // The 2.0 tail the way the device prints it when the magic headers are unset (measured read-only on
-// the test Keenetic, 2026-11-05): eleven bare arguments, then five empty quoted strings. A bare "0" in an
-// I slot, which this used to write, is not what NDM prints for an unset one.
+// a Keenetic router): eleven bare arguments, then five empty quoted strings. A bare "0" in an
+// I slot is not what NDM prints for an unset one.
 func TestWireguardCommands_AWG2UnsetHeadersAreEmptyQuotedStrings(t *testing.T) {
 	e := awgEndpoint()
 	e.Params["s3"], e.Params["s4"] = 25, 40
@@ -371,7 +371,7 @@ func TestWireguardCommands_AWG2UnsetHeadersAreEmptyQuotedStrings(t *testing.T) {
 	}
 }
 
-// A magic header with spaces goes out as a quoted string (QA-125), so one holding a quote or a
+// A magic header with spaces goes out as a quoted string, so one holding a quote or a
 // control character cannot be carried as it is. It is refused rather than changed (the quote used to
 // be dropped, the control character cut the line): a different header is a tunnel the server never
 // answers.

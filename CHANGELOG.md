@@ -3,6 +3,107 @@
 All notable changes to WayHop are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.11] — 2026-11-24
+
+**Upgrading: press Review & Apply once after the update.** In fast mode, on OpenWrt and Keenetic alike, the same
+one Apply is what turns on the fast-mode changes below; until then the router keeps the fast plane it had.
+
+### Security
+- **A server WayHop sets up checks the sing-box it installs.** The VPS install and update scripts
+  fetched sing-box through mirrors, some over plain HTTP, and installed it as root unchecked. They
+  now need its published SHA-256 and refuse a download that does not match; server mirrors are
+  HTTPS only.
+- **Root's working directories in /tmp must be root's own.** WayHop unpacks and runs binaries in
+  `/tmp/wayhop`, and the installers keep their rollback copy in `/tmp/wayhop-upgrade.<pid>`. A local
+  process that made either directory first could swap what root ran or deleted. A directory that is
+  a link, another user's or writable by others is now refused, with the path to remove.
+- **AmneziaWG I1-I5 values that crash older kernel modules are refused.** Before module
+  3.1.20261113 a negative tag length, or tags summing past 65535 bytes, corrupted kernel memory on
+  the router instead of being refused. WayHop now refuses both at save, import and Apply.
+- **Update mirror addresses no longer leak.** A mirror prefix can carry an access token. Download
+  errors shown in the panel and written to the log no longer print it, and the shareable config
+  export keeps only each mirror's scheme and host; importing such an export keeps the mirrors the
+  router already has.
+- **A bad answer from a provider can no longer stop the daemon.** The background loops that parse
+  subscriptions, rule lists and DNS data now log a panic and start again a minute later instead of
+  taking the whole process down.
+
+### Added
+- **Fast mode routes domain lists on OpenWrt.** Until now fast mode left sing-box out by giving up
+  lists of names. Now the router's dnsmasq puts the addresses it resolves for a list's names into
+  nftables sets, and the kernel routes them like the list's own addresses, with the same tunnel and
+  precedence. General traffic never enters sing-box; only lists that need it (a proxy connection, a
+  sing-box endpoint) keep a TUN, and only their destinations reach it. Remote rule-sets are read with
+  the installed core into RAM. It needs `dnsmasq-full`, and Review gives the command to install it.
+  What the kernel cannot express (keyword and regex matchers, a kill switch over names) is refused in
+  Review rather than dropped. Names are matched with their subdomains, so an exact name widens to a
+  suffix, and Review says so.
+- **Large lists become kernel routes in fast mode (OpenWrt).** A list with more than 256 prefixes at
+  one tunnel or block now lives in a routing table of its own instead of an nftables set, which made
+  every resolved address cost dnsmasq a quarter of a second. Precedence is unchanged.
+- **Fast mode makes devices use the router's DNS.** With domain lists in fast mode, LAN DNS sent
+  elsewhere is redirected to the router, and DNS over TLS (port 853) from the LAN is refused so phones
+  fall back to plain DNS. On Keenetic forwarded IPv6 DNS is refused too, so clients fall back to IPv4.
+  The router's own lookups are untouched. `fast_dns_enforce: false` turns it off, with a Review
+  warning. DNS over HTTPS cannot be closed by port.
+- **Fast mode watches dnsmasq.** Before a restart the new configuration is tested; after it dnsmasq
+  must answer, or the previous file goes back and the Apply step fails. For a minute after an install
+  DNS is checked every five seconds, and a silent dnsmasq gets the previous working file back, with
+  bounded retries and a Diagnostics failure. On Keenetic, if dnsmasq stays silent for three minutes,
+  DNS enforcement is suspended (lists keep routing) until it answers again; a reboot clears it.
+- **Fast mode on Keenetic catches up with OpenWrt.** Addresses dnsmasq resolves for a list go into
+  sets of their own whose entries live six hours and are renewed by every new connection, so active
+  sites keep their route. Connections opened before an address entered a set are reset, so they
+  reconnect through the list's tunnel, and the sets are warmed after a change and at start. Review and
+  Diagnostics show the sets, their counts, the reset count and dnsmasq's health. Remote and proxy lists
+  keep the compatibility routing they had.
+- **Fastest tunnel per routing list.** A list with two or more tunnels can pick, while it runs, the
+  fastest working one by handshakes to its own destinations, on KeeneticOS and OpenWrt. The list panel
+  shows tunnels against targets, lets you probe now, pin a tunnel for a while or exclude one, and keeps
+  a journal of switches. When all are down the list goes to the provider (the default), blocks, or
+  stays on its last tunnel; a kill-switched list blocks.
+- **Speed measurement for tunnels.** Connections and Failover show download speed beside latency, and
+  a tunnel, group or list can be measured on demand. A measurement keeps nothing it downloads, stays
+  inside a monthly budget, and can run on an opt-in schedule only while the router is idle. Groups and
+  fastest lists can be elected by latency, speed or both.
+- **Keenetic: AmneziaWG 3.1 tunnels on KeeneticOS 5.2, and Replace tunnel.** WayHop writes the 3.1
+  settings the router's own AmneziaWG takes from firmware 5.2. A connection can be pointed at another
+  router tunnel with Replace tunnel, folding a duplicate record into it. Deleting a failover group or
+  list that others use offers to replace, detach or send them straight to the provider instead of
+  blocking, and the exit and Download via of several lists can be changed at once.
+
+### Changed
+- **A tunnel list wins shared addresses over a direct list.** Lists now apply weakest first: direct,
+  tunnels, kill-switched tunnels, blocks. A direct domain list can no longer pull a shared CDN address
+  out of a tunnel list. Review lists such overlaps with the list that wins them, and refuses a kill
+  switch that would lose addresses this way.
+- **Kernel-routed failover groups follow their type.** A group's table used to follow the first
+  member the monitor called alive, so an automatic group stayed on its first member. Now an automatic
+  group takes the fastest working member, a fallback group the first working one, and a manual group
+  your pick. The Failover page names the member in use.
+- **The kill switch holds through Apply and reboot.** Its blocking routes go in before the new rules,
+  a new plane replaces the old one without a gap, and at boot listed destinations are held until
+  WayHop has filled them in. On OpenWrt the kill switch has its own table, loaded before the network
+  comes up and kept through a rollback. A kill-switched list may not use direct DNS, and Review refuses
+  setups the kill switch cannot hold (on KeeneticOS, a kill-switched list limited to some devices).
+- **Fewer flash writes.** List feed caches moved out of the profile into their own file, written at
+  most once a day when changed; the applied state is kept as small content-addressed pieces, so a
+  status change writes about 2 KB instead of megabytes; an unchanged file is never rewritten.
+- **Hardware flow offload in fast mode is flagged as experimental on OpenWrt** in Review.
+- **The OpenWrt AmneziaWG kernel module is 3.1.20261113-02.** Its package version reads
+  `3.1.20261113.02`, since apk and opkg versions cannot carry the hyphen.
+
+### Fixed
+- **Keenetic: an address removed from a list stops taking its tunnel.** An edit only ever added to
+  the router's sets, so a removed range kept its route; the Apply now deletes what it no longer
+  needs. A refused `ip rule` no longer passes the Apply unseen, and a rule that combines an address
+  with a domain or port is no longer routed by its address alone.
+- **A scripted Apply is no longer cut off after two minutes.** A request without a body got a read
+  deadline that, when it fired, cancelled the request and rolled the Apply back.
+- **The panel keeps what you typed.** Cancelling "leave without saving", editing while Settings
+  saves, switching Add connection tabs and deleting a DNS rule no longer lose or bring back edits, and
+  the Host allow-list hint now says what the server does.
+
 ## [0.5.10] — 2026-11-11
 
 **Upgrading on OpenWrt: press Review & Apply once after the update.** 0.5.10 draws the routing plane

@@ -5,7 +5,10 @@
       "why": "WR_SINGBOX not set — ran generation-only (set it to a sing-box binary for a real `check`)",
       "when": "env:WR_SINGBOX"
     },
-
+    "TestHelperUCIHang": {
+      "why": "helper process for TestReadUCIGivesUpOnAUCIThatHangs",
+      "when": "env:WAYHOP_UCI_HANG"
+    },
     "TestLoaderPathHelperProcess": {
       "why": "helper process for TestChildrenDoNotInheritLoaderPath",
       "when": "env:WAYHOP_LOADERENV_HELPER"
@@ -122,6 +125,11 @@
       "why": "set WR_NATIVEDNS_FIXTURE to a dir with captured device output",
       "when": "env:WR_NATIVEDNS_FIXTURE"
     },
+    "TestFastDNSRender_NftCheck": {
+      "why": "nft not on PATH, or nft -c cannot initialize its netlink cache here (an unprivileged runner) - either way this host cannot syntax-check the fast DNS plane",
+      "when": "cap:nft",
+      "reason_re": "nft not in PATH.*|nft -c cannot run here.*"
+    },
     "TestRenderNft_NftCheck": {
       "why": "nft not on PATH, or nft -c cannot initialize its netlink cache here (an unprivileged runner) - either way this host cannot syntax-check a ruleset",
       "when": "cap:nft",
@@ -209,6 +217,14 @@
     },
     "TestProbeKernelPBRFreshExecutesReadOnlyCapabilityCheck": {
       "why": "test uses a POSIX nft fixture",
+      "when": "os:win32"
+    },
+    "TestWrite_UnchangedContentFixesMode": {
+      "why": "POSIX modes",
+      "when": "os:win32"
+    },
+    "TestResolve_SymlinkRefused": {
+      "why": "symlinks need privileges on Windows",
       "when": "os:win32"
     }
   }

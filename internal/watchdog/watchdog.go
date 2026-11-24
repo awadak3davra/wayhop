@@ -28,7 +28,7 @@ type Supervisor interface {
 // whether it actually started. Combining the desired+alive check with the spawn
 // under one lock closes the TOCTOU between the watchdog's separate Desired() →
 // Alive() → Start() reads: an intentional Stop() (which clears desired and kills
-// the process, e.g. a native-only apply) can no longer be straddled by the
+// the process, e.g. a native-only apply) cannot be straddled by the
 // watchdog and overtaken by a stale Alive()=false read that would resurrect a
 // redundant TUN core over the kernel-PBR datapath.
 //
@@ -166,7 +166,7 @@ func (w *Watchdog) tick() {
 	}
 
 	// Crashed while it should be up — restart, honoring the backoff window.
-	// Snapshot the pre-advance backoff so we can roll it back if the "crash" turns
+	// Snapshot the pre-advance backoff so it can be rolled back if the "crash" turns
 	// out to be a deliberate Stop() that raced this tick (native-only apply).
 	w.mu.Lock()
 	if !w.nextAttempt.IsZero() && now.Before(w.nextAttempt) {
@@ -186,14 +186,14 @@ func (w *Watchdog) tick() {
 	w.mu.Unlock()
 
 	// Make the restart DECISION atomic when the supervisor supports it: spawn only
-	// if it's STILL desired and not alive, all under the core's own lock. This is
-	// the TOCTOU fix — a concurrent intentional Stop() (clears desired + kills the
-	// proc) can no longer be straddled by the watchdog's separate reads and have a
+	// if it's STILL desired and not alive, all under the core's own lock. This closes
+	// the TOCTOU: a concurrent intentional Stop() (clears desired + kills the
+	// proc) cannot be straddled by the watchdog's separate reads and have a
 	// stale Alive()=false resurrect a redundant TUN core over the kernel datapath.
 	err, deliberateStop := w.restart()
 	if deliberateStop {
 		// Not a crash: the core was intentionally Stopped (no longer desired)
-		// between the Alive() check and the restart decision. Undo the backoff we
+		// between the Alive() check and the restart decision. Undo the backoff
 		// optimistically charged, don't notify, don't count it as a restart, and
 		// let this tick fall through as if the core is intentionally down (the
 		// next tick will early-return via the Desired() gate).
@@ -242,7 +242,7 @@ func (w *Watchdog) restart() (err error, deliberateStop bool) {
 		started, err := ar.StartIfDesiredDead()
 		// started=false with no error means it was no longer desired (Stopped) —
 		// the only non-crash outcome. A spawn error (err != nil) is a genuine
-		// crash-restart attempt that failed and must be reported like before.
+		// crash-restart attempt that failed and must be reported.
 		if !started && err == nil {
 			return nil, true
 		}

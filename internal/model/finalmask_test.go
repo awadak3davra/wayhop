@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// QA-136: what each of Xray's finalmask types asks of a client (Xray-core v26.10.29, the masks'
+// What each of Xray's finalmask types asks of a client (Xray-core v26.10.29, the masks'
 // config.go): nothing (filter), only what it sends (fragment, noise, udphop), or a transform the
 // server undoes (everything else), by list, with the type matched as Xray matches it.
 func TestParseFinalMask_Classifies(t *testing.T) {

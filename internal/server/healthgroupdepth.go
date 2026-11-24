@@ -13,7 +13,7 @@ import (
 //
 // The kernel plane can only fall to a member that has a real link. A group mixing a native tunnel
 // with one the proxy core carries has fewer exits than names, and the difference only shows when the
-// first one dies. Measured on a live test router: group-failover lists tunnel-a (interface awg1) and
+// first one dies. Observed on an OpenWrt router: group-failover lists tunnel-a (interface awg1) and
 // proxy-member (a sing-box socks outbound at 10.0.1.2:1080), its policy table holds exactly one route
 // and no blackhole, and the group carries no kill switch. So when awg1 goes down there is nothing to
 // elect, the fwmark lookup falls through to main, and traffic meant for a tunnel leaves through the

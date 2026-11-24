@@ -136,7 +136,7 @@ var secretParamKeys = map[string]bool{
 	"short_id": true, "api_key": true, "subscription": true,
 	// An SSH exit's key passphrase (private_key and password are above).
 	"private_key_passphrase": true,
-	// QA-104: the Snell pre-shared key and the OpenConnect TOTP seed showed in the change review. An
+	// The Snell pre-shared key and the OpenConnect TOTP seed showed in the change review. An
 	// OpenVPN profile's client key, its tls-auth / tls-crypt key and its static key are the same kind
 	// of secret under other names (importer/openvpn.go ovpnInline), so they are masked with them.
 	"psk": true, "totp_secret": true, "key": true, "control_key": true, "static_key": true,
@@ -618,8 +618,8 @@ func diffEndpointFields(b, d model.Endpoint) []Change {
 	}
 
 	// TLS / Transport are whole sub-structs. They carry security-relevant settings (Reality keys,
-	// SNI, uTLS fingerprint, ws/grpc paths) and were previously invisible, so a change to them
-	// produced an empty review while Apply genuinely rewrote the outbound. Reported structurally —
+	// SNI, uTLS fingerprint, ws/grpc paths); left out, a change to them would produce an empty
+	// review while Apply genuinely rewrites the outbound. Reported structurally —
 	// a Reality private/short id must never be rendered.
 	if !sameJSON(b.TLS, d.TLS) {
 		out = append(out, mk("TLS settings", describeTLS(b.TLS), describeTLS(d.TLS), false))
@@ -706,6 +706,9 @@ func diffGroups(base, desired []model.Group) []Change {
 		}
 		if b.Type != d.Type {
 			out = append(out, mk("Type", string(b.Type), string(d.Type)))
+		}
+		if b.Election() != d.Election() {
+			out = append(out, mk("Election mode", string(b.Election()), string(d.Election())))
 		}
 		if strings.Join(b.Members, ", ") != strings.Join(d.Members, ", ") {
 			out = append(out, mk("Members", strings.Join(b.Members, ", "), strings.Join(d.Members, ", ")))
@@ -795,9 +798,9 @@ func diffRoutingLists(base, desired []model.RoutingList) []Change {
 		}
 		// The downloaded feed. Nothing compared it, and it is the ONE thing the background refresher
 		// stages: it fetches, writes the cache and logs "staged for strict reviewed Apply" — on purpose,
-		// so remote prefixes never enter the datapath unreviewed. Without this row the operator was told
-		// "you have unapplied changes, review them" and shown an empty review: measured on the router,
-		// pending true with count 0, after cidr-antifilter went from 15751 to 15767 prefixes.
+		// so remote prefixes never enter the datapath unreviewed. Without this row the operator would be told
+		// "you have unapplied changes, review them" and shown an empty review (pending true with
+		// count 0) after a feed grows by a few prefixes.
 		//
 		// Source is "external", not "user": nobody edited this. It is the feed moving underneath a list
 		// the operator set up once, which is exactly why it deserves a review line of its own.
@@ -853,16 +856,38 @@ func diffRoutingLists(base, desired []model.RoutingList) []Change {
 			c.Impact = "changes how this list's direct TLS connections start"
 			out = append(out, c)
 		}
+		// The tunnels a list may leave by, and the runtime choice among them ("fastest"). A pin or an
+		// exclusion is a staged setting like any other, so it shows here before Apply runs it.
+		if !sameStrings(b.Candidates, d.Candidates) {
+			c := mk("Tunnels", candidatesWord(b.Candidates), candidatesWord(d.Candidates))
+			c.MayInterrupt = true
+			out = append(out, c)
+		}
+		if fb, fd := FastestWord(b.Fastest), FastestWord(d.Fastest); fb != fd {
+			c := mk("Fastest tunnel", fb, fd)
+			c.Impact = "changes which of the list's tunnels carries it, and when it switches"
+			c.MayInterrupt = true
+			out = append(out, c)
+		}
 		// Order matters for routing evaluation — report a move explicitly with both positions.
 		// Compared on RELATIVE order (position among the lists present in BOTH states), not absolute
 		// index: inserting or deleting any earlier list shifts every following absolute index, which
-		// previously fabricated a "reordered" row for rules the user never touched.
+		// would fabricate a "reordered" row for rules the user never touched.
 		if op, ok := relBase[d.ID]; ok && op != relDesired[d.ID] {
+			// The row stays for every move (the saved order did change, and a pending state with an
+			// empty review is worse), but it says what the move does. A block list is matched before
+			// every other list wherever it stands (generator routingFrom emits the rejects first; the
+			// kernel plane ranks a block last-written, pbr orderZonesForEmit), so a move that only
+			// passes a block list, or moves one, changes no generated rule.
+			impact := "rules are evaluated in order, so this changes which rule wins for overlapping destinations"
+			if !movedPastRoutedList(d.ID, desired, relBase, relDesired) {
+				impact = "a block list is matched before every other list wherever it stands, so this move changes the order shown and not which list wins"
+			}
 			out = append(out, Change{
 				ID: d.ID, ObjectType: "routing_list", ObjectName: nameOr(d.Name, d.ID), Action: ActionReordered,
 				Field: "Position", Before: "#" + strconv.Itoa(op+1), After: "#" + strconv.Itoa(relDesired[d.ID]+1),
 				Subsystem: SubRouting, Source: "user",
-				Impact:        "rules are evaluated in order, so this changes which rule wins for overlapping destinations",
+				Impact:        impact,
 				RequiresApply: true, RequiresServiceRestart: true, Rollbackable: true,
 			})
 		}
@@ -996,6 +1021,29 @@ func sameStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// movedPastRoutedList reports whether list id, itself not a block list, changed sides with another
+// list that is not a block list either: the only reorder that changes which list wins. relBase and
+// relDesired are relativeOrder's ranks. Judged by the outbound as saved; an outbound edited in the
+// same sitting has a row of its own.
+func movedPastRoutedList(id string, desired []model.RoutingList, relBase, relDesired map[string]int) bool {
+	blocks := func(r model.RoutingList) bool { return strings.EqualFold(r.Outbound, model.OutboundBlock) }
+	for _, r := range desired {
+		if r.ID == id && blocks(r) {
+			return false
+		}
+	}
+	for _, r := range desired {
+		ob, ok := relBase[r.ID]
+		if !ok || r.ID == id || blocks(r) {
+			continue
+		}
+		if (ob < relBase[id]) != (relDesired[r.ID] < relDesired[id]) {
+			return true
+		}
+	}
+	return false
 }
 
 func relativeOrder(ss, other []model.RoutingList) map[string]int {

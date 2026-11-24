@@ -67,11 +67,11 @@ type watcher struct {
 	countdownAt time.Time
 	// window is the test Apply the open apply message is about (its Keep / Roll back name it), "" when
 	// none is open or its name is not known yet. A second Test inside a running window supersedes it
-	// without the window ever closing, and only the name tells the two apart (QA-100).
+	// without the window ever closing, and only the name tells the two apart.
 	window string
 	// autoRollback: the running window's fail-safe rolled back by itself. Its window stays pending until
 	// the next healthy tick, so by the close the phase no longer tells the fail-safe's rollback from a
-	// pressed one: the last check passed and the phase before the close is rolled_back (QA-098).
+	// pressed one: the last check passed and the phase before the close is rolled_back.
 	autoRollback bool
 	// announce: the running window replaced another one at a step whose read still showed the old
 	// window's phase and time left, so its own message waits for the next step.
@@ -138,7 +138,7 @@ func (w *watcher) step(now time.Time, p Pulse, log EventLog, status func() Statu
 	// While every exit is down at once, the exits are not the news. Once the uplink is back, an exit
 	// failing is news again straight away: the monitor holds exits' failures back for the whole
 	// outage, so one that stays dead is marked down a probe round or two after the internet
-	// returned, and a quiet window after the outage used to swallow exactly that tunnel.
+	// returned, and a quiet window after the outage would swallow exactly that tunnel.
 	quiet := p.LocalFault || w.prev.LocalFault
 
 	// The routing switch. Switched off, the core is stopped on purpose and every exit it carried fails
@@ -265,7 +265,7 @@ func (w *watcher) apply(now time.Time, p Pulse) []Alert {
 				// Another Test was applied inside this one's window, which supersedes it: pending never
 				// drops, so this is no open or close, and the countdown re-rendered the old message with the
 				// new window's Keep. An owner deciding about the first Test then kept the second, which
-				// nobody had asked about (QA-100). The old message is closed without buttons, and the new
+				// nobody had asked about. The old message is closed without buttons, and the new
 				// Test is announced in its own message. A window whose rollback has finished has no name
 				// until then (nothing is live), so that is not taken for a new one.
 				//
@@ -355,7 +355,7 @@ func (w *watcher) apply(now time.Time, p Pulse) []Alert {
 			// The fail-safe rolled back because the connection was lost: loud. Its window usually closes a
 			// tick after the rollback, on the check that passed with the previous configuration back, so the
 			// phase and the check at the close are a pressed Roll back's; what the window showed before it
-			// is the fail-safe's (QA-098).
+			// is the fail-safe's.
 			out = append(out, applyClosed(now, "al.apply.rolledback", SevCritical, false))
 		case f.Phase == "rolled_back":
 			// Somebody pressed Roll back (here or in the panel): the outcome, quietly.

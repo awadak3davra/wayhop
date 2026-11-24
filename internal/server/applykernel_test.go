@@ -3,8 +3,10 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -13,10 +15,12 @@ import (
 )
 
 type exactKernelRecordRunner struct {
-	calls       []string
-	stdin       []string
-	causes      []error
-	fail        map[string]error
+	calls  []string
+	stdin  []string
+	causes []error
+	fail   map[string]error
+	// out answers a command by its exact text: the rule and route dumps postcheck reads.
+	out         map[string]string
 	cancel      context.CancelFunc
 	cancelAfter int
 }
@@ -50,7 +54,79 @@ func (runner *exactKernelRecordRunner) Run(
 			return "", err
 		}
 	}
-	return "", nil
+	return runner.out[command], nil
+}
+
+// kernelStateOf is what the router's ip prints once an artifact is installed, in the kernel's own
+// shapes (an OpenWrt router's `ip rule show` and `ip route show table all`): a rule as
+// "150:	from all fwmark 0x20000/0xff0000 lookup 151", a kill-switch route as "blackhole default table
+// 151 metric 1000" (IPv6: "blackhole default dev lo table 151 metric 2048 pref medium"). The map is
+// keyed by the command postcheck runs.
+// guardChainCommand is what the adapter runs to see whether a guard is loaded, and
+// guardChainListing what nft answers for a loaded guard: its chain, the marker rule last.
+const guardChainCommand = "nft list chain inet wayhop_ks ks_forward"
+
+func guardChainListing(guard string) string {
+	head := "\tchain " + pbr.GuardChain + " {\n"
+	body := guard[strings.Index(guard, head):]
+	body = body[:strings.Index(body, "\n\t}\n")]
+	return "table inet wayhop_ks {\n" + body + "\n\t\taccept comment \"" + pbr.GuardProofSet(guard) + "\"\n\t}\n}\n"
+}
+
+// guardChainFlushed is the same listing after `nft flush chain inet wayhop_ks ks_forward`.
+const guardChainFlushed = "table inet wayhop_ks {\n\tchain ks_forward {\n\t\ttype filter hook forward priority filter - 5; policy accept;\n\t}\n}\n"
+
+func kernelStateOf(artifact executionKernelArtifactV1) map[string]string {
+	out := map[string]string{
+		"ip rule show": "0:\tfrom all lookup local\n", "ip -6 rule show": "0:\tfrom all lookup local\n",
+		"ip route show table all":    "default via 192.0.2.1 dev wan proto static src 192.0.2.138\n",
+		"ip -6 route show table all": "",
+	}
+	if guard := artifact.Plan.RenderNftGuard(); guard != "" {
+		out[guardChainCommand] = guardChainListing(guard)
+	}
+	for _, command := range artifact.IP {
+		f := strings.Fields(command)[1:]
+		fam := "ip "
+		if f[0] == "-6" {
+			fam, f = "ip -6 ", f[1:]
+		}
+		switch {
+		case len(f) > 2 && f[0] == "rule" && f[1] == "add":
+			var spec []string
+			pref := ""
+			for i := 2; i < len(f); i++ {
+				switch f[i] {
+				case "priority":
+					pref = f[i+1]
+					i++
+				case "table":
+					spec = append(spec, "lookup", f[i+1])
+					i++
+				case "fwmark":
+					mark, mask, _ := strings.Cut(f[i+1], "/")
+					m, _ := strconv.ParseUint(mark, 0, 32)
+					k, _ := strconv.ParseUint(mask, 0, 32)
+					spec = append(spec, "fwmark", fmt.Sprintf("%#x/%#x", m, k))
+					i++
+				default:
+					spec = append(spec, f[i])
+				}
+			}
+			out[fam+"rule show"] += pref + ":\tfrom all " + strings.Join(spec, " ") + "\n"
+		case len(f) > 4 && f[0] == "route" && f[1] == "replace" && f[2] == "blackhole":
+			table, metric := f[len(f)-1], ""
+			if f[4] == "metric" {
+				metric = " metric " + f[5]
+			}
+			if fam == "ip " {
+				out["ip route show table all"] += "blackhole default table " + table + metric + "\n"
+			} else {
+				out["ip -6 route show table all"] += "blackhole default dev lo table " + table + metric + " pref medium\n"
+			}
+		}
+	}
+	return out
 }
 
 func exactKernelTestArtifact() executionKernelArtifactV1 {
@@ -71,6 +147,7 @@ func exactKernelTestArtifact() executionKernelArtifactV1 {
 		NFTTool: nftTool, IPTool: ipTool,
 		Nft: []byte(plan.RenderNft()), IP: plan.RenderIP(pbr.Options{}),
 		Offload: []byte(plan.RenderOffload()), Teardown: plan.RenderTeardown(pbr.Options{}),
+		Renderer: kernelRendererID(),
 	}
 }
 
@@ -103,13 +180,15 @@ func TestExactKernelAdapterConsumesCapturedArtifactInOrder(t *testing.T) {
 		want = append(want, "nft -f -")
 	}
 	want = append(want, "nft -f -")
+	// Nothing of this plan is kill-switched: a guard an earlier plane left is removed, last.
+	want = append(want, "nft delete table inet wayhop_ks")
 	proof, err := exactKernelProofProgram(artifact)
 	if err != nil {
 		t.Fatal(err)
 	}
 	nftAt := slices.Index(runner.calls, "nft -f -")
 	if !reflect.DeepEqual(runner.calls, want) || nftAt < 0 || runner.stdin[nftAt] != string(artifact.Nft) ||
-		runner.stdin[len(runner.stdin)-1] != proof {
+		runner.stdin[len(runner.stdin)-2] != proof {
 		t.Fatalf("calls = %#v\nwant calls = %#v", runner.calls, want)
 	}
 }
@@ -138,7 +217,7 @@ func TestExactKernelAdapterReapplyConvergesInPlace(t *testing.T) {
 		}
 	}
 	blackhole := "ip route replace blackhole default metric 1000 table 100"
-	if b, n := slices.Index(runner.calls, blackhole), slices.Index(runner.calls, "nft -f -"); b < 0 || n < 0 || b > n {
+	if b, n := slices.Index(runner.calls, blackhole), slices.Index(runner.stdin, string(artifact.Nft)); b < 0 || n < 0 || b > n {
 		t.Fatalf("the kill-switch blackhole must be in place before the nft load (blackhole %d, nft %d): %#v", b, n, runner.calls)
 	}
 
@@ -174,13 +253,14 @@ func TestExactKernelAdapterPostcheckRequiresArtifactProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner := &exactKernelRecordRunner{}
+	runner := &exactKernelRecordRunner{out: kernelStateOf(artifact)}
 	adapter, _ := newExactKernelAdapter(runner)
 	if err := adapter.postcheck(context.Background(), artifact); err != nil {
 		t.Fatal(err)
 	}
-	want := "nft list set inet " + artifact.Plan.Table + " " + proof
-	if !reflect.DeepEqual(runner.calls, []string{want}) {
+	// The marker first, then the rules. No kill switch in this plan: no route is read.
+	want := []string{"nft list set inet " + artifact.Plan.Table + " " + proof, "ip rule show"}
+	if !reflect.DeepEqual(runner.calls, want) {
 		t.Fatalf("postcheck calls = %#v; want %q", runner.calls, want)
 	}
 
@@ -255,8 +335,10 @@ func TestExactKernelAdapterRemovesOnlyAuthenticatedBaseline(t *testing.T) {
 	if err := adapter.apply(context.Background(), artifact); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(runner.calls, previous.Teardown) {
-		t.Fatalf("calls = %#v; want authenticated teardown %#v", runner.calls, previous.Teardown)
+	// The plane's own teardown, then the kill-switch guard: it has no plane left to guard.
+	want := append(append([]string(nil), previous.Teardown...), "nft delete table inet wayhop_ks")
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("calls = %#v; want authenticated teardown %#v", runner.calls, want)
 	}
 	if artifact.NFTTool != previous.NFTTool || artifact.IPTool != previous.IPTool {
 		t.Fatal("authenticated teardown lost the captured kernel tool identities")
@@ -410,6 +492,110 @@ func TestExactKernelAdapterKeepsThePlaneWhenATunnelDeviceIsMissing(t *testing.T)
 		}
 		if !slices.Contains(runner.calls, artifact.Teardown[0]) {
 			t.Fatalf("%q failing with %v did not roll the plane back", command, failure)
+		}
+	}
+}
+
+// TestExactKernelAdapterRerendersAnOlderBuildsArtifact (live 22.11): after a binary upgrade the stored
+// artifact, rendered by the previous build, no longer equals this build's rendering of the same plan.
+// It is re-rendered from its plan and installed, not refused; tools that are not authenticated are
+// still refused, and the postcheck reads the re-rendered form.
+func TestExactKernelAdapterRerendersAnOlderBuildsArtifact(t *testing.T) {
+	old := exactKernelTestArtifact()
+	old.Renderer = "" // stored before the field, or by another build
+	old.Nft = append(old.Nft, []byte("\n# what the previous build rendered")...)
+	old.IP = append(append([]string(nil), old.IP...), "ip rule add fwmark 0x00010000/0x00ff0000 table 100 priority 999")
+	runner := &exactKernelRecordRunner{}
+	adapter, _ := newExactKernelAdapter(runner)
+	if err := adapter.apply(context.Background(), old); err != nil {
+		t.Fatalf("an older build's artifact was refused: %v", err)
+	}
+	deleted := false
+	for _, c := range runner.calls {
+		if strings.Contains(c, "rule add") && strings.Contains(c, "priority 999") || strings.Contains(c, "previous build") {
+			t.Fatalf("the stale rendering was run: %q", c)
+		}
+		// What the old rendering added and the new one does not is taken out.
+		deleted = deleted || strings.Contains(c, "rule del fwmark 0x00010000/0x00ff0000 table 100 priority 999")
+	}
+	if !deleted {
+		t.Errorf("the superseded rule was left: %q", runner.calls)
+	}
+	bad := old
+	bad.NFTTool.ContentSHA256 = strings.Repeat("f", 63)
+	runner = &exactKernelRecordRunner{}
+	adapter, _ = newExactKernelAdapter(runner)
+	if err := adapter.apply(context.Background(), bad); !errors.Is(err, errExactKernelArtifact) || len(runner.calls) != 0 {
+		t.Fatalf("an unauthenticated tool was re-rendered and run: %v %q", err, runner.calls)
+	}
+}
+
+// TestRerenderNeedsAMatchingRendering: a stored plan changed beside an older build's
+// rendering (a prefix the old bytes never held, an egress device they never named) is not re-rendered
+// into an executable plane; it stays refused until a fresh Review and Apply.
+func TestRerenderNeedsAMatchingRendering(t *testing.T) {
+	for name, mutate := range map[string]func(*executionKernelArtifactV1){
+		"prefix": func(a *executionKernelArtifactV1) { a.Plan.Zones[0].V4 = []string{"0.0.0.0/0"} },
+		"device": func(a *executionKernelArtifactV1) { a.Plan.Egresses[1].Iface = "evil0" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := exactKernelTestArtifact()
+			a.Renderer = ""
+			plan := *a.Plan
+			plan.Zones = append([]pbr.Zone(nil), a.Plan.Zones...)
+			plan.Egresses = append([]pbr.Egress(nil), a.Plan.Egresses...)
+			a.Plan = &plan
+			mutate(&a)
+			runner := &exactKernelRecordRunner{}
+			adapter, _ := newExactKernelAdapter(runner)
+			if err := adapter.apply(context.Background(), a); !errors.Is(err, errExactKernelArtifact) || len(runner.calls) != 0 {
+				t.Fatalf("a plan the old rendering does not account for ran: %v %q", err, runner.calls)
+			}
+		})
+	}
+}
+
+// TestNoRerenderOfAnotherBuildsFastPlan: a fast-mode plan with the resolver plane, or
+// one carrying routed tables, from another build is not re-rendered (it would keep that build's choice
+// of what leaves nft); the same plan rendered by this build still runs. Superseded cleanup treats a
+// route added by the old rendering as the one the new rendering replaces.
+func TestNoRerenderOfAnotherBuildsFastPlan(t *testing.T) {
+	for name, mutate := range map[string]func(*pbr.Plan){
+		"fast dns": func(p *pbr.Plan) { p.FastDNS = true },
+		"routed":   func(p *pbr.Plan) { p.Zones[0].Routed, p.Zones[0].RouteV4 = true, []string{"0.0.0.0/0"} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := exactKernelTestArtifact()
+			plan := *a.Plan
+			plan.Zones = append([]pbr.Zone(nil), a.Plan.Zones...)
+			mutate(&plan)
+			a.Plan = &plan
+			a.Renderer = ""
+			a.Nft = append(append([]byte(nil), a.Nft...), []byte("\n# the other build's rendering")...)
+			runner := &exactKernelRecordRunner{}
+			adapter, _ := newExactKernelAdapter(runner)
+			if err := adapter.apply(context.Background(), a); !errors.Is(err, errExactKernelArtifact) || len(runner.calls) != 0 {
+				t.Fatalf("another build's fast plan ran: %v %q", err, runner.calls)
+			}
+		})
+	}
+	old := []string{"ip -6 route add blackhole default table 151", "ip rule add fwmark 0x1/0xff table 151 priority 150"}
+	now := []string{"ip -6 route replace blackhole default table 151", "ip rule add fwmark 0x1/0xff table 151 priority 150"}
+	if got := supersededKernelCommands(old, now); len(got) != 0 {
+		t.Errorf("a route the new rendering replaces was deleted: %q", got)
+	}
+}
+
+// TestKernelTeardownOfAnOlderBuild: an older build's stored plane is taken down with this
+// build's teardown of its plan too (a table an older teardown does not name).
+func TestKernelTeardownOfAnOlderBuild(t *testing.T) {
+	a := exactKernelTestArtifact()
+	a.Renderer = ""
+	a.Teardown = a.Teardown[:1] // the older teardown deleted only the table
+	got := strings.Join(kernelTeardownOf(a), "\n")
+	for _, c := range exactKernelTestArtifact().Teardown {
+		if !strings.Contains(got, c) {
+			t.Errorf("teardown lacks %q:\n%s", c, got)
 		}
 	}
 }

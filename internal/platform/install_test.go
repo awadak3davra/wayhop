@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// The test router as measured: apk, kernel 6.12.74, kmod feed pinned to that build, and an overlay with
+// The reference OpenWrt router as measured: apk, kernel 6.12.74, kmod feed pinned to that build, and an overlay with
 // 6.1 MiB free of 60.6 — the number that makes the space check load-bearing rather than decorative.
 func liveHost() InstallInput {
 	return InstallInput{

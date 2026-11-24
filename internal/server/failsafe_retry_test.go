@@ -760,7 +760,7 @@ func TestApplyRollback_DuringAFailedApplyThatRestoredTheCommittedConfiguration(t
 	}
 }
 
-// QA-143: whether sing-box must run was fixed from the tested configuration when the window opened.
+// Whether sing-box must run was fixed from the tested configuration when the window opened.
 // After the window rolled a crashed core back to a committed configuration that runs none by design,
 // every later check read the stopped core as an outage: the window never closed as recovered and, with
 // auto-reboot on, rebooted the router with "no connectivity even after rollback".
@@ -796,7 +796,7 @@ func TestFailSafeCheck_JudgesTheRestoredConfigurationAfterARollback(t *testing.T
 	}
 }
 
-// QA-144: rolling a native Test back to a committed revision with no native plan aborts the Test's
+// Rolling a native Test back to a committed revision with no native plan aborts the Test's
 // native target. A failed abort was only logged: Roll back answered rolled_back and the record forgot
 // the tunnels, routes and ladder still on the router. It is a rollback failure, retried by Roll back.
 func TestApplyRollback_FailedNativeAbortIsARollbackFailure(t *testing.T) {

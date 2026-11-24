@@ -181,7 +181,7 @@ func (s *Server) refreshSubscriptionOnce(ctx context.Context) (added int, err er
 			default:
 				toAdd[i].Enabled = false
 			}
-			// One the core cannot load at all would fail model.Validate and so every Apply (QA-028).
+			// One the core cannot load at all would fail model.Validate and so every Apply.
 			if toAdd[i].Enabled && model.EndpointParamProblem(&toAdd[i]) != "" {
 				toAdd[i].Enabled = false
 			}

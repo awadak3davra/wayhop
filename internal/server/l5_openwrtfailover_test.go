@@ -11,7 +11,7 @@ import (
 // TestListFailoverIsNotKeeneticShaped (L5): the owner that repoints a routing list's table must run
 // on the routers that need it, not only on the one it was written against.
 //
-// Measured on a live test router (OpenWrt 25.12.2) over ssh:
+// Observed on an OpenWrt router (OpenWrt 25.12.2) over ssh:
 //
 //	ipset     MISSING
 //	iptables  MISSING

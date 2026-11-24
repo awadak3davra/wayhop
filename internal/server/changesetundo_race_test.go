@@ -34,7 +34,7 @@ func waitForUndoOnStoreLock(t *testing.T) {
 	t.Fatal("the undo never reached the store's write lock")
 }
 
-// QA-090: an undo must not write back what it read before it waited. It read the config and the
+// An undo must not write back what it read before it waited. It read the config and the
 // profile, then waited for the store's write lock (held by a background CIDR refresh, standing in
 // for any store writer) and published its stale copy of the profile over the refresh's caches; then
 // it saved its stale copy of the WHOLE config, silently reverting a Settings save (allowed hosts)

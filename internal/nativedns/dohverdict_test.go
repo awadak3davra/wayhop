@@ -59,7 +59,7 @@ func TestLeakVerdict_DoTRulesAloneDoNotClearTheVerdict(t *testing.T) {
 	}
 }
 
-// The test router's actual shape: the same :853 rules plus a resolver-set restriction on :443.
+// The reference router's actual shape: the same :853 rules plus a resolver-set restriction on :443.
 func TestLeakVerdict_ResolverSetOn443ClosesTheLastHatch(t *testing.T) {
 	ep := detectFW4(t, "\t\ttcp dport 853 counter jump handle_reject\n"+
 		"\t\tiifname \"br-lan\" tcp dport { 443, 853 } ip daddr @doh_v4 reject with tcp reset\n"+
@@ -73,7 +73,7 @@ func TestLeakVerdict_ResolverSetOn443ClosesTheLastHatch(t *testing.T) {
 	}
 	// The verdict clears, but the note says what the :443 rule can and cannot do: it refuses the
 	// listed resolvers, and DoH to any other is ordinary HTTPS. "All three bypass routes are
-	// constrained" claimed more than that (QA-107).
+	// constrained" claimed more than that.
 	if len(ep.Notes) != 1 || !strings.Contains(ep.Notes[0], "well-known resolver addresses") ||
 		!strings.Contains(ep.Notes[0], "outside that list") {
 		t.Errorf("note = %q, want the listed-resolvers wording with its limit", ep.Notes)

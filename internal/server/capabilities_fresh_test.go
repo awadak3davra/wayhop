@@ -8,9 +8,8 @@ import (
 	"wayhop/internal/platform"
 )
 
-// Found by two hunters on emulated OpenWrt 24.10 and 25.12: right after installing sing-box from
-// Components, saving a connection was refused from a capability cache up to five minutes old, and the
-// form's Retry did not help because its fresh answer was never kept.
+// Right after installing sing-box from Components, saving a connection must not be refused from a
+// capability cache up to five minutes old, and the form's Retry must keep its fresh answer.
 func TestCapabilityCacheFollowsInstallsAndRetry(t *testing.T) {
 	s := bindTestServer(t, feedProfile(), "")
 	stale := platform.CapabilitySet{ProbedAt: time.Now()}

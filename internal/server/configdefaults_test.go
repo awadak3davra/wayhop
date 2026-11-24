@@ -40,7 +40,7 @@ func dug(m map[string]any, path ...string) (any, bool) {
 
 // The Settings index answers "is this still the default" by looking the field up in this payload, so
 // a field missing from it is a setting the page cannot judge. `omitempty` was dropping exactly the
-// fields whose default is empty — measured on a live router: routing_mode, flow_offload and
+// fields whose default is empty — observed on a router: routing_mode, flow_offload and
 // flow_offload_devices were all absent, which left the filter blind to the routing mode.
 func TestConfigDefaultsCarryFieldsWhoseDefaultIsEmpty(t *testing.T) {
 	defaults := defaultsMap(t)

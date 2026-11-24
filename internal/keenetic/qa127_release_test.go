@@ -8,7 +8,7 @@ import (
 	"wayhop/internal/model"
 )
 
-// QA-127. The writer holds the firmware's line as well as the planner: on a KeeneticOS release that
+// The writer holds the firmware's line as well as the planner: on a KeeneticOS release that
 // takes only the AmneziaWG 1 settings it refuses the AmneziaWG 2 ones instead of writing a
 // `wireguard asc` line the router rejects, and writes the nine-argument form it does take.
 func TestQA127WriterCappedByFirmwareGeneration(t *testing.T) {

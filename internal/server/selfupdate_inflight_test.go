@@ -254,7 +254,7 @@ func exitedPID(t *testing.T) int {
 }
 
 // The supervisor drops the marker first and works on: rollback() then stops the service, restores the
-// copy and waits up to 60 s for the old build; proven() compresses the copy, 10-40 s on a test router.
+// copy and waits up to 60 s for the old build; proven() compresses the copy, 10-40 s on a small OpenWrt router.
 // An update let in there relinked .bak to the build now running and deleted .bak.gz, and the
 // compression then moved its gzip of the first build into place and deleted .bak: the second update
 // had no rollback copy, and a build that crashes on start crash-looped.

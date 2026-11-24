@@ -79,7 +79,7 @@ func TestBulkEndpoints_Duplicates(t *testing.T) {
 	}
 }
 
-// QA-148: importing the same link again keeps what the user changed since the first import — the
+// Importing the same link again keeps what the user changed since the first import — the
 // name, the switch, the health target, multiplex, the ID groups hold it by — and the answer says it was
 // unchanged rather than "imported". A link that now carries a different param updates that param and
 // still keeps the rest, and is counted as updated. The subscription timer already kept this promise;
@@ -144,7 +144,7 @@ func TestBulkEndpoints_ReimportKeepsTheUsersEdits(t *testing.T) {
 	}
 }
 
-// QA-148 (hunter, after the first fix): a re-import laid only the values the link carries over the
+// A re-import laid only the values the link carries over the
 // stored connection, so a link that had dropped Vision, allowInsecure, its fingerprint and its pin
 // was answered "1 unchanged" and all four stayed stored. Everything the link can express now comes
 // from the link, an absent value included, and the answer says the connection was updated.
@@ -230,7 +230,7 @@ func TestBulkEndpoints_ReimportSaysItKeptAServerKeyPin(t *testing.T) {
 	}
 }
 
-// QA-156: a link that omits MTU and keepalive still clears them, but the answer names the loss.
+// A link that omits MTU and keepalive still clears them, but the answer names the loss.
 func TestBulkEndpoints_ReimportSaysItClearedWireGuardKnobs(t *testing.T) {
 	s, _ := sharehandlers_server(t)
 	const base = "wireguard://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA%3D@203.0.113.61:51820?publickey=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQ%3D&address=10.0.0.2/32"

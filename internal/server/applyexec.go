@@ -13,6 +13,7 @@ import (
 	"wayhop/internal/atomicfile"
 	"wayhop/internal/core"
 	"wayhop/internal/nativeplan"
+	"wayhop/internal/pbr"
 	"wayhop/internal/platform"
 	"wayhop/internal/plugin"
 	"wayhop/internal/updater"
@@ -484,8 +485,8 @@ const coreConfigSpaceReserve = 1 << 20
 // coreConfigSpaceError refuses an Apply whose core config would not fit where it is written. An Apply
 // holds about three copies at its peak - the staged check copy here, the temp the live file is swapped
 // in from, and the Apply record, which keeps the config base64-encoded for the committed and the
-// tested revision - and since downloaded feeds reach the core (QA-066) a refilter-sized list sent to
-// a proxy makes a config of megabytes, against 6.1 MB free on the test router's overlay. An unknown free
+// tested revision - and since downloaded feeds reach the core, a large list sent to a proxy makes a
+// config of megabytes, against perhaps 6 MB free on a small router's overlay. An unknown free
 // space (off Linux, or statfs failing) skips the guard rather than blocking on it.
 func coreConfigSpaceError(dir string, size int, avail func(string) (uint64, bool)) error {
 	free, ok := avail(dir)
@@ -519,40 +520,105 @@ func (s *Server) kernelStep(ctx context.Context, target executionKernelArtifactV
 		if err != nil {
 			return fmt.Errorf("%w: adapter: %v", errExactProductionKernelApply, err)
 		}
-		return adapter.apply(ctx, target)
+		if err := adapter.apply(ctx, target); err != nil {
+			return err
+		}
+		s.syncBootGuard(nil) // the guard went with the plane; so does its boot copy
+		// The dlist sets went with the table (fast mode left): the snippet that fills them goes too,
+		// and so does a watch of it.
+		s.stopFastDNSWatch()
+		if err := s.syncFastDNS(ctx, nil); err != nil {
+			log.Printf("apply: kernel retire: %v", err)
+		}
+		return nil
 	}
 	if target.Action != ExecutionEnsurePresent {
 		return fmt.Errorf("kernel action %q cannot be executed", target.Action)
 	}
 	if target.Ipset != nil {
-		if previous != nil && previous.Ipset != nil && string(previous.Ipset.Script) != string(target.Ipset.Script) {
-			// A replaced plane: remove the old sets and marks first so nothing the new plan no longer
-			// names lingers; the new program is installed right after. The DNS redirect and refusals
-			// the new program keeps stay in place across the swap.
-			if err := s.kernelTeardownSparing(ctx, *previous, target.Ipset.Script); err != nil {
-				log.Printf("apply: previous Keenetic plane teardown: %v", err)
-			}
-		}
 		adapter, err := newExactKeeneticKernelAdapter(*target.Ipset)
 		if err != nil {
 			return fmt.Errorf("%w: adapter: %v", errExactProductionKernelApply, err)
 		}
+		// The kill switch backstop's routes go in before any rule or mark is (re)written, and the old
+		// plane's stay until that plane is retired below (pbr/backstop.go).
+		if err := s.syncKillSwitchBackstop(ctx, target.Plan, *target.Ipset, true, true, previous); err != nil {
+			return fmt.Errorf("%w: kill switch backstop: %v", errExactProductionKernelApply, err)
+		}
+		// A replaced plane is NOT taken down first: that left nothing marked, and listed traffic on
+		// the WAN, until the new program ran (kill switch audit). The new program goes in over it (its
+		// chain is one commit, its rules del-then-add), then only what it does not install is retired.
+		replaced := previous != nil && previous.Ipset != nil && string(previous.Ipset.Script) != string(target.Ipset.Script)
+		if replaced {
+			if flush := pbr.ReflushTables(string(previous.Ipset.Script), string(target.Ipset.Script)); len(flush) > 0 {
+				if err := adapter.runProgram(ctx, *target.Ipset, strings.Join(flush, "\n")+"\n"); err != nil {
+					log.Printf("apply: reflush the tables the new Keenetic plane re-seeds: %v", err)
+				}
+			}
+		}
 		if err := adapter.apply(ctx, *target.Ipset); err != nil {
 			return err
 		}
-		// The hook goes in last and takes the plane with it if it fails. A plane installed without
-		// one survives only until NDM's next firewall rebuild — minutes, on a router where an
-		// interface flap triggers it — and would disappear with the panel still reporting applied.
+		if previous != nil && previous.Ipset != nil {
+			if err := adapter.pruneRestore(ctx, previous.Ipset.Restore, target.Ipset.Restore); err != nil {
+				return err
+			}
+		}
+		// Fast mode guards dnsmasq's restart for the policy file the hook install writes (keeneticfast.go):
+		// the file it replaces and whether DNS answered are read before it is written.
+		fastPolicy := target.Ipset.DynamicDomainSets && len(target.Ipset.DnsmasqConf) != 0 && !s.config().Demo
+		var pre keeneticFastPreInstall
+		if fastPolicy {
+			if pre, err = keeneticFastBeforeInstall(ctx); err != nil {
+				return fmt.Errorf("%w: %v", errExactProductionKernelApply, err)
+			}
+		}
+		// The hook goes in before the old plane is retired, and takes the plane with it if it fails.
+		// A plane installed without one survives only until NDM's next firewall rebuild — minutes, on
+		// a router where an interface flap triggers it — and would disappear with the panel still
+		// reporting applied.
 		if _, err := installKeeneticPBRHook(*target.Ipset); err != nil {
 			_ = adapter.teardown(ctx, *target.Ipset)
+			if replaced {
+				if tdErr := s.kernelTeardown(ctx, *previous); tdErr != nil {
+					log.Printf("apply: previous Keenetic plane teardown: %v", tdErr)
+				}
+			}
 			return fmt.Errorf("install the netfilter.d re-assert hook: %w", err)
 		}
+		if replaced {
+			if err := s.retireKeeneticPlane(ctx, *previous.Ipset, *target.Ipset); err != nil {
+				log.Printf("apply: retire the previous Keenetic plane: %v", err)
+			}
+		}
+		if previous != nil && previous.Ipset != nil {
+			s.dropExtraIfaces(ctx, previous.Plan, *previous.Ipset, target.Ipset)
+		}
+		// From the kernel: the retire may have flushed the table.
+		if err := s.syncKillSwitchBackstop(ctx, target.Plan, *target.Ipset, false, true, nil); err != nil {
+			log.Printf("apply: kill switch backstop: drop the routes no plane needs: %v", err)
+		}
+		// The learned addresses of kill-switched domain sets, for the boot fill: written
+		// when an Apply is saved, if they changed.
+		s.saveLearnedNow()
+		s.sweepLeakedFlows(ctx, target.Plan, *target.Ipset, true, "the Apply")
 		// Domain zones are populated by the resolver, so they stay empty until it has read the
 		// directives just written. A failure here is degraded, not wrong — the IP part of the plane
 		// is installed and the domains start filling at the resolver's next start.
+		// In fast mode the restart is guarded instead: a dnsmasq that refuses the file or stops answering
+		// gets the previous file back, and the step fails so the Apply rolls back.
+		if fastPolicy {
+			return s.keeneticFastReload(ctx, adapter.runner.Run, *target.Ipset, target.Plan, pre)
+		}
+		s.keeneticFastLeft()
 		if len(target.Ipset.DnsmasqConf) != 0 {
 			if reloadErr := reloadKeeneticDnsmasq(ctx, adapter.runner); reloadErr != nil {
 				log.Printf("apply: domain sets will fill only after the resolver restarts: %v", reloadErr)
+			}
+			// Also the rollback of a fast Apply to an earlier plane: a dnsmasq that did
+			// not come back is restarted by the loop.
+			if !s.config().Demo && waitKeeneticAlive(ctx) != nil {
+				s.oweRestartIfSilent(ctx)
 			}
 		}
 		return nil
@@ -567,9 +633,67 @@ func (s *Server) kernelStep(ctx context.Context, target executionKernelArtifactV
 	if err != nil {
 		return fmt.Errorf("%w: adapter: %v", errExactProductionKernelApply, err)
 	}
+	adapter.keep = s.electedRouteKeeper(ctx, target.Plan)
+	// The guard is rendered with the router's routes as they are now; the postcheck that follows
+	// reads the same ones (killswitchlocal.go).
+	s.noteGuardTunnels(target.Plan)
+	s.refreshGuardLocal(true)
+	adapter.hold = s.namesHold
+	adapter.learned = s.learnedNamesProgram
+	adapter.guardTx = &s.ksGuardTx
+	adapter.coreRunning = func() bool { return s.singbox != nil && s.singbox.Running() }
+	if previous != nil && previous.Action == ExecutionEnsurePresent && previous.Ipset == nil && previous.Plan != nil {
+		adapter.fallbackGuard, adapter.fallbackPlan = adapter.guardProgram(previous.Plan), previous.Plan
+	}
+	var prevPlan *pbr.Plan
+	if previous != nil && previous.Action == ExecutionEnsurePresent && previous.Ipset == nil {
+		prevPlan = previous.Plan
+	}
+	nftPath := target.NFTTool.ResolvedPath
+	adapter.carry = func(ctx context.Context, plan *pbr.Plan) string {
+		return s.fastInstallProgram(ctx, nftPath, plan, prevPlan)
+	}
+	adapter.mustLoad = s.fastMustLoad
+	// dnsmasq answering on 127.0.0.1:53 before the install arms the watch after it.
+	dnsWasUp := target.Plan != nil && len(target.Plan.DlistSets()) > 0 && !s.config().Demo &&
+		s.detectedPlatform() == platform.OpenWrt && fastDNSAlive(ctx, false) == nil
+	dnsAfter := s.fastDNSGuard(ctx, target.Plan)
+	// A list moving from nft to a table gets its routes before the plane drops its set, so it has no
+	// moment by the WAN; only tables the installed plane does not use.
+	s.preloadRoutedTables(ctx, target.Plan, prevPlan)
 	if err := adapter.apply(ctx, target); err != nil {
 		return fmt.Errorf("%w: %v", errExactProductionKernelApply, err)
 	}
+	// The large lists' tables (fastdns_routed.go): their rules came with the plane; their routes now.
+	// A table that cannot be filled fails the step, so the Apply rolls back rather than leave a list
+	// unrouted.
+	if err := s.syncRoutedTables(ctx, target.Plan); err != nil {
+		return fmt.Errorf("%w: %v", errExactProductionKernelApply, err)
+	}
+	// The fast DNS plane's dnsmasq snippet follows the installed plan (fastdns.go). A dnsmasq that no
+	// longer answers after the restart has had the snippet taken out again; the step fails so the
+	// Apply rolls back rather than leave the LAN without DNS.
+	if err := s.syncFastDNS(ctx, target.Plan); err != nil {
+		return fmt.Errorf("%w: %v", errExactProductionKernelApply, err)
+	}
+	if err := dnsAfter(); err != nil {
+		return fmt.Errorf("%w: %v", errExactProductionKernelApply, err)
+	}
+	// A plan without resolver-fed sets leaves no DNS table behind (the previous fast plan's).
+	if target.Plan != nil && len(target.Plan.DlistSets()) == 0 {
+		command := "nft delete table inet " + target.Plan.DNSTable()
+		if err := adapter.runCommand(ctx, command); err != nil && !exactKernelAlreadyAbsent(command, err) {
+			log.Printf("apply: the fast path's DNS table was not removed: %v", err)
+		}
+	}
+	// The LAN's DNS is watched for a minute after the install (live 22.11: it stalled 10-20 s later).
+	s.fastDNSInstalled()
+	s.startFastDNSWatch(target.Plan, dnsWasUp)
+	// The same guard on flash, for the boot before WayHop runs (killswitchnft.go), and the learned
+	// addresses of its kill-switched names if they changed since the file was written.
+	s.syncBootGuard(target.Plan)
+	s.saveLearnedNamesNow(target.Plan)
+	s.setLearnTarget(target.Plan, target.NFTTool, target.IPTool)
 	return nil
 }
 
@@ -593,13 +717,31 @@ func (s *Server) kernelTeardownSparing(ctx context.Context, artifact executionKe
 		if err := adapter.teardownSparing(ctx, *artifact.Ipset, spare); err != nil {
 			return err
 		}
+		// The backstop's rules went with the program; its routes go after them.
+		if spare == nil {
+			s.dropExtraIfaces(ctx, artifact.Plan, *artifact.Ipset, nil)
+			s.clearKillSwitchBackstop(ctx)
+			s.keeneticFastLeft() // its policy file went with the hook; so does a watch of it
+		}
 		return hookErr
 	}
 	adapter, err := newExactKernelAdapter(exactKernelToolRunner{nft: artifact.NFTTool, ip: artifact.IPTool})
 	if err != nil {
 		return fmt.Errorf("%w: adapter: %v", errExactProductionKernelApply, err)
 	}
-	return adapter.teardown(ctx, artifact.Teardown)
+	if err := adapter.teardown(ctx, kernelTeardownOf(artifact)); err != nil {
+		return err
+	}
+	// The dlist sets went with the table: the snippet that fills them goes too, and a watch of it.
+	s.stopFastDNSWatch()
+	if err := s.syncFastDNS(ctx, nil); err != nil {
+		log.Printf("apply: kernel teardown: %v", err)
+	}
+	// A plane taken down with nothing to replace it (routing switched off, an Apply with no baseline
+	// to return to): the guard would hold the kill-switched addresses with no tunnel route left to
+	// take. It goes after the plane, as the Keenetic backstop's routes do.
+	s.syncBootGuard(nil)
+	return adapter.dropGuard(ctx)
 }
 
 // kernelPostcheck proves the plane is in the kernel, not merely that a command succeeded: NDM
@@ -619,7 +761,56 @@ func (s *Server) kernelPostcheck(ctx context.Context, artifact executionKernelAr
 	if err != nil {
 		return err
 	}
+	adapter.hold = s.namesHold
 	return adapter.postcheck(ctx, artifact)
+}
+
+// renewKernelNamesHold is the reconcile tick's part in the nft guard: the boot copy follows the
+// installed plan, and the names hold gets another period while the core runs.
+func (s *Server) renewKernelNamesHold(ctx context.Context, artifact executionKernelArtifactV1, coreRunning bool) {
+	if artifact.Action != ExecutionEnsurePresent || artifact.Ipset != nil || artifact.Plan == nil {
+		return
+	}
+	s.noteGuardTunnels(artifact.Plan)
+	if s.refreshGuardLocal(false) {
+		s.reloadGuardForRoutes(ctx, artifact)
+	}
+	s.noteStoredPlan(artifact.Plan)
+	s.syncBootGuard(artifact.Plan)
+	s.setLearnTarget(artifact.Plan, artifact.NFTTool, artifact.IPTool)
+	run := func(ctx context.Context, program string) error {
+		_, err := exactKernelToolRunner{nft: artifact.NFTTool, ip: artifact.IPTool}.Run(ctx, program, "nft", "-f", "-")
+		return err
+	}
+	s.renewNamesHold(ctx, artifact.Plan, coreRunning, run)
+	s.coreReturned(artifact.Plan, coreRunning)
+	// The addresses of kill-switched names are learned on a timer of their own (killswitchlearn.go).
+}
+
+// reloadGuardForRoutes loads the guard again when the router's own routes changed what it says (a
+// new segment inside a private network a kill-switched list names). Only the guard:
+// the plane does not read those routes. With the learned addresses and the hold's remaining time, as
+// every load. A plan whose guard does not depend on the routes renders the same program and is left
+// alone. A failed load is logged; the next tick's postcheck then finds the guard is not this one and
+// reinstalls.
+func (s *Server) reloadGuardForRoutes(ctx context.Context, artifact executionKernelArtifactV1) {
+	adapter, err := newExactKernelAdapter(exactKernelToolRunner{nft: artifact.NFTTool, ip: artifact.IPTool})
+	if err != nil {
+		return
+	}
+	adapter.hold = s.namesHold
+	adapter.learned = s.learnedNamesProgram
+	adapter.guardTx = &s.ksGuardTx
+	adapter.coreRunning = func() bool { return s.singbox != nil && s.singbox.Running() }
+	guard := adapter.guardProgram(artifact.Plan)
+	if guard == "" || adapter.guardLoaded(ctx, guard) {
+		return
+	}
+	if err := adapter.loadGuard(ctx, guard, artifact.Plan); err != nil {
+		log.Printf("kill switch: the guard was not reloaded for the router's changed routes: %v", strings.TrimSpace(err.Error()))
+		return
+	}
+	log.Printf("kill switch: the guard was reloaded: the router's own routes into private addresses a kill-switched list covers changed")
 }
 
 // keeneticProductionNativeOperations names the exact NDM operations the Keenetic adapter implements,

@@ -345,6 +345,30 @@ func TestCompileKeeneticAdoptsKnownExternalOwnersWithoutWritePlan(t *testing.T) 
 	}
 }
 
+// A freed WireguardN slot is reused by the next tunnel, so an old adopted record and the new one can
+// name one interface. That is refused here, naming both, not later as an opaque invalid plan.
+func TestCompileKeeneticRefusesTwoAdoptedEndpointsOnOneInterface(t *testing.T) {
+	old, fresh := managedAWG(), managedAWG()
+	old.ID, fresh.ID = "external-nwg0", "external-nwg0-2"
+	for _, e := range []*model.Endpoint{&old, &fresh} {
+		e.Owner = model.OwnerExternal
+	}
+	protocol := string(old.Protocol)
+	facts := HostFacts{
+		Platform: platform.Keenetic,
+		Capabilities: usableCapabilities(
+			platform.NativeOperationCapabilityID(protocol, platform.NativeAdopt),
+		),
+		AdoptInterfaces:    map[string]string{old.ID: "nwg0", fresh.ID: "nwg0"},
+		AdoptNDMNames:      map[string]string{old.ID: "Wireguard0", fresh.ID: "Wireguard0"},
+		OccupiedInterfaces: map[string]bool{},
+	}
+	_, err := Compile(&model.Profile{Endpoints: []model.Endpoint{old, fresh}}, facts)
+	if err == nil || !strings.Contains(err.Error(), old.ID) || !strings.Contains(err.Error(), fresh.ID) {
+		t.Fatalf("two adopted endpoints on nwg0 compiled or hid the names: %v", err)
+	}
+}
+
 // A tunnel run outside KeeneticOS is adopted by its device alone: no NDM name exists for it, and the
 // device the capture proved is both the decision's link and the routes' target.
 func TestCompileKeeneticAdoptsForeignTunnelByDevice(t *testing.T) {

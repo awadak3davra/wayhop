@@ -27,7 +27,10 @@ type Asymmetry struct {
 	DNSServerTag  string `json:"dns_server_tag,omitempty"`
 	Exposed       bool   `json:"exposed"`   // the resolver sees a lookup from a different exit than the traffic
 	Encrypted     bool   `json:"encrypted"` // query contents are protected on the path to the resolver
-	Detail        string `json:"detail"`
+	// KillSwitch: a kill switch covers the list's tunnels (model.ListKillSwitch). Its traffic never
+	// leaves by the provider, so a lookup that does is refused, encrypted or not.
+	KillSwitch bool   `json:"kill_switch,omitempty"`
+	Detail     string `json:"detail"`
 }
 
 // directTags are the outbound values that mean "no tunnel".
@@ -78,7 +81,7 @@ func DetectAsymmetric(p model.Profile, plane Plane) []Asymmetry {
 		// noLookup: no query leaves the router, so there is no lookup to disagree with the traffic.
 		// A fakeip server hands out an address from its pool and the name is resolved at the exit
 		// the traffic takes; read as a resolver it had no detour ("direct") and no encryption, and
-		// the catalog's FakeIP preset was refused as a plaintext leak (QA-106). A reject rule
+		// the catalog's FakeIP preset was refused as a plaintext leak. A reject rule
 		// answers with a refusal.
 		noLookup bool
 	}
@@ -164,7 +167,7 @@ func DetectAsymmetric(p model.Profile, plane Plane) []Asymmetry {
 			// default is not, because that is the same exposure by another route. The default is
 			// the server sing-box will actually use, which with no `final` is the first one emitted:
 			// skipping an empty final let a plaintext `local` first server answer tunnel lists with
-			// no finding at all (QA-105).
+			// no finding at all.
 			if isDirect(rl.Outbound) {
 				continue
 			}
@@ -173,6 +176,12 @@ func DetectAsymmetric(p model.Profile, plane Plane) []Asymmetry {
 				continue
 			}
 			finalResolver, known := resolverOf[def.Tag]
+			if known && !finalResolver.noLookup && !isDirect(finalResolver.detour) &&
+				model.ListKillSwitch(&p, rl) && fallsBackDirect(p, finalResolver.detour) {
+				out = append(out, killSwitchFallback(rl, finalResolver.tag, finalResolver.detour, finalResolver.encrypted,
+					"no DNS rule covers this list, so its lookups go to the default server"))
+				continue
+			}
 			if !known || finalResolver.noLookup || !isDirect(finalResolver.detour) {
 				continue
 			}
@@ -203,7 +212,12 @@ func DetectAsymmetric(p model.Profile, plane Plane) []Asymmetry {
 				RoutingListID: rl.ID, ListName: rl.Name,
 				TrafficVia: rl.Outbound, DNSVia: "direct", DNSServerTag: def.Tag,
 				Exposed: true, Encrypted: finalResolver.encrypted, Detail: detail,
+				KillSwitch: model.ListKillSwitch(&p, rl),
 			})
+			continue
+		}
+		if !res.noLookup && !isDirect(res.detour) && model.ListKillSwitch(&p, rl) && fallsBackDirect(p, res.detour) {
+			out = append(out, killSwitchFallback(rl, res.tag, res.detour, res.encrypted, "its DNS rule sends its lookups to that server"))
 			continue
 		}
 		if res.noLookup || res.detour == rl.Outbound || (isDirect(res.detour) && isDirect(rl.Outbound)) {
@@ -219,6 +233,7 @@ func DetectAsymmetric(p model.Profile, plane Plane) []Asymmetry {
 			// The resolver sees a different source exit than the traffic. Encrypted transports protect
 			// the query on the WAN path; plaintext transports expose it to that path as well.
 			a.Exposed = true
+			a.KillSwitch = model.ListKillSwitch(&p, rl)
 			if res.encrypted {
 				a.Detail = fmt.Sprintf("traffic for %q goes through %q, but its encrypted DNS lookup goes directly via %q; "+
 					"the WAN path cannot read the query, while the resolver sees it from the WAN address instead of the tunnel exit",
@@ -241,4 +256,40 @@ func DetectAsymmetric(p model.Profile, plane Plane) []Asymmetry {
 		out = append(out, a)
 	}
 	return out
+}
+
+// fallsBackDirect reports whether a server's detour can end up direct: a group with `direct` among
+// its members, directly or through nested groups. sing-box picks that member when every tunnel is
+// down, which is the graceful degradation a kill switch rules out.
+func fallsBackDirect(p model.Profile, detour string) bool {
+	seen := map[string]bool{}
+	var walk func(id string) bool
+	walk = func(id string) bool {
+		if seen[id] {
+			return false
+		}
+		seen[id] = true
+		g := p.GroupByID(id)
+		if g == nil {
+			return false
+		}
+		for _, m := range g.Members {
+			if isDirect(m) || walk(m) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(strings.TrimSpace(detour))
+}
+
+// killSwitchFallback is the finding for a kill-switched list whose lookups go through a detour that
+// falls back to direct.
+func killSwitchFallback(rl model.RoutingList, tag, detour string, encrypted bool, why string) Asymmetry {
+	return Asymmetry{
+		RoutingListID: rl.ID, ListName: rl.Name, TrafficVia: rl.Outbound, DNSVia: detour, DNSServerTag: tag,
+		Exposed: true, Encrypted: encrypted, KillSwitch: true,
+		Detail: fmt.Sprintf("traffic for %q goes through %q under a kill switch; %s, %q, whose detour %q falls back to "+
+			"direct when its tunnels are down, so the lookups would then leave by the provider", rl.Name, rl.Outbound, why, tag, detour),
+	}
 }

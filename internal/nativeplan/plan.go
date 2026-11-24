@@ -68,7 +68,7 @@ type HostFacts struct {
 	OccupiedInterfaces map[string]bool
 	// KeeneticOwnedBlocks likewise comes only from the authenticated previous native plan (see the
 	// function of that name): endpoint -> the NDM interface block that plan created for it, which an
-	// unchanged endpoint keeps (keenetic.CompileOptions.OwnedBlocks, QA-108). OpenWrt ignores it.
+	// unchanged endpoint keeps (keenetic.CompileOptions.OwnedBlocks). OpenWrt ignores it.
 	KeeneticOwnedBlocks map[string][]string
 	// GlobalPriorities is the router's own `ip global` ladder (Keenetic). A default route is
 	// expressed by raising an interface above whatever holds it today, so the plan is compiled
@@ -280,6 +280,7 @@ const ByeDPIOnKeenetic = "ByeDPI is not available on KeeneticOS yet: WayHop's Ke
 func compileKeenetic(profile *model.Profile, facts HostFacts) (*Plan, error) {
 	plan := &Plan{Platform: platform.Keenetic}
 	userspace := UserspaceDevices(KeeneticUserspace(profile, facts.Capabilities))
+	claimedAdopted := make(map[string]string)
 	for _, endpoint := range profile.Endpoints {
 		if !endpoint.Enabled {
 			continue
@@ -301,6 +302,13 @@ func compileKeenetic(profile *model.Profile, facts HostFacts) (*Plan, error) {
 			decision, err := adoptDecision(endpoint, facts, netvpn.Proto(endpoint.Protocol))
 			if err != nil {
 				return nil, err
+			}
+			// KeeneticOS reuses a freed WireguardN slot, so a tunnel deleted and made again (a
+			// firmware update that recreated it, say) leaves the old record and the new one both
+			// pointing at one interface. The exact adapter refuses such a plan with no names in it;
+			// say here which two connections and what to do.
+			if err := reserveInterface(claimedAdopted, decision.Interface, endpoint.ID); err != nil {
+				return nil, fmt.Errorf("%w: the router has one tunnel on that interface, so one of the two connections is a stale record; delete the one that is no longer on the router", err)
 			}
 			plan.Decisions = append(plan.Decisions, decision)
 			continue
@@ -526,7 +534,7 @@ func UserspaceFor(profile *model.Profile, p platform.Platform, capabilities plat
 // UserspaceLane is UserspaceFor asked of one endpoint: whether Compile runs it on WayHop's AmneziaWG
 // engine (PathEnginePlugin) rather than on the router's own, and why. Each endpoint's place in the set
 // depends on it alone, so this is the planner's answer for the profile it will be part of. The save
-// check asks it of a connection the router's own AmneziaWG cannot create (QA-133): one the planner
+// check asks it of a connection the router's own AmneziaWG cannot create: one the planner
 // hands to the engine is not refused for want of a native operation it never uses.
 func UserspaceLane(endpoint model.Endpoint, p platform.Platform, capabilities platform.CapabilitySet, kernel awg.Generation) (UserspaceEndpoint, bool) {
 	u, ok := UserspaceFor(&model.Profile{Endpoints: []model.Endpoint{endpoint}}, p, capabilities, kernel)[endpoint.ID]
@@ -727,13 +735,24 @@ func keeneticAutomaticReason(endpoint model.Endpoint, capabilities platform.Capa
 			Code: platform.ReasonPlatformUnsupported,
 		}
 		if len(beyondGeneration(endpoint, keenetic.AWGGeneration)) == 0 {
-			// The writer has the arguments; this firmware release does not take them (QA-127).
+			// The writer has the arguments; this firmware release does not take them.
 			firmware := capabilities.Get(platform.CapNativeAWGGen2)
 			out.Reason = fmt.Sprintf("it uses AmneziaWG %s settings (%s): %s",
 				awg.Need(endpoint.Params), strings.Join(settings, ", "), firmware.Detail)
 			out.Remedy = firmware.Remedy
 		}
 		return out, true
+	}
+	// The firmware takes the 3.x settings, but a line cannot be written without the key and the timers
+	// the connection did not carry: WayHop's own engine runs it instead of the writer guessing them.
+	if endpoint.Protocol == model.ProtoAmneziaWG {
+		if missing := keenetic.ASC31Missing(endpoint.Params); len(missing) != 0 {
+			return UserspaceEndpoint{
+				Reason: "its AmneziaWG 3.x settings lack " + strings.Join(missing, ", ") + ", which KeeneticOS's `wireguard asc` needs",
+				Code:   platform.ReasonPlatformUnsupported,
+				Remedy: "Add the missing settings to the connection to run it on KeeneticOS's own AmneziaWG.",
+			}, true
+		}
 	}
 	for _, operation := range []platform.NativeOperation{platform.NativeCreate, platform.NativeRemove} {
 		capability := capabilities.Get(platform.NativeOperationCapabilityID(string(endpoint.Protocol), operation))
@@ -762,11 +781,14 @@ func keeneticAutomaticReason(endpoint model.Endpoint, capabilities platform.Capa
 // KeeneticAWGGeneration is the newest AmneziaWG generation NDM's `wireguard asc` expresses on this
 // router: the writer's own (keenetic.AWGGeneration), unless the capability set proves the firmware
 // release takes less - platform.CapNativeAWGGen2 unsupported for want of the platform, KeeneticOS
-// 4.2 to 5.0 (QA-127). Only that definite answer lowers it; a set without the item, or with it
+// 4.2 to 5.0. Only that definite answer lowers it; a set without the item, or with it
 // unknown, keeps the writer's generation, as before the release was read.
 func KeeneticAWGGeneration(capabilities platform.CapabilitySet) awg.Generation {
 	if capabilities.Get(platform.CapNativeAWGGen2).Reason == platform.ReasonPlatformUnsupported {
 		return awg.Gen1
+	}
+	if capabilities.Get(platform.CapNativeAWGGen31).State.Usable() {
+		return keenetic.MaxAWGGeneration
 	}
 	return keenetic.AWGGeneration
 }

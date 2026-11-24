@@ -61,7 +61,7 @@ func TestSelfUpdate_DigestFetchedDirect(t *testing.T) {
 // TestStreamAsset_RejectsHTTPMirrorForDigest: a digest-mandatory download (every executable install)
 // must refuse a plaintext http:// mirror (a passive MITM could rewrite the binary). The second half
 // characterises the shared primitive itself: with requireDigest=false it still permits an http://
-// mirror — no PRODUCTION executable path passes false after LOOP-010 (both self-update and engine
+// mirror — no PRODUCTION executable path passes false (both self-update and engine
 // installs pass true), the flag is exercised here only as the documented primitive behaviour.
 func TestStreamAsset_RejectsHTTPMirrorForDigest(t *testing.T) {
 	tgz := updaterinstall_tarGz(t, "sing-box-1.0-amd64", "sing-box", []byte("SINGBOX-BINARY-BYTES"))
@@ -84,7 +84,7 @@ func TestStreamAsset_RejectsHTTPMirrorForDigest(t *testing.T) {
 		t.Fatalf("want an http:// refusal, got %v", err)
 	}
 	// The shared primitive with requireDigest=false still permits the http:// mirror. This is not a
-	// production path any more (LOOP-010 made engine installs pass true); it pins the primitive's
+	// production path (engine installs pass true); it pins the primitive's
 	// documented behaviour so a future non-executable use of it is a deliberate choice, not a drift.
 	if err := u.streamAssetToFile(context.Background(), asset, "sing-box", dst, false); err != nil {
 		t.Fatalf("non-digest download should still use an http:// mirror: %v", err)

@@ -49,7 +49,7 @@ type Capabilities struct {
 	Accel Accel `json:"accel"`
 	// NetifdProtos is the set of protocol handlers netifd actually has, keyed by bare proto name
 	// ("amneziawg", "wireguard"), read from /lib/netifd/proto/*.sh. It answers a narrower question
-	// than Native and must not be confused with it: on a live test router `Native["wireguard"]`
+	// than Native and must not be confused with it: on a reference OpenWrt router `Native["wireguard"]`
 	// is TRUE — the amneziawg kmod is a WireGuard superset, which is exactly what Native records —
 	// while `/lib/netifd/proto/wireguard.sh` is ABSENT. Anything that WRITES a uci `proto=` has to
 	// gate on this one, or it produces a section netifd cannot bring up.
@@ -175,7 +175,7 @@ func decideOpenWrt(in hostInputs) Capabilities {
 // Rules (docs/NATIVE_INTEGRATION_DESIGN.md §1-2) in the development repository: WireGuard/AmneziaWG
 // are native if the "wireguard" firmware component is present, OR an NDM interface of type
 // "Wireguard" exists (the NDM Wireguard type carries AmneziaWG params on Keenetic) - AmneziaWG only
-// on a release that has `wireguard asc` (4.2 on, KeeneticReleaseAWG; QA-127). KeeneticOS
+// on a release that has `wireguard asc` (4.2 on, KeeneticReleaseAWG). KeeneticOS
 // firmware also ships ipsec/openvpn/l2tp/etc. components — those are populated too when present
 // (best-effort), but WG/AWG are the priority this iteration.
 func decideKeenetic(in hostInputs) Capabilities {
@@ -193,7 +193,7 @@ func decideKeenetic(in hostInputs) Capabilities {
 	}
 
 	// The WireGuard component is older than AmneziaWG on KeeneticOS: a release before 4.2 has
-	// WireGuard and no `wireguard asc` (QA-127, see KeeneticReleaseAWG). There the router carries no
+	// WireGuard and no `wireguard asc` (see KeeneticReleaseAWG). There the router carries no
 	// AmneziaWG of its own, installing the component would not change that, and the endpoint belongs
 	// to WayHop's AmneziaWG engine. A release that cannot be read keeps the component's answer.
 	awgGen, releaseKnown := KeeneticReleaseAWG(caps.FirmwareRelease)

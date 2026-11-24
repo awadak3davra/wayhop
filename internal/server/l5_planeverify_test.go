@@ -5,7 +5,7 @@ import "testing"
 // TestUnreferencedSets (L5): a set nothing marks against routes nothing, and the supervision must
 // say so instead of reporting the plane verified.
 //
-// Measured on a live Keenetic: deleting the one MARK rule for wr_list_rl_teamviewer_4 left
+// Observed on KeeneticOS: deleting the one MARK rule for wr_list_rl_teamviewer_4 left
 // the set in place with every member intact, so the postcheck passed, /api/pbr/status kept saying
 // verified:true, and the panel kept saying "The router is verified to be running this
 // configuration" — while that list was not policy-routed at all. The rule returned in ~30s from the

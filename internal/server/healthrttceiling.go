@@ -11,12 +11,12 @@ import (
 // RFC 7323 says scaling is then off in BOTH directions — the window is pinned at the 16-bit maximum
 // and the ceiling becomes real.
 //
-// This row exists because that arithmetic cost days of hunting. Measured on a live tunnel:
-// the exit's round trip is 145 ms, one server answered without wscale, the window sat at 65535 for
-// the whole transfer, and the connection ran at 0.44 MB/s with ZERO packet loss, zero
-// retransmissions and clean counters everywhere. A 54.5 MB file then needs about two minutes, which
-// every download client reports as a stall or a timeout rather than as a slow connection. The panel
-// showed the latency all along and never said what it implied.
+// This row exists because that arithmetic is easy to miss. An example: the exit's round trip is
+// 145 ms, a server answers without wscale, the window sits at 65535 for the whole transfer, and the
+// connection runs at 0.44 MB/s with ZERO packet loss, zero retransmissions and clean counters
+// everywhere. A 54.5 MB file then needs about two minutes, which every download client reports as a
+// stall or a timeout rather than as a slow connection. Showing the latency alone does not say what
+// it implies.
 
 // maxUnscaledWindow is the largest receive window expressible without the window-scale option.
 const maxUnscaledWindow = 65535

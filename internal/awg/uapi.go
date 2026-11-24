@@ -79,7 +79,7 @@ type UAPI struct {
 // NewUAPI addresses the amneziawg-go instance that serves iface.
 //
 // The name becomes a path, so it is held to the rule internal/config applies to device names: a
-// letter or digit, then letters, digits, '.', '_' or '-', at most 15 bytes (IFNAMSIZ-1). That rules
+// letter or digit, then letters, digits, '.', '_' or '-', at most 15 bytes. That rules
 // out '/' and a leading '.', so no name can address a socket outside amneziawg-go's directory.
 func NewUAPI(iface string) (*UAPI, error) {
 	if !validIface(iface) {

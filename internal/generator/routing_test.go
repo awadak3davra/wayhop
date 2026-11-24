@@ -19,6 +19,9 @@ func TestRuleSetFormat(t *testing.T) {
 		{"https://x/list.json?token=abc", "", "source"}, // was mis-detected as binary
 		{"https://x/list.json#frag", "", "source"},
 		{"https://x/list.srs?v=2", "", "binary"},
+		{"https://x/list.JSON", "", "source"}, // was read as binary: the core cannot load JSON as .srs
+		{"https://x/list.Json?token=abc", "", "source"},
+		{"https://x/LIST.SRS", "", "binary"},
 		{"https://x/dynamic?fmt=json", "", "binary"},          // no .json before the query → binary default
 		{"https://x/list.json?token=abc", "binary", "binary"}, // explicit override wins
 	}

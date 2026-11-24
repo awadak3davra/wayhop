@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// Verbatim `apk del --simulate sing-box` from the test router. The second line is the whole point: the
+// Verbatim `apk del --simulate sing-box` from the reference OpenWrt router. The second line is the whole point: the
 // plan the operator reads says `apk del sing-box` and a kernel module goes with it.
 const apkDelSim = "(1/2) Purging sing-box (1.12.17-r1)\n(2/2) Purging kmod-inet-diag (6.12.74-r1)\nOK: 25.6 MiB in 186 packages\n"
 

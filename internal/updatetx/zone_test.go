@@ -8,7 +8,7 @@ import (
 	"wayhop/internal/localtz"
 )
 
-// QA-131. The note is written in the zone of the now it is given, and names it. Go's time.Local is UTC
+// The note is written in the zone of the now it is given, and names it. Go's time.Local is UTC
 // on Keenetic and OpenWrt, so a rollback the router's clock put at 22:20 in UTC+3 read 19:20 in the
 // panel, the bot's /update view and the boot alert, beside bot times in router time. The zone here is
 // five hours off this host's own, so a time formatted in time.Local cannot pass.

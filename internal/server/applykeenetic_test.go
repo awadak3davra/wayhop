@@ -196,11 +196,10 @@ func exactKeeneticConfigReader(configs ...string) keeneticConfigReadFunc {
 	}
 }
 
-// keeneticOSPrinted renders blocks the way KeeneticOS's running-config prints them (measured
-// read-only on the test Keenetic, 2026-11-05): the header at the margin, its commands one level in, a
-// peer's commands a level deeper with `!` closing the peer group, `!` closing the interface, and no
-// `wireguard private-key` or `preshared-key` line at all. These fixtures used to echo each block
-// verbatim, which is how a check that no real router could pass went green.
+// keeneticOSPrinted renders blocks the way KeeneticOS's running-config prints them: the header at
+// the margin, its commands one level in, a peer's commands a level deeper with `!` closing the peer
+// group, `!` closing the interface, and no `wireguard private-key` or `preshared-key` line at all.
+// Fixtures that echo each block verbatim would let a check that no real router can pass go green.
 func keeneticOSPrinted(blocks ...[]string) []string {
 	var out []string
 	for _, block := range blocks {
@@ -351,8 +350,7 @@ func TestExactKeeneticAdapterSaveFailureIsRedacted(t *testing.T) {
 	if !errors.Is(err, errExactKeeneticApply) || strings.Contains(err.Error(), "sensitive") {
 		t.Fatalf("error = %v", err)
 	}
-	// This test used to demand a teardown here, and that demand encoded the bug: persist runs only
-	// after the postcheck proved the datapath, its caller keeps the revision as a live unsaved
+	// No teardown here: persist runs only after the postcheck proved the datapath, its caller keeps the revision as a live unsaved
 	// window with "use Keep to retry", and Keep retries persist - which cannot succeed against a
 	// target the previous attempt tore down. A failed `system configuration save` means flash
 	// failed, not the datapath: the target must SURVIVE so the promised retry can work.
@@ -385,7 +383,7 @@ func TestExactKeeneticAdapterPersistReadFailureLeavesTargetRunning(t *testing.T)
 	}
 }
 
-// QA-141: a running config that changed after it was verified (the tunnel switched off in KeeneticOS
+// A running config that changed after it was verified (the tunnel switched off in KeeneticOS
 // during the window) is refused, not torn down. Both callers keep the revision as running: a teardown
 // left the core and the kernel plane on deleted interfaces, and the Keep they offer could never
 // succeed again.
@@ -410,9 +408,9 @@ func TestExactKeeneticAdapterPersistDriftLeavesTargetRunning(t *testing.T) {
 }
 
 // An abort is retried (Roll back, boot, switching routing on) after one that stopped part way, or after
-// the operator deleted a tunnel in KeeneticOS. It was one batch that stopped at the first refusal and
-// asked again for removals already done, so how NDM answers a `no` for something gone could make every
-// retry fail. What the running config no longer has is not asked for, and each removal goes on its own.
+// the operator deleted a tunnel in KeeneticOS. As one batch that stops at the first refusal and asks
+// again for removals already done, how NDM answers a `no` for something gone could make every retry
+// fail. What the running config no longer has is not asked for, and each removal goes on its own.
 func TestExactKeeneticAdapterAbortRetriesOnlyWhatIsLeft(t *testing.T) {
 	target := exactKeeneticTestTarget()
 	teardown := keenetic.TeardownCommands(target.Keenetic)
@@ -643,5 +641,20 @@ func TestExactKeeneticAdapterRejectsUnboundAddonAndCrossPlatformArtifacts(t *tes
 				t.Fatalf("invalid plan mutated Keenetic: %#v", runner.batches)
 			}
 		})
+	}
+}
+
+func TestExactKeeneticAddressHolder(t *testing.T) {
+	running := "interface Wireguard10\n    description old\n    ip address 10.96.44.79 255.255.255.255\n    up\n!\ninterface Wireguard11\n    ip address 10.1.1.1 255.255.255.255\n!\n"
+	block := []string{"interface Wireguard12", "ip address 10.96.44.79 255.255.255.255", "up"}
+	if holder, addr := exactKeeneticAddressHolder(running, block); holder != "Wireguard10" || addr != "10.96.44.79 255.255.255.255" {
+		t.Fatalf("holder = %q %q", holder, addr)
+	}
+	own := []string{"interface Wireguard10", "ip address 10.96.44.79 255.255.255.255"}
+	if holder, _ := exactKeeneticAddressHolder(running, own); holder != "" {
+		t.Fatalf("own address reported as conflict: %q", holder)
+	}
+	if holder, _ := exactKeeneticAddressHolder(running, []string{"interface Wireguard12", "ip address 10.2.2.2 255.255.255.255"}); holder != "" {
+		t.Fatalf("free address reported as conflict: %q", holder)
 	}
 }

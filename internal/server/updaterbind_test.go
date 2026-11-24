@@ -211,7 +211,7 @@ func TestDownloadPathChoicesSkipsGroupsNothingCanBind(t *testing.T) {
 
 // When the release source cannot be reached, the message names the path the fetch was bound to.
 //
-// Measured on a live Keenetic: version checks bound to a group answered "3 source(s) tried,
+// Observed on KeeneticOS: version checks bound to a group answered "3 source(s) tried,
 // all failed" for twelve seconds, while the same request over the ordinary path succeeded at once.
 // The setting that made the difference appeared nowhere in the failure, and an operator has no way to
 // remember it from an error about GitHub.

@@ -382,6 +382,9 @@ func (b tgBackend) Events(limit int) tgbot.EventLog {
 	}
 	out := tgbot.EventLog{Known: true, Since: time.UnixMilli(since), Total: s.monitor.EventCount()}
 	for _, e := range s.monitor.Events(limit) {
+		if e.Quiet {
+			continue // in the panel's log, not the bot's news
+		}
 		out.Events = append(out.Events, tgbot.Event{At: time.UnixMilli(e.At), Kind: e.Kind, ID: e.ID, Name: e.Name,
 			From: e.From, To: e.To, LatencyMs: e.LatencyMS})
 	}
@@ -604,8 +607,7 @@ func (s *Server) handleTelegramPair(w http.ResponseWriter, r *http.Request) {
 		Role string `json:"role"`
 	}
 	_ = decodeJSONBody(r.Body, &in)
-	// With no token there is no bot to send the code to; the panel offered one anyway and said "send
-	// /start CODE to your bot" on a router that had none (QA-034).
+	// With no token there is no bot to send the code to, so no pairing code is offered.
 	if s.Telegram().Token == "" {
 		writeErr(w, http.StatusConflict, "set up the bot token first: there is no bot to send a pairing code to")
 		return
@@ -693,8 +695,8 @@ func (s *Server) handleTelegramChatPut(w http.ResponseWriter, r *http.Request) {
 					return errors.New("a group or channel cannot be an owner: everyone in it could press the owner's buttons")
 				}
 				// A channel's subscribers can press the buttons on its posts without being in it, so a
-				// viewer channel let anyone who can see it mute it, switch its alerts off and post the
-				// device list into it (QA-102). Pairing forces a channel to alerts; this was the way back.
+				// viewer channel would let anyone who can see it mute it, switch its alerts off and post
+				// the device list into it. Pairing forces a channel to alerts; this closes the way back.
 				if in.Role != config.TelegramAlerts && t.Chats[i].Type == "channel" {
 					return errors.New("a channel can only receive alerts: anyone who can see it could press its buttons")
 				}

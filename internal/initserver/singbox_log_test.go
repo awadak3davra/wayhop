@@ -6,7 +6,7 @@ import (
 )
 
 // A provisioned sing-box logs warnings only: with no log block it logs at trace, and its info lines
-// alone are a journal of every user's destinations (QA-052). Both unit writers drop the fragment in,
+// alone are a journal of every user's destinations. Both unit writers drop the fragment in,
 // so it is there whichever protocol ran last.
 func TestScriptSingboxLogsWarningsOnly(t *testing.T) {
 	const frag = `cat > /etc/sing-box/conf.d/wr-log.json <<'WRLOG'

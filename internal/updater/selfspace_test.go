@@ -107,7 +107,7 @@ func writeJunk(t *testing.T, p string, n int, mtime time.Time) {
 	}
 }
 
-// The test router case: room for the new binary, not for it AND a full copy of the old one. The swap used
+// The reference OpenWrt router case: room for the new binary, not for it AND a full copy of the old one. The swap used
 // to need both (the 31 MiB refusal); with the rollback copy a hard link it needs the new one alone,
 // and the .bak is the old binary's own inode.
 func TestSelfUpdateFitsWithRoomForTheNewBinaryAlone(t *testing.T) {

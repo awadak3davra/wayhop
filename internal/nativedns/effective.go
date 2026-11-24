@@ -26,7 +26,7 @@ type EffectivePath struct {
 	// port number. A rule on :853 stops DoT. DoH rides ordinary HTTPS on :443, so constraining it
 	// means naming the resolvers (an address set); a port rule cannot do it without breaking the web.
 	//
-	// These were one field, set from the :853 signal alone and named for DoH. On the test test router
+	// These were one field, set from the :853 signal alone and named for DoH. On the reference OpenWrt router
 	// that produced "plain and DoT bypass are both constrained" with LeakRisk cleared — correct there
 	// only by luck, because that box also carries a resolver-set block the detector never read. The
 	// :853 rules themselves come from the https-dns-proxy package, which every OpenWrt running it
@@ -40,7 +40,7 @@ type EffectivePath struct {
 	// Bypass fields are read from `iptables` (or nft when there is no iptables), and the
 	// intercept WayHop installs is iptables only. On a LAN with IPv6 a client reached a v6 resolver
 	// on :53, :853 or :443 untouched while ip6tables was never read, the verdict was cleared and
-	// the DNS page said clients could not route around it (QA-107).
+	// the DNS page said clients could not route around it.
 	IPv6Gaps []string  `json:"ipv6_gaps,omitempty"`
 	LeakRisk bool      `json:"leak_risk"`       // true when clients can bypass the router DNS unhindered
 	Loops    []DNSLoop `json:"loops,omitempty"` // upstreams that resolve back into this router's own DNS path
@@ -388,7 +388,7 @@ func DetectEffectivePath(resolvConf, listeners, natRules, allRules string) Effec
 	applyLeakVerdict(&ep)
 
 	// No Loops here: resolv.conf is not where the forwarder sends queries, and judging loops from it
-	// reported the stock OpenWrt stub as two confirmed self-loops (QA-117). RunEffectivePath reads
+	// reported the stock OpenWrt stub as two confirmed self-loops. RunEffectivePath reads
 	// dnsmasq's own upstreams for that.
 	return ep
 }

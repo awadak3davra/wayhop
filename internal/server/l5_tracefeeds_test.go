@@ -11,7 +11,7 @@ import (
 //
 // "Where does a domain go?" read only a list's INLINE entries, so any list backed by a feed fell
 // into "may also match (can't check statically) — remote rule-set — contents not loaded here".
-// Measured on a live Keenetic tracing teamviewer.com: four CIDR-feed lists hedged that way
+// Observed on KeeneticOS tracing teamviewer.com: four CIDR-feed lists hedged that way
 // while `ipset test` answered each one outright (NOT in set), because the very prefixes the trace
 // called unloaded were sitting in the profile — 15887 of them for cidr-antifilter alone — and in the
 // kernel sets built from them. The answer was available and withheld.

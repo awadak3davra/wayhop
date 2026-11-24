@@ -341,12 +341,11 @@ func (s *Server) handleUpdaterPMApply(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	approved := updater.PMPlan{Argv: body.Argv, Steps: body.Steps}
-	// Removing the package removes the FILE. The panel's own uninstall path has stopped the process
-	// first since the day it was written — a deleted binary keeps running as an orphan holding ports
-	// and locks, and the watchdog, whose Desired() is still set, respawns onto a path that no longer
-	// exists — and `apk del sing-box` is that same deletion reached through a different door. This
-	// door had no guard at all: the operator could confirm the command and take the router's datapath
-	// down with no warning that it was about to happen.
+	// Removing the package removes the FILE. The panel's own uninstall path stops the process first
+	// (a deleted binary keeps running as an orphan holding ports and locks, and the watchdog, whose
+	// Desired() is still set, respawns onto a path that no longer exists), and `apk del sing-box` is
+	// that same deletion reached through a different door. Unguarded, the operator could confirm the
+	// command and take the router's datapath down with no warning that it was about to happen.
 	//
 	// The refusal is checked BEFORE the stop, which is the whole reason PreflightPM exists separately.
 	// Stopping first and refusing second is the inversion that leaves the core down with nothing
@@ -360,15 +359,15 @@ func (s *Server) handleUpdaterPMApply(w http.ResponseWriter, r *http.Request) {
 	// then refused or fails can put it back. The stop happens between the two preflights, and the
 	// window between them is exactly where an external opkg/apk run (or a transient probe error) can
 	// turn ExecutePM's re-check into a refusal — leaving the datapath down with nothing removed unless
-	// we compensate. Tracked at handler scope because the compensation runs after ExecutePM returns.
+	// it is compensated. Tracked at handler scope because the compensation runs after ExecutePM returns.
 	stoppedProcs := 0
 	stoppedCore := false
 	stoppedPluginBin := ""
 	var core pmCoreState
 	// Whether the datapath is about to go down is a property of the PLAN, not of the verb. A removal
 	// deletes the binary; so does the first command of a low-space upgrade, which removes the
-	// installed build because the new one fits only in the room it is holding. The gate used to ask
-	// "is this action remove?", which would have walked an upgrade straight past the stop, the
+	// installed build because the new one fits only in the room it is holding. A gate asking
+	// "is this action remove?" would walk an upgrade straight past the stop, the
 	// acknowledgement and the compensation into deleting a running core's binary unannounced.
 	prePlan, perr := s.updater.PreflightPM(ctx, *e, action, body.Version, approved)
 	if perr != nil {
@@ -475,14 +474,12 @@ func (s *Server) handleUpdaterPMApply(w http.ResponseWriter, r *http.Request) {
 	// of it: the operator rolls back precisely because the current build misbehaves, and the
 	// misbehaving process keeps running while the page says the older version is installed.
 	//
-	// The sibling install path has reloaded the core here since it was written; this is the same call
-	// with the same lock. NOT after a removal — the binary is gone, and Reload re-asserts desired=true,
+	// The sibling install path reloads the core here; this is the same call with the same lock. NOT after a removal — the binary is gone, and Reload re-asserts desired=true,
 	// which would point the watchdog at a file that no longer exists, undoing the stop above.
 	// Demo mode runs DemoPM, whose mutating verbs deliberately change nothing and say so in their
-	// output — "so nobody reads the output as a real install". The panel read it as one anyway: it has
-	// only the HTTP status to go on, so a simulated apk add rendered the same "Installed." block as a
-	// real one, directly above a State column still reading "not installed" and a toast saying nothing
-	// was installed. Say it in the response instead of leaving the page to parse English out of the
+	// output — "so nobody reads the output as a real install". The panel has only the HTTP status to
+	// go on, so a simulated apk add would render the same "Installed." block as a real one, directly
+	// above a State column still reading "not installed". Say it in the response instead of leaving the page to parse English out of the
 	// package manager's line.
 	resp := map[string]any{"output": out, "plan": plan, "stopped": stoppedProcs, "demo": s.demoMode()}
 	//

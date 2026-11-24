@@ -103,7 +103,7 @@ func (s *Server) handleNetDiagStream(w http.ResponseWriter, r *http.Request) {
 		// one exit". DNSLookup resolves through the router's own resolver path, whatever the operator
 		// picked in the Egress selector, so a lookup chosen precisely to see what a name resolves to
 		// FROM a tunnel — geo-DNS, a resolver that answers differently per region — silently answered
-		// from the ordinary path instead. Measured on a live Keenetic: egress set to
+		// from the ordinary path instead. Observed on KeeneticOS: egress set to
 		// WgProvider_Malta, "Resolve (DNS)" returned the same records the WAN resolver gives, with
 		// nothing on screen saying the exit had been ignored. Ping and traceroute on the same row DO
 		// take it (-I/-i), which is what made the omission invisible.
@@ -112,7 +112,7 @@ func (s *Server) handleNetDiagStream(w http.ResponseWriter, r *http.Request) {
 		// the router asks; saying which path answered is the part that has to be true today.
 		if iface != "" {
 			// No "above"/"below": this same closure runs standalone AND inside the Full run, where DNS is
-			// emitted FIRST and the two tools it refers to appear underneath. Measured on a live
+			// emitted FIRST and the two tools it refers to appear underneath. Observed on a
 			// Keenetic with Full through nwg0: the note claimed "ping and traceroute above" with nothing
 			// above it at all. Name the tools, not their position.
 			emit("note: this lookup used the router's own resolver, not " + iface + " — the selected exit applies to ping and traceroute, not to DNS")

@@ -181,7 +181,7 @@ func (s *Server) serviceClient(ctx context.Context, tag string, probe probeInbou
 			return s.serviceClient(ctx, m, probe, haveProbe, coreUp)
 		}
 		// None of the three says which member it is on. Its first member with an interface is a guess
-		// (QA-049: the demo's "auto" read "interface missing" for a tunnel it was not using), so the
+		// (it can report "interface missing" for a tunnel the group is not using), so the
 		// group says it cannot be read rather than answering for another exit.
 		if !haveProbe {
 			return nil, "core", "", servicesNeedApply

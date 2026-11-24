@@ -250,6 +250,10 @@ function buildReport(h, mask) {
   done.forEach(id => out += "- [" + res[id].status.toUpperCase() + "] " + hcLabel(id, res[id]) + " — " + (res[id].summary || "") + "\n");
   const det = done.filter(id => res[id].status !== "pass" && res[id].status !== "na" && (res[id].detail || res[id].fix));
   if (det.length) { out += "\n### Details\n"; det.forEach(id => { const r = res[id]; out += "\n**" + hcLabel(id, r) + "** (" + r.status + ")\n"; if (r.fix) out += "Fix: " + r.fix + "\n"; if (r.detail) out += "```\n" + r.detail + "\n```\n"; }); }
+  // Lists in fastest mode: list and tunnel names with the RTT, never the lists' probe targets (they
+  // would name what the operator routes).
+  const fast = fastestLines(state.fastestInfo);
+  if (fast.length) { out += "\n### Fastest lists\n"; fast.forEach(l => out += "- " + l + "\n"); }
   return mask ? scrubText(out) : out;
 }
 // scrubText masks secrets + public IPs so a copied report is safe to share. Private /
@@ -413,6 +417,8 @@ async function renderDiagnostics(view) {
   const nativeCard = nativeSupportCard(); // read-only: what this router can carry natively
   nativeCard.setAttribute("data-group", "reports");
   view.appendChild(nativeCard);
+
+  tools.appendChild(tunnelSpeedCard());
 
   // Throughput: on-demand speedtest through the active proxy (moved off the dashboard). Globals
   // (speedResults / pinSpeed / runSpeedtest) are module-level, so the persisted result restores here.
@@ -580,6 +586,53 @@ async function renderDiagnostics(view) {
 // throughput test) into `out`, with the time it was measured — so the Speed/Speedtest
 // button reads as a living measurement that survives a re-render, not a fire-and-forget
 // action. Cleared on page reload (results are session-ephemeral).
+// tunnelSpeedCard is the tunnel x source table: what each test server last gave each tunnel, the
+// month's traffic use and whether the schedule would run now.
+function tunnelSpeedCard() {
+  const body = el("div", {});
+  const card = el("div", { class: "card", "data-group": "reports", "data-tp-live": "1" },
+    el("div", { class: "card-title", style: "margin-bottom:8px" }, t("Tunnel speed by test server")), body);
+  const paint = () => {
+    const d = state.throughput;
+    body.innerHTML = "";
+    if (!d) { body.appendChild(el("div", { class: "hint" }, t("Not measured yet."))); return; }
+    const srcs = [];
+    (d.media_sources || []).concat(d.sources || []).forEach(x => { if (!srcs.includes(x.id)) srcs.push(x.id); });
+    Object.values(d.tunnels || {}).forEach(st => Object.keys(st.sources || {}).forEach(k => { if (!srcs.includes(k)) srcs.push(k); }));
+    const ids = Object.keys(d.tunnels || {}).filter(id => findEndpoint(id)).sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
+    if (!ids.length) body.appendChild(el("div", { class: "hint" }, t("Not measured yet.")));
+    else {
+      const tbl = el("table", { class: "tbl" });
+      tbl.appendChild(el("thead", {}, el("tr", {}, el("th", {}, t("Tunnel")), ...srcs.map(x => el("th", {}, x)), el("th", {}, t("Measured")))));
+      const tb = el("tbody", {});
+      ids.forEach(id => {
+        const st = d.tunnels[id];
+        tb.appendChild(el("tr", {}, el("td", {}, nameOf(id)),
+          ...srcs.map(x => {
+            const c = (st.sources || {})[x];
+            if (!c) return el("td", { class: "hint" }, "—");
+            if (c.mbps) return el("td", { title: fmtClock(c.at) }, t("{0} Mbit/s", tpMbps(c.mbps)));
+            return el("td", { class: "hint", title: c.error || "" }, c.status && c.status !== 200 ? "HTTP " + c.status : c.status === 200 ? t("no usable sample") : t("no answer"));
+          }),
+          el("td", { style: "white-space:nowrap" }, tpSpan(id) || el("span", { class: "hint" }, "—"))));
+      });
+      tbl.appendChild(tb);
+      body.appendChild(el("div", { class: "tbl-wrap", style: "overflow-x:auto" }, tbl));
+    }
+    const u = d.usage || {};
+    body.appendChild(el("div", { class: "hint", style: "margin-top:8px" },
+      t("Used this month: {0} of {1}.", fmtBytes(u.used_bytes || 0), fmtBytes(u.budget_bytes || 0)) + " " +
+      (!d.scheduled ? t("Scheduled measurements are off.")
+        : d.clock_ok === false ? t("Scheduled measurements are on; the router's clock is not set yet, so they wait.")
+        : d.wan && d.wan.known ? (d.wan.idle ? t("Scheduled measurements are on; the line is idle now.") : t("Scheduled measurements are on; the line is busy now, so they wait."))
+          : t("Scheduled measurements are on; the line's load is not known yet, so they wait.")) + (d.scheduled ? " " + tpPlanText(d) : "")));
+  };
+  card._tpLive = paint;
+  paint();
+  loadThroughput().then(paint);
+  return card;
+}
+
 function pinSpeed(out, key) {
   const r = speedResults[key];
   if (!out || !r) return;
@@ -822,6 +875,7 @@ function healthBatteryCard() {
   const card = el("div", { class: "card", id: "hbat" });
   const runBtn = el("button", { class: "btn btn-primary", id: "hbat-run", style: "padding:9px 20px", onclick: () => runHealthBattery() }, "Run all checks");
   const copyBtn = el("button", { class: "btn btn-sm", id: "hbat-copy", onclick: () => copyReport() }, "Copy report");
+  loadFastestInfo(); // the report's fastest-list summary, read ahead so the copy stays synchronous
   copyBtn.disabled = true;
   // Mask toggle (default ON): the report carries exit IP + ISP/ASN once geo is in,
   // so scrub public IPs / keys / tokens before it lands on a clipboard or support chat.

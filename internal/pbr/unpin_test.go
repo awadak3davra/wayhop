@@ -110,7 +110,7 @@ func routeSim(rules []ipRuleSim, mainTable []netip.Prefix, dst netip.Addr, mark 
 	return got
 }
 
-// TestListedPrivateDestinationLeavesThroughTheTunnel (RT-09): a private destination a list names is
+// TestListedPrivateDestinationLeavesThroughTheTunnel: a private destination a list names is
 // routed by its mark, not pinned to the main table's default route (the WAN); the router's own LAN
 // prefix stays on main even inside a listed supernet; a private destination nothing names, and
 // unmarked traffic, keep the pin.

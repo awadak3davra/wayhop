@@ -458,7 +458,7 @@ func TestNativeRoutingOffOnOpenWrtChangesNothing(t *testing.T) {
 }
 
 // A Test left from before routing went off is rolled back when it goes on. Since a native abort that
-// fails is a rollback failure (QA-144), one that kept failing kept routing off for good: switching on
+// fails is a rollback failure, one that kept failing kept routing off for good: switching on
 // removed routing again, and an Apply is refused while routing is off. The committed configuration is
 // back by then, so routing goes on and the leftover stays on record as an outstanding rollback, which
 // Roll back retries.

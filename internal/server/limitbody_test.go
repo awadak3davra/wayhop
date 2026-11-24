@@ -76,7 +76,7 @@ func TestLimitBodyNilBodySafe(t *testing.T) {
 	}
 }
 
-// TestLimitBody_BoundsSlowTrickleBody is the LOOP-040 proof. MaxBytesReader caps how MANY bytes a
+// TestLimitBody_BoundsSlowTrickleBody proves it. MaxBytesReader caps how MANY bytes a
 // body may carry but not how LONG they may take to arrive, so a client that trickles a body forever
 // pins a goroutine + descriptor per connection — a slowloris the byte cap is blind to. limitBody now
 // sets a read deadline on body-bearing methods, so a body slower than the window is cut off, while a
@@ -137,4 +137,33 @@ func TestLimitBody_BoundsSlowTrickleBody(t *testing.T) {
 			t.Fatal("a body trickled slower than the read deadline was accepted (200) — the slowloris is not bounded")
 		}
 	})
+}
+
+// SRV-04: a POST with no body must keep its context past the body deadline. The deadline used to land
+// on the server's background read, and its expiry cancelled r.Context() while the handler still ran.
+func TestLimitBody_BodylessPostKeepsContext(t *testing.T) {
+	orig := slowBodyReadTimeout
+	slowBodyReadTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { slowBodyReadTimeout = orig })
+
+	h := limitBody(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+			http.Error(w, "context cancelled", http.StatusServiceUnavailable)
+		case <-time.After(4 * slowBodyReadTimeout):
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/apply", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("body-less POST failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("body-less POST got %d: its context was cancelled by the body read deadline", resp.StatusCode)
+	}
 }

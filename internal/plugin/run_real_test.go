@@ -248,7 +248,7 @@ func main() {
 }
 `
 
-// TestPluginrun_SuperviseThrottlesLateCrashLoop is QA-110: a plugin that is still alive on the tick
+// TestPluginrun_SuperviseThrottlesLateCrashLoop covers a plugin that is still alive on the tick
 // after its relaunch and dead on the one after that (a life of 3-6 s) was never throttled. The alive
 // tick cleared the crash-loop counters, so every death was the first one, inside the grace, and the
 // proc was relaunched every other tick forever. The throttle may clear only once the proc has

@@ -215,7 +215,7 @@ func TestTLSPinSnippetMatchesGo(t *testing.T) {
 // one VPS). Several shells running the installer's certificate and pin fragments at once, in a loop,
 // against one certificate, must each print that certificate's pins every time: never another value,
 // the hash of empty input included, and never none. The snippet once staged the DER in a fixed temp
-// file, which a parallel run deleted and rewrote under it (QA-138 review: wrong pins in ~1 run of 4).
+// file, which a parallel run deleted and rewrote under it (wrong pins in about 1 run of 4).
 func TestTLSPinSnippetConcurrentRuns(t *testing.T) {
 	sh := pinShell(t)
 	dir := t.TempDir()

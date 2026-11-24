@@ -269,22 +269,40 @@ type Endpoint struct {
 	Import string `json:"import,omitempty"`
 }
 
+// ElectionMode selects the measurements an automatic election optimizes for.
+type ElectionMode string
+
+const (
+	ElectionLatency    ElectionMode = "latency"
+	ElectionThroughput ElectionMode = "throughput"
+	ElectionMixed      ElectionMode = "mixed"
+)
+
 // GroupType selects how a group chooses among its members.
 type GroupType string
 
 const (
-	GroupURLTest  GroupType = "urltest"  // automatic, lowest latency working member
+	GroupURLTest  GroupType = "urltest"  // automatic; ElectionMode selects the optimization metric
 	GroupSelector GroupType = "selector" // manual selection
 	GroupFallback GroupType = "fallback" // strict ordered preference
 )
 
+// Election returns the group's election mode; an empty mode is the legacy latency policy.
+func (g Group) Election() ElectionMode {
+	if g.ElectionMode == "" {
+		return ElectionLatency
+	}
+	return g.ElectionMode
+}
+
 // Group is a failover/selection set over endpoints (or nested groups).
 type Group struct {
-	ID      string    `json:"id"`
-	Name    string    `json:"name"`
-	Type    GroupType `json:"type"`
-	Members []string  `json:"members"` // endpoint or group IDs, in preference order
-	Test    *Health   `json:"test,omitempty"`
+	ID           string       `json:"id"`
+	Name         string       `json:"name"`
+	Type         GroupType    `json:"type"`
+	ElectionMode ElectionMode `json:"election_mode,omitempty"`
+	Members      []string     `json:"members"` // endpoint or group IDs, in preference order
+	Test         *Health      `json:"test,omitempty"`
 	// KillSwitch, when true, DROPs traffic that selects this group while ALL of
 	// its members are down — instead of leaking to the WAN. Default false keeps
 	// the current behavior (WAN fallback). Opt-in, so an unset/zero value is a
@@ -402,6 +420,13 @@ type RoutingList struct {
 	// tls_record_fragment / tls_fragment. Only a list whose outbound is direct uses it, and only for
 	// flows the core carries.
 	TLSFragment string `json:"tls_fragment,omitempty"`
+	// Candidates are the tunnels (endpoint or group ids) this list may leave by, in the operator's
+	// order. Empty = Outbound alone, exactly as before. When set, Outbound holds the first candidate,
+	// so an older client and a platform without the runtime choice still route the list somewhere.
+	Candidates []string `json:"candidates,omitempty"`
+	// Fastest makes the list choose, at runtime, the fastest WORKING candidate by measurements to its
+	// own destinations (see fastest.go). nil = off, byte-identical to a profile without it.
+	Fastest *FastestPolicy `json:"fastest,omitempty"`
 }
 
 // TLSFragment modes for RoutingList.TLSFragment.

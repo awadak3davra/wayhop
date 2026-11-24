@@ -25,7 +25,7 @@ func withCapabilities(facts HostFacts, ids ...string) HostFacts {
 	return facts
 }
 
-// QA-043: a ByeDPI connection made the OpenWrt planner refuse the whole profile ("not a supported
+// A ByeDPI connection made the OpenWrt planner refuse the whole profile ("not a supported
 // addon"), so every native tunnel went to the generic path. It is core-carried - a SOCKS outbound to
 // the ciadpi the plugin manager runs - and the native tunnel beside it stays the router's own. Its
 // stored protocol means nothing to it, so a native-family value does not send it to the writer.

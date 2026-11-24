@@ -19,15 +19,18 @@ type ruleLine struct {
 	fwmark   uint64 // 0 when absent
 	fwmask   uint64 // 0 when absent
 	toCIDR   string // "" when absent
+	iif      string // "" when absent
 	lookup   string // table name or number, "" when absent
 	original string
 }
 
 var (
 	rulePrefRe = regexp.MustCompile(`^(\d+):`)
-	fwmarkRe   = regexp.MustCompile(`fwmark (0x[0-9a-fA-F]+)(?:/(0x[0-9a-fA-F]+))?`)
-	toRe       = regexp.MustCompile(`\bto (\S+)`)
-	lookupRe   = regexp.MustCompile(`\blookup (\S+)`)
+	// A zero mark prints as "0" (`%#x`), the backstop's `fwmark 0/0xff0000`.
+	fwmarkRe = regexp.MustCompile(`fwmark (0x[0-9a-fA-F]+|0)(?:/(0x[0-9a-fA-F]+))?`)
+	iifRe    = regexp.MustCompile(`\b(?:iif|dev) (\S+)`)
+	toRe     = regexp.MustCompile(`\bto (\S+)`)
+	lookupRe = regexp.MustCompile(`\blookup (\S+)`)
 )
 
 func parseRuleLine(s string) (ruleLine, bool) {
@@ -45,6 +48,9 @@ func parseRuleLine(s string) (ruleLine, bool) {
 	}
 	if tm := toRe.FindStringSubmatch(s); tm != nil {
 		rl.toCIDR = tm[1]
+	}
+	if im := iifRe.FindStringSubmatch(s); im != nil {
+		rl.iif = im[1]
 	}
 	if lm := lookupRe.FindStringSubmatch(s); lm != nil {
 		rl.lookup = lm[1]
@@ -96,7 +102,7 @@ func SweepStrandedRules(r Runner, opt Options) (int, error) {
 			}
 			// fwmark strand: wayhop mask + numeric table inside the wayhop window.
 			if rl.fwmask != 0 && rl.fwmask == uint64(opt.MarkMask) {
-				if n, err := strconv.Atoi(rl.lookup); err == nil && n >= opt.TableBase && n < opt.TableBase+sweepTableSpan {
+				if n, err := strconv.Atoi(rl.lookup); err == nil && (n >= opt.TableBase && n < opt.TableBase+sweepTableSpan || n == BackstopTable(opt)) {
 					del := fmt.Sprintf("ip %srule del fwmark %s/%s table %d priority %d",
 						famFlag, hexMark(uint32(rl.fwmark)), hexMark(uint32(rl.fwmask)), n, rl.pref)
 					name, args := splitCmd(del)

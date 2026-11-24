@@ -63,7 +63,7 @@ func handshakeError(t *testing.T, skew time.Duration, trusted bool) string {
 	return err.Error()
 }
 
-// QA-130. A router without an RTC boots after a power cut with its clock behind and every TLS exit
+// A router without an RTC boots after a power cut with its clock behind and every TLS exit
 // fails with Go's "certificate has expired or is not yet valid". The down-exit card, the Test button
 // and the bot's exits view show the first knowledge-base match, and that was the certificate-trust
 // entry: "enable insecure or add the CA", which switches off certificate checking on a working server.

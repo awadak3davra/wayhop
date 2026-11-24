@@ -67,7 +67,7 @@ func resolveAdoptedIDAmong(existing []model.Endpoint, d netvpn.DiscoveredVPN, vp
 // The endpoint's own interface wins while a tunnel by that name is there and its key does not say
 // it is another tunnel. The public key alone (a renamed tunnel) decides only when no tunnel carries
 // the endpoint's name and exactly one carries its key. Two interfaces built from one private key
-// share a public key: a live test router had awg1 to one exit and a second interface to another under
+// share a public key: an OpenWrt router had awg1 to one exit and a second interface to another under
 // one key, and matching by key first re-pointed the RU connection at the second one when a page
 // listed the tunnels. The next Apply, made for a DNS change, sent every RU list into a firewall zone
 // LAN traffic may not enter.

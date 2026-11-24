@@ -108,7 +108,7 @@ func (s *Server) armFailSafe(live *appliedRevision) {
 	// plane / native tunnels is the authoritative signal. Read at each check from the record rather
 	// than fixed from the tested materialization: after this window's rollback the committed
 	// configuration runs, and one that runs no core by design read as an outage at every later check,
-	// so the window never closed as recovered and, with auto-reboot on, rebooted the router (QA-143).
+	// so the window never closed as recovered and, with auto-reboot on, rebooted the router.
 	// A rollback that failed part way left what supervisedBaseline says: the Test while it never got
 	// to its kernel step, the committed configuration once it did, and neither when that step failed,
 	// where the ping alone decides. Judging the committed configuration whatever the rollback reached

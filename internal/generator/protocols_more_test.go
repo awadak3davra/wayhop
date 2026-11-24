@@ -1053,8 +1053,8 @@ func TestTransportGRPCNoService(t *testing.T) {
 // so the generator's grpc branch MUST drop Path: sing-box rejects an unknown
 // `path` field inside a grpc transport, and because every endpoint shares one
 // singbox.json that decode failure would take ALL routing down on the next
-// apply. Verified correct against `sing-box check` on the live OpenWrt router
-// (cycle 68) — this guards against a future refactor reintroducing the brick.
+// apply. Verified correct against `sing-box check` on an OpenWrt router;
+// this guards against a future refactor reintroducing the brick.
 func TestTransportGRPCIgnoresPath(t *testing.T) {
 	e := generator_singBoxEndpoint("vmess-grpc", model.ProtoVMess, map[string]any{"uuid": "u"})
 	e.Transport = &model.Transport{Type: "grpc", ServiceName: "GrpcSvc", Path: "GrpcSvc"}
@@ -1072,7 +1072,7 @@ func TestTransportGRPCIgnoresPath(t *testing.T) {
 // a v2ray-style transport (ws/grpc/http/httpupgrade) must be emitted ONLY on the
 // VLESS/VMess/Trojan outbounds and DROPPED on every other protocol. sing-box
 // FATALs on a `transport` field for hysteria2/tuic/shadowsocks/socks/http
-// ("json: unknown field transport", verified on the live router, cycle 69), and
+// ("json: unknown field transport", verified on a router), and
 // because every endpoint shares one singbox.json that decode failure takes ALL
 // routing down on the next apply. The importer and the UI manual form never
 // attach a transport to those protocols, but a raw POST /api/endpoints accepts an

@@ -8,7 +8,7 @@ import (
 )
 
 // A down ByeDPI exit is explained by its process, never by the tunnel advice that sends the operator
-// to trace a server it does not have (QA-041); every other engine is left to the existing causes.
+// to trace a server it does not have; every other engine is left to the existing causes.
 func TestLocalProxyCause(t *testing.T) {
 	for _, tc := range []struct {
 		name                string

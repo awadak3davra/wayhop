@@ -266,9 +266,8 @@ func (s *Server) dnsPortFindings(cfg config.Config, prof model.Profile) []PlanFi
 	}}
 }
 
-// dnsPlaneFindings names DNS switches this router will not carry, which an Apply otherwise reported as
-// applied. A hunter on an emulated OpenWrt turned both on, Apply said "Applied & saved", and nothing
-// changed for a device: interception is a redirect WayHop renders only into the KeeneticOS kernel plane
+// dnsPlaneFindings names DNS switches this router will not carry, which an Apply would otherwise report
+// as applied ("Applied & saved") while nothing changes for a device: interception is a redirect WayHop renders only into the KeeneticOS kernel plane
 // (hybrid and fast, see interceptEnforced), and on OpenWrt WayHop does not touch dnsmasq, so its resolver
 // listens on loopback where no device asks.
 func (s *Server) dnsPlaneFindings(cfg config.Config, prof model.Profile) []PlanFinding {

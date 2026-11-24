@@ -14,7 +14,7 @@ import (
 )
 
 // A Hysteria2 realm on a core older than 1.14 is rendered without it, so the config checks clean
-// while the connection can never come up. The Check button said "configuration is valid" (QA-059);
+// while the connection can never come up. The Check button said "configuration is valid";
 // it now says why it cannot work, and a 1.14 core is not held against it.
 func TestEndpointCheckRefusesARealmTheCoreCannotCarry(t *testing.T) {
 	s, _ := sharehandlers_server(t)

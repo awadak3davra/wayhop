@@ -13,7 +13,7 @@ import (
 // core.
 //
 // The Matched column was fed only from the core's connection API, so on a kernel-routed router every
-// list read "nothing yet" while the kernel was demonstrably matching them — measured on a live
+// list read "nothing yet" while the kernel was demonstrably matching them — observed on a
 // own box, where the mangle chain showed hits on three lists at the same moment the page claimed none.
 // The counters were there the whole time; nothing was reading them.
 //
@@ -41,6 +41,9 @@ func (s *Server) kernelListCounters(ctx context.Context, listIDs []string) map[s
 		zone := pbr.ListZoneName(id)
 		want[opts.ZoneSetName(zone, "4")] = id
 		want[opts.ZoneSetName(zone, "6")] = id
+		// Fast mode's resolver-fed sets (pbr DynamicDomainSets); absent sets simply match no line.
+		want[opts.DynamicSetName(zone, "4")] = id
+		want[opts.DynamicSetName(zone, "6")] = id
 	}
 	out := map[string]kernelListStats{}
 	for _, tool := range []string{executionToolIptables, executionToolIp6tables} {
@@ -51,7 +54,8 @@ func (s *Server) kernelListCounters(ctx context.Context, listIDs []string) map[s
 		}
 		for _, line := range strings.Split(text, "\n") {
 			set, ok := matchSetOf(line)
-			if !ok {
+			if !ok || strings.Contains(line, "add-set ") {
+				// The refresh rule beside a wd_ set's MARK rule sees the same NEW packets again.
 				continue
 			}
 			id, ok := want[set]
@@ -63,7 +67,7 @@ func (s *Server) kernelListCounters(ctx context.Context, listIDs []string) map[s
 				continue
 			}
 			st := out[id]
-			st.Packets += pkts // packets, not connections: the page names the unit (QA-113)
+			st.Packets += pkts // packets, not connections: the page names the unit
 			st.Bytes += bytes
 			out[id] = st
 		}

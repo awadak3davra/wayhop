@@ -8,9 +8,9 @@ import (
 	"wayhop/internal/platform"
 )
 
-// Found by a hunter on an emulated OpenWrt: sing-box installed from Components lands at the configured
-// /opt/sbin/sing-box, off the daemon's PATH. Health said the core was running, and the review still
-// listed every proxy protocol as "requires the sing-box core, which is not installed".
+// sing-box installed from Components lands at the configured /opt/sbin/sing-box, off the daemon's
+// PATH. With Health saying the core is running, the review must not list every proxy protocol as
+// "requires the sing-box core, which is not installed".
 func TestPreflightCountsTheConfiguredCore(t *testing.T) {
 	s := opshandlers_server(t)
 	c := config.Default()

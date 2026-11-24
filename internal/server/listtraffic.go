@@ -41,7 +41,7 @@ type listStats struct {
 	// Kernel is what the kernel plane matched for the list's zone, nil when it was not read. It has
 	// its own field and unit because it is a different count: the core counts connections since the
 	// daemon started, the kernel counts packets since the rules were last installed. They used to share
-	// Conns, so the Matched column read 52,341 packets as "52341 conns" (QA-113). The column still
+	// Conns, so the Matched column read 52,341 packets as "52341 conns". The column still
 	// turns to the core's count once the core attributes a connection, now under the core's unit.
 	Kernel *kernelListStats `json:"kernel,omitempty"`
 }

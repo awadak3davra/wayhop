@@ -129,7 +129,7 @@ func TestApplyTriesOnlyTheBoundRows(t *testing.T) {
 }
 
 // No tunnel row answering stops the write with the router exactly as it was: restarting dnsmasq into a
-// chain that cannot answer would cost the house its DNS to learn what the trial already said.
+// chain that cannot answer would cost the LAN its DNS to learn what the trial already said.
 func TestApplyRefusesWhenNoBoundRowAnswers(t *testing.T) {
 	f := newFakeHost(t, mainConfFixture, nil)
 	f.Trial = func(context.Context, ChainRow) error { return errors.New("no answer") }

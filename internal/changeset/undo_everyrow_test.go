@@ -152,6 +152,10 @@ func everyRowCases() []undoCase {
 		{name: "list Auto-update", base: list(nil), desired: list(func(r *model.RoutingList) { r.RefreshHours = 6 })},
 		{name: "list Applies to", base: list(nil), desired: list(func(r *model.RoutingList) { r.ScopeMode, r.ScopeGroups = "only", []string{"dg"} })},
 		{name: "list TLS fragmentation", base: list(nil), desired: list(func(r *model.RoutingList) { r.TLSFragment = model.TLSFragmentRecord })},
+		{name: "list Tunnels", base: list(nil), desired: list(func(r *model.RoutingList) { r.Candidates = []string{"a", "b"} })},
+		{name: "list Fastest tunnel", base: list(nil), desired: list(func(r *model.RoutingList) {
+			r.Fastest = &model.FastestPolicy{Enabled: true, Pinned: "a", PinnedUntil: 1_900_000_000}
+		})},
 		{name: "list Position", wantRowsAtLeast: 2,
 			base:    model.Profile{RoutingLists: []model.RoutingList{rl("x", "X", "direct"), rl("y", "Y", "direct")}},
 			desired: model.Profile{RoutingLists: []model.RoutingList{rl("y", "Y", "direct"), rl("x", "X", "direct")}}},
@@ -210,7 +214,7 @@ func everyRowCases() []undoCase {
 	return cases
 }
 
-// QA-088: every row the review shows carries an Undo button, so every row the differ emits must be
+// Every row the review shows carries an Undo button, so every row the differ emits must be
 // undoable — at the row's own scope, as a group, and by "Discard all". Rules, device groups and the
 // DNS plane were diffed but had no undo at all, and a dozen endpoint/group/list fields were diffed
 // without a revert case: the panel answered 400 "no pending change for field …", which is false, and
@@ -343,10 +347,10 @@ func TestUndo_SyntheticDNSIDDoesNotHitASameNamedList(t *testing.T) {
 	}
 }
 
-// QA-089: restoring a removed routing list puts it back among the lists that survive in the order
-// the baseline had them. At its absolute baseline index it landed after lists that used to follow it
-// — [a b c d] minus a and c, undo c, gave [b d c] — so d started winning traffic c used to route, and
-// the review grew two "Reordered" rows nobody made.
+// Restoring a removed routing list puts it back among the lists that survive in the order
+// the baseline had them. At its absolute baseline index it would land after lists that followed it
+// in the baseline ([a b c d] minus a and c, undo c, would give [b d c]), so d would win traffic c
+// routes, and the review would grow two "Reordered" rows nobody made.
 func TestUndo_RestoredRoutingListKeepsBaselineNeighbours(t *testing.T) {
 	lists := func(ids ...string) []model.RoutingList {
 		out := make([]model.RoutingList, 0, len(ids))
@@ -389,8 +393,8 @@ func TestUndo_RestoredRoutingListKeepsBaselineNeighbours(t *testing.T) {
 }
 
 // Undoing a content edit leaves the list where it is when it already sits right among the lists
-// both states share. It used to jump to the front over a list the user had just added there, which
-// changes which of the two wins for overlapping destinations although no review row said so.
+// both states share. Jumping to the front over a list the user has just added there would change
+// which of the two wins for overlapping destinations although no review row said so.
 func TestUndoRoutingObject_ContentUndoDoesNotJumpOverAddedList(t *testing.T) {
 	base := model.Profile{RoutingLists: []model.RoutingList{rl("a", "A", "direct"), rl("b", "B", "direct")}}
 	desired := model.Profile{RoutingLists: []model.RoutingList{rl("n", "N", "direct"), rl("a", "A2", "direct"), rl("b", "B", "direct")}}
@@ -480,7 +484,7 @@ func TestUndoRoutingPosition_ClearsTheRowItWasShownFor(t *testing.T) {
 }
 
 // An object undo of a list that was renamed but never moved resets the name and leaves the list
-// where it is. It used to take the fewest-out-of-order slot: [a b c] -> [c b' a], undo b, gave
+// where it is. Taking the fewest-out-of-order slot instead, [a b c] -> [c b' a], undo b, would give
 // [b c a] and a new "Position #2 -> #1" row for a move nobody made.
 func TestUndoRoutingObject_UnmovedListStaysPut(t *testing.T) {
 	base := model.Profile{RoutingLists: listsOf("a", "b", "c")}
@@ -540,12 +544,11 @@ func fuzzLists(r *rand.Rand) (base, desired model.Profile) {
 	return base, desired
 }
 
-// QA-088 review: over random reorders, every routing-list row the review lists undoes at its own
-// scope, its row clears, and nothing but that list moves. The slot used to come from the fewest
-// out-of-order lists while the differ reports a move by the count of shared lists in front; over
-// 20k reorders 2304 Position undos were refused (the base code: 1449), and clicking the first row
-// again and again got stuck 1487 times (the base code: never). The seed is fixed, so a failure
-// replays.
+// Over random reorders, every routing-list row the review lists undoes at its own
+// scope, its row clears, and nothing but that list moves. The slot must agree with the differ, which
+// reports a move by the count of shared lists in front; a slot chosen by the fewest out-of-order
+// lists refuses Position undos and gets stuck when the first row is clicked again and again. The
+// seed is fixed, so a failure replays.
 func TestUndoRouting_FuzzEveryRowUndoesAndClears(t *testing.T) {
 	r := rand.New(rand.NewSource(157))
 	failures := 0
@@ -659,7 +662,7 @@ func TestUndoRouting_FuzzEveryRowUndoesAndClears(t *testing.T) {
 	}
 }
 
-// QA-090 review: restoring a modified list by object, group or "Discard all" keeps the feed
+// Restoring a modified list by object, group or "Discard all" keeps the feed
 // timestamps the list has now. They say when a fetch last ran, which did happen; the baseline's can
 // be zero (or older), and a zero stamp marks the feed as never loaded, so the refresher re-fetched it
 // at once and re-staged the very feed the operator had just declined.

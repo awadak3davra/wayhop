@@ -21,7 +21,7 @@ import (
 // RoutingList.DownloadVia only reached sing-box, as a rule set's download_detour. The two feeds the
 // daemon fetches itself went out over the provider with no regard to it, so a router configured to
 // download every list through a VPN announced "antifilter" to its provider on each refresh. Measured
-// on a live Keenetic: at the 12 h refresh, the provider's address to peer.antifilter.download:443.
+// on a Keenetic: at the 12 h refresh, the provider's address to peer.antifilter.download:443.
 //
 // Same mechanism as Updater.DownloadVia, and for the same reason it is not a routing change: the socket
 // is bound to the chosen link (SO_BINDTODEVICE) for the fetch, with no mark, table or rule to undo.

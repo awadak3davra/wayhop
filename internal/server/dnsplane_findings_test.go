@@ -10,9 +10,9 @@ import (
 	"wayhop/internal/platform"
 )
 
-// Found by a hunter on an emulated OpenWrt 23.05: "Intercept clients' DNS", "Break hardcoded encrypted
-// resolvers" and "Answer clients through these encrypted resolvers" were applied with "Applied & saved",
-// and no device saw a change. The review now says so before the Apply.
+// On OpenWrt, "Intercept clients' DNS", "Break hardcoded encrypted resolvers" and "Answer clients
+// through these encrypted resolvers" change nothing for a device, so the review says so before the
+// Apply instead of letting it report "Applied & saved".
 func dnsPlaneIDs(t *testing.T, p platform.Platform, mode, dhcp string) []string {
 	t.Helper()
 	s := opshandlers_server(t)

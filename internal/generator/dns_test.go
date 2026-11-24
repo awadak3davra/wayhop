@@ -91,8 +91,8 @@ func TestGenerateDNSDropsUnreferencedDisabledServer(t *testing.T) {
 }
 
 // TestGenerateDNSRejectsReferenceToDisabledServer: a `final` or an enabled rule that names a DISABLED
-// server is refused at the generator boundary too (Generate runs Validate) — LOOP-029. Before that
-// fix Generate silently dropped the reference, leaving the plane with no default resolver, or the
+// server is refused at the generator boundary too (Generate runs Validate). Without
+// this check Generate would silently drop the reference, leaving the plane with no default resolver, or the
 // rule's queries falling through to `final` instead of where they were aimed.
 func TestGenerateDNSRejectsReferenceToDisabledServer(t *testing.T) {
 	base := func() []model.DNSServer {
@@ -157,8 +157,7 @@ func TestGenerateDNSH3Path(t *testing.T) {
 	singboxCheckDNS(t, res.Config)
 }
 
-// TestGenerateDNSDirectDetourIsOmitted pins a runtime-only sing-box 1.12.17 failure found on the
-// test router. A network resolver with detour="direct" passes `sing-box check`, then `sing-box run`
+// TestGenerateDNSDirectDetourIsOmitted pins a runtime-only sing-box 1.12.17 failure. A network resolver with detour="direct" passes `sing-box check`, then `sing-box run`
 // aborts with "detour to an empty direct outbound makes no sense". The schema's empty detour already
 // means direct, so the generator must omit the field while preserving real group detours (covered by
 // TestGenerateDNSSecureDefault below).

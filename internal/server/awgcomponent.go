@@ -124,7 +124,7 @@ func (s *Server) awgComponent(ctx context.Context, prof model.Profile) awgCompon
 	}
 	builtinGeneration := nativeplan.NativeAWGGenerationFor(p, kernel)
 	if nativePlan && p == platform.Keenetic {
-		// KeeneticOS's own AmneziaWG is what its firmware release takes (QA-127), as the planner asks it.
+		// KeeneticOS's own AmneziaWG is what its firmware release takes, as the planner asks it.
 		builtinGeneration = nativeplan.KeeneticAWGGeneration(capset)
 	}
 	out.Builtin = awgBuiltin(probe, firmwareOwned, nativePlan && nativeplan.NativeAWGAvailable(capset), builtinGeneration)

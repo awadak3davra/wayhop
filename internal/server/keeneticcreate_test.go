@@ -303,7 +303,7 @@ func keeneticCreateTuple(t *testing.T, rules []model.Rule, more ...model.Endpoin
 	}
 }
 
-// QA-121. The compiler indents a WireGuard peer's own settings under its `wireguard peer` line, and
+// The compiler indents a WireGuard peer's own settings under its `wireguard peer` line, and
 // the exact adapter's command validator refused any line with leading spaces, so every native
 // create was refused as an invalid plan before a single command was sent. The block here is the
 // one the compiler produces, run through the production ndmc runner into a stand-in NDM.

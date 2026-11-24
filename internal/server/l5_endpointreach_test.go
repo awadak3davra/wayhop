@@ -9,7 +9,7 @@ import (
 // TestEndpointReachVerdict (L5): "VPN servers reachable" must be able to go red on a router whose
 // exits are native tunnels.
 //
-// Measured on a live Keenetic: all five exits are adopted NDM tunnels, so each has server "",
+// Observed on KeeneticOS: all five exits are adopted NDM tunnels, so each has server "",
 // port 0 and no endpoint_ip. The row dialled nothing, reported "no dialable endpoints - nothing to
 // reach", and would have reported exactly that with all five tunnels down - while the monitor held
 // state alive, handshake ok and a latency for every one of them. The battery answered fourteen

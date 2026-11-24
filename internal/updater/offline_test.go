@@ -10,7 +10,7 @@ import (
 // TestOfflineReleaseLookupsMakeNoRequest: in demo the panel must answer version questions without
 // reaching GitHub.
 //
-// The verification suite drives the demo, and twice in three full runs on 2026-08-19 it failed on
+// The verification suite drives the demo, and twice in three full runs it failed on
 // `502 /api/updater/sing-box/fit` — once on diagnostics, once on Components — because api.github.com
 // did not answer in time. Nothing in the panel was wrong. The transport below fails every request,
 // so a lookup that still tries the network cannot pass this test by being lucky.

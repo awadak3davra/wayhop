@@ -47,14 +47,14 @@ var dohResolvers = map[string]string{
 // router's own traffic, not a client's, and the difference is the whole claim: this row is titled
 // "LAN clients use the router's DNS".
 //
-// Measured on a live test router before this existed. WayHop's own secure default resolves over
+// Observed on an OpenWrt router before this existed. WayHop's own secure default resolves over
 // DoH to 1.1.1.1, riding the tunnel — so conntrack carried `src=10.0.0.30 dst=1.1.1.1 dport=443`, and
 // 10.0.0.30 is the router's address on its own awg0 device. The check reported the ROUTER as a LAN
 // client bypassing the router, and the row's fix text told the operator to disable DoH on that device
 // or block the resolver in Routing: advice that, followed, breaks the router's own encrypted DNS.
 // Returns one line per (client, resolver) PAIR — the evidence the operator needs — plus the number
 // of distinct CLIENTS, which is a different number and the one the summary sentence claims.
-// Measured on a live Keenetic: one phone talking to both Google and AdGuard produced two
+// Observed on KeeneticOS: one phone talking to both Google and AdGuard produced two
 // lines, and the row said "2 client(s) may be bypassing the router's DNS", with the same address
 // printed twice in the detail directly underneath. A count of devices is what an operator acts on —
 // it decides how many gadgets they go and reconfigure.
@@ -236,7 +236,7 @@ func countWordClients(n int) string {
 // A routing list entry that is a DOMAIN cannot be matched by the kernel, which only sees addresses.
 // It works by the router resolving the name for the client and putting the ANSWER into the kernel
 // set. So the list holds exactly as long as the client asks this router. If the client resolves
-// elsewhere it gets a different address for the same name — measured on a live network:
+// elsewhere it gets a different address for the same name — observed on a real network:
 // one download host answered a different address to each of two resolvers, and
 // only the second was in the set. The first leaves through the ordinary path with nothing on screen
 // saying so, which is how a file download fails while the site it came from works.
@@ -328,7 +328,7 @@ func (s *Server) dnsInterceptApplied() bool {
 // interceptEnforced is whether an applied profile's DNS interception is actually installed. The flag
 // alone was taken for the fact. WayHop renders the redirect only into the KeeneticOS kernel plane,
 // which exists only in hybrid and fast with zones; in mixed or tun, and on OpenWrt in every mode,
-// nothing installed it, yet this check passed on "answered by this router" (QA-068). Off KeeneticOS
+// nothing installed it, yet this check passed on "answered by this router". Off KeeneticOS
 // the door is shut only if the firewall itself sends the LAN's :53 to this router.
 func interceptEnforced(p model.Profile, k executionKernelArtifactV1, keenetic bool, firewallHijacks53 func() bool) bool {
 	if !dnsInterceptOn(p) {

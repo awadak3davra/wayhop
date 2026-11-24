@@ -76,7 +76,7 @@ func TestRenderIP_V6SourceScopedDatapath(t *testing.T) {
 	})
 }
 
-// TestRenderIP_V6BlackholeIsReplace pins BUG-2: the v6 blackhole egress route must use `ip -6
+// TestRenderIP_V6BlackholeIsReplace pins the v6 blackhole egress route must use `ip -6
 // route replace` (idempotent) like every sibling line, not `add` (which errors
 // "RTNETLINK answers: File exists" on a re-assert that skips the preceding flush).
 func TestRenderIP_V6BlackholeIsReplace(t *testing.T) {

@@ -57,7 +57,7 @@ type PMPlan struct {
 	Argv    []string   `json:"argv,omitempty"` // exactly what would execute; empty when blocked
 	// What the package manager says the command WOULD do, asked with its own dry-run flag. Showing
 	// the command is not the same as showing its effect: `apk del sing-box` reads as one package and,
-	// on the test router, removes two — kmod-inet-diag goes with it and nothing in the preview said so.
+	// on the reference OpenWrt router, removes two — kmod-inet-diag goes with it and nothing in the preview said so.
 	Effect     string      `json:"effect,omitempty"`
 	Collateral []string    `json:"collateral,omitempty"` // other packages the operation would remove
 	Checks     []PlanCheck `json:"checks"`
@@ -156,7 +156,7 @@ func (u *Updater) PlanPM(ctx context.Context, e Engine, action PlanAction, versi
 	path, exists := u.enginePath(e)
 	p.Path = path
 
-	// Which package are we talking about? For anything but a fresh install the answer must come from
+	// Which package is this about? For anything but a fresh install the answer must come from
 	// the package manager's own ownership record, never from a name table: a guessed package name is
 	// how a remove takes out the wrong thing.
 	var pkg string
@@ -169,7 +169,7 @@ func (u *Updater) PlanPM(ctx context.Context, e Engine, action PlanAction, versi
 			return p
 		}
 		// The engine id is a GUESS at the package name, and it is wrong more often than it is right.
-		// Measured against the test router's own feed: of the engines this panel knows, only sing-box
+		// Measured against the reference router's own feed: of the engines this panel knows, only sing-box
 		// and dnscrypt-proxy exist as packages — mihomo, xray, hysteria and amneziawg-go do not. Without this the plan reads as runnable, the operator confirms it, and apk
 		// fails on a package that was never there. The rollback branch below already refuses a version
 		// the feed does not carry; this is the same question asked one level up.
@@ -180,11 +180,11 @@ func (u *Updater) PlanPM(ctx context.Context, e Engine, action PlanAction, versi
 		}
 		if len(cands) == 0 {
 			// An empty list is not the same as "absent". opkg lets a package answer to a VIRTUAL name
-			// it declares in `Provides:` — measured on the Keenetic, `opkg list sing-box` is empty
-			// while `opkg whatprovides sing-box` answers `sing-box-go` and `opkg install --noaction
-			// sing-box` reports that package as already installed. Blocking on the empty list refused
-			// an operation the package manager can perform, which is a regression this check itself
-			// introduced by taking apk's behaviour (where empty really does mean absent) for both.
+			// it declares in `Provides:` — on Keenetic, `opkg list sing-box` is empty while
+			// `opkg whatprovides sing-box` answers `sing-box-go` and `opkg install --noaction
+			// sing-box` reports that package as already installed. Blocking on the empty list would
+			// refuse an operation the package manager can perform; only apk's empty list really
+			// means absent.
 			if real, found, rerr := u.pm.Resolve(ctx, pkg); rerr == nil && found {
 				p.noteOK("the name is virtual and resolves",
 					fmt.Sprintf("%s is provided by package %s", pkg, real))
@@ -391,10 +391,9 @@ func (u *Updater) ExecutePM(ctx context.Context, e Engine, action PlanAction, ve
 	// budget is per call rather than per command.
 	runCtx, cancel := context.WithTimeout(ctx, 6*time.Minute)
 	defer cancel()
-	// The plan's own commands are what run. ExecutePM used to re-derive them from the action — calling
-	// Install for an upgrade — so the argv that was shown, simulated and approved and the argv that
-	// executed were built in two different places, and they disagreed for as long as the upgrade path
-	// existed. There is no second derivation left to drift.
+	// The plan's own commands are what run. Re-deriving them from the action here would build the
+	// argv that was shown, simulated and approved and the argv that executes in two different places,
+	// free to disagree. There is no second derivation to drift.
 	var out strings.Builder
 	for i, step := range now.Steps {
 		stepOut, rerr := u.pm.RunPlanned(runCtx, step)

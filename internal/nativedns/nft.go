@@ -8,9 +8,9 @@ import (
 // Reading the firewall through nftables, for routers that have no iptables binary.
 //
 // The effective-path detector derived Hijack53 and DoHBypassBlocked from `iptables -S` alone. On a
-// modern OpenWrt running fw4 there may be no iptables at all — the test test router is exactly that —
-// so every probe came back empty and the detector reported the redirect as absent. AUD-43 made that
-// honest (it now says the firewall could not be read); this makes it unnecessary in the common case.
+// modern OpenWrt running fw4 there may be no iptables at all — so every probe came back empty and the detector would report the redirect as absent. Reporting
+// that the firewall could not be read keeps the answer honest; this makes it unnecessary in the
+// common case.
 //
 // Parsing `nft list ruleset` is not the same job as scanning `iptables -t nat -S`. That command
 // prints ONLY the nat table, so any matching line is by definition a nat rule. nft prints
@@ -34,7 +34,7 @@ var (
 	//
 	// The jump form is how fw4 actually writes a reject: the rule reads `tcp dport 853 counter jump
 	// handle_reject`, and `\breject\b` does not match inside `handle_reject` because the underscore
-	// is a word character. Measured on the test test router, where every :853 rule the https-dns-proxy
+	// is a word character. Measured on the reference OpenWrt router, where every :853 rule the https-dns-proxy
 	// package installs takes that shape — so DoT handling went undetected on the router family this
 	// matters most for. That erred safe, which is why it survived; it still made the page say DoT was
 	// unhandled on a router that rejects it.
@@ -45,7 +45,7 @@ var (
 	// A destination RESTRICTION: an address set (`ip daddr @doh_v4`) or a literal address. DoH rides
 	// ordinary HTTPS, so the port alone says nothing — the only way to constrain it without breaking
 	// the web is to name the resolvers. Requiring the restriction is also what keeps an unrelated
-	// blanket :443 rule out: the test test router rejects `udp dport 443` from the LAN to force TCP for
+	// blanket :443 rule out: the reference OpenWrt router rejects `udp dport 443` from the LAN to force TCP for
 	// QUIC, which has nothing to do with DNS and would otherwise read as DoH blocking.
 	reNftDaddrSet = regexp.MustCompile(`\bip6?\s+daddr\s+(?:@\S+|[0-9a-fA-F:.]+(?:/\d+)?)`)
 )
@@ -84,7 +84,7 @@ type nftChain struct {
 // Reachability, not membership. The first version of this asked whether a :53 redirect sat IN a
 // chain hooked to nat prerouting, which is not how fw4 is built: the base `dstnat` chain holds only
 // `iifname "br-lan" jump dstnat_lan`, and the redirect lives in `dstnat_lan`, a regular chain with
-// no hook of its own. On the test test router that made the detector report hijack53=false while 309,402
+// no hook of its own. On the reference OpenWrt router that made the detector report hijack53=false while 309,402
 // UDP packets had gone through that exact rule, and the DNS page told the user their clients could
 // bypass the router's DNS — the precise opposite of what the firewall was doing. Every fixture had
 // agreed with it, because every fixture shared the same wrong model of fw4.

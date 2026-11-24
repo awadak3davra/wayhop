@@ -2,6 +2,7 @@ package server
 
 import (
 	"testing"
+	"time"
 
 	"wayhop/internal/model"
 	"wayhop/internal/netvpn"
@@ -188,5 +189,18 @@ func TestPeerEndpointHost(t *testing.T) {
 				t.Errorf("peerEndpointHost = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// A tunnel that is up is adopted switched on; one that is not stays off, because an enabled
+// connection on a down interface stops every Apply.
+func TestEndpointFromDiscoveredFollowsTheTunnelBeingUp(t *testing.T) {
+	up := netvpn.DiscoveredVPN{Iface: "awg0", Type: "amneziawg",
+		Peers: []netvpn.Peer{{PublicKey: "p", LastHandshake: time.Now().Unix()}}}
+	if !endpointFromDiscovered(up).Enabled {
+		t.Error("a tunnel with a fresh handshake was adopted switched off")
+	}
+	if endpointFromDiscovered(netvpn.DiscoveredVPN{Iface: "awg1", Type: "amneziawg"}).Enabled {
+		t.Error("a tunnel that is not up was adopted switched on")
 	}
 }

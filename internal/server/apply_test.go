@@ -476,7 +476,7 @@ func apply_failRollbackCore(s *Server, fake *applytest_ops) {
 	s.execOps = &ops
 }
 
-// QA-140: a failed Apply whose rollback also failed was recorded only while an earlier rollback was
+// A failed Apply whose rollback also failed was recorded only while an earlier rollback was
 // outstanding. Otherwise the record went on naming the committed revision as running over the Apply's
 // leftovers: Roll back answered "the committed configuration is running", and the reconcile loop put
 // the committed plane back under the failed Apply's core. The Apply is now the live state with its

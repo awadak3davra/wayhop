@@ -55,7 +55,7 @@ func TestDetectEffectivePath_RealKeenetic(t *testing.T) {
 // A :853 REJECT is DoT handling and nothing more. This case used to assert that it cleared the leak
 // verdict, which is the conflation the detector was built on: DoH rides ordinary HTTPS on :443, so a
 // rule about :853 is not evidence about it. The expectation is corrected here rather than the code,
-// because the evidence comes from the protocols and from the test router's own ruleset, not from either.
+// because the evidence comes from the protocols and from the reference router's own ruleset, not from either.
 func TestDetectEffectivePath_DoTBlockedStillLeaksOverDoH(t *testing.T) {
 	nat := `-A _NDM_HOTSPOT_DNSREDIR -i br0 -p udp -m udp --dport 53 -j REDIRECT --to-ports 41100`
 	filter := `-A FORWARD -p tcp -m tcp --dport 853 -j REJECT --reject-with tcp-reset`

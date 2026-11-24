@@ -14,7 +14,7 @@ import (
 // The GitHub install path has had this since it was written (see the updater's Fit): it reads the
 // release asset's size and refuses before downloading anything onto a 60 MiB overlay. The package
 // path had nothing of the sort — it built a command, showed it, and let apk discover mid-write that
-// the router is too small. On the test router that is not an edge case: /overlay has 20.2 MiB free and
+// the router is too small. On the reference OpenWrt router that is not an edge case: /overlay has 20.2 MiB free and
 // the sing-box the feed offers unpacks to 42.4 MiB, so every upgrade of the core through the package
 // manager is a decision that cannot be made without these numbers.
 //

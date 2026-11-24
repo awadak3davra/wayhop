@@ -56,16 +56,17 @@ func getRec(t *testing.T, h http.HandlerFunc, url string) *httptest.ResponseReco
 // silently-dropped-field class (gateway, then offload, then IgnoredDrift): every exported config
 // field must be copied by applyConfigFields except the three written by their own endpoints —
 // Subscription, Features and IgnoredDrift — each of which is asserted here to stay UNcopied.
-// This header used to say "except Subscription" while two more exclusions had grown under it.
 func TestApplyConfigFields_CopiesEveryExportedField(t *testing.T) {
 	in := &config.Config{
 		Listen: ":9999", DataDir: "/x", Demo: true, Gateway: true,
 		GatewayMTU: 1280, GatewayAddr: "172.31.3.1/30", RoutingMode: "fast",
-		Offload: "sw", OffloadDevices: []string{"wan", "br-lan"},
-		// RuleSetDetour was the second field the zero-value guard caught on its first run: it IS
-		// copied by applyConfigFields, but the fixture never set it, so its coverage here was the
-		// same nil-equals-nil as IgnoredDrift's. Copied-and-untested is a weaker failure than
-		// uncopied, and it was equally invisible.
+		Offload: "sw", OffloadDevices: []string{"wan", "br-lan"}, KillSwitchBackstopMax: 1234, KillSwitchBootHoldLift: 900,
+		ExperimentalHandoff: true, FastDNSEnforce: new(bool),
+		Throughput: config.Throughput{Scheduled: true, ScheduleHours: 8, MaxBytes: 50_000_000, MaxDurationSec: 30,
+			MonthlyBudgetMB: 4096, WANIdleKbps: 2048, Sources: []string{"https://example.com/file"}, CustomURL: "https://example.net/file", TelegramChannel: "https://t.me/s/example"},
+		// RuleSetDetour IS copied by applyConfigFields; unset here, its coverage would be the same
+		// nil-equals-nil the zero-value guard below rejects. Copied-and-untested is a weaker
+		// failure than uncopied, and equally invisible.
 		RuleSetDetour: "wg0", CoreRestart: "04:30", NativeFirewallZone: "vpn",
 		CoreOverride:   `{"log":{"level":"info"}}`,
 		Ports:          config.Ports{UI: 1, Clash: 2, DNS: 3, Mixed: 4},
@@ -80,6 +81,7 @@ func TestApplyConfigFields_CopiesEveryExportedField(t *testing.T) {
 		AllowAnyHost:   true,
 		Features:       map[string]config.FeatureConfig{"iptv": {Enabled: true}},
 		Backup:         config.Backup{AutoHours: 6, KeepN: 5, Dir: "/bk"},
+		Flash:          config.Flash{RuntimeDir: "/tmp/x", RAMBudgetMB: 2, MinFreeMB: 16, CacheFlushHours: 12},
 		IgnoredDrift:   []string{"ep1"},
 		Telegram:       config.Telegram{Enabled: true, Token: "123456:abcdefghijklmnopqrstuvwxyz"},
 		TelegramBridge: config.TelegramBridge{Enabled: true, Port: 2443, Secret: "0123456789abcdef0123456789abcdef"},
@@ -91,15 +93,14 @@ func TestApplyConfigFields_CopiesEveryExportedField(t *testing.T) {
 
 	// Every exported field must be NON-ZERO in the fixture, checked BEFORE the copy runs.
 	//
-	// Without this the test's reflection was decoration. It walks every exported field, so the name
-	// "CopiesEveryExportedField" reads as a structural guarantee — and the production comment leans
-	// on it in those words — but the input was a hand-written literal, so a field missing from it was
-	// zero on both sides and DeepEqual passed. IgnoredDrift was exactly that: absent from the fixture,
-	// absent from applyConfigFields, nil == nil, green. The live cost was a drift dismissal that
-	// answered 200 and was never stored (measured against the running daemon). A guard on the fixture
-	// is what makes the field walk mean what its name says: an unset field can no longer pass by
-	// being equally empty on both sides, so the NEXT field added to config.Config fails here loudly
-	// whether or not somebody remembered this file.
+	// Without this the test's reflection is decoration. It walks every exported field, so the name
+	// "CopiesEveryExportedField" reads as a structural guarantee, and the production comment leans
+	// on it in those words; but the input is a hand-written literal, so a field missing from it would
+	// be zero on both sides and DeepEqual would pass, even for a field applyConfigFields drops (a
+	// drift dismissal that answers 200 and is never stored). A guard on the fixture makes the field
+	// walk mean what its name says: an unset field cannot pass by being equally empty on both sides,
+	// so the NEXT field added to config.Config fails here loudly whether or not somebody remembered
+	// this file.
 	for i := 0; i < tp.NumField(); i++ {
 		f := tp.Field(i)
 		if !f.IsExported() {
@@ -152,6 +153,14 @@ func TestApplyConfigFields_CopiesEveryExportedField(t *testing.T) {
 			// Features must NOT be copied by the bulk PUT — toggled via /api/features/{id}.
 			if dst.Features != nil {
 				t.Errorf("Features must NOT be copied (per-plugin toggles via /api/features), got %+v", dst.Features)
+			}
+			continue
+		}
+		if f.Name == "Flash" {
+			// Hand-edited in config.json and read at start; the Settings page never sends it, so a
+			// copy would reset it to the defaults on every unrelated save.
+			if !reflect.DeepEqual(gotDst, config.Flash{}) {
+				t.Errorf("Flash must NOT be copied (not a Settings field), got %+v", gotDst)
 			}
 			continue
 		}
@@ -345,8 +354,8 @@ func TestConfigReset_DropsInvalidPreservedAllowList(t *testing.T) {
 }
 
 // unwritableCfgServer builds a *Server whose config is seeded with defaults but
-// whose backing file CANNOT be written: after Load creates the config dir, we
-// replace that dir with a regular file of the same name, so the next Save() ->
+// whose backing file CANNOT be written: after Load creates the config dir, it
+// replaces that dir with a regular file of the same name, so the next Save() ->
 // atomicfile.Write -> os.MkdirAll fails (ENOTDIR / "not a directory") on every
 // platform. Used to exercise the failed-Save rollback path.
 func unwritableCfgServer(t *testing.T) *Server {

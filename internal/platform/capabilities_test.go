@@ -10,7 +10,7 @@ import (
 
 // --- Synthetic samples (NOT real device dumps) ---------------------------------------------
 
-// /proc/modules excerpt with the amneziawg kmod loaded (the live test router case: amneziawg, no
+// /proc/modules excerpt with the amneziawg kmod loaded (the reference OpenWrt router case: amneziawg, no
 // plain wireguard kmod). Fields after the name are size/refcount/deps/state — irrelevant here.
 const lsmodAWG = `amneziawg 90112 0 - Live 0x0000000000000000
 chacha20poly1305 16384 1 amneziawg, Live 0x0000000000000000
@@ -91,7 +91,7 @@ func TestDecideOpenWrt(t *testing.T) {
 		wantSbPres  bool
 	}{
 		{
-			// The live test router case: amneziawg kmod, no plain wireguard. The amneziawg kmod
+			// The reference OpenWrt router case: amneziawg kmod, no plain wireguard. The amneziawg kmod
 			// is a WireGuard superset, so vanilla WG rides it — both are native and neither
 			// needs an install (design §1-2: "WireGuard | native via amneziawg kmod").
 			name:        "amneziawg kmod loaded -> awg+wg native (WG rides the awg kmod)",

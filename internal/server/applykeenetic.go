@@ -81,24 +81,68 @@ func (runner *exactKeeneticNDMCRunner) ParseBatch(ctx context.Context, commands 
 	//
 	// Interactive ndmc needs a terminal: with stdin piped it reports "unable to update a window line
 	// size", closes the NDM connection, and **exits 0 having executed nothing**. A daemon has no tty,
-	// so the whole batch silently did nothing while the process reported success — the failure mode
-	// that a postcondition check exists to catch, and did.
+	// so a piped batch silently does nothing while the process reports success.
 	//
 	// `-c` accepts exactly one command, so a block has to be flattened: KeeneticOS takes the full
-	// path in one line (`interface Wireguard0 description …` is accepted and saved), which is how the
-	// context that the interactive session used to provide is carried instead. How a block nests,
-	// including a peer's own settings one context deeper (QA-121), is flattenExactKeeneticBatch's
+	// path in one line (`interface Wireguard0 description …` is accepted and saved), which carries the
+	// context an interactive session would provide. How a block nests,
+	// including a peer's own settings one context deeper, is flattenExactKeeneticBatch's
 	// business.
 	var out strings.Builder
 	for _, line := range lines {
 		output, err := runner.run(ctx, "", exactKeeneticNDMCPath, "-c", line)
 		if err != nil || exactKeeneticSemanticFailure(output) {
-			return nil, errExactKeeneticApply
+			// Removing an interface NDM no longer has (an earlier rollback or a manual delete took
+			// it) is the state asked for, but NDM answers it with an error. Only a running-config
+			// that provably lacks the section turns the refusal into success.
+			if name, ok := strings.CutPrefix(line, "no interface "); ok && !strings.ContainsAny(name, " \t") {
+				cfg, cerr := runner.run(ctx, "", exactKeeneticNDMCPath, "-c", "show running-config")
+				if cerr == nil && strings.TrimSpace(cfg) != "" && !exactKeeneticHasInterface(cfg, name) {
+					continue
+				}
+			}
+			return nil, exactKeeneticDetail(line, output, err)
 		}
 		out.WriteString(output)
 		out.WriteString("\n")
 	}
 	return []byte(out.String()), nil
+}
+
+func exactKeeneticHasInterface(config, name string) bool {
+	for _, l := range strings.Split(config, "\n") {
+		if strings.TrimRight(l, "\r ") == "interface "+name {
+			return true
+		}
+	}
+	return false
+}
+
+// exactKeeneticOwn passes this file's own sanitized errors and context errors through and flattens
+// anything else, so a foreign runner's text never reaches the operator.
+func exactKeeneticOwn(err error) error {
+	if errors.Is(err, errExactKeeneticApply) || errors.Is(err, errExactKeeneticPlan) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return errExactKeeneticApply
+}
+
+// exactKeeneticDetail keeps errors.Is(errExactKeeneticApply) true but tells the operator which command
+// was refused: its first three words (never an argument, so no key or address). NDM's own output is
+// left out on purpose, it may echo a key.
+func exactKeeneticDetail(line, _ string, runErr error) error {
+	words := strings.Fields(line)
+	if len(words) > 3 {
+		words = words[:3]
+	}
+	reason := "ndmc exit"
+	if runErr == nil {
+		reason = "NDM refused"
+	} else if errors.Is(runErr, errExactKeeneticApply) {
+		reason = "ndmc failed or timed out"
+	}
+	return fmt.Errorf("%w: %s on %q", errExactKeeneticApply, reason, strings.Join(words, " "))
 }
 
 // ndmc may exit zero even when NDM rejected one command. The interactive client can expose the
@@ -358,7 +402,7 @@ func (adapter *exactKeeneticNativeAdapter) prepare(ctx context.Context, target n
 		return &applyStepUntouchedError{err: errExactKeeneticApply}
 	}
 	// An interface already in the running config predates this Apply: a slot the previous plan
-	// created and this one keeps (QA-108), or a saved interface NDM re-created at boot before Entware
+	// created and this one keeps, or a saved interface NDM re-created at boot before Entware
 	// started, or one a rollback finds still standing. None is re-sent. NDM merges a re-sent block into
 	// what is there, so it proves nothing, and the block's `ip global` would pull a tunnel the ladder
 	// raised back down to the priority it was created with, moving the default route. During early
@@ -407,6 +451,20 @@ func (adapter *exactKeeneticNativeAdapter) prepare(ctx context.Context, target n
 		log.Printf("apply: native: the key of %s could not be verified (the interface list could not be read); left as it is",
 			strings.Join(unverified, ", "))
 	}
+	// NDM refuses a second interface on an address another one holds ("network ... conflicts with
+	// interface ...") only when the block's `ip address` line arrives, after the interface exists, so the
+	// Apply would fail with a bare "command failed" and roll back. Found here it costs nothing and says
+	// which interface holds the address. It is never removed on the operator's behalf: it may be what a
+	// replaced tunnel left behind, or something the operator runs.
+	for _, block := range plan.Interfaces {
+		if preexisting[block[0]] || !strict {
+			continue
+		}
+		if holder, address := exactKeeneticAddressHolder(baseline, block); holder != "" {
+			return &applyStepUntouchedError{err: fmt.Errorf("%w: %s needs the address %s, which %s on the router already holds, so nothing was changed; delete %s in KeeneticOS (or remove the tunnel that uses it) and Apply again",
+				errExactKeeneticApply, strings.TrimPrefix(block[0], "interface "), address, holder, holder)}
+		}
+	}
 	attempted := &keenetic.Plan{}
 	cleanup := func() {
 		_ = adapter.cleanup(context.WithoutCancel(ctx), attempted)
@@ -422,7 +480,7 @@ func (adapter *exactKeeneticNativeAdapter) prepare(ctx context.Context, target n
 		}
 		if _, err := adapter.runner.ParseBatch(ctx, append([]string(nil), block...)); err != nil {
 			cleanup()
-			return errExactKeeneticApply
+			return exactKeeneticOwn(err)
 		}
 	}
 	running, err := adapter.readConfig(ctx)
@@ -462,6 +520,35 @@ func (adapter *exactKeeneticNativeAdapter) prepare(ctx context.Context, target n
 		}
 	}
 	return nil
+}
+
+// exactKeeneticAddressHolder returns the name of a live interface other than the block's own that
+// carries one of the block's IPv4 `ip address` lines, and that address.
+func exactKeeneticAddressHolder(running string, block []string) (holder, address string) {
+	want := map[string]bool{}
+	for _, line := range block {
+		if strings.HasPrefix(line, "ip address ") {
+			want[strings.TrimSpace(line)] = true
+		}
+	}
+	if len(want) == 0 {
+		return "", ""
+	}
+	current := ""
+	for _, raw := range strings.Split(running, "\n") {
+		line := strings.TrimRight(raw, "\r ")
+		if !strings.HasPrefix(line, " ") {
+			current = ""
+			if name, ok := strings.CutPrefix(line, "interface "); ok {
+				current = name
+			}
+			continue
+		}
+		if current != "" && "interface "+current != block[0] && want[strings.TrimSpace(line)] {
+			return current, strings.TrimPrefix(strings.TrimSpace(line), "ip address ")
+		}
+	}
+	return "", ""
 }
 
 // report hands the interfaces found changed outside WayHop to whoever shows them to the operator.
@@ -571,9 +658,9 @@ func ndmInterfaceSection(running, header string) ([]ndmSectionLine, bool) {
 // peer` line opened. Lines printed between them do not count against it: NDM prints settings of its
 // own, and on an interface that outlives an Apply the operator may have attached more in KeeneticOS
 // (an `ip access-group`, between `ip mtu` and `ip tcp`). Requiring the block as one unbroken run of
-// lines failed such an interface, and the failure path then deleted it. A line that is missing,
-// reordered or moved out of its peer still fails: with the indentation normalized away, a peer's
-// `connect` printed after its group closed, or found only under another peer, used to pass.
+// lines would fail such an interface, and the failure path would then delete it. A line that is
+// missing, reordered or moved out of its peer still fails, including a peer's `connect` printed after
+// its group closed or found only under another peer.
 //
 // A secret is never expected back (exactKeeneticPrintedLine): `show running-config` does not print it.
 //
@@ -618,11 +705,10 @@ func verifyExactKeeneticInterfaceBlock(block []string, running string, skipGloba
 
 // exactKeeneticPrintedLine is a block command as running-config shows it (normalized, at its depth),
 // or false for a line NDM never prints back. KeeneticOS keeps the keys out of `show running-config`:
-// KeeneticOS 5.1.8 prints no `wireguard private-key` for any of its five WireGuard interfaces, and the
-// test Keenetic none for its six (2026-11-05). Neither prints a `preshared-key` under any peer;
-// whether any of them has one cannot be told from that, so a pre-shared key is treated the same way.
-// Expecting a key back failed every new tunnel after it was created (and the failure path then
-// deleted it) and read every kept one as changed. Nothing can verify a key by reading the
+// KeeneticOS 5.1.8 prints no `wireguard private-key` for any WireGuard interface, and no
+// `preshared-key` under any peer; whether a peer has one cannot be told from that, so a pre-shared key
+// is treated the same way. Expecting a key back would fail every new tunnel after it was created (and
+// the failure path would then delete it) and read every kept one as changed. Nothing can verify a key by reading the
 // configuration (the key is checked against `show interface` instead); the block that carries it is
 // still sent whole. Each is left out only at its own depth: the private key on the interface, the
 // pre-shared key under its peer.
@@ -676,7 +762,7 @@ func (adapter *exactKeeneticNativeAdapter) commit(
 	for _, block := range target.Keenetic.GlobalPriorityBlocks() {
 		if _, err := adapter.runner.ParseBatch(ctx, append([]string(nil), block...)); err != nil {
 			cleanup()
-			return errExactKeeneticApply
+			return exactKeeneticOwn(err)
 		}
 	}
 	// Then the interfaces the previous plan raised and this one does not. AFTER the target ladder, so
@@ -687,19 +773,19 @@ func (adapter *exactKeeneticNativeAdapter) commit(
 	for _, block := range restore {
 		if _, err := adapter.runner.ParseBatch(ctx, append([]string(nil), block...)); err != nil {
 			cleanup()
-			return errExactKeeneticApply
+			return exactKeeneticOwn(err)
 		}
 	}
 	if len(target.Keenetic.Routes) != 0 {
 		if _, err := adapter.runner.ParseBatch(ctx, append([]string(nil), target.Keenetic.Routes...)); err != nil {
 			cleanup()
-			return errExactKeeneticApply
+			return exactKeeneticOwn(err)
 		}
 	}
 	if len(teardown) != 0 {
 		if _, err := adapter.runner.ParseBatch(ctx, append([]string(nil), teardown...)); err != nil {
 			cleanup()
-			return errExactKeeneticApply
+			return exactKeeneticOwn(err)
 		}
 	}
 	running, err := adapter.readConfig(ctx)
@@ -829,7 +915,7 @@ func (adapter *exactKeeneticNativeAdapter) cleanupEach(ctx context.Context, plan
 	// is left. Restoring is not a `no` command, so it cannot ride the teardown batch.
 	for _, block := range restore {
 		if _, err := adapter.runner.ParseBatch(cleanupCtx, append([]string(nil), block...)); err != nil {
-			return errExactKeeneticApply
+			return exactKeeneticOwn(err)
 		}
 	}
 	if len(commands) == 0 {
@@ -837,7 +923,7 @@ func (adapter *exactKeeneticNativeAdapter) cleanupEach(ctx context.Context, plan
 	}
 	if !each {
 		if _, err := adapter.runner.ParseBatch(cleanupCtx, append([]string(nil), commands...)); err != nil {
-			return errExactKeeneticApply
+			return exactKeeneticOwn(err)
 		}
 		return nil
 	}
@@ -871,19 +957,18 @@ func (adapter *exactKeeneticNativeAdapter) persist(
 	if exactKeeneticNativeMutationEmpty(*reconcile.Target, reconcile.KeeneticTeardown, reconcile.KeeneticPriorityRestore) {
 		return nil
 	}
-	// Three distinct failures used to share one answer - tear the target down - and that answer
-	// contradicted the caller: apply keeps the revision as a live unsaved window and tells the
-	// operator "the configuration runs - use Keep to retry", and Keep retries THIS function. A
-	// retry after a teardown cannot succeed (the re-read verifies against a target that is gone),
-	// so the old behaviour made its own retry path unimplementable while the panel promised it.
+	// Three distinct failures must not share one answer such as tearing the target down: apply keeps
+	// the revision as a live unsaved window and tells the operator "the configuration runs - use Keep
+	// to retry", and Keep retries THIS function. A retry after a teardown cannot succeed (the re-read
+	// verifies against a target that is gone).
 	// persist runs only after the global postcheck proved the datapath, so:
 	//   - a READ failure is transient plumbing: the target is live and carrying traffic; keep it,
 	//     report the error, and let Keep retry the save;
 	//   - a VERIFY mismatch means something else mutated NDM between postcheck and persist (a
 	//     tunnel switched off in KeeneticOS during the window): fail closed by not saving, and
-	//     leave the target as it is. Tearing it down left the core and the kernel plane on deleted
-	//     interfaces while both callers kept the revision as running, and Keep could never succeed
-	//     again (QA-141). Left alone, the window still judges it, and Roll back still undoes it;
+	//     leave the target as it is. Tearing it down would leave the core and the kernel plane on
+	//     deleted interfaces while both callers keep the revision as running, and Keep could never
+	//     succeed again. Left alone, the window still judges it, and Roll back still undoes it;
 	//   - a failed `system configuration save` does not un-run the configuration: flash failed,
 	//     the datapath did not; keep it, retryable.
 	running, err := adapter.readConfig(ctx)
@@ -895,7 +980,7 @@ func (adapter *exactKeeneticNativeAdapter) persist(
 		return errExactKeeneticDrift
 	}
 	if _, err := adapter.runner.ParseBatch(ctx, []string{exactKeeneticSaveCommand}); err != nil {
-		return errExactKeeneticApply
+		return exactKeeneticOwn(err)
 	}
 	return nil
 }
@@ -1014,8 +1099,7 @@ func verifyExactKeeneticRunningConfigLeaving(
 	// The ladder is verified by READING it back, not by matching command lines. `ip global` is only
 	// the default route when it is read under the interface it belongs to, but it is not adjacent to
 	// that interface line: the running config prints description, address and mtu in between, so an
-	// exact-sequence match never finds it — measured as an Apply that submitted the ladder, failed its
-	// own verification, and correctly rolled the router back.
+	// exact-sequence match never finds it, and the Apply would fail its own verification and roll back.
 	if len(target.Keenetic.GlobalPriority) != 0 || len(restore) != 0 {
 		observed := keenetic.GlobalPriorities(running)
 		for iface, want := range target.Keenetic.GlobalPriority {
@@ -1233,9 +1317,9 @@ func validExactKeeneticInterfaceBlock(block []string) bool {
 // it `endpoint …` flattens to `interface X endpoint …`, a command NDM does not have, unless this code
 // learned NDM's grammar to put the peer back. It costs the verification nothing, since running-config
 // prints the same lines one level deeper and both sides are compared with whitespace normalized away.
-// The validator used to refuse any leading whitespace, so the block the compiler writes for an
-// interface WayHop creates could never pass the exact adapter. (The one-level path form was verified
-// on a device; the peer form is the same rule one level deeper and has not been run on one yet.)
+// Refusing all leading whitespace would mean the block the compiler writes for an interface WayHop
+// creates could never pass the exact adapter. (The one-level path form is verified on a device; the
+// peer form is the same rule one level deeper.)
 //
 // So the indent is allowed exactly where it carries that meaning: one level of four spaces, under a
 // peer, inside an interface. A tab, any other width, trailing whitespace or an indented line with no
@@ -1295,8 +1379,8 @@ func validExactKeeneticTeardown(commands []string) bool {
 // `interface …` at the start of a line as the context every following line is flattened under and
 // verification compares commands with whitespace collapsed), and only `no …` in a teardown. The single
 // indentation allowed is the one keenetic.WireguardCommands emits for a peer's own settings, directly
-// under the `wireguard peer` line of an interface block or under a sibling; refusing it refused every
-// native WireGuard block the compiler produces (QA-121). An empty list is valid: a plan may carry no
+// under the `wireguard peer` line of an interface block or under a sibling; refusing it would refuse
+// every native WireGuard block the compiler produces. An empty list is valid: a plan may carry no
 // routes and a run may have nothing to tear down.
 func validExactKeeneticCommands(commands []string, teardown bool) bool {
 	if len(commands) == 0 {

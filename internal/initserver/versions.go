@@ -87,6 +87,14 @@ func VerCheckRan(output string) bool { return strings.Contains(output, "WR_VERCH
 // arch itself, backs up the current binary, swaps atomically, restarts the service,
 // and prints WR_UPDATE_OK=<new version> on success. DESTRUCTIVE (brief endpoint drop).
 func UpdateSingBoxScript(version string, mirrors ...string) string {
+	return UpdateSingBoxScriptPinned(version, nil, mirrors...)
+}
+
+// UpdateSingBoxScriptPinned is UpdateSingBoxScript with the digests the router resolved for that
+// release (a pin for another version is ignored). The server checks the tarball against the pin,
+// else against the digest api.github.com gives for the tag, and refuses a binary it cannot check:
+// the download may come through a mirror.
+func UpdateSingBoxScriptPinned(version string, pin *SingBoxPin, mirrors ...string) string {
 	// Sanitize: embed ONLY the extracted x.y.z, never the raw caller string, so no shell
 	// metacharacters can reach the remote VER= assignment / download URL (command-injection
 	// guard). An input with no valid x.y.z yields "" → the script's own `[ -n "$VER" ]`
@@ -105,10 +113,14 @@ case "$(uname -m)" in
   *) echo "WR_UPDATE_ERR=unsupported arch $(uname -m)"; exit 1;;
 esac
 URL="https://github.com/SagerNet/sing-box/releases/download/v${VER}/sing-box-${VER}-linux-${A}.tar.gz"
+case "$A" in amd64) SUM="${SB_PIN_SHA_amd64:-}";; arm64) SUM="${SB_PIN_SHA_arm64:-}";; *) SUM="${SB_PIN_SHA_armv7:-}";; esac
+[ -n "$SUM" ] || SUM=$(wr_sb_digest "$(curl -fsS "https://api.github.com/repos/SagerNet/sing-box/releases/tags/v${VER}" 2>/dev/null || true)" "sing-box-${VER}-linux-${A}.tar.gz")
+[ ${#SUM} -eq 64 ] || { echo "WR_UPDATE_ERR=no sha256 for sing-box ${VER} (${A}): refusing a binary nobody can check"; exit 1; }
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 cd "$TMP"
 log "downloading $URL"
 wr_fetch "$URL" sb.tgz || { echo "WR_UPDATE_ERR=download failed"; exit 1; }
+echo "${SUM}  sb.tgz" | sha256sum -c - >/dev/null 2>&1 || { echo "WR_UPDATE_ERR=the download does not match its sha256"; exit 1; }
 tar -xzf sb.tgz
 BIN=$(find . -type f -name sing-box | head -n1)
 [ -n "$BIN" ] || { echo "WR_UPDATE_ERR=binary not in archive"; exit 1; }
@@ -131,7 +143,21 @@ else
   exit 1
 fi
 log "done"
-`, mirrorFetchShell(mirrors), clean)
+`, mirrorFetchShell(mirrors)+updatePinShell(pin, clean)+sbDigestFromAPI, clean)
+}
+
+// updatePinShell renders the digest lines of pin when it is for version, else nothing.
+func updatePinShell(pin *SingBoxPin, version string) string {
+	if pin == nil || version == "" || pin.Version != version {
+		return ""
+	}
+	var b strings.Builder
+	for _, line := range strings.Split(pin.shell(), "\n") {
+		if strings.HasPrefix(line, "SB_PIN_SHA_") {
+			b.WriteString(line + "\n")
+		}
+	}
+	return b.String()
 }
 
 // UpdateAWGScript upgrades the apt-managed AmneziaWG packages and reports the new

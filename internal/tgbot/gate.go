@@ -177,7 +177,7 @@ func (g *Gate) Redeem(chat Chat, code string) (string, RedeemResult) {
 		// wrong code is oldest is forgotten (it is the nearest to its window's end anyway).
 		// Never the chat just recorded: with equal timestamps (a coarse router clock during a flood)
 		// "oldest" was whichever entry the map yielded first, and evicting the sender reset its own
-		// count - wrong codes from one chat plus a flood from fresh ones defeated the limit (QA-057).
+		// count - wrong codes from one chat plus a flood from fresh ones defeated the limit.
 		var oldest int64
 		var at time.Time
 		for id, ts := range g.bad {
@@ -220,7 +220,7 @@ func (g *Gate) expireLocked() {
 
 // tellLimited reports whether a chat that Redeem found locked out should be told so now: once per
 // refuseEvery, like Seen's refusal, and silence in between. Every message during the lockout was
-// answered, and each answer could sit out Telegram's flood control in a handler slot (QA-099).
+// answered, and each answer could sit out Telegram's flood control in a handler slot.
 func (g *Gate) tellLimited(chatID int64) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()

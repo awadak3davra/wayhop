@@ -87,6 +87,10 @@ type executionKernelArtifactV1 struct {
 	// and hashed into the ledger, so a changed encoding would make every already-applied plan read
 	// as drift on the next startup.
 	Ipset *executionKernelIpsetArtifactV1 `json:"ipset,omitempty"`
+	// Renderer names the build that rendered Nft/IP/Offload/Teardown from Plan (kernelRendererID). A
+	// stored artifact of another build is re-rendered from its plan instead of refused as drift
+	// (rerenderKernelArtifact). omitempty: an artifact stored before the field reads as "another build".
+	Renderer string `json:"renderer,omitempty"`
 }
 
 // executionKernelIpsetArtifactV1 is the KeeneticOS policy plane: ipset sets, iptables mangle marks,
@@ -121,10 +125,29 @@ type executionKernelIpsetArtifactV1 struct {
 	// names from the plan and drifting from what RenderIpsetRestore actually created.
 	SetNames []string `json:"set_names"`
 	Teardown []byte   `json:"teardown"`
+	// DynamicDomainSets records whether resolver answers were rendered into separate wd_ sets.
+	// It is stored so exact validation can re-render the same program; false stays omitted in old blobs.
+	DynamicDomainSets bool `json:"dynamic_domain_sets,omitempty"`
+	FastDNSEnforce    bool `json:"fast_dns_enforce,omitempty"`
 	// WANIface is the uplink the MASQUERADE rule was rendered against. Stored because validation
 	// re-renders the program from the plan and compares it byte for byte; without it that render
 	// would fall back to a default and every artifact would fail its own integrity check.
 	WANIface string `json:"wan_iface"`
+	// LANIfaces are the LAN interfaces the kill switch backstop's rules match (host facts), and
+	// KillSwitchDNS the sing-box DNS listener kill-switched names are pinned to. Stored for the same
+	// reason as WANIface; empty in an artifact recorded before them, which re-renders as it was.
+	LANIfaces     []string `json:"lan_ifaces,omitempty"`
+	KillSwitchDNS string   `json:"killswitch_dns,omitempty"`
+	// HandoffIface is the overlap hand-off TUN the program routes into ("" without one).
+	HandoffIface string `json:"handoff_iface,omitempty"`
+	// BackstopPref is the priority the backstop's rules were rendered at, derived from the router's
+	// live rules at capture (pbr.BackstopPrefFromRules); 0 in an artifact recorded before it.
+	BackstopPref int `json:"backstop_pref,omitempty"`
+	// FillTool is the WayHop binary the program runs at boot as `backstop-fill`, and BootHoldLift the
+	// seconds after which the hook lifts the broad boot hold; both empty in an artifact
+	// recorded before them, which re-renders as it was.
+	FillTool     string `json:"fill_tool,omitempty"`
+	BootHoldLift int    `json:"boot_hold_lift,omitempty"`
 }
 
 type executionPluginSpecV1 struct {
@@ -161,7 +184,13 @@ type ExecutionHostFactsV1 struct {
 	// KernelWANIface is the uplink the plane MASQUERADEs through. Captured rather than defaulted:
 	// the rendering default in render_ipset.go is one developer's router, and a wrong value breaks
 	// return traffic while the installed rules still look correct.
-	KernelWANIface   string                       `json:"-"`
+	KernelWANIface string `json:"-"`
+	// KernelLANIfaces are the interfaces traffic is forwarded from (the WAN and loopback excluded):
+	// the kill switch backstop matches them by iif, which is what keeps the router's own traffic out.
+	KernelLANIfaces []string `json:"-"`
+	// KernelRules is `ip rule` as read at capture: the backstop is placed ahead of the lowest foreign
+	// rule in it (NDM's access policies).
+	KernelRules      string                       `json:"-"`
 	ExternalBindings []ExecutionExternalBindingV1 `json:"-"`
 }
 
@@ -447,8 +476,14 @@ func executionGeneratorOptions(
 	}
 	opts.Hybrid = true
 	if mode == "fast" {
-		opts.TunEnabled = false
-		return opts, nil
+		// With the TUN back the core keeps every list as hybrid emits it.
+		opts.FastDNS = reviewedPlan.FastDNS && !reviewedPlan.CorePin
+		if !reviewedPlan.CorePin {
+			opts.TunEnabled = false
+			return opts, nil
+		}
+		// The fast DNS plane keeps the hybrid TUN for the lists only the core carries (wr_corepin).
+		opts.TunEnabled = true
 	}
 	blackhole := make(map[string]bool)
 	for _, egress := range reviewedPlan.Egresses {
@@ -487,7 +522,7 @@ func executionKeeneticCompatibilityOptions(desired DesiredSnapshot) generator.Op
 // Here auto_route is OFF by design - NDM installs the route into wrtun0 - so the address cannot buy
 // that benefit, and it is not free.
 //
-// Measured on a live Keenetic: the address puts "fdfe:dcba:9876::/126 dev wrtun0" in the
+// Observed on KeeneticOS: the address puts "fdfe:dcba:9876::/126 dev wrtun0" in the
 // kernel, NDM's IPv6 route enumeration cannot map wrtun0 to an interface it manages, and it answers
 // every enumeration with a ~24-frame backtrace. 165 of 165 "unable to resolve" records named wrtun0,
 // about 4000 log lines in 9.5 minutes, which cut the router's bounded native log to under ten

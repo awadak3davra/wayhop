@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"wayhop/internal/awg"
 )
 
 // DisabledRefError marks the validation failures where a LIVE reference points at something that is
@@ -36,11 +38,11 @@ func disabledRef(kind, id, target, format string, a ...any) error {
 // can take it.
 //
 // It carries structure rather than only a sentence because the caller needs to know WHICH object
-// holds the broken reference. Measured on the demo profile: the review said «The configuration is
-// invalid — rule "st-rule-6": outbound "st-grp-0" does not resolve · Items: profile» and offered
-// "Correct or disable the affected object". The panel has no rules editor — profile.rules is read in
-// five places and rendered as an editable row in none — so the object named could not be reached
-// from any page, and "Items: profile" pointed at the whole configuration instead of at the one rule.
+// holds the broken reference. A sentence alone reads like «The configuration is
+// invalid — rule "st-rule-6": outbound "st-grp-0" does not resolve · Items: profile» and offers
+// "Correct or disable the affected object". The panel has no rules editor, so the object named
+// cannot be reached from any page, and "Items: profile" points at the whole configuration instead
+// of at the one rule.
 //
 // Kind/ID name the object to fix, Target names what it pointed at. The message is unchanged: the
 // type carries the class, so nothing the operator reads moves.
@@ -144,7 +146,7 @@ func RuleSetURLKind(source string) string {
 }
 
 // CarriedRuleSetFormat reports whether a rule-set format carried over from a list's old URL still
-// holds for its new one (QA-150). A URL whose file name says nothing (a mirror with no extension, a
+// holds for its new one. A URL whose file name says nothing (a mirror with no extension, a
 // query-string feed) keeps it: dropped, the generator would skip a list it has no way to read. A URL
 // that names the same format keeps it too. One that names the other format, or a plain-text list,
 // does not: kept, sing-box would read the file as what it is not, and a rule set that fails to load
@@ -276,6 +278,15 @@ func (p *Profile) Validate() error {
 		enabled[g.ID] = true
 		if len(g.Members) == 0 {
 			return fmt.Errorf("group %q: no members", g.ID)
+		}
+		switch g.ElectionMode {
+		case "", ElectionLatency:
+		case ElectionThroughput, ElectionMixed:
+			if g.Type != GroupURLTest {
+				return fmt.Errorf("group %q: election_mode %q requires urltest", g.ID, g.ElectionMode)
+			}
+		default:
+			return fmt.Errorf("group %q: invalid election_mode %q (latency|throughput|mixed)", g.ID, g.ElectionMode)
 		}
 	}
 
@@ -517,6 +528,9 @@ func (p *Profile) Validate() error {
 		default:
 			return fmt.Errorf("routing list %q: invalid tls_fragment %q (record|handshake)", rl.ID, rl.TLSFragment)
 		}
+		if err := validateRoutingListFastest(p, rl, ids, enabled); err != nil {
+			return err
+		}
 		if (rl.ScopeMode == "only" || rl.ScopeMode == "except") && len(rl.ScopeGroups) == 0 {
 			return fmt.Errorf("routing list %q: scope_mode %q needs at least one device group", rl.ID, rl.ScopeMode)
 		}
@@ -561,6 +575,25 @@ func ValidateManualEntries(rl RoutingList) error {
 		}
 	}
 	return nil
+}
+
+// MalformedManualPrefix is the first typed entry that holds a "/" and is not an IP prefix: a mistyped
+// one ("10.0.0.0/99") or a pasted URL ("example.com/path"). No name holds a "/", so nothing matches
+// such an entry: the kernel plane drops it (pbr normalizeDomains) and the core had it as a domain
+// suffix that no query ever has. It is "" when every entry is readable. A comment line is not an
+// entry. Asked where an entry is typed, not in Validate: a profile that already holds one applies and
+// runs, with that entry inert, and refusing it there would stop every Apply.
+func MalformedManualPrefix(entries []string) string {
+	for _, entry := range entries {
+		e := strings.TrimSpace(entry)
+		if e == "" || strings.HasPrefix(e, "#") || !strings.Contains(e, "/") {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(e); err != nil {
+			return entry
+		}
+	}
+	return ""
 }
 
 // validCIDRSource reports whether a RoutingList.CIDRSource has a supported scheme: an
@@ -725,6 +758,15 @@ var knownSSMethods = map[string]bool{
 func invalidProtoParam(e *Endpoint) string {
 	get := func(k string) string { s, _ := e.Params[k].(string); return strings.TrimSpace(s) }
 	switch e.Protocol {
+	case ProtoAmneziaWG:
+		// I1-I5 go to the kernel module as written. One with a negative length or tags past 64 KiB
+		// corrupts kernel memory on a module older than v3.1.20261113 instead of being refused, and a
+		// router keeps the module it has; an imported config is the likely source.
+		for i := 1; i <= 5; i++ {
+			if p := awg.IPacketProblem(get(fmt.Sprintf("i%d", i))); p != "" {
+				return fmt.Sprintf("I%d: %s", i, p)
+			}
+		}
 	case ProtoTUIC:
 		// TUIC authenticates with a uuid + password; sing-box parses the uuid
 		// strictly (a non-canonical one fails the whole config load). vless/vmess
@@ -877,7 +919,7 @@ func firstInvalidCIDR(cidrs []string) string {
 }
 
 // validSourceIface reports whether s is a safe ingress-interface name for a source rule's
-// kernel plane: 1..15 chars (IFNAMSIZ-1, counting an optional trailing "*" wildcard) made of
+// kernel plane: 1..15 chars (counting an optional trailing "*" wildcard) made of
 // [A-Za-z0-9._@-] (plus that trailing "*"). A whitelist keeps it both nft-safe (emitted
 // quoted as `iifname "x"`) and shell-safe (the Keenetic iptables path interpolates `-i x`),
 // so the name can never carry whitespace or an injection metacharacter. A bare "*" is

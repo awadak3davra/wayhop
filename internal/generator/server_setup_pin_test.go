@@ -63,7 +63,7 @@ func setupInbound(proto model.Protocol, tls map[string]any) (ib map[string]any, 
 	return nil, false
 }
 
-// TestServerSetupPinSingBoxRuntime follows QA-138 end to end. Set up Server's own fragments run under
+// TestServerSetupPinSingBoxRuntime follows the server pin end to end. Set up Server's own fragments run under
 // sh with the real openssl (the certificate fragment, the pin snippet and what each TLS fragment
 // prints once its server is up), and their output goes through ExtractTagged, the importer and
 // ApplyPins as the provisioning job takes it. Each of the five TLS connections that come out renders

@@ -29,7 +29,7 @@ func TestClassify(t *testing.T) {
 	}
 }
 
-// Decide is where the 3.0-versus-3.1 trap and the real routers land. The test router runs a generation-2
+// Decide is where the 3.0-versus-3.1 trap and the real routers land. The reference OpenWrt router runs a generation-2
 // kmod with /dev/net/tun; every Keenetic has no generation-3 module at all.
 func TestDecide(t *testing.T) {
 	cases := []struct {

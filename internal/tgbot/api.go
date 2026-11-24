@@ -61,7 +61,7 @@ type APIError struct {
 // HTTPError is an answer that did not come from the Bot API: a captive portal, a provider's block
 // page, a proxy's error. It is a transport failure, retried like a dropped connection, and never
 // read as Telegram's verdict: a proxy's 404 is not a rejected token, and its 403 is not a chat that
-// blocked the bot. Either reading used to cost dearly, ten minutes asleep as "unauthorized" or an
+// blocked the bot. Either reading would cost dearly, ten minutes asleep as "unauthorized" or an
 // alert dropped as undeliverable, over a page that had nothing to do with Telegram.
 type HTTPError struct {
 	Method  string

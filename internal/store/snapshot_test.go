@@ -73,7 +73,7 @@ func snapshot_markFor(g uint64) string {
 	return "1.1.1.1" // markA
 }
 
-// TestSnapshot_NeverTearsProfileFromGen is the LOOP-035 proof. It is white-box and disk-free on
+// TestSnapshot_NeverTearsProfileFromGen proves the snapshot never tears a profile from its generation. It is white-box and disk-free on
 // purpose: the guarantee under test — that a published {profile, gen} is indivisible — lives in the
 // cur pointer, and driving cur directly lets the writer publish MILLIONS of times so the tiny window
 // between two independent atomic loads is actually hit. (An earlier version drove the public write

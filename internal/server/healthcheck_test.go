@@ -38,7 +38,7 @@ func TestPBRKernelCheckReportsAppliedPlaneOnKeenetic(t *testing.T) {
 	}
 }
 
-// QA-029: mixed mode has no TUN, so the row must not call it one; TUN mode still passes as before.
+// Mixed mode has no TUN, so the row must not call it one; TUN mode still passes as before.
 func TestPBRKernelCheckDoesNotCallMixedTUN(t *testing.T) {
 	for _, tc := range []struct{ mode, status, summary string }{
 		{"mixed", "na", "Local proxy only, no gateway (mixed)"},

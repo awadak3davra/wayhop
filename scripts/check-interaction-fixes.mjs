@@ -75,7 +75,6 @@ function balancedBlock(source, open, name = 'block') {
     if (c === '}' && --depth === 0) return source.slice(open, i + 1);
   }
   throw new Error(`function ${name} has no closing brace`);
-  throw new Error(`${name} has no closing brace`);
 }
 
 function walk(node, fn) {
@@ -361,8 +360,11 @@ function languageContext({ dirty = false, confirmLeave = true, stored = 'auto' }
   check(context.switches({ id: 'g', type: 'selector', managed: true, members: ['wg-a', 'vless-a'] }, false) === true,
     'a managed proxy group is still driven by the daemon control loop');
 
-  check(/nothing measures their latency/.test(context.orderNote(native('urltest'))),
-    'a native urltest group says its latency is not measured', context.orderNote(native('urltest')));
+  // Since the kernel elector (stage 1) router-tunnel groups ARE measured through each tunnel and
+  // routed via the fastest working member; the card must say so and must not claim the opposite.
+  check(/measures each one through the tunnel itself/.test(context.orderNote(native('urltest'))) &&
+    !/nothing measures/.test(context.orderNote(native('urltest'))),
+    'a native urltest group says it is measured and elected', context.orderNote(native('urltest')));
   check(/picks the fastest working member/.test(context.orderNote(proxy('urltest'))),
     'a proxy urltest group keeps the sing-box wording', context.orderNote(proxy('urltest')));
 }
@@ -2077,7 +2079,9 @@ globalThis.row = healthRowEl;`, rowCtx);
   check(notes === 2, 'the Routing order note covers both planes', notes + ' note(s)');
   const appended = app.split('card.appendChild(el("div", { class: "hint rl-order-note"').length - 1;
   check(appended === 2, 'and each one is appended by its own call, not passed as a spare argument');
-  check(app.includes('a block always wins'),
+  // Precedence since the live Cloudflare leak (kill switch audit / precedence): direct, tunnels,
+  // kill-switched tunnels, blocks.
+  check(app.includes('direct yields to a tunnel') && app.includes('everything to a block'),
     'the kernel sentence names what actually decides an overlap there');
 }
 
@@ -2157,13 +2161,27 @@ globalThis.row = healthRowEl;`, rowCtx);
 // Routing lists card on the same page called that group "Primary group". Both call sites — the
 // per-connection "via X" and the per-egress byte summary — go through this one function.
 {
-  const fn = functionSource(app, 'exitLabel');
-  check(fn.includes('findGroup(tag)'),
-    'exitLabel resolves a group tag, not just an endpoint id', fn.trim().slice(0, 120));
-  check(fn.includes('findEndpoint(tag)'),
-    'and still resolves an endpoint id');
-  check(fn.includes('return tag') || fn.includes(': tag'),
-    'and falls back to the raw tag rather than rendering nothing for an outbound the profile lost');
+  // Executed, not grepped: endpoint, group, access policy, and the labels the daemon builds for a
+  // table the elector owns, "<group> (<iface>)" and "list:<id> (<iface>)" (review F10), which read raw.
+  const from = app.indexOf('const plainNameOf = ');
+  const to = app.indexOf('/* ---------- formatting');
+  const state = { profile: { groups: [{ id: 'grp-awg31', name: 'AWG31' }], routing_lists: [{ id: 'telegram', name: 'Telegram' }] },
+    ndmPolicies: [] };
+  const ctx = { state, t: (x) => x, findEndpoint: (id) => (id === 'nl1' ? { name: 'Netherlands' } : undefined),
+    findGroup: (id) => state.profile.groups.find((g) => g.id === id) };
+  vm.createContext(ctx);
+  vm.runInContext(app.slice(from, to) + ';' + functionSource(app, 'exitLabel') + ';' + functionSource(app, 'exitsSummary') +
+    ';globalThis.__x = { nameOf, exitLabel, exitsSummary };', ctx);
+  const { exitLabel, exitsSummary } = ctx.__x;
+  ctx.fmtBytes = (n) => String(n);
+  const cases = [['nl1', 'Netherlands'], ['grp-awg31', 'AWG31'], ['grp-awg31 (nwg5)', 'AWG31 (nwg5)'],
+    ['list:telegram (nwg5)', 'Telegram (nwg5)'], ['list:telegram', 'Telegram'], ['gone', 'gone'], ['direct', 'direct']];
+  for (const [inp, want] of cases) {
+    const got = exitLabel(inp);
+    check(got === want, `exitLabel(${JSON.stringify(inp)}) reads ${JSON.stringify(want)}`, got);
+  }
+  const sum = exitsSummary({ 'grp-awg31 (nwg4)': 5, 'grp-awg31 (nwg5)': 7, direct: 3 });
+  check(sum.startsWith('AWG31 12'), 'the byte summary keeps one total per group across switches', sum);
   // Both consumers must keep going through it: the summary line is where the id was actually seen.
   check(app.split('exitLabel(').length - 1 >= 3,
     'the per-connection row and the byte summary both use it');
@@ -2544,8 +2562,10 @@ globalThis.pi = pluralIndex; globalThis.tn = tn;`, context);
   // path has used for a long time, and this renders them.
   check(/GROUP_IN_USE/.test(src) && /data\.dependents/.test(src),
     'the refusal path reads the structured dependents rather than printing the raw error');
-  check(/acknowledgeOnly/.test(src),
-    'and states them, rather than offering OK on a message that is not a choice');
+  // The refusal now offers the two ways forward (repoint the dependents, or keep the group) through
+  // the same askDependentsChoice the connection delete uses, instead of a bare acknowledgement.
+  check(/askDependentsChoice\(/.test(src),
+    'and offers the ways forward, rather than OK on a message that is not a choice');
   // All FOUR conditions Store.DeleteGroup refuses on, pinned individually. The first cut of this
   // gate checked two, and the pre-check quietly shipped knowing only those two: deleting a group a
   // DNS server detoured through asked first and refused afterwards anyway. A gate that names the
@@ -2555,8 +2575,8 @@ globalThis.pi = pluralIndex; globalThis.tn = tn;`, context);
     'it checks the rule reference the store refuses on');
   check(/\.length === 1/.test(refs) && /members/.test(refs),
     'and the only-member parent group');
-  check(/rl\.outbound === g\.id \|\| rl\.download_via === g\.id/.test(refs),
-    'and a routing list routing or downloading through it');
+  check(/rl\.outbound === g\.id && !others\) \|\| rl\.download_via === g\.id/.test(refs),
+    'and a routing list routing or downloading through it (one with other tunnels moves on: store.hasOtherTunnel)');
   check(/ds\.detour === g\.id/.test(refs),
     'and a DNS server detouring through it');
 }
@@ -2877,9 +2897,9 @@ globalThis.pi = pluralIndex; globalThis.tn = tn;`, context);
 // form renders (fingerprint is carried only where there is no f-fp input).
 {
   const at = conns.indexOf('if (proto === "http" && T.enabled) out.tls = Object.assign({}, T);');
-  const block = conns.slice(at, at + 900);
+  const block = conns.slice(at, at + 1100);
   check(at >= 0 && /proto === "anytls" && T\.type === "reality"/.test(block)
-    && /\["fragment", "record_fragment", "insecure"\]\.concat\(document\.getElementById\("f-fp"\) \? \[\] : \["fingerprint"\]\)/.test(block)
+    && /\["fragment", "record_fragment", "insecure", "cipher_suites"\]\.concat\(document\.getElementById\("f-fp"\) \? \[\] : \["fingerprint"\]\)/.test(block)
     && /T\[k\] !== undefined && out\.tls\[k\] === undefined/.test(block),
     'an edit-and-save keeps the TLS settings the form has no control for, without resurrecting cleared ones');
   check(at > 0 && at < conns.indexOf('const healthEl = document.getElementById("f-health");'),
@@ -2921,7 +2941,7 @@ globalThis.pi = pluralIndex; globalThis.tn = tn;`, context);
   check((src.match(/needsServer\(e\) && \(!e\.server \|\| !e\.port\)/g) || []).length === 3,
     'all three save paths let a Realm connection through without a server');
 }
-// Gap 6: a routing list's exit may be one of the Keenetic's own access policies. The three list-exit
+// Gap 6: a routing list's exit may be one of the Keenetic's own access policies. The four list-exit
 // selects offer them; a saved policy renders first as routingOutboundSelect's "unavailable" entry (the
 // list arrives before the policies), so the late answer must relabel that option, never add a second.
 {
@@ -2929,7 +2949,7 @@ globalThis.pi = pluralIndex; globalThis.tn = tn;`, context);
   const fn = functionSource(src, 'addKeeneticPolicies');
   check(/if \(have\) have\.textContent = label; else sel\.appendChild/.test(fn),
     "a saved access policy is relabelled, not listed twice");
-  check((src.match(/addKeeneticPolicies\(routingOutboundSelect\(/g) || []).length === 3,
+  check((src.match(/addKeeneticPolicies\(routingOutboundSelect\(/g) || []).length === 4,
     'every list-exit select offers the access policies');
 }
 // QA-050: Routing -> Import showed a pasted HydraRoute file's groups under "This Keenetic's own lists":
@@ -3612,7 +3632,9 @@ const oneLine = (src, name) => (src.match(new RegExp(`^const ${name} = .*;$`, 'm
       api: { post: async (url, body, h) => { sent.push({ url, body, h }); return {}; } },
       loadProfile: async () => {}, route: () => {},
     });
-    vm.runInContext(`${functionSource(failover, 'openEditGroup')}
+    vm.runInContext(`${functionSource(failover, 'wanFallbackRow')}
+  ${functionSource(failover, 'electionField')}
+  ${functionSource(failover, 'openEditGroup')}
   ${oneLine(app, 'ifMatch')}
   globalThis.run = openEditGroup;`, context);
     const g = { id: 'grp-tiers', name: 'Tiers', type: 'fallback', members: ['vless-de', 'auto', 'direct'] };
@@ -3646,6 +3668,8 @@ const oneLine = (src, name) => (src.match(new RegExp(`^const ${name} = .*;$`, 'm
         modal: (o) => { footer = o.footer; body = o.body; return { remove() {} }; },
         api: { post: async (url, b, h) => { sent.push({ url, b, h }); return {}; } }, loadProfile: async () => {}, route: () => {},
         ifMatch: () => ({}),
+        // The tunnels/fastest block has its own step below; here it adds nothing to the body.
+        fastestEditor: () => ({ node: formEl('div', {}), collect: () => '' }),
       });
       vm.runInContext(`${functionSource(routingSrc, 'openRoutingList')}
   ${/function rlKeepsFormat\(/.test(routingSrc) ? functionSource(routingSrc, 'rlKeepsFormat') : 'function rlKeepsFormat() { return false; }'}
@@ -3698,6 +3722,55 @@ const oneLine = (src, name) => (src.match(new RegExp(`^const ${name} = .*;$`, 'm
     const urlSaved = await urlOnly.save();
     check(urlSaved && JSON.stringify(urlSaved.manual) === '[]', 'and saves no manual entries', JSON.stringify(urlSaved));
   } catch (e) { check(false, 'the routing list form step could not be run', e.message); }
+}
+
+// Fastest tunnel per list, the editor block, run: the switch is live only with two or more tunnels
+// (a group counts as its members), and Save sends the first tunnel as the outbound's twin with the
+// rest as candidates and the policy beside them.
+{
+  try {
+    const routingSrc = fs.readFileSync('web/dist/page-routing.js', 'utf8');
+    const mk = (tag, attrs = {}, ...children) => {
+      const n = formEl(tag, attrs, ...children);
+      n.classList = { toggle() {} };
+      Object.defineProperty(n, 'innerHTML', { set() { n.children.length = 0; }, get() { return ''; } });
+      n.checked = false;
+      return n;
+    };
+    const profile = { endpoints: [{ id: 'a', name: 'A', enabled: true }, { id: 'b', name: 'B', enabled: true }],
+      groups: [{ id: 'g', name: 'G', members: ['a'] }] };
+    const make = (supported) => {
+      const ctx = vm.createContext({ el: mk, t: (s) => s, state: { profile, fastestInfo: { supported, reason: 'only KeeneticOS' } }, api: {} });
+      vm.runInContext(`${functionSource(routingSrc, 'rlTunnelLike')}
+  ${functionSource(routingSrc, 'rlExpandCandidates')}
+  ${functionSource(app, 'tpMediaList')}
+  ${functionSource(routingSrc, 'fastestEditor')}
+  globalThis.ed = fastestEditor;`, ctx);
+      return ctx;
+    };
+    const ctx = make(true);
+    const routeSel = mk('select', { value: 'a' });
+    const ed = ctx.ed({ id: 'l', outbound: 'a' }, routeSel);
+    const label = findNode(ed.node, (n) => n.tag === 'label' && (n.children || []).some((c) => c && c.tag === 'span' && c.children.includes('Fastest tunnel for this list')));
+    const fast = label && label.children[0];
+    const box = (id) => findNode(ed.node, (n) => n.tag === 'input' && n.attrs.value === id);
+    check(fast && fast.disabled === true, 'one tunnel: the fastest switch is greyed out');
+    const g = box('g');
+    g.checked = true; g.onchange();
+    check(fast.disabled === true, 'a group whose only member is the first tunnel adds no second tunnel');
+    const b = box('b');
+    b.checked = true; b.onchange();
+    check(fast.disabled === false, 'two tunnels: the fastest switch is live');
+    fast.checked = true; fast.onchange();
+    const body = {};
+    const err = ed.collect(body);
+    check(err === '' && JSON.stringify(body.candidates) === '["a","g","b"]' && body.fastest && body.fastest.enabled === true,
+      'Save sends the first tunnel and the others as candidates, with the policy switched on', JSON.stringify(body));
+    const off = make(false).ed({ id: 'l', outbound: 'a', candidates: ['a', 'b'] }, mk('select', { value: 'a' }));
+    const offLabel = findNode(off.node, (n) => n.tag === 'label' && (n.children || []).some((c) => c && c.tag === 'span' && c.children.includes('Fastest tunnel for this list')));
+    await Promise.resolve(); await Promise.resolve();
+    check(offLabel.children[0].disabled === true, 'a platform without the runtime choice greys the switch out even with two tunnels');
+  } catch (e) { check(false, 'the fastest-tunnel editor step could not be run', e.message); }
 }
 
 // QA-151, QA-155, QA-153, QA-148: the rest of the review's panel fixes, by their code.
@@ -4014,6 +4087,145 @@ globalThis.filterRaw = dnsCheckText(DNS_FAST_FILTER_TEXT, "future_filter");`, ra
     check(fakeModal.closed === false, 'the Use dialog stays open when saveDNS fails');
     check(useCtx.dnsState === priorState, 'the Use dialog restores prior dnsState when saveDNS fails');
   })().catch(e => check(false, 'the Use dialog save flow could not be exercised', e.message));
+}
+
+// Kimi review 18.11, stage 0: panel input that was lost or misreported.
+{
+  const guard = functionSource(app, 'onHashChange');
+  check(/history\.replaceState\(null, "", _navGuardHash\)/.test(guard) && !/location\.hash = _navGuardHash/.test(guard),
+    'BW-02: cancelling "leave without saving" restores the address without a hashchange that rebuilds the page');
+  check(/baseline = JSON\.stringify\(next\); markDirty\(\);/.test(app),
+    'BW-01: after a save the baseline is what was sent, so an edit made during the request stays dirty');
+  check(/function saveDNSAfter\(mutate, msg, rerender\)/.test(app) &&
+    (dns.match(/saveDNSAfter\(\(\) => \{/g) || []).length >= 2 && !/dnsState\.rules\.splice\(idx, 1\);\s*saveDNS\(/.test(dns),
+    'BW-03: a DNS rule or resolver delete mutates dnsState only after earlier saves land');
+  check(/const carry = \[[^\]]*"cipher_suites"/.test(connections),
+    'BW-04: saving an imported connection keeps its TLS cipher_suites');
+  check(/if \(!panels\[key\]\) panels\[key\] = /.test(connections) && /content\.replaceChildren\(panels\[key\]\)/.test(connections),
+    'BW-11: Add connection builds each tab once, so switching tabs keeps what was typed');
+  const css = fs.readFileSync('web/dist/styles.css', 'utf8');
+  check(/\.sidebar \{[^}]*visibility:hidden;/.test(css) && /body:has\(\.nav-toggle:checked\) \.sidebar \{[^}]*visibility:visible/.test(css),
+    'DS-003: the closed mobile drawer is hidden, so its items leave the Tab order');
+  check(/\.check\.member-row > \.member-n \{ grid-column:3 \/ 5;/.test(css),
+    'DS-002: on a phone a failover member row gives the name its own line');
+}
+
+// Tunnel throughput, review TP-1/3/7/8/9: what the shared helpers say, run as shipped.
+{
+  try {
+    const sent = [];
+    const state = { throughput: null, tpAt: 0, tpMine: '' };
+    const context = vm.createContext({
+      state, Date, Math, String,
+      t: (s, ...a) => s.replace(/\{(\d)\}/g, (_, i) => a[i]),
+      fmtClock: (ms) => 'clock' + ms,
+      fmtBytes: (n) => n + 'B',
+      el: (tag, attrs = {}, ...children) => ({ tag, ...attrs, textContent: children.join('') }),
+      toast: () => {},
+      api: { post: async (url, body, h, m) => { sent.push({ url, body, m: m || 'POST' }); return {}; } },
+      loadThroughput: async () => state.throughput,
+      tpRepaint: () => {},
+    });
+    vm.runInContext(['tpReasonWord', 'tpMbps', 'tpNow', 'tpWhen', 'tpNote', 'tpBlocked', 'tpMine', 'tpButton', 'tpMediaList', 'tpPlanText']
+      .map((n) => functionSource(app, n)).join('\n') + '\nglobalThis.tp = { tpReasonWord, tpWhen, tpNote, tpButton, tpMediaList, tpPlanText };', context);
+    const tp = context.tp;
+    const hour = 3600000;
+    const now = new Date(2026, 10, 21, 10, 0, 0).getTime();
+    const set = (d) => { state.throughput = { now, fresh_hours: 24, tunnels: {}, measurable: ['a'], usage: { remaining_bytes: 1 }, ...d }; state.tpAt = Date.now(); };
+
+    check(/429\/403/.test(tp.tpReasonWord('rate_limited')), 'TP-8: a refusal is worded for 403 as well as 429', tp.tpReasonWord('rate_limited'));
+    check(/does not carry the test servers/.test(tp.tpReasonWord('restricted')) && /too short/.test(tp.tpReasonWord('too_short')),
+      'TP-3/TP-6: restricted and too-short have their own words');
+
+    set({});
+    check(tp.tpWhen(now - 2 * hour) === 'clock' + (now - 2 * hour), 'TP-8: a measurement of today shows its clock time');
+    check(tp.tpWhen(now - 23 * hour) === 'yesterday clock' + (now - 23 * hour), 'TP-8: a measurement from 23 hours ago is marked as yesterday\'s', tp.tpWhen(now - 23 * hour));
+    check(tp.tpWhen(now - 30 * hour) === '30 h ago', 'TP-8: past a day a measurement shows its age');
+
+    // The browser clock is a day ahead of the router's: the figure is fresh by the router's clock.
+    set({ tunnels: { a: { success_at: now - hour, success: { steady_mbps: 50, source: 'cloudflare' } } } });
+    state.tpAt = Date.now();
+    const realNow = Date.now;
+    let note = tp.tpNote('a');
+    check(note && !note.stale && /50\.0 Mbit\/s/.test(note.text), 'TP-8: staleness is counted against the router\'s clock', JSON.stringify(note));
+
+    set({ tunnels: { a: { reason: 'restricted', restricted: true } } });
+    note = tp.tpNote('a');
+    check(note && note.text === '↓ ?' && !note.failed, 'TP-3: a restricted exit without a figure is not marked as a failed tunnel', JSON.stringify(note));
+    set({ tunnels: { a: { reason: 'unreachable' } } });
+    note = tp.tpNote('a');
+    check(note && note.text === '↓ —' && note.failed, 'a tunnel no test server answered through keeps its failure mark');
+    set({ tunnels: { a: { restricted: true, success_at: now - hour, success: { steady_mbps: 70, source: 'google' } } } });
+    note = tp.tpNote('a');
+    check(note && !note.failed && /measured through google/.test(note.title), 'TP-3: a restricted exit\'s figure names the source it came from', note && note.title);
+    set({ tunnels: { a: { media_at: now - hour, media: { steady_mbps: 30, source: 'telegram' } } } });
+    note = tp.tpNote('a');
+    check(note && /30\.0 Mbit\/s \(Telegram\)/.test(note.text), 'TP-1: a media-only figure is labelled as Telegram\'s', note && note.text);
+    // Hunt H1-3: a list elected by the media samples shows those, not the test servers' figure beside them.
+    set({ tunnels: { a: { success_at: now - hour, success: { steady_mbps: 100, source: 'cloudflare' }, media_at: now - 2 * hour, media: { steady_mbps: 20, source: 'telegram' } },
+      b: { success_at: now - hour, success: { steady_mbps: 50, source: 'cloudflare' } } } });
+    note = tp.tpNote('a');
+    check(note && /^↓ 100 Mbit\/s · /.test(note.text), 'everywhere else a tunnel with both samples shows the test servers\' figure', note && note.text);
+    note = tp.tpNote('a', 'media');
+    check(note && /^↓ 20\.0 Mbit\/s \(Telegram\) · clock/.test(note.text) && note.text.endsWith(String(now - 2 * hour)),
+      'H1-3: asked for the media class, a tunnel with both samples shows the Telegram figure and its own time', note && note.text);
+    note = tp.tpNote('b', 'media');
+    check(note && /^↓ 50\.0 Mbit\/s · /.test(note.text), 'H1-3: a tunnel without a media sample keeps its test-server figure, not labelled as Telegram\'s', note && note.text);
+
+    set({ max_bytes: 25000000 });
+    let btn = tp.tpButton('tunnel', 'a', 'btn', 'A');
+    check(/up to 25 MB/.test(btn.title), 'TP-8: the button names the configured volume', btn.title);
+
+    // TP-7: the router's own account of what runs decides the button, in any tab; a press stops it.
+    set({ busy: true, active: { scope: 'group', id: 'g' }, running: 'a', tunnels: { a: { running: true, live_mbps: 12 } } });
+    btn = tp.tpButton('group', 'g', 'btn', 'G');
+    const other = tp.tpButton('tunnel', 'a', 'btn', 'A');
+    check(!btn.disabled && btn.title === 'Stop the measurement' && /12\.0 Mbit\/s/.test(btn.textContent), 'TP-7: the running request\'s button is the Stop control', JSON.stringify(btn));
+    check(other.disabled, 'TP-7: another button stays disabled while a measurement runs');
+    await btn.onclick();
+    check(sent.length === 1 && sent[0].m === 'DELETE' && sent[0].url === '/api/throughput/measure', 'TP-7: Stop sends DELETE /api/throughput/measure', JSON.stringify(sent));
+    set({});
+    btn = tp.tpButton('tunnel', 'a', 'btn', 'A');
+    await btn.onclick();
+    check(sent.length === 2 && sent[1].m === 'POST' && sent[1].body.scope === 'tunnel', 'an idle button still starts a measurement');
+    void realNow;
+
+    check(tp.tpMediaList('cidr-meta', 'Meta') && tp.tpMediaList('x', 'Telegram calls') && !tp.tpMediaList('metamask', 'MetaMask') && !tp.tpMediaList('x', 'Metal'),
+      'TP-10: the list editor recognises a media list by whole words, as the daemon does');
+    check(/Nothing chooses/.test(tp.tpPlanText({ plan: { tunnels: 0 } })) &&
+      /25000000B per tunnel every 36 h for 4 tunnels/.test(tp.tpPlanText({ plan: { tunnels: 4, run_bytes: 25000000, interval_hours: 36, monthly_bytes: 1, reserve_bytes: 2 } })),
+      'TP-4: Settings says what the schedule will spend');
+  } catch (e) { check(false, 'the throughput helpers could not be run', e.message); }
+
+  const routing = fs.readFileSync('web/dist/page-routing.js', 'utf8');
+  check(/t\("Automatic \(both\)"\) : t\("Automatic \(delay\)"\)/.test(routing), 'TP-10: the list editor shows what Automatic resolves to');
+  check(/d\.election_now === "delay"/.test(routing), 'TP-2: the fastest panel says which rule is in force');
+  check(/const tpClass = d\.election_now === "throughput" && d\.sample_class === "media" \? "media" : "";/.test(routing) && /tpSpan\(c\.id, tpClass\)/.test(routing),
+    'H1-3: the fastest panel\'s Speed column shows the sample class the list is elected by');
+  check(/probeBtn\.disabled = !d\.applied;/.test(routing), 'H1-7: Probe now is off for a list the router does not run');
+  check(/c\.no_link \? null : pinSel/.test(routing), 'H1-9: a tunnel without an interface of its own gets no pin control');
+  // Hunt H2-7: a DNS rule whose routing lists are all switched off is left out by Apply; the panel
+  // showed it as blocking or resolving, and offered a switched-off list with no mark.
+  try {
+    const src = dns.slice(dns.indexOf('function dnsRuleListsOff('), dns.indexOf('function openDNSRule('));
+    const listsOff = new Function('state', 'asList', src + '; return dnsRuleListsOff;');
+    const run = (lists, rule) => listsOff({ profile: { routing_lists: lists } }, v => Array.isArray(v) ? v : (v == null ? [] : [v]))(rule);
+    const on = { id: 'a', enabled: true }, off = { id: 'b', enabled: false };
+    check(run([on, off], { rule_sets: ['b'] }) === true, 'H2-7: a rule whose only list is switched off is marked');
+    check(run([on, off], { rule_sets: ['a', 'b'] }) === false, 'H2-7: a rule with one list still on is not marked');
+    check(run([on, off], { domain_suffix: ['example.com'] }) === false, 'H2-7: a rule that names no list is not marked');
+  } catch (e) { check(false, 'H2-7: dnsRuleListsOff could not be run', e.message); }
+  check(/if \(dnsRuleListsOff\(r\)\) \{\s*row\.classList\.add\("off"\);/.test(dns), 'H2-7: the rule row reads as off when its lists are');
+  check(/rl\.enabled === false \? el\("span", \{ class: "pill muted" \}, t\("off"\)\) : null\)\);/.test(dns), 'H2-7: the rule editor marks a switched-off list');
+  check(/c\.status === 200 \? t\("no usable sample"\) : t\("no answer"\)/.test(diag), 'TP-8: a 200 that gave no sample is not shown as "no answer"');
+  // TP-9: no dictionary leaves these in English (French "Tunnel" is the same word).
+  for (const lang of ['be', 'de', 'es', 'fa', 'fr', 'pt', 'ru', 'tr', 'uk', 'zh-CN']) {
+    const dict = JSON.parse(fs.readFileSync(`web/i18n/${lang}.json`, 'utf8'));
+    for (const key of ['Not measured yet.', 'no answer']) {
+      check(dict[key] && dict[key] !== key, `TP-9: "${key}" is translated in ${lang}`);
+    }
+    if (!['de', 'fr'].includes(lang)) check(dict.Tunnel !== 'Tunnel', `TP-9: "Tunnel" is translated in ${lang}`);
+  }
 }
 
 if (failures.length) {

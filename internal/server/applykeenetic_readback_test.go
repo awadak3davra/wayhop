@@ -8,8 +8,8 @@ import (
 )
 
 // measuredShapeRunningConfig is the compiled target of compiledKeeneticNativeTarget as KeeneticOS
-// would print it, written out by hand from the structure measured read-only on the test Keenetic
-// (2026-11-05; the values here are synthetic). Against the block the writer sent it has no
+// would print it, written out by hand from the structure measured read-only on a KeeneticOS
+// router (the values here are synthetic). Against the block the writer sent it has no
 // `wireguard private-key` and no `preshared-key` line, the peer's lines sit a level deeper with `!`
 // closing the group, and it carries `ip mtu`, which every measured interface printed and this block
 // never sent. %s is the peer's public key.

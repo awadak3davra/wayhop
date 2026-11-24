@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
 	"wayhop/internal/dnsaudit"
@@ -53,7 +54,7 @@ func (s *Server) handleNativeCapabilities(w http.ResponseWriter, r *http.Request
 	// asks for something this box will silently discard. That verdict is computed here, server-side,
 	// against the same facts the apply path uses.
 	// engine_plugin is the save check's own answer for a new AmneziaWG connection the router's own
-	// cannot create (QA-133): the connection form offers it on WayHop's engine and says why.
+	// cannot create: the connection form offers it on WayHop's engine and says why.
 	writeJSON(w, http.StatusOK, struct {
 		platform.Capabilities
 		CapabilitySet platform.CapabilitySet       `json:"capability_set"`
@@ -104,7 +105,7 @@ func dnsPathUnsupported(a dnsaudit.Asymmetry) platform.Unsupported {
 	// A list sent to a KeeneticOS access policy: WayHop cannot see whether the policy leaves by a
 	// tunnel or by the WAN, and a DNS server's detour cannot name a policy, so the usual remedy could
 	// not be followed. Reported as advice with steps that can be taken, never as an Apply blocker - it
-	// refused a list on a WAN policy for a leak that did not exist (QA-063).
+	// refused a list on a WAN policy for a leak that did not exist.
 	if _, policy := model.NDMPolicyName(a.TrafficVia); policy {
 		return platform.Unsupported{
 			Setting: "dns_path:" + a.RoutingListID, Value: a.TrafficVia, Severity: platform.SeverityDegraded,
@@ -112,6 +113,18 @@ func dnsPathUnsupported(a dnsaudit.Asymmetry) platform.Unsupported {
 				"sends the traffic, which WayHop cannot see",
 			Remedy: "If the policy leaves through a tunnel, use an encrypted DNS server (DoH or DoT), or send " +
 				"the list to a WayHop tunnel or group so its lookups can follow it.",
+		}
+	}
+	if a.Exposed && a.KillSwitch {
+		// A kill switch promises that this list never uses the provider: its lookups may not either,
+		// encrypted or not. Refused, with the one change that makes it hold.
+		return platform.Unsupported{
+			Setting: "dns_path:killswitch:" + a.RoutingListID, Value: a.TrafficVia, Severity: platform.SeverityPrivacy,
+			Reason: a.Detail + "; a kill switch covers this list, and its lookups would still leave by the provider",
+			Remedy: fmt.Sprintf("On the DNS page add a rule for the list %q that uses a server whose detour is %q, "+
+				"or a tunnel or group with no direct member (add such a server if there is none). Lookups then go through "+
+				"the tunnel and fail while it is down, instead of going out by the provider. Or switch the kill switch off.",
+				a.RoutingListID, a.TrafficVia),
 		}
 	}
 	severity, settingPrefix := platform.SeverityDegraded, "dns_path:"

@@ -7,8 +7,8 @@ import (
 
 // When the plan marks v6, RenderIPScript must emit a SYMMETRIC v6 datapath (ip -6 rule +
 // route + the v6 LAN-exclusion) so a marked v6 packet routes THROUGH the tunnel instead
-// of falling through to the main v6 table (a censorship leak on a v6-default-WAN device,
-// the bug-hunt's one high finding). A v4-only plan must emit no `ip -6` at all.
+// of falling through to the main v6 table (a censorship leak on a v6-default-WAN device).
+// A v4-only plan must emit no `ip -6` at all.
 func TestRenderIPScript_V6(t *testing.T) {
 	v6 := &Plan{Mask: 0x00ff0000,
 		Egresses: []Egress{{Kind: EgressInterface, Iface: "nwg1", Mark: 0x20000, Table: 151}},

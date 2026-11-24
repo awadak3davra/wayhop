@@ -7,24 +7,23 @@ import (
 	"wayhop/internal/model"
 )
 
-// TestInvalidProfileNamesTheObjectAndARealWayOut (L5): a blocking finding must name the object that
+// TestInvalidProfileNamesTheObjectAndARealWayOut: a blocking finding must name the object that
 // has to change and an action that exists.
 //
-// Measured on the demo profile. The review said:
+// A review that reads
 //
 //	The configuration is invalid
 //	rule "st-rule-6": outbound "st-grp-0" does not resolve
 //	How to fix: Correct or disable the affected object, then review again.
 //	Items: profile
 //
-// Two faults in four lines. "Items: profile" points at the whole configuration when exactly one
-// object is at fault — and there were TWO such rules, st-rule-6 and st-rule-12, both pointing at a
-// group that is not in the profile. And "correct or disable the affected object" names an action the
-// panel cannot perform: state.profile.rules is read in five places (dashboard verdict, tunnelled
-// count, failover chain, DNS detour guess) and rendered as an editable row in none, so neither rule
-// appears in the DOM on any page. The operator is told to fix something no page can touch.
+// has two faults in four lines. "Items: profile" points at the whole configuration when exactly one
+// object is at fault. And "correct or disable the affected object" names an action the panel cannot
+// perform: state.profile.rules is read in several places (dashboard verdict, tunnelled count,
+// failover chain, DNS detour guess) and rendered as an editable row in none, so a rule appears in
+// the DOM on no page. The operator would be told to fix something no page can touch.
 func TestInvalidProfileNamesTheObjectAndARealWayOut(t *testing.T) {
-	// A rule whose outbound is a group that does not exist — the measured shape.
+	// A rule whose outbound is a group that does not exist.
 	profile := model.Profile{
 		Endpoints: []model.Endpoint{{ID: "ep", Enabled: true, Engine: model.EngineExternal, Params: map[string]any{"interface": "nwg0"}}},
 		Rules:     []model.Rule{{ID: "st-rule-6", Outbound: "st-grp-0", Domain: []string{"example.com"}}},
@@ -56,15 +55,14 @@ func TestInvalidProfileNamesTheObjectAndARealWayOut(t *testing.T) {
 	if !strings.Contains(remedy, "st-grp-0") {
 		t.Errorf("the way out must name the missing target: %q", remedy)
 	}
-	// The assertions that actually pin the rule case. An earlier version of this test checked only
-	// "not the generic sentence" plus "names both ids" — which the ordinary unresolved-reference
-	// wording also satisfies, so a mutation that sent rules down the ordinary branch passed.
+	// The assertions that actually pin the rule case. "Not the generic sentence" plus "names both
+	// ids" is not enough: the ordinary unresolved-reference wording also satisfies it, so a mutation
+	// that sent rules down the ordinary branch would pass.
 	//
-	// The distinguishing fact is that a rule cannot be repointed from any page. This gate first
-	// required the remedy to name DELETE /api/rules/<id>, because prose was then the only way out.
-	// It no longer is: the finding carries the action structurally and the review renders a button,
-	// so the pin moved from the sentence to the STRUCTURE — a string can be reworded, an action
-	// cannot be faked. The remedy is still forbidden from proposing a screen that does not exist.
+	// The distinguishing fact is that a rule cannot be repointed from any page. The finding carries
+	// the delete action structurally and the review renders a button, so the pin is on the STRUCTURE,
+	// not the sentence: a string can be reworded, an action cannot be faked. The remedy is still
+	// forbidden from proposing a screen that does not exist.
 	if strings.Contains(remedy, "Point it at an exit") {
 		t.Errorf("that instruction is a panel action, and rules have no page: %q", remedy)
 	}
@@ -112,9 +110,8 @@ func TestInvalidProfileNamesTheObjectAndARealWayOut(t *testing.T) {
 	if r := invalidProfileRemedy(offErr); !strings.Contains(r, "switch it back on") {
 		t.Errorf("the disabled-reference class must keep its own way out: %q", r)
 	}
-	// And it names its object, like the other class. Measured once several problems were listed
-	// together: twelve entries named a routing list and the first read "profile", the whole
-	// configuration, only because that one was the switched-off class.
+	// And it names its object, like the other class: listed among entries that each name a routing
+	// list, a switched-off reference must not read "profile", the whole configuration.
 	if item := invalidProfileItem(offErr); !strings.Contains(item, "default") || item == "profile" {
 		t.Errorf("a switched-off reference must name the object holding it, got %q", item)
 	}

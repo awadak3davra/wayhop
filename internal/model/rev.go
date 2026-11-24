@@ -8,7 +8,7 @@ import (
 
 // EndpointRev, GroupRev and RoutingListRev are the revision of ONE stored connection, group or
 // routing list: a hash of its stored form. An edit made from a copy sends the revision the copy was
-// loaded at, and the save is refused when the stored object no longer has it (QA-152). It is per
+// loaded at, and the save is refused when the stored object no longer has it. It is per
 // object so that a write to anything else - another connection, a new device group, a reorder, a
 // subscription adding exits - never makes an open form stale.
 //

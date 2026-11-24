@@ -66,7 +66,7 @@ type executionNativeCaptureV1 struct {
 	// carried, for ownershipBaseline. Unexported, so never recorded with the artifact.
 	ndmPresent map[string]bool
 	// ndmPublicKeys is the matching `show interface` view. A committed block whose derived public key
-	// differs now belongs to somebody else's replacement tunnel, not to the rollback union (QA-146).
+	// differs now belongs to somebody else's replacement tunnel, not to the rollback union.
 	ndmPublicKeys map[string]string
 }
 
@@ -172,7 +172,7 @@ func nativePluginDevicesFrom(previous *nativeplan.Plan) map[string]string {
 
 // genericPluginDevices lists the AmneziaWG devices WayHop's own engine ran under a previous
 // materialization that carried no native plan - the generic path, where an OpenWrt router lands when
-// its native plan could not be compiled (QA-043: one ByeDPI connection did that). The router's own
+// its native plan could not be compiled (one ByeDPI connection can do that). The router's own
 // AmneziaWG creates the same device name, so taking such an endpoint native is the move the planner
 // refuses within one Apply (nativeplan.MoveError); with no native previous it went unseen, and the
 // new interface came up while the old plugin still held the link. The planner cannot be told: it

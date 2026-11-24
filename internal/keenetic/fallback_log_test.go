@@ -8,7 +8,7 @@ import (
 )
 
 // With no log block sing-box logs at trace and names every connection's destination; the fallback
-// core logs warnings only, like the generated one (QA-051).
+// core logs warnings only, like the generated one.
 func TestSingboxFallbackLogsWarningsOnly(t *testing.T) {
 	vless := &model.Endpoint{ID: "vless-nl", Engine: model.EngineSingBox, Protocol: model.ProtoVLESS, Server: "192.0.2.1", Port: 443, Enabled: true, Params: map[string]any{"uuid": "u"}}
 	plan, err := SingboxFallback([]*model.Endpoint{vless}, FallbackOptions{})

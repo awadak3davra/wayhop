@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"os"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -32,7 +34,7 @@ type exactKeeneticKernelRunner struct {
 
 // identityFor returns the authenticated identity a tool name must run as. An unknown name has no
 // identity and therefore cannot be executed at all, which is what keeps the set of runnable binaries
-// closed to the four the artifact declares.
+// closed to the tools the artifact declares.
 func (runner exactKeeneticKernelRunner) identityFor(name string) (ExecutionToolIdentityV1, bool) {
 	switch name {
 	case executionToolIpset:
@@ -45,12 +47,25 @@ func (runner exactKeeneticKernelRunner) identityFor(name string) (ExecutionToolI
 		return runner.tools.ShellTool, true
 	case executionToolDnsmasq:
 		return runner.tools.DnsmasqTool, true
+	case executionToolIP:
+		return runner.tools.IPTool, true
 	}
 	return ExecutionToolIdentityV1{}, false
 }
 
 func (runner exactKeeneticKernelRunner) Run(
 	ctx context.Context,
+	stdin string,
+	name string,
+	args ...string,
+) (string, error) {
+	return runner.runLimit(ctx, exactKeeneticKernelOutputLimit, stdin, name, args...)
+}
+
+// runLimit is Run with its own output bound, for a read that is large by nature (a set's members).
+func (runner exactKeeneticKernelRunner) runLimit(
+	ctx context.Context,
+	limit int,
 	stdin string,
 	name string,
 	args ...string,
@@ -66,7 +81,7 @@ func (runner exactKeeneticKernelRunner) Run(
 	}
 	runCtx, cancel := context.WithTimeout(ctx, exactKeeneticKernelCommandTimeout)
 	defer cancel()
-	output := newApplyHostCommandOutput(exactKeeneticKernelOutputLimit, cancel)
+	output := newApplyHostCommandOutput(limit, cancel)
 	cmd := exec.CommandContext(runCtx, identity.ResolvedPath, args...)
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
@@ -169,11 +184,10 @@ func (adapter *exactKeeneticKernelAdapter) teardownSparing(
 // are likewise cheap enough for every supervision tick. A program that redirects DNS or refuses
 // encrypted DNS also needs those rules in nat PREROUTING and filter FORWARD, read the same way.
 //
-// Existence alone was the whole check, and it is only half the plane: a set nothing marks against
-// routes nothing. Measured on a live router by deleting one MARK rule — the TeamViewer list
-// stopped being policy-routed, `/api/pbr/status` still said verified:true and the panel still said
-// "The router is verified to be running this configuration". The rule came back within ~30s, but
-// from the NDM firewall hook re-asserting the plane, not from this supervision noticing anything.
+// Existence alone is only half the plane: a set nothing marks against routes nothing. With one MARK
+// rule deleted, its list stops being policy-routed, and an existence-only check would still report
+// verified:true and the panel "The router is verified to be running this configuration". The NDM
+// firewall hook re-asserts the plane within ~30s, but that is not this supervision noticing anything.
 func (adapter *exactKeeneticKernelAdapter) postcheck(
 	ctx context.Context,
 	artifact executionKernelIpsetArtifactV1,
@@ -220,21 +234,109 @@ func keeneticPlanePostcheck(ctx context.Context, artifact executionKernelIpsetAr
 	}
 	// The DNS redirect and the encrypted-DNS refusals sit in chains NDM rebuilds, and the mangle
 	// dump above says nothing about them: a filter rebuild could drop every refusal while this
-	// reported the plane present (QA-115). Their chains are read only when the program installs them.
+	// reported the plane present. Their chains are read only when the program installs them.
 	dumps := map[keeneticChainRef]string{}
 	for _, rule := range keeneticDNSRules(artifact.Script) {
 		dump, read := dumps[rule.keeneticChainRef]
 		if !read {
-			dump, err = run(ctx, "", executionToolIptables, "-w", "-t", rule.table, "-S", rule.chain)
+			tool := executionToolIptables
+			if rule.tool == "ip6tables" {
+				tool = executionToolIp6tables
+			}
+			dump, err = run(ctx, "", tool, "-w", "-t", rule.table, "-S", rule.chain)
+			if err != nil && tool == executionToolIp6tables {
+				// As for the v6 mangle sets: a router without ip6tables is a shape, not drift.
+				dumps[rule.keeneticChainRef] = keeneticDumpUnread
+				continue
+			}
 			if err != nil {
 				return fmt.Errorf("%w: iptables -t %s -S %s: %v", errExactProductionKernelApply, rule.table, rule.chain, err)
 			}
 			dumps[rule.keeneticChainRef] = dump
 		}
+		if dump == keeneticDumpUnread || rule.suspendable && keeneticDNSSuspended() {
+			continue
+		}
 		if !iptablesDumpHasRule(dump, rule.chain, rule.spec) {
 			return fmt.Errorf("%w: %s %s rule %q is missing",
 				errExactProductionKernelApply, rule.table, rule.chain, rule.spec)
 		}
+	}
+	if err := keeneticHandoffPostcheck(ctx, artifact, v4Rules, run); err != nil {
+		return err
+	}
+	return keeneticIPRulesPostcheck(ctx, artifact, run)
+}
+
+// keeneticOutputJumpRE matches the program's check-then-add of a mangle OUTPUT jump.
+var keeneticOutputJumpRE = regexp.MustCompile(`(?m)^iptables -t mangle -C OUTPUT (.+ -j (\S+)) 2>/dev/null \|\| iptables -t mangle -A OUTPUT (.+)$`)
+
+// keeneticHandoffPostcheck reads back what the hand-off's return traffic depends on, when the program
+// installs it: the OUTPUT jump (the kernel refused it with an xt_mac rule reachable from
+// OUTPUT, and `sh -s` went on), a non-empty return chain, and the return table's loopback route,
+// without which the return traffic would be held only by the blackhole rule behind it.
+func keeneticHandoffPostcheck(ctx context.Context, artifact executionKernelIpsetArtifactV1, v4Rules string, run keeneticToolRun) error {
+	script := string(artifact.Script)
+	for _, m := range keeneticOutputJumpRE.FindAllStringSubmatch(script, -1) {
+		if m[1] != m[3] || strings.HasSuffix(m[2], pbr.MangleStageSuffix) {
+			continue
+		}
+		if !iptablesDumpHasRule(v4Rules, "OUTPUT", m[1]) {
+			return fmt.Errorf("%w: mangle OUTPUT rule %q is missing", errExactProductionKernelApply, m[1])
+		}
+		if !strings.Contains(v4Rules, "\n-A "+m[2]+" ") && !strings.HasPrefix(v4Rules, "-A "+m[2]+" ") {
+			return fmt.Errorf("%w: mangle chain %s is empty", errExactProductionKernelApply, m[2])
+		}
+	}
+	table := pbr.HandoffReturnTable(pbr.Options{})
+	if strings.Contains(script, fmt.Sprintf("\nip route replace default dev lo table %d\n", table)) {
+		out, err := run(ctx, "", executionToolIP, "route", "show", "table", fmt.Sprint(table))
+		if err != nil {
+			return fmt.Errorf("%w: ip route show table %d: %v", errExactProductionKernelApply, table, err)
+		}
+		if !strings.Contains(" "+strings.Join(strings.Fields(out), " ")+" ", " default dev lo ") {
+			return fmt.Errorf("%w: the hand-off return table %d has no loopback route", errExactProductionKernelApply, table)
+		}
+	}
+	return nil
+}
+
+// keeneticIPRulesPostcheck reads the policy rules back. The program runs under `sh -s`, which
+// reports only its last command, so an `ip rule add` the kernel refused passed the Apply while the
+// marked traffic fell through to the main table and left by the WAN.
+func keeneticIPRulesPostcheck(ctx context.Context, artifact executionKernelIpsetArtifactV1, run keeneticToolRun) error {
+	script := string(artifact.Script)
+	if !strings.Contains(script, "\nip rule add ") && !strings.Contains(script, "\nip -6 rule add ") {
+		return nil
+	}
+	v4, err := run(ctx, "", executionToolIP, "rule")
+	if err != nil {
+		return fmt.Errorf("%w: ip rule: %v", errExactProductionKernelApply, err)
+	}
+	var v6 string
+	v6Known := false
+	if strings.Contains(script, "\nip -6 rule add ") {
+		// A kernel without IPv6 policy routing answers with an error: that is a router shape, not drift.
+		out, v6Err := run(ctx, "", executionToolIP, "-6", "rule")
+		v6, v6Known = out, v6Err == nil
+	}
+	if missing := pbr.MissingIPRules(script, v4, v6, v6Known); len(missing) > 0 {
+		return fmt.Errorf("%w: policy rule %q is missing", errExactProductionKernelApply, missing[0])
+	}
+	return nil
+}
+
+// pruneRestore deletes the set entries the previous plane added and this one no longer does. The
+// restore stream only adds, so without it a CIDR removed from a list would stay in its set and keep
+// being routed into the tunnel. Run after the target's own restore, so an entry both keep is never
+// absent, not even for a moment.
+func (adapter *exactKeeneticKernelAdapter) pruneRestore(ctx context.Context, previous, target []byte) error {
+	removals := pbr.IpsetRestoreRemovals(string(previous), string(target))
+	if removals == "" {
+		return nil
+	}
+	if _, err := adapter.runner.Run(ctx, removals, executionToolIpset, "restore", "-!"); err != nil {
+		return fmt.Errorf("%w: ipset restore (removals): %v", errExactProductionKernelApply, err)
 	}
 	return nil
 }
@@ -242,8 +344,8 @@ func keeneticPlanePostcheck(ctx context.Context, artifact executionKernelIpsetAr
 // keeneticTeardownProgram is what the teardown runs: the artifact's own Teardown, then a delete for
 // every rule its Script adds to a chain NDM owns that the Teardown does not delete itself.
 //
-// For an artifact rendered since QA-114 that adds nothing, because its Teardown deletes the DNS
-// redirect and the encrypted-DNS refusals. An artifact recorded before then has a Teardown without
+// For a current artifact that adds nothing, because its Teardown deletes the DNS
+// redirect and the encrypted-DNS refusals. An artifact recorded by an older build has a Teardown without
 // those deletes, and a router upgraded with interception on tears exactly that one down when
 // interception is next turned off, the mode leaves the kernel plane or routing is switched off. The
 // deletes are taken from the authenticated Script's own check-then-add lines, so they name only rules
@@ -252,7 +354,7 @@ func keeneticTeardownProgram(artifact executionKernelIpsetArtifactV1) string {
 	program := string(artifact.Teardown)
 	var missing strings.Builder
 	for _, rule := range keeneticDNSRules(artifact.Script) {
-		del := pbr.IptablesDeleteEveryCopy(rule.table, rule.chain, rule.spec)
+		del := pbr.DeleteEveryCopy(rule.tool, rule.table, rule.chain, rule.spec)
 		if !strings.Contains(program, del) && !strings.Contains(missing.String(), del) {
 			missing.WriteString(del)
 		}
@@ -260,7 +362,7 @@ func keeneticTeardownProgram(artifact executionKernelIpsetArtifactV1) string {
 	if missing.Len() == 0 {
 		return program
 	}
-	return program + "# Recorded before the teardown removed the DNS redirect and refusals (QA-114).\n" + missing.String()
+	return program + "# Recorded before the teardown removed the DNS redirect and refusals.\n" + missing.String()
 }
 
 // keeneticTeardownProgramSparing is keeneticTeardownProgram without the deletes of the DNS rules the
@@ -268,41 +370,64 @@ func keeneticTeardownProgram(artifact executionKernelIpsetArtifactV1) string {
 func keeneticTeardownProgramSparing(artifact executionKernelIpsetArtifactV1, spare []byte) string {
 	program := keeneticTeardownProgram(artifact)
 	for _, rule := range keeneticDNSRules(spare) {
-		program = strings.ReplaceAll(program, pbr.IptablesDeleteEveryCopy(rule.table, rule.chain, rule.spec), "")
+		program = strings.ReplaceAll(program, pbr.DeleteEveryCopy(rule.tool, rule.table, rule.chain, rule.spec), "")
 	}
 	return program
 }
 
-// keeneticChainRef names one built-in chain of one iptables table.
-type keeneticChainRef struct{ table, chain string }
+// keeneticDNSSuspended reports fast mode's DNS enforcement suspended (pbr.FastDNSOpenFlag present):
+// the postcheck then does not ask for its rules. A variable for tests.
+var keeneticDNSSuspended = func() bool {
+	_, err := os.Stat(pbr.FastDNSOpenFlag)
+	return err == nil
+}
+
+// keeneticDumpUnread marks a chain dump the postcheck could not read and does not judge.
+const keeneticDumpUnread = "\x00unread"
+
+// keeneticChainRef names one built-in chain of one table of one family's tool (iptables, ip6tables).
+type keeneticChainRef struct{ tool, table, chain string }
 
 // keeneticDNSRule is one rule the program adds to a chain NDM rebuilds.
 type keeneticDNSRule struct {
 	keeneticChainRef
 	spec string
+	// line is the program's check-then-add line; suspendable says it is fast mode's enforcement, which
+	// pbr.FastDNSOpenFlag suspends.
+	line        string
+	suspendable bool
 }
 
 // keeneticGuardedRuleRE matches the program's check-then-add lines, whose two halves must agree.
 var keeneticGuardedRuleRE = regexp.MustCompile(
-	`^iptables(?: -t (\S+))? -C (\S+) (.+) 2>/dev/null \|\| iptables(?: -t (\S+))? -[AI] (\S+) (.+)$`)
+	`^(ip6?tables)(?: -t (\S+))? -C (\S+) (.+) 2>/dev/null \|\| (ip6?tables)(?: -t (\S+))? -[AI] (\S+) (.+)$`)
 
 // keeneticDNSRules lists the rules the program adds to nat PREROUTING and filter FORWARD: the DNS
 // redirect and the encrypted-DNS refusals. They are read from the authenticated program itself, so
 // the check follows what was installed, including which of the two switches were on.
 func keeneticDNSRules(script []byte) []keeneticDNSRule {
 	var out []keeneticDNSRule
+	open := false
 	for _, line := range strings.Split(string(script), "\n") {
-		m := keeneticGuardedRuleRE.FindStringSubmatch(line)
-		if m == nil || m[1] != m[4] || m[2] != m[5] || m[3] != m[6] {
+		switch line {
+		case "if [ ! -e " + pbr.FastDNSOpenFlag + " ]; then":
+			open = true
+			continue
+		case "fi":
+			open = false
 			continue
 		}
-		table := m[1]
+		m := keeneticGuardedRuleRE.FindStringSubmatch(line)
+		if m == nil || m[1] != m[5] || m[2] != m[6] || m[3] != m[7] || m[4] != m[8] {
+			continue
+		}
+		table := m[2]
 		if table == "" {
 			table = "filter"
 		}
-		ref := keeneticChainRef{table: table, chain: m[2]}
-		if ref == (keeneticChainRef{"nat", "PREROUTING"}) || ref == (keeneticChainRef{"filter", "FORWARD"}) {
-			out = append(out, keeneticDNSRule{keeneticChainRef: ref, spec: m[3]})
+		ref := keeneticChainRef{tool: m[1], table: table, chain: m[3]}
+		if ref.tool == "iptables" && ref.table == "nat" && ref.chain == "PREROUTING" || ref.table == "filter" && ref.chain == "FORWARD" {
+			out = append(out, keeneticDNSRule{keeneticChainRef: ref, spec: m[4], line: line, suspendable: open})
 		}
 	}
 	return out
@@ -360,7 +485,7 @@ func iptablesRuleKey(fields []string) string {
 //
 // A set without its MARK rule routes NOTHING while looking perfectly healthy: `ipset list -n` shows
 // it, the members are all there, and the traffic that was supposed to take the tunnel goes out the
-// provider instead. Demonstrated on a live Keenetic by deleting one rule — the list stopped
+// provider instead. Demonstrated on KeeneticOS by deleting one rule — the list stopped
 // being marked, and every WayHop verdict still read "verified to be running this configuration",
 // because the only thing verified was that the sets existed.
 //
@@ -385,4 +510,40 @@ func unreferencedSets(setNames []string, v4Rules, v6Rules string, v6Known bool) 
 		}
 	}
 	return out
+}
+
+// runProgram runs a short program under the artifact's own preamble, so its bare tool names reach the
+// authenticated binaries.
+func (adapter *exactKeeneticKernelAdapter) runProgram(ctx context.Context, artifact executionKernelIpsetArtifactV1, body string) error {
+	preamble, err := keeneticPBRPreamble(artifact)
+	if err != nil {
+		return err
+	}
+	if _, err := adapter.runner.Run(ctx, preamble+body, executionToolShell, "-s"); err != nil {
+		return fmt.Errorf("%w: %v", errExactProductionKernelApply, err)
+	}
+	return nil
+}
+
+// retireKeeneticPlane removes what only the previous plane had, after the next one is installed: its
+// teardown with every line spared that would undo the next program (pbr.RetireProgram), the DNS rules
+// the next program keeps spared as before. A dnsmasq config the next plane no longer writes goes too.
+func (s *Server) retireKeeneticPlane(ctx context.Context, previous, next executionKernelIpsetArtifactV1) error {
+	adapter, err := newExactKeeneticKernelAdapter(previous)
+	if err != nil {
+		return fmt.Errorf("%w: adapter: %v", errExactProductionKernelApply, err)
+	}
+	program := pbr.RetireProgram(keeneticTeardownProgramSparing(previous, next.Script), string(next.Script), next.SetNames)
+	if _, err := adapter.runner.Run(ctx, program, executionToolShell, "-s"); err != nil {
+		return fmt.Errorf("%w: retire script: %v", errExactProductionKernelApply, err)
+	}
+	if len(previous.DnsmasqConf) != 0 && len(next.DnsmasqConf) == 0 {
+		if err := os.Remove(keeneticPBRDnsmasqConfPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("%w: dnsmasq config: %v", errExactProductionKernelApply, err)
+		}
+		if err := reloadKeeneticDnsmasq(ctx, adapter.runner); err != nil {
+			log.Printf("apply: the resolver keeps the previous domain directives until it restarts: %v", err)
+		}
+	}
+	return nil
 }

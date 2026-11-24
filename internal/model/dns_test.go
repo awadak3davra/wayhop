@@ -116,7 +116,7 @@ func TestValidateDNS_Errors(t *testing.T) {
 	}
 }
 
-// TestValidateDNS_RejectsReferenceToDisabledServer is the LOOP-029 guard. The generator DROPS a
+// TestValidateDNS_RejectsReferenceToDisabledServer guards against silently dropped references. The generator DROPS a
 // disabled server and, silently, any `final` or enabled rule that named it — so an enabled reference
 // to a disabled resolver has to be refused at save, not discovered as broken resolution. A disabled
 // rule, or an unreferenced disabled server, stays fine.

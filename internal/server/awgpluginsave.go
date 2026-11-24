@@ -8,8 +8,8 @@ import (
 	"wayhop/internal/plugin"
 )
 
-// awgpluginsave.go is the save check's half of WayHop's AmneziaWG engine (QA-133). Where the router's
-// own AmneziaWG cannot create a connection - KeeneticOS before 4.2 has no `wireguard asc` (QA-127) -
+// awgpluginsave.go is the save check's half of WayHop's AmneziaWG engine. Where the router's
+// own AmneziaWG cannot create a connection - KeeneticOS before 4.2 has no `wireguard asc` -
 // the planner runs it on the engine plugin, and a save asking only for the native operations refused
 // a connection the next Apply would have run. Each answer here is one the rest of the daemon acts on:
 // the lane is nativeplan's (what Compile decides), and the engine's path is plugin.AWGDecision (what the

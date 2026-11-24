@@ -12,7 +12,7 @@ import (
 	"wayhop/internal/platform"
 )
 
-// QA-136: the Apply review names the Xray masks a link carries that only the client's sending side
+// The Apply review names the Xray masks a link carries that only the client's sending side
 // applies, which sing-box leaves out (a note: the connection works without them). A mask the server
 // undoes, or fm that is no finalmask, which an import refuses, is named as failing the connection when
 // it arrives another way. A finalmask that asks nothing of a client, and no finalmask, say nothing.

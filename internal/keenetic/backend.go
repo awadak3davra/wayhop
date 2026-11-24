@@ -26,7 +26,7 @@ type Plan struct {
 	Singbox    map[string]any    // sing-box config for the non-native endpoints (nil if none) → /opt/etc/sing-box
 
 	// KeptInterfaces names the Interfaces blocks this plan keeps from the authenticated previous plan
-	// (CompileOptions.OwnedBlocks, QA-108): interfaces an earlier Apply created and this one leaves in
+	// (CompileOptions.OwnedBlocks): interfaces an earlier Apply created and this one leaves in
 	// place. They were live before this Apply began, so the exact adapter never re-sends one and a
 	// failed Apply's cleanup never removes one: that would delete a working tunnel, with whatever the
 	// operator attached to it in KeeneticOS, to undo an Apply that did not create it.
@@ -132,7 +132,7 @@ type CompileOptions struct {
 	//
 	// The running config lists WayHop's own interfaces too, so OccupiedInterfaces holds them, and
 	// allocating past every occupied slot moved each unchanged native tunnel to the next free
-	// WireguardN on every Apply while the reconcile removed the live one (QA-108): a re-handshake,
+	// WireguardN on every Apply while the reconcile removed the live one: a re-handshake,
 	// dropped flows, and whatever the operator had attached to the interface in KeeneticOS went with
 	// the `no interface`. An endpoint whose block renders identically at its old slot now keeps that
 	// slot: the interface is already live, prepare finds it in place, and nothing removes it
@@ -425,7 +425,7 @@ func Compile(p *model.Profile, opt CompileOptions) (*Plan, error) {
 			plan.IfaceFor[e.ID] = iface
 			// ServerAddress, not Server: a Server left beside a Hysteria2 realm is not where the
 			// connection goes, and an ISP route to it sent LAN traffic for that address out of the
-			// tunnel a list chose (QA-060; the generator's own bypass already read it this way).
+			// tunnel a list chose (the generator's own bypass already read it this way).
 			if ip, err := netip.ParseAddr(e.ServerAddress()); err == nil {
 				bypass = append(bypass, ip.String())
 			}
@@ -439,17 +439,17 @@ func Compile(p *model.Profile, opt CompileOptions) (*Plan, error) {
 	// Compile pins it to one member here. This is the whole reason a native group needs no proxy core
 	// — the core's contribution was picking the member, which is a decision, not a datapath.
 	//
-	// WHO picks, today: nobody. GroupElection is the seam for a health-driven choice and NOTHING in
-	// the daemon writes it (checked across the tree), so every group takes the branch below — the
-	// first enabled, routable member in the operator's own order. That is fallback semantics for
-	// every group type, including urltest, and it is what the panel now says on a native group
-	// instead of promising a latency contest nobody runs.
+	// WHO picks: not Compile. The pin below is only the table's starting value — the first enabled,
+	// routable member in the operator's order (GroupElection is still written by nobody). At runtime
+	// the daemon's kernel elector (internal/server/kernelelect.go over failover.TableElector) measures
+	// every member through its own link against the group's target and re-points the group's routing
+	// table with `ip route replace default dev <member> table <N>` by the group's policy — urltest the
+	// fastest working member, fallback the first working one, selector the pick while it works. It does
+	// so without recompiling: this plan is authenticated between review and execution, and it fixes the
+	// group's TABLE and member SET, not the member, so a re-point changes nothing it signed.
 	//
-	// The earlier wording here said the daemon "supplies the choice through GroupElection and
-	// recompiles when health moves it", which described an intention as a behaviour. Wiring it is not
-	// free either: this plan is authenticated between review and execution, so an election that moves
-	// with health would change the plan under its own signature — which is why it is a seam and not
-	// yet a feature.
+	// Not covered by that elector: a group carrying the DEFAULT route sits on NDM's `ip global` ladder
+	// below (defaultRouteLadder), where KeeneticOS's own connection failover walks it in ladder order.
 	plan.GroupMember = map[string]string{}
 	groupIface := map[string]string{}
 	for gi := range p.Groups {
@@ -509,7 +509,7 @@ func Compile(p *model.Profile, opt CompileOptions) (*Plan, error) {
 		}
 		// Device scope has NO native static-route equivalent (a static route can't match by source
 		// device), so a scoped list applied here would route/block ALL clients, not just its device
-		// group — a correctness/privacy regression. Refuse rather than widening it to all clients.
+		// group, a correctness and privacy fault. Refuse rather than widening it to all clients.
 		if m := rl.ScopeMode; m == "only" || m == "except" {
 			return nil, fmt.Errorf("list %q: device scope %q cannot be represented natively without widening it to all clients", rl.ID, m)
 		}
@@ -604,8 +604,8 @@ func compatibilityReasons(p *model.Profile, planes RoutePlanes) []string {
 		}
 		reasons = append(reasons, fmt.Sprintf("rule %q is not a plain default to a natively routable exit", r.ID))
 	}
-	// A group used to pull in the core unconditionally, on the reading that "the fastest of five" is
-	// not a static route. Only the CHOICE is not static: at any instant the group is one member, and
+	// A group does not pull in the core by itself. "The fastest of five" is not a static route only
+	// in its CHOICE: at any instant the group is one member, and
 	// failing over is re-pointing its routes — which is Compile plus the daemon's election, not a
 	// proxy core. So only a group this backend cannot resolve on its own still needs one.
 	for gi := range p.Groups {
@@ -656,8 +656,8 @@ func compatibilityReasons(p *model.Profile, planes RoutePlanes) []string {
 				// A name. The kernel plane carries it through the resolver when one is wired;
 				// otherwise it is unroutable here and the core has to take the whole policy.
 				if !domainsViaDNSMasq {
-					// One sentence per list, not per name: the walk used to return here, and a list of
-					// forty typed names would otherwise repeat the same reason forty times.
+					// One sentence per list, not per name: a list of forty typed names would
+					// otherwise repeat the same reason forty times.
 					reasons = append(reasons, fmt.Sprintf("routing list %q carries a domain name and no resolver plane is wired", list.ID))
 					break
 				}
@@ -791,9 +791,9 @@ func defaultRouteLadder(p *model.Profile, plan *Plan, opt CompileOptions, groupI
 
 // dnsPlaneNeedsCore reports whether the DNS block asks for something only the proxy core can do.
 //
-// Having a DNS block used to be the whole test, which made "manage DNS" mean "install sing-box" even
-// when every resolver in it goes out DIRECT and there are no rules — a configuration this router
-// carries with its own dnsmasq and DoH. Two things genuinely need the core: a resolver whose queries
+// Having a DNS block is not enough: "manage DNS" must not mean "install sing-box" when every
+// resolver in it goes out DIRECT and there are no rules, a configuration this router carries with
+// its own dnsmasq and DoH. Two things genuinely need the core: a resolver whose queries
 // must leave through a TUNNEL (the kernel plane routes packets by destination, and a resolver's
 // detour is a statement about which exit its own traffic takes), and FakeIP, which is synthetic
 // addressing that only the core can hand out and then match on.
@@ -801,11 +801,10 @@ func dnsPlaneNeedsCore(p *model.Profile) bool {
 	return len(dnsPlaneCoreReasons(p)) > 0
 }
 
-// dnsPlaneCoreReasons names WHICH part of the DNS block asks for the core. The decision used to be a
-// bare yes, so the panel could only recite the four things that might have caused it - and on the
-// operator's router, where the DNS plane is the single reason sing-box runs at all, "an encrypted
-// resolver, a fakeip plane, a detour, or a per-name rule" is a list to work through rather than an
-// answer. Same walk as the decision, so the two cannot disagree.
+// dnsPlaneCoreReasons names WHICH part of the DNS block asks for the core. A bare yes would leave the
+// panel reciting the four things that might have caused it; where the DNS plane is the single reason
+// sing-box runs at all, "an encrypted resolver, a fakeip plane, a detour, or a per-name rule" is a
+// list to work through rather than an answer. Same walk as the decision, so the two cannot disagree.
 func dnsPlaneCoreReasons(p *model.Profile) []string {
 	if p.DNS == nil || !p.DNS.Enabled {
 		return nil
@@ -820,10 +819,9 @@ func dnsPlaneCoreReasons(p *model.Profile) []string {
 			continue
 		}
 		// An ENCRYPTED resolver needs the core whatever its detour: dnsmasq speaks plain UDP/TCP and
-		// nothing else, so DoH/DoT/DoQ exists on this router only if sing-box is running. Leaving this
-		// out is what made the plan read "native only" on a box whose profile asked for DoH — measured
-		// on a live router: two DoH resolvers configured, the core installed and idle, and
-		// dnsmasq answering in plaintext while the panel said the lookups were encrypted.
+		// nothing else, so DoH/DoT/DoQ exists on this router only if sing-box is running. Without
+		// this check a profile asking for DoH would read "native only", the core would sit idle and
+		// dnsmasq would answer in plaintext while the panel said the lookups were encrypted.
 		tag := s.Tag
 		if tag == "" {
 			tag = s.Type
@@ -945,15 +943,14 @@ func (p *Plan) GlobalPriorityBlocks() [][]string { return priorityBlocks(p.Globa
 func (p *Plan) GlobalPriorityRestoreBlocks() [][]string { return priorityBlocks(p.GlobalPriorityWas) }
 
 // StaleGlobalPriorityBlocks restores the interfaces the PREVIOUS plan raised and this one no longer
-// does. It is the ladder's half of reconciliation, and it was missing.
+// does. It is the ladder's half of reconciliation.
 //
 // The ladder is not a resource with a `no` command: raising an interface overwrites a number the
 // ROUTER owns, so nothing in TeardownCommands can undo it, and the rollback path only runs when an
-// apply fails. A successful apply that stopped pointing the default rule at a tunnel therefore left
-// the tunnel sitting on top of the ladder. Measured on a live Keenetic: the default rule was
-// switched to `direct`, the apply reported success, and every client kept egressing through Exit C
-// until the five priorities were restored by hand — the panel said one thing and the router did
-// another, which is the failure this whole apply path exists to prevent.
+// apply fails. Without this, a successful apply that stops pointing the default rule at a tunnel
+// would leave the tunnel on top of the ladder: the default rule switched to `direct`, the apply
+// reporting success, and every client still egressing through the tunnel. The panel would say one
+// thing and the router do another, which is the failure this whole apply path exists to prevent.
 //
 // An interface the target raises again is NOT restored: the target's own ladder block overwrites it
 // in the same batch, and restoring it first would be a pointless write and a moment of ambiguity
@@ -971,7 +968,7 @@ func StaleGlobalPriorityBlocks(previous, target *Plan) [][]string {
 		}
 		// An interface the previous plan created itself. Its recorded Was is not a number the router
 		// chose: it is nothing at all (the interface did not exist when that ladder was compiled) or,
-		// once a slot is kept across Applies (QA-108), what an earlier Apply's ladder had raised it to,
+		// once a slot is kept across Applies, what an earlier Apply's ladder had raised it to,
 		// and restoring that leaves the tunnel on top of the ladder holding the default route. A kept
 		// interface goes back to the `ip global` its own block sets. One the target does not keep is
 		// removed by the same reconcile, and a restore read back from an interface that is gone could
@@ -1030,10 +1027,10 @@ func priorityBlocks(ladder map[string]int) [][]string {
 // PlanRequiresCore reports whether Compile would populate Plan.Singbox for this profile — that is,
 // whether a Keenetic native apply materializes a sing-box core at all. It exists so the Apply review
 // can ask the same question the executor answers instead of a differently-shaped one: the executor
-// sets coreAction=ensure_absent exactly when Plan.Singbox is nil, while the review used to demand
-// the core capability whenever generator.DatapathNativeOnly was false. That predicate hard-requires
-// routing mode "fast", which is SeverityBlocked on a router without nftables, so on KeeneticOS it
-// could never be true and every Apply was blocked for want of a core the executor would never start.
+// sets coreAction=ensure_absent exactly when Plan.Singbox is nil. generator.DatapathNativeOnly is
+// the wrong question here: it hard-requires routing mode "fast", which is SeverityBlocked on a
+// router without nftables, so on KeeneticOS it is never true and would block every Apply for want
+// of a core the executor never starts.
 //
 // It deliberately lives beside needsCompatibilityRouting and nativeIface: the two branches below
 // mirror Compile's own classification, and keeping them in one file is what stops them drifting.
@@ -1044,11 +1041,11 @@ func PlanRequiresCore(p *model.Profile, planes RoutePlanes) bool {
 // CoreReasons is PlanRequiresCore with its answer in words: every condition in this profile that
 // pulls sing-box in, or nothing when the datapath is native end to end.
 //
-// The panel could say THAT the core is part of the datapath and never which part of the profile put
-// it there, which leaves "run this router without sing-box" as a goal nobody can act on. Measured on
-// a live Keenetic: five IP lists, two domain lists, a five-member native group and a plain
-// default rule are all carried natively, and the single thing keeping sing-box alive is the DNS
-// plane. That sentence is the whole difference between a fact and a next step.
+// Saying only THAT the core is part of the datapath, and not which part of the profile put it
+// there, leaves "run this router without sing-box" as a goal nobody can act on. A typical case: IP
+// lists, domain lists, a native group and a plain default rule are all carried natively, and the
+// single thing keeping sing-box alive is the DNS plane. Naming it is the difference between a fact
+// and a next step.
 //
 // Derived from the same walk the decision uses, never a second opinion about it.
 func CoreReasons(p *model.Profile, planes RoutePlanes) []string {

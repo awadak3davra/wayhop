@@ -9,7 +9,7 @@ import (
 
 // An enabled nfqws connection cannot be applied (the executor has no path for a packet modifier with
 // no exit), so the review says so and blocks Apply - it used to promise that installing nfqws2 would
-// fix it, and said nothing at all once the binary was there (QA-055).
+// fix it, and said nothing at all once the binary was there.
 func TestEndpointFindings_NfqwsIsNotRunnableByThisBuild(t *testing.T) {
 	s, _ := sharehandlers_server(t)
 	prof := model.Profile{Endpoints: []model.Endpoint{{ID: "dpi", Name: "Desync", Enabled: true, Engine: model.EngineNfqws}}}

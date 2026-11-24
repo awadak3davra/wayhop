@@ -33,7 +33,7 @@ func opensslColons(b []byte) string {
 	return strings.Join(parts, ":")
 }
 
-// QA-135: a current Xray panel's link to a self-signed server carries pcs= alone (Xray removed
+// A current Xray panel's link to a self-signed server carries pcs= alone (Xray removed
 // allowInsecure). It imported with certificate checks on and no pin, and failed with nothing said.
 func TestLinkPinsFromShareLinks(t *testing.T) {
 	esc := url.QueryEscape

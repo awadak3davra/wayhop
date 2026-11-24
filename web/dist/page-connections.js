@@ -123,7 +123,7 @@ function exitPanelFor(item) {
   const gone = nativeGone[e.id];
   if (gone) {
     panel.appendChild(el("div", { class: "insp-note", style: "color:var(--err)" }, gone.deleted
-      ? t("The router no longer has this tunnel. Repoint what uses it, then delete it here.")
+      ? t("The router no longer has this tunnel. Use Replace tunnel to point this connection at the new one, or delete it here.")
       : t("This tunnel is not running on the router right now.")));
   }
   if (isExternal && !e.enabled) {
@@ -160,6 +160,10 @@ function exitPanelFor(item) {
     // that answers "does it work" comes first.
     el("button", { class: "btn", "aria-label": t("Test") + " " + (e.name || e.id), title: t("Connects through it now and measures the delay"), onclick: ev => testEndpoint(e, ev.currentTarget) }, "Test"),
     el("button", { class: "btn", "aria-label": "Check config " + (e.name || e.id), title: t("Looks for mistakes in the settings without connecting"), onclick: ev => checkEndpointConfig(e, ev.currentTarget) }, "Check config"),
+    // The download speed through this one tunnel; the row beside its latency shows the result.
+    e.enabled ? tpButton("tunnel", e.id, "btn", e.name || e.id) : null,
+    isExternal ? el("button", { class: "btn" + (nativeGone[e.id] ? " btn-primary" : ""), "aria-label": t("Replace tunnel") + " " + (e.name || e.id),
+      title: t("The tunnel died and you made a new one: point this connection at it"), onclick: () => replaceTunnel(e) }, t("Replace tunnel")) : null,
     el("button", { class: "btn", "aria-label": t("Edit") + " " + (e.name || e.id), onclick: () => openEditEndpoint(e) }, "Edit"),
     el("button", { class: "btn btn-danger", "aria-label": t("Delete") + " " + (e.name || e.id), onclick: () => delEndpoint(e) }, "Delete")));
   return panel;
@@ -185,8 +189,18 @@ function paintExitRow(row, item) {
   }
   const dot = row.querySelector(".insp-dot");
   if (dot) dot.className = "insp-dot " + dotCls;
+  // The last speed measurement rides after the latency: "192 ms · ↓ 19.6 Mbit/s · 14:02". Nothing is
+  // added for a tunnel that was never measured; a stale figure is dimmed; a failed attempt says why
+  // on hover.
+  const tp = item.kind !== "native" && item.ep.enabled && !nativeGone[item.ep.id] ? tpNote(item.ep.id) : null;
+  const key = note + "\n" + (tp ? tp.text + "\n" + tp.title + (tp.stale ? "s" : "") : "");
   const meta = row.querySelector(".insp-row-m");
-  if (meta && meta.textContent !== note) meta.textContent = note;
+  if (meta && meta._key !== key) {
+    meta._key = key;
+    meta.textContent = note;
+    if (tp) meta.append(note ? " · " : "", tpSpan(item.ep.id));
+    row.classList.toggle("tp", !!tp); // the longer note takes its own line, so the name keeps its width
+  }
 }
 
 // paintExitsList repaints every row of the exits list plus the header verdict derived from the same
@@ -252,6 +266,7 @@ function dependentLabel(d) {
     dns_detour: t("DNS server"),
     dns_server: t("DNS server"),
     group_member: t("failover group"),
+    sole_member_of: t("failover group"),
   };
   return (kinds[d.kind] || d.kind) + " " + (d.name || d.id);
 }
@@ -288,6 +303,7 @@ function askDependentsChoice(name, dependents, replacements, words) {
       body,
       footer: el("div", { style: "display:flex;gap:10px;justify-content:flex-end" },
         el("button", { class: "btn", onclick: () => done(null) }, t("Cancel")),
+        words.direct ? el("button", { class: "btn", onclick: () => done({ replace: "direct" }) }, words.direct) : el("span"),
         el("button", { class: "btn btn-danger", onclick: () => done({ detach: true }) }, words.anyway)),
     });
     back.addEventListener("click", ev => { if (ev.target === back) done(null); });
@@ -312,6 +328,40 @@ function askDisableDependents(name, dependents, replacements) {
     hint: t("Or switch it off anyway: these keep their addresses but stop routing until you give them an exit."),
     anyway: t("Switch off and leave without an exit"),
   });
+}
+
+// replaceTunnel points an adopted connection at another tunnel the router has now: the old one died
+// and a new one was made (same country, say). Rules, lists, groups and DNS keep pointing at this
+// connection; only the tunnel under it changes. A record WayHop already made for the new tunnel is
+// folded into this one by the daemon.
+async function replaceTunnel(e) {
+  let vpns = [];
+  try { vpns = ((await api.get("/api/vpn/discover")) || {}).vpns || []; }
+  catch (err) { toast(err.message, "err"); return; }
+  const choices = vpns.filter(v => v.endpoint_id !== e.id);
+  const name = e.name || e.id;
+  const picked = await new Promise(resolve => {
+    let answered = false;
+    const done = v => { if (answered) return; answered = true; back.close(); resolve(v); };
+    const list = el("div", { style: "display:flex;flex-direction:column;gap:8px;margin:10px 0" });
+    choices.forEach(v => list.appendChild(el("button", { class: "btn", style: "text-align:left;display:block",
+      onclick: () => done(v) },
+      (v.name || v.iface) + " · " + v.iface + (v.active ? "" : " · " + t("down"))
+        + (v.adopted ? " · " + t("already a connection: it will be merged into this one") : ""))));
+    const body = el("div", {},
+      el("p", { style: "margin:0 0 6px" }, t("Pick the tunnel that now stands in for {0}. Everything that routes through it keeps doing so.", name)),
+      choices.length ? list : el("p", { class: "hint" }, t("The router has no other tunnel to pick.")));
+    const back = modal({ title: t("Replace tunnel of {0}", name), body,
+      footer: el("div", { style: "display:flex;justify-content:flex-end" },
+        el("button", { class: "btn", onclick: () => done(null) }, t("Cancel"))) });
+    back.addEventListener("click", ev => { if (ev.target === back) done(null); });
+  });
+  if (!picked) return;
+  try {
+    await api.post("/api/endpoints/" + encodeURIComponent(e.id) + "/replace-tunnel", { iface: picked.iface });
+    await loadProfile(); route();
+    toast(t("{0} now uses {1}", name, picked.name || picked.iface), "ok");
+  } catch (err) { toast(err.message, "err"); }
 }
 
 async function delEndpoint(e) {
@@ -830,6 +880,7 @@ function openAddConnection() {
 
   const tabKeys = [["paste", "Paste link"], ["manual", "Manual"], ["sub", "Subscription"], ["byedpi", "ByeDPI"]];
   const order = tabKeys.map(([k]) => k);
+  const panels = {};
   function show(key) {
     Object.entries(tabEls).forEach(([k, t]) => {
       const sel = k === key;
@@ -838,8 +889,10 @@ function openAddConnection() {
       t.tabIndex = sel ? 0 : -1; // roving tabindex: only the active tab is in the tab order
     });
     content.setAttribute("aria-labelledby", "addconn-tab-" + key); // name the panel by its owning tab (ARIA tabs pattern)
-    content.innerHTML = "";
-    content.appendChild(key === "paste" ? pasteTab() : key === "manual" ? manualTab() : key === "byedpi" ? byedpiTab() : subTab());
+    // Each panel is built once and kept: switching tabs used to rebuild the form and silently threw
+    // away what had been typed into it (BW-11).
+    if (!panels[key]) panels[key] = key === "paste" ? pasteTab() : key === "manual" ? manualTab() : key === "byedpi" ? byedpiTab() : subTab();
+    content.replaceChildren(panels[key]);
     associateLabels(content); // the tab's fields are injected AFTER modal()'s one-shot associateLabels ran — re-wire them
   }
   const tabBar = el("div", { class: "tabs", role: "tablist" }, ...tabKeys.map(([k, label]) => {
@@ -1412,7 +1465,9 @@ function manualForm(ep) {
     else if (out.tls && T.enabled) {
       if (proto === "anytls" && T.type === "reality") Object.assign(out.tls, { type: "reality", public_key: T.public_key, short_id: T.short_id });
       if (T.type === out.tls.type) {
-        const carry = ["fragment", "record_fragment", "insecure"].concat(document.getElementById("f-fp") ? [] : ["fingerprint"]);
+        // cipher_suites too: an imported `cs=` has no control here, and a save without it dropped the
+        // parameter silently (BW-04).
+        const carry = ["fragment", "record_fragment", "insecure", "cipher_suites"].concat(document.getElementById("f-fp") ? [] : ["fingerprint"]);
         // Pins only where the form has no field for them (certificate pins: HTTPS proxy; key pins: none to show).
         carry.push("pin_cert_may_be_ca", "pin_cert_beside_chain", "pin_cert_may_be_ca_of", "pin_cert_beside_chain_of",
           ...(document.getElementById("f-pins") ? [] : ["pin_cert_sha256"]), ...(document.getElementById("f-pinkeys") ? [] : ["pin_pubkey_sha256"]));

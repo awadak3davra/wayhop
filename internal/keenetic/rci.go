@@ -102,7 +102,7 @@ func (c *RCIClient) Show(ctx context.Context, path string) ([]byte, error) {
 // Parse executes an NDM CLI command via POST /rci/parse — this is how the backend APPLIES
 // native config (e.g. `interface Wireguard0`, `wireguard asc …`, `ip route …`, `up`).
 // CALLER OWNS SAFETY: only WayHop-managed config should be passed; never run with the
-// live live router without the user's explicit OK (the loop is read-only by default).
+// a production router without explicit approval (the loop is read-only by default).
 func (c *RCIClient) Parse(ctx context.Context, command string) ([]byte, error) {
 	body, _ := json.Marshal(map[string]string{"parse": command})
 	b, err := c.do(ctx, http.MethodPost, "/rci/parse", body)

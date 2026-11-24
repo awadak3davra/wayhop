@@ -9,7 +9,7 @@ import (
 
 // What KeeneticOS's NDM takes on `wireguard asc` depends on the firmware release, not on the
 // WireGuard component: the component is older than the command, so a router can have WireGuard and
-// no AmneziaWG at all (QA-127). The thresholds, and where they come from:
+// no AmneziaWG at all. The thresholds, and where they come from:
 //
 //   - 4.2: WireGuard with asc parameters appeared in KeeneticOS 4.2 Alpha 2
 //     (docs.amnezia.org/documentation/instructions/old-keenetic-os-awg). Before it NDM has no
@@ -28,6 +28,9 @@ import (
 var (
 	keeneticASCSince  = keeneticVersion{major: 4, minor: 2}
 	keeneticASC2Since = keeneticVersion{major: 5, minor: 1}
+	// keeneticASC31Since: KeeneticOS 5.2 prints and takes the AmneziaWG 3.1 set as 31 arguments (read
+	// off a router on 5.02.B.3, Beta 3; the official changelog adds the 3.1 settings in 5.2 Alpha 11).
+	keeneticASC31Since = keeneticVersion{major: 5, minor: 2}
 )
 
 type keeneticVersion struct{ major, minor int }
@@ -60,14 +63,15 @@ func parseKeeneticRelease(release string) (keeneticVersion, bool) {
 
 // KeeneticReleaseAWG is the newest AmneziaWG generation NDM's `wireguard asc` takes on a KeeneticOS
 // release (Capabilities.FirmwareRelease): GenNone before 4.2, which has no `wireguard asc`; Gen1 up
-// to 5.0; Gen2 from 5.1. It never answers above Gen2, which is as far as WayHop's NDM writer goes
-// (keenetic.AWGGeneration). known is false for a release it cannot read, and a caller then keeps
+// to 5.0; Gen2 from 5.1; Gen31 from 5.2 (keenetic.MaxAWGGeneration is as far as the writer goes). known is false for a release it cannot read, and a caller then keeps
 // what it decided before the release was read.
 func KeeneticReleaseAWG(release string) (generation awg.Generation, known bool) {
 	v, ok := parseKeeneticRelease(release)
 	switch {
 	case !ok:
 		return awg.GenNone, false
+	case v.atLeast(keeneticASC31Since):
+		return awg.Gen31, true
 	case v.atLeast(keeneticASC2Since):
 		return awg.Gen2, true
 	case v.atLeast(keeneticASCSince):

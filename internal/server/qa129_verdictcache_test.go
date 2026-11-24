@@ -17,9 +17,9 @@ import (
 	"wayhop/internal/platform"
 )
 
-// QA-129. The hunt's repro: the kernel-PBR verdict was detected once for the daemon's lifetime, so
-// following the review's own remedy (install nft) never lifted the fast-mode refusal until a restart,
-// while /api/native/capabilities, which probes fresh, already reported fast usable.
+// The kernel-PBR verdict must not be detected once for the daemon's lifetime: following the review's
+// own remedy (install nft) must lift the fast-mode refusal without a restart, as
+// /api/native/capabilities, which probes fresh, already reports fast usable.
 func TestQA129KernelPBRVerdictFollowsTheRemedy(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PATH", dir)

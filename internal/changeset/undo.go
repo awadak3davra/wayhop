@@ -81,6 +81,9 @@ func Undo(base, desired model.Profile, baseCfg, desiredCfg config.Config, req Un
 		if req.ID == "" || req.Field == "" {
 			return desired, desiredCfg, fmt.Errorf("field undo requires an id and a field")
 		}
+		if err := fieldUndoRefusal(base, desired, req.ObjectType, req.ID, req.Field); err != nil {
+			return desired, desiredCfg, err
+		}
 		p, c, ok := undoField(base, desired, baseCfg, desiredCfg, req.ObjectType, req.ID, req.Field)
 		if !ok {
 			return desired, desiredCfg, fmt.Errorf("no pending change for field %q of %q", req.Field, req.ID)
@@ -512,6 +515,7 @@ func undoField(base, desired model.Profile, baseCfg, desiredCfg config.Config, o
 		if revertGroupField(&g, base.Groups[bi], field) {
 			out := cloneProfile(desired)
 			out.Groups[di] = g
+			model.TidyListFastest(&out) // a list pinned to a member the revert removed
 			return out, desiredCfg, true
 		}
 	}
@@ -527,6 +531,7 @@ func undoField(base, desired model.Profile, baseCfg, desiredCfg config.Config, o
 		if revertRoutingField(&r, base.RoutingLists[bi], field) {
 			out := cloneProfile(desired)
 			out.RoutingLists[di] = r
+			model.TidyListFastest(&out) // a pin or exclusion of a tunnel the revert removed
 			return out, desiredCfg, true
 		}
 	}
@@ -555,6 +560,26 @@ func undoField(base, desired model.Profile, baseCfg, desiredCfg config.Config, o
 	return desired, desiredCfg, false
 }
 
+// fieldUndoRefusal names a row that cannot be undone on its own, where Validate would not: the result
+// passes it and breaks the router at Apply. One case so far. A list's explicit feed format going back
+// beside a new URL that names the other kind of file (or a plain-text list) is a rule set sing-box
+// cannot load, and one such set stops the whole core. The URL row carries the format with it (see
+// revertRoutingField), so that is the row to undo.
+func fieldUndoRefusal(base, desired model.Profile, objType, id, field string) error {
+	if field != "Feed format" || !wants(objType, objRoutingList) {
+		return nil
+	}
+	bi, di := indexOfRouting(base.RoutingLists, id), indexOfRouting(desired.RoutingLists, id)
+	if bi < 0 || di < 0 {
+		return nil
+	}
+	b, d := base.RoutingLists[bi], desired.RoutingLists[di]
+	if b.Format == "" || b.Format == d.Format || b.Source == d.Source || model.CarriedRuleSetFormat(b.Format, d.Source) {
+		return nil
+	}
+	return fmt.Errorf("the feed format of %q cannot go back to %q on its own: the list's new URL names another kind of file, and read as %q it would not load; undo its \"Source URL\" row, which takes the format with it", id, b.Format, b.Format)
+}
+
 // undoRoutingPosition moves a list back to its baseline-relative position WITHOUT touching its
 // content (the content edits stay pending, per §1.5's smallest-safe-unit rule). The slot is the
 // differ's own test for the row (rankSlot), so the row this undo was made on always clears.
@@ -581,6 +606,15 @@ func revertGroupField(g *model.Group, b model.Group, field string) bool {
 		g.Name = b.Name
 	case "Type":
 		g.Type = b.Type
+		// Only an automatic group elects by throughput (Validate: "requires urltest"). An election
+		// mode edited in while the group was automatic cannot stay on the manual type put back, so the
+		// baseline mode, which that type did run, comes back with it; otherwise the row could not be
+		// undone at all. Between types that both run the mode it is its own row's edit and is kept.
+		if g.Type != model.GroupURLTest && g.ElectionMode != "" && g.ElectionMode != model.ElectionLatency {
+			g.ElectionMode = b.ElectionMode
+		}
+	case "Election mode":
+		g.ElectionMode = b.ElectionMode
 	case "Members":
 		g.Members = append([]string(nil), b.Members...)
 	case "Health test":
@@ -612,6 +646,15 @@ func revertDNSField(d *model.DNSSettings, b model.DNSSettings, field string) boo
 		d.Strategy = b.Strategy
 	case "Resolvers":
 		d.Servers = b.Servers
+		// The default resolver names one of these. One the restored set does not hold, or holds
+		// switched off, cannot stay (Validate refuses both, so the row could not be undone at all
+		// after a resolver was replaced): the baseline default, which did name one of them, comes
+		// back with them. A default they still hold is its own row's edit and is kept. The other
+		// direction is left to Validate: putting the baseline default back needs its resolver, and
+		// that is this row.
+		if d.Final != "" && !hasEnabledDNSServer(d.Servers, d.Final) {
+			d.Final = b.Final
+		}
 	case "DNS rules":
 		d.Rules = b.Rules
 	case "Default resolver":
@@ -632,6 +675,15 @@ func revertDNSField(d *model.DNSSettings, b model.DNSSettings, field string) boo
 		return false
 	}
 	return true
+}
+
+func hasEnabledDNSServer(servers []model.DNSServer, tag string) bool {
+	for i := range servers {
+		if servers[i].Tag == tag {
+			return servers[i].Enabled
+		}
+	}
+	return false
 }
 
 // revertEndpointField sets one field of e back to b's value. Reports false for an unknown field so
@@ -692,10 +744,29 @@ func revertRoutingField(r *model.RoutingList, b model.RoutingList, field string)
 		r.Name = b.Name
 	case "Outbound":
 		r.Outbound = b.Outbound
+		// A fastest list's Outbound IS its first tunnel (model.NormalizeRoutingList): reverting one
+		// without the other leaves "outbound must be the first candidate", which fails every Apply.
+		// Only that first slot is this row's. The rest of the tunnel set is the "Tunnels" row's edit
+		// and stays, so a tunnel added in the same sitting is not discarded with the outbound.
+		switch {
+		case len(r.Candidates) > 0 && len(b.Candidates) > 0:
+			r.Candidates = withFirstTunnel(r.Candidates, b.Outbound)
+		case len(r.Candidates) > 0 || len(b.Candidates) > 0:
+			// Fastest mode itself was switched on or off: there is no first tunnel to swap on one
+			// side, and the baseline outbound need not be a tunnel at all (direct, block, a policy).
+			r.Candidates = append([]string(nil), b.Candidates...)
+		}
 	case "Enabled":
 		r.Enabled = b.Enabled
 	case "Source URL":
 		r.Source = b.Source
+		// The format says how that URL's file is read, so an edited one the restored URL contradicts
+		// goes back with it (the store drops it the same way on a URL edit). Left behind, the
+		// old .srs would be read as JSON, which Validate accepts and the core cannot load. A format the
+		// URL does not contradict is the operator's own edit and keeps its row.
+		if r.Format != b.Format && r.Format != "" && !model.CarriedRuleSetFormat(r.Format, r.Source) {
+			r.Format = b.Format
+		}
 	case "Entries":
 		r.Manual = append([]string(nil), b.Manual...)
 	case "Feed format":
@@ -710,9 +781,15 @@ func revertRoutingField(r *model.RoutingList, b model.RoutingList, field string)
 	case "Name feed":
 		r.DomainCache = b.DomainCache // as "IP feed"
 	case "IP feed source":
-		r.CIDRSource = b.CIDRSource
+		// A source goes back with what it last returned and when: the cache held now is the OTHER
+		// source's fetch (or empty, the store clears it on a source edit), and Apply would route those
+		// prefixes under the restored source's name until its next refresh. The baseline cache is that
+		// source's own and is what the router runs. The fetch time goes with it, unlike under "IP
+		// feed": the time kept there is of a fetch of the source being undone, and it would hold off a
+		// baseline source that was never fetched.
+		r.CIDRSource, r.CIDRCache, r.CIDRRefreshed = b.CIDRSource, b.CIDRCache, b.CIDRRefreshed
 	case "Name feed source":
-		r.DomainSource = b.DomainSource
+		r.DomainSource, r.DomainCache, r.DomainRefreshed = b.DomainSource, b.DomainCache, b.DomainRefreshed // as "IP feed source"
 	case "Download via":
 		r.DownloadVia = b.DownloadVia
 	case "Auto-update":
@@ -721,10 +798,42 @@ func revertRoutingField(r *model.RoutingList, b model.RoutingList, field string)
 		r.ScopeMode, r.ScopeGroups = b.ScopeMode, b.ScopeGroups
 	case "TLS fragmentation":
 		r.TLSFragment = b.TLSFragment
+	case "Tunnels":
+		r.Candidates = append([]string(nil), b.Candidates...)
+		if len(b.Candidates) > 0 {
+			r.Outbound = b.Candidates[0] // the two travel together (model.NormalizeRoutingList)
+		}
+	case "Fastest tunnel":
+		if b.Fastest == nil {
+			r.Fastest = nil
+		} else {
+			f := *b.Fastest
+			f.Targets = append([]string(nil), b.Fastest.Targets...)
+			f.Excluded = append([]string(nil), b.Fastest.Excluded...)
+			r.Fastest = &f
+		}
 	default:
 		return false
 	}
 	return true
+}
+
+// withFirstTunnel is a list's tunnels with first leading them: moved up when it is already one of
+// them, else in place of the tunnel that led. A new slice; the caller's may be the store's.
+func withFirstTunnel(cands []string, first string) []string {
+	out := make([]string, 0, len(cands))
+	out = append(out, first)
+	has := false
+	for _, c := range cands {
+		has = has || c == first
+	}
+	for i, c := range cands {
+		if c == first || (i == 0 && !has) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // paramKeyFromLabel inverts fieldLabel ("Peer public key" -> "peer_public_key").

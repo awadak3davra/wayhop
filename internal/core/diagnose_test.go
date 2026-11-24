@@ -11,7 +11,7 @@ import (
 const realFatal = `FATAL[0002] start service: (initialize rule-set[3]: initial rule-set: rs-ai_openai: invalid sing-box rule-set file | initialize rule-set[1]: initial rule-set: rs-ai_anthropic: invalid sing-box rule-set file | initialize rule-set[11]: initial rule-set: rs-news_independent: Get "https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Categories/news.lst": context canceled | initialize rule-set[12]: initial rule-set: rs-ooni_blocked: invalid sing-box rule-set file)`
 
 // A binary rule-set whose format byte is past the core's ceiling (srs.Read: "unsupported version: N")
-// is intact, so re-downloading it after clearing the cache fails the same way (QA-064).
+// is intact, so re-downloading it after clearing the cache fails the same way.
 func TestClassifyStartFailure_RuleSetTooNew(t *testing.T) {
 	tooNew := `FATAL[0001] start service: initialize rule-set[2]: initial rule-set: rs-ru_bundle: unsupported version: 4`
 	f := ClassifyStartFailure([]string{tooNew})

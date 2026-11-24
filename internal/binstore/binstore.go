@@ -28,7 +28,7 @@ import (
 )
 
 // DefaultRunDir is where a compressed binary is unpacked to run: /tmp is tmpfs on OpenWrt and on
-// KeeneticOS, and not mounted noexec (measured on the test router: tmpfs rw,nosuid,nodev,noatime).
+// KeeneticOS, and not mounted noexec (OpenWrt mounts it tmpfs rw,nosuid,nodev,noatime).
 const DefaultRunDir = "/tmp/wayhop"
 
 // maxUnpacked bounds what one gzip may inflate to. amneziawg-go is under 4 MB; the cap only stops a
@@ -114,9 +114,9 @@ func describe(p, version string, compressed bool) (string, error) {
 // version. The order leaves a record that matches a runnable copy wherever a kill or a power cut
 // lands: the record for src is written and synced first, under the name Read falls back to; then src
 // takes the gzip's name and the unpacked binary goes; only then does the record take its own name.
-// Done the other way round (gzip, unpacked binary removed, record last), a cut in between left a
-// record naming a file that was gone (raw to gzip) or no longer matched (gzip to gzip): Unpack said
-// ErrNotStored, the plugin found nothing, and the binary did not run again until reinstalled.
+// Done the other way round (gzip, unpacked binary removed, record last), a cut in between would leave
+// a record naming a file that is gone (raw to gzip) or does not match (gzip to gzip): Unpack would say
+// ErrNotStored, the plugin would find nothing, and the binary would not run again until reinstalled.
 func StoreCompressed(dir, name, version, src string) error {
 	rec, err := describe(src, version, true)
 	if err != nil {
@@ -301,7 +301,7 @@ func Unpack(dir, name, runDir string) (string, error) {
 	if sum != rec.SHA256 {
 		return "", fmt.Errorf("the compressed %s on flash does not match its record (sha256 %s, recorded %s); reinstall it", name, sum, rec.SHA256)
 	}
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
+	if err := EnsureRunDir(runDir); err != nil {
 		return "", err
 	}
 	// The marker goes before the copy it vouches for is replaced. Killed after the rename below (a

@@ -10,7 +10,7 @@ import (
 // a literal ESC byte in a Go string is invisible in every diff and editor.
 const esc = "\x1b"
 
-// A live test router `logread` line. sing-box colours the level and the connection id, and
+// A reference OpenWrt router `logread` line. sing-box colours the level and the connection id, and
 // procd copies the daemon's stdout into logd verbatim; the panel renders the same bytes.
 var colouredEngineLine = esc + "[31mERROR" + esc + "[0m[" + esc + "[38;5;144m2070870144" + esc +
 	"[0m 5.0s] connection: open connection to 203.0.113.8:585 using outbound/direct[direct]: dial tcp: i/o timeout\n"

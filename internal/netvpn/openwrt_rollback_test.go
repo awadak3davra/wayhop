@@ -14,7 +14,7 @@ import (
 // holding a staged change nobody could see. A rollback is only worth having if a failed one is
 // distinguishable from a successful one.
 
-// stagedRemoval builds a removal plan against the test router-shaped fixture and a runner whose reads
+// stagedRemoval builds a removal plan against the reference-router-shaped fixture and a runner whose reads
 // answer as a router with the interface still present would.
 func stagedRemoval(t *testing.T) (RemovalPlan, *RecordRunner) {
 	t.Helper()

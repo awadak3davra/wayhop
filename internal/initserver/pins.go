@@ -13,7 +13,7 @@ import (
 	"wayhop/internal/model"
 )
 
-// Certificate pins of the self-signed TLS servers Set up Server makes (QA-138).
+// Certificate pins of the self-signed TLS servers Set up Server makes.
 //
 // The installer hashes the certificate it generated (scriptTLSPins) and prints both pins with the
 // client config: the whole-certificate pin inside the link, where WayHop's importer and other

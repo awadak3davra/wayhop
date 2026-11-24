@@ -290,9 +290,9 @@ func (m *Manager) tick(now int64, ok bool) Action {
 
 // tickHealth advances the window.
 //
-// The escalation — degrade, roll back, then REBOOT — used to be driven by a bool in which "the
-// target did not answer" and "the probe never ran" were the same value. On a router with no ping
-// binary on the init system's PATH, every Apply would therefore roll back and reboot a device whose
+// The escalation — degrade, roll back, then REBOOT — must not be driven by a bool in which "the
+// target did not answer" and "the probe never ran" are the same value: on a router with no ping
+// binary on the init system's PATH, every Apply would then roll back and reboot a device whose
 // connectivity was fine. An observation that established nothing must not move the machine toward
 // rebooting the router: Unknown holds.
 func (m *Manager) tickHealth(now int64, h Health) Action {
@@ -333,7 +333,7 @@ func (m *Manager) tickHealth(now int64, h Health) Action {
 			m.pending = false // internet recovered after rollback
 			return ActDone
 		}
-		// A manual Roll back that failed (QA-147) leaves rolledBack false but its verdict in phase: the
+		// A manual Roll back that failed leaves rolledBack false but its verdict in phase: the
 		// Test is still partly on the router, so neither "armed" nor "live_unsaved" is true. The window
 		// closes on the failure it already reports.
 		if now >= m.deadline {
@@ -355,9 +355,9 @@ func (m *Manager) tickHealth(now int64, h Health) Action {
 		m.badSince = now
 	}
 	badFor := now - m.badSince
-	// Reboot is the LAST resort, and only after the rollback has been attempted. The reboot
-	// threshold used to be tested first, so a single delayed tick that arrived past BOTH deadlines
-	// — a hung probe, a suspended process, a clock jump — skipped the rollback entirely and went
+	// Reboot is the LAST resort, and only after the rollback has been attempted. Testing the
+	// reboot threshold first would let a single delayed tick that arrives past BOTH deadlines
+	// — a hung probe, a suspended process, a clock jump — skip the rollback entirely and go
 	// straight to rebooting the router. The escalation's whole value is its order: try the previous
 	// configuration, and only reboot if that did not help. Gating on rolledBack costs one extra
 	// interval in that rare case and cannot deadlock: the rollback branch below marks rolledBack
@@ -458,9 +458,9 @@ func (m *Manager) MarkRolledBack() {
 //     second production rollback left a window where a manual click finalized+cancelled on top of a
 //     dispatch that subsequently FAILED, reporting success and disarming the reboot last resort.
 //
-// Do NOT report false success or cancel the still-armed reboot fallback while the config is broken —
-// the original bug: the old code unconditionally set phase="rolled_back" and returned nil even after
-// the auto path's rollback had errored, disarming the reboot last resort over a live-broken config.
+// Do NOT report false success or cancel the still-armed reboot fallback while the config is broken:
+// setting phase="rolled_back" and returning nil after the auto path's rollback has errored would
+// disarm the reboot last resort over a live-broken config.
 func (m *Manager) RollbackNow() error { return m.rollbackNow(0, false) }
 
 // Epoch is the current window's epoch, for RollbackNowAt. Read it under the lock that serializes the
@@ -527,10 +527,10 @@ func (m *Manager) rollbackNow(epoch int64, only bool) error {
 	// committed under the caller's lock and calls Confirm after releasing it. Marking that skip as a
 	// failed rollback flashed rollback_failed (a loud alert) before Confirm's verdict.
 	if m.epoch != ep || errors.Is(rbErr, ErrSuperseded) {
-		// Superseded while rb() ran or waited. The success tail used to run anyway: on a closure that
-		// had skipped it closed the NEW window, cancelled its run() — no auto-rollback, no reboot for an
-		// untested configuration — and reported "rolled back"; after a Keep it overwrote "committed".
-		// The window that replaced this one owns the state now: touch nothing. What rb() reported
+		// Superseded while rb() ran or waited. Running the success tail here would, on a closure that
+		// skipped, close the NEW window and cancel its run() (no auto-rollback, no reboot for an
+		// untested configuration) and report "rolled back"; after a Keep it would overwrite
+		// "committed". The window that replaced this one owns the state now: touch nothing. What rb() reported
 		// stands — ErrSuperseded when it skipped, nil only if it ran before the window was replaced.
 		m.mu.Unlock()
 		return rbErr

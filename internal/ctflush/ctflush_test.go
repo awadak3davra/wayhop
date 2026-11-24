@@ -94,7 +94,7 @@ func TestStaleNft(t *testing.T) {
 	})
 }
 
-// RT-09: a private destination a zone names is routed by its mark (pbr carves it out of the private
+// A private destination a zone names is routed by its mark (pbr carves it out of the private
 // pin), so a flow to it that the plan moves is stale like any other; private space no zone names is
 // still pinned to main and left alone.
 func TestStaleListedPrivateDestination(t *testing.T) {
@@ -393,5 +393,72 @@ func TestParseDumpAndEncodeDelete(t *testing.T) {
 	// A truncated message is an error, not a panic.
 	if _, _, err := readMessages(msg[:nlmsgHdrLen+8], 2, 0, nil); err == nil {
 		t.Error("a message longer than the buffer must be refused")
+	}
+}
+
+// A leak after an Apply on a Keenetic router: LAN flows to listed
+// destinations with ctmark 0, NATed out of the WAN, kept there by the fast NAT after the chain was back.
+func TestFlushUnroutedDeletesFlowsTheChainMissed(t *testing.T) {
+	direct := pbr.Egress{Tag: "direct", Kind: pbr.EgressWAN, Mark: 0x10000, Table: 254}
+	tun := pbr.Egress{Tag: "grp-awg31", Kind: pbr.EgressInterface, Mark: 0x20000, Table: 151, FailClosed: true}
+	p := plan([]pbr.Egress{direct, tun},
+		pbr.Zone{Name: "list_ru", EgressTag: "direct", Mark: 0x10000, V4: []string{"77.88.0.0/18"}},
+		pbr.Zone{Name: "list_antifilter", EgressTag: "grp-awg31", Mark: 0x20000, V4: []string{"203.0.113.0/24", "198.51.100.0/24"}},
+	)
+	f := &fakeTable{entries: map[uint8][]Entry{2: {
+		entry("203.0.113.24", 0),                       // the leak: deleted
+		entry("198.51.100.75", 0x10000),                // marked direct, listed for the tunnel: deleted
+		entry("198.51.100.88", 0x20000),                // already in the tunnel: kept
+		entry("77.88.8.8", 0),                          // a direct list: kept
+		entry("93.184.216.34", 0),                      // unlisted: kept
+		entry("192.168.60.5", 0),                       // LAN: kept
+		from(entry("203.0.113.25", 0), "192.168.50.1"), // the router's own: kept
+		{Family: 2, Dst: netip.MustParseAddr("203.0.113.26"), tuple: []byte{4, 0, 1, 0}}, // source unknown, unmarked: deleted
+	}}}
+	res, err := FlushUnrouted(f, p, Options{Limit: 10, Local: func(a netip.Addr) bool { return a == netip.MustParseAddr("192.168.50.1") }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, a := range f.deleted {
+		got[a.String()] = true
+	}
+	if res.Deleted != 3 || !got["203.0.113.24"] || !got["198.51.100.75"] || !got["203.0.113.26"] {
+		t.Fatalf("deleted %v (%+v)", f.deleted, res)
+	}
+	// Bounded.
+	f.deleted = nil
+	res, _ = FlushUnrouted(f, p, Options{Limit: 1})
+	if res.Deleted != 1 || !res.Capped {
+		t.Fatalf("limit: %+v", res)
+	}
+	// A domain zone the caller did not fill cannot be judged: nothing behind it is touched.
+	p.Zones = append(p.Zones, pbr.Zone{Name: "list_dom", EgressTag: "grp-awg31", Mark: 0x20000, Domains: []string{"t.me"}})
+	f.deleted = nil
+	if res, _ = FlushUnrouted(f, p, Options{Limit: 10}); res.Deleted != 0 {
+		t.Fatalf("judged through an unfilled domain zone: %v", f.deleted)
+	}
+}
+
+// A flow whose connmark is a mark the plan no longer has (its egress was retired, or renumbered away)
+// has its mark restored by the chain and routed by no rule once the old plane's rules are retired: the
+// main table, the WAN. The sweep judges it like an unmarked flow.
+func TestFlushUnroutedDeletesFlowsOnARetiredMark(t *testing.T) {
+	direct := pbr.Egress{Tag: "direct", Kind: pbr.EgressWAN, Mark: 0x10000, Table: 254}
+	tun := pbr.Egress{Tag: "grp-awg31", Kind: pbr.EgressInterface, Mark: 0x20000, Table: 151, FailClosed: true}
+	p := plan([]pbr.Egress{direct, tun},
+		pbr.Zone{Name: "list_antifilter", EgressTag: "grp-awg31", Mark: 0x20000, V4: []string{"203.0.113.0/24"}},
+	)
+	f := &fakeTable{entries: map[uint8][]Entry{2: {
+		entry("203.0.113.30", 0x50000),  // listed, mark of no egress of the plan: deleted
+		entry("93.184.216.34", 0x50000), // unlisted, mark of no egress: kept (the plan sends it direct)
+		entry("203.0.113.31", 0x20000),  // in the tunnel: kept
+	}}}
+	res, err := FlushUnrouted(f, p, Options{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Deleted != 1 || len(f.deleted) != 1 || f.deleted[0].String() != "203.0.113.30" {
+		t.Fatalf("deleted %v (%+v)", f.deleted, res)
 	}
 }

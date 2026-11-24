@@ -129,7 +129,7 @@ func preflightRoutingMode(in PreflightInput) []Unsupported {
 				Reason: "\"fast\" steers traffic ONLY through the kernel policy-routing plane, and this " +
 					"router cannot load it (no nftables). With no capture-all TUN either, no traffic " +
 					"would be routed through WayHop — carve-outs included.",
-				// Not "or hybrid": hybrid needs the same plane (a hunter on OpenWrt 21.02 was sent there).
+				// Not "or hybrid": hybrid needs the same plane.
 				Remedy: "Install nftables support, or use \"tun\", which carries traffic through the " +
 					"sing-box TUN and does not depend on nftables.",
 			})

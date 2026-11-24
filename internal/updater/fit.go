@@ -94,7 +94,7 @@ func (u *Updater) Fit(ctx context.Context, e Engine, tag string) (InstallFit, er
 // the RUNNING executable and must also write a complete .bak — the rollback is mandatory, so its
 // bytes are part of the peak.
 //
-// The panel needs this before it offers the button. Measured on a live test router (OpenWrt,
+// The panel needs this before it offers the button. Measured on a reference OpenWrt router (OpenWrt,
 // /overlay 13 MiB free): a self-update there needs ~27 MiB, so the refusal is the routine outcome
 // on that box, and until now it could only arrive after the click.
 func (u *Updater) SelfFit(ctx context.Context, repo, tag, exePath string) (InstallFit, error) {

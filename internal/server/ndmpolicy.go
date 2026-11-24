@@ -17,7 +17,7 @@ import (
 // mark NDM routes it by is read from the router - by the review here, and by the Apply capture
 // (captureExecutionNative) for the plan it compiles.
 
-// demoNDMPolicies is the demo's router: two policies in the shape a live Keenetic reports, so the
+// demoNDMPolicies is the demo's router: two policies in the shape a Keenetic reports, so the
 // panel and the review can be exercised without NDM. Marks and tables are the measured ones.
 var demoNDMPolicies = []keenetic.Policy{
 	{Name: "Policy0", Description: "Bypass", Mark: 0x0ffffaaa, Table: 4096},
@@ -34,7 +34,7 @@ type ndmPolicyFacts struct {
 
 // reviewNDMPolicies reads the router's access policies for the review, and only when a list points at
 // one: every other profile reads nothing and cannot fail here. The review is built on every panel
-// visit; the read is one ndmc call, and on a live Keenetic two consecutive ones finished within the
+// visit; the read is one ndmc call, and on a Keenetic two consecutive ones finished within the
 // same wall-clock second.
 func (s *Server) reviewNDMPolicies(ctx context.Context, cfg config.Config, p *model.Profile) ndmPolicyFacts {
 	facts := ndmPolicyFacts{inUse: model.NDMPoliciesInUse(p)}

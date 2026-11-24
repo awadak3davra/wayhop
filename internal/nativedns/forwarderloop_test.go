@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// QA-117: the loop check read /etc/resolv.conf as if it held the router's forwarder upstreams. On
+// The loop check read /etc/resolv.conf as if it held the router's forwarder upstreams. On
 // OpenWrt it holds the libc stub instead, `nameserver 127.0.0.1` and `nameserver ::1`, which point the
 // router's own programs at the local dnsmasq; dnsmasq itself forwards to what `uci show dhcp` names
 // (server, or the resolvfile when noresolv is off). So every stock OpenWrt was reported with two

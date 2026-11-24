@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"wayhop/internal/generator"
 	"wayhop/internal/model"
 	"wayhop/internal/netvpn"
 )
@@ -105,15 +106,15 @@ func (s *Server) handleExitIPs(w http.ResponseWriter, r *http.Request) {
 // kept the tunnel's source address, the tunnel's counters never moved, and the tile reported the
 // router's WAN address as the tunnel's exit. The same chain's FIRST rule is `meta mark <this>
 // return`, so a socket carrying the mark is left alone and really egresses out the interface it is
-// bound to. Measured on a test router (sing-box 1.13.21): unmarked, awg0 and awg1 both answered the
+// bound to. Observed on an OpenWrt router (sing-box 1.13.21): unmarked, awg0 and awg1 both answered the
 // WAN IP and `awg show <iface> transfer` did not move; marked, they answered their own exits and
 // the counters moved.
 //
-// The value is sing-tun's default for `tun.auto_redirect_output_mark`, which WayHop never sets. A
-// host using a different one is not a wrong answer, only a missed measurement: probeEgressIP
-// discards any result equal to the router's own exit, so the grid falls back to the tunnel's
-// server address instead of passing the WAN off as the tunnel's.
-const engineBypassMark = 0x2024
+// The value is the one the generator writes into the core's TUN inbound as
+// `auto_redirect_output_mark`: one constant for both sides, and an operator's core
+// override that names another is refused (generator.ApplyCoreOverride). It is also sing-tun's
+// default, so a core running a config generated before the field was written agrees too.
+const engineBypassMark = generator.AutoRedirectOutputMark
 
 // probeIface is the per-egress probe seam: SO_BINDTODEVICE (+ optional fwmark) on the router,
 // a no-op stub off Linux. A variable so tests can drive resolveExitIP's decision logic on any

@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// The Components page names the core a protocol needs from this map; it must reach the API (QA-017).
+// The Components page names the core a protocol needs from this map; it must reach the API.
 func TestCapabilities_ExposeSingboxMinMinor(t *testing.T) {
 	for _, c := range []Capabilities{DetectCapabilities(), DemoCapabilities()} {
 		for _, proto := range []string{"openvpn", "snell", "openconnect"} {

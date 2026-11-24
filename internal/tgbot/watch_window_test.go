@@ -10,7 +10,7 @@ import (
 // tickHealth sets rolled_back and dispatches the rollback; only a later tick clears pending), so the
 // watcher, pulsing three times as often, sees testing/rolled_back for a while and then a close whose
 // last check passed. That close was told as a manual Roll back: a silent edit, no critical alert,
-// and meanwhile the countdown kept offering Keep / Roll back with "rolls back by itself" (QA-098).
+// and meanwhile the countdown kept offering Keep / Roll back with "rolls back by itself".
 func TestWatcherAutomaticRollbackPendingStepIsStillLoud(t *testing.T) {
 	w := newWatcher()
 	w.step(testNow, Pulse{}, EventLog{}, sampleStatus)
@@ -57,7 +57,7 @@ func TestWatcherAutomaticRollbackPendingStepIsStillLoud(t *testing.T) {
 // A second Test applied inside the first one's window supersedes it (ArmHealth bumps the epoch and
 // pending stays true), so the watcher saw testing -> testing and its countdown re-rendered the first
 // message with the new window's buttons: an owner deciding about the first Test kept the second one,
-// which nobody had asked about (QA-100). The old message closes without buttons; the new Test gets its
+// which nobody had asked about. The old message closes without buttons; the new Test gets its
 // own message.
 func TestWatcherSecondTestInsideTheWindowGetsItsOwnMessage(t *testing.T) {
 	h := newHarness(t, owner)

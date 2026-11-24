@@ -18,6 +18,7 @@ import (
 
 	"wayhop/internal/atomicfile"
 	"wayhop/internal/model"
+	"wayhop/internal/writebehind"
 )
 
 // Store guards a Profile persisted at path using copy-on-write. The published profile is
@@ -47,10 +48,25 @@ type Store struct {
 	// gen bumps on every durably-published mutation; a lock-free reader that memoizes a
 	// profile-derived result (e.g. the native-only datapath verdict) keys its cache on it.
 	cur atomic.Pointer[published]
+
+	// Feed caches kept apart from profile.json (listcache.go).
+	cachePath      string
+	cacheW         *writebehind.Writer
+	legacyEmbedded bool // profile.json on disk still carries the caches inline (old format)
+	// lastDigest is the hash of the profile.json bytes last written or read, so a change that only
+	// touches the feed caches skips the profile write without reading the file back.
+	lastDigest [32]byte
+	hasDigest  bool
 }
 
-// Open loads the profile at path, creating an empty one if it does not exist.
+// Open loads the profile at path, creating an empty one if it does not exist. Feed caches are
+// written through to list-cache.json on every change; the daemon uses OpenWith to coalesce them.
 func Open(path string) (*Store, error) {
+	return OpenWith(path, Options{})
+}
+
+// OpenWith is Open with the feed-cache write policy.
+func OpenWith(path string, opt Options) (*Store, error) {
 	s := &Store{path: path}
 	// A temp a crash left between atomicfile.Write's create and rename is a full copy of the profile,
 	// endpoint keys included, that nothing else removes. No writer exists before Open returns.
@@ -67,6 +83,7 @@ func Open(path string) (*Store, error) {
 			log.Printf("wayhop: profile %s is empty; recreating empty profile", path)
 		}
 		empty := model.Profile{}
+		s.openListCache(&empty, opt)
 		s.cur.Store(&published{p: &empty, gen: startGen()})
 		return s, s.persist(&empty)
 	}
@@ -76,6 +93,12 @@ func Open(path string) (*Store, error) {
 	var p model.Profile
 	if err := json.Unmarshal(data, &p); err != nil {
 		return nil, fmt.Errorf("parse profile %s: %w", path, err)
+	}
+	s.openListCache(&p, opt)
+	if !s.legacyEmbedded {
+		// What the next write would produce for an unchanged profile, if the file is in today's
+		// format; an indentation or field-order difference only costs that one rewrite.
+		s.lastDigest, s.hasDigest = profileDigest(data), true
 	}
 	s.cur.Store(&published{p: &p, gen: startGen()})
 	return s, nil
@@ -334,6 +357,9 @@ func (s *Store) DeleteEndpoint(id string) error {
 			return fmt.Errorf("endpoint %q is the only member of group %q; remove or repoint that group first", id, g.ID)
 		}
 	}
+	// A list with other tunnels drops this one and moves on to the next (its operator named them);
+	// only a list left with nothing to route by still refuses below.
+	model.RepointListCandidates(&p, id, "")
 	// Refuse if a routing list routes (or downloads) via this endpoint — a dangling
 	// outbound fails Validate() and blocks every Apply (same intent as the rule guard).
 	for _, rl := range p.RoutingLists {
@@ -437,6 +463,7 @@ func (s *Store) DeleteGroup(id string) error {
 		}
 	}
 	// Refuse if a routing list routes (or downloads) via this group — see DeleteEndpoint.
+	model.RepointListCandidates(&p, id, "")
 	for _, rl := range p.RoutingLists {
 		if rl.Outbound == id || rl.DownloadVia == id {
 			return fmt.Errorf("group %q is used by routing list %q (route/download via); repoint it first", id, rl.ID)
@@ -563,7 +590,7 @@ func (s *Store) UpsertRoutingListAt(rl model.RoutingList, rev Rev) (Saved, error
 	}
 	for i := range p.RoutingLists {
 		if p.RoutingLists[i].ID == rl.ID {
-			// A rule-set format carried over from the old URL may not describe a new one (QA-150):
+			// A rule-set format carried over from the old URL may not describe a new one:
 			// model.CarriedRuleSetFormat decides, and the format then comes from the URL again. A
 			// format that differs from the stored one is the caller's choice and is kept.
 			if old := p.RoutingLists[i]; rl.Source != old.Source && rl.Format != "" && rl.Format == old.Format &&
@@ -819,13 +846,36 @@ func (s *Store) SetDNSIfGen(dns *model.DNSSettings, wantGen uint64) (uint64, err
 	return s.Gen(), nil // under wmu: no other writer can bump between publish and this read
 }
 
-// persist atomically + durably writes p to disk.
+// persist atomically + durably writes p to disk: profile.json without the feed caches (those go to
+// list-cache.json, see listcache.go). A profile.json that would not change is not rewritten, so a
+// feed refresh costs no profile write at all.
 func (s *Store) persist(p *model.Profile) error {
-	data, err := json.MarshalIndent(p, "", "  ")
+	if s.legacyEmbedded && s.cacheW != nil {
+		// Migration: the profile on disk still holds the caches. Put them in list-cache.json durably
+		// first, so no crash between the two writes loses them. The caches written are the ones being
+		// published (p), not the ones on disk: a write that changes a cache too (a feed refresh as the
+		// first write after the upgrade) then costs one write of the file, not one with the old caches
+		// here and another with the new ones at the commit's flush.
+		s.cacheW.Mark(func() ([]byte, error) { return renderListCache(p) })
+		if err := s.cacheW.Flush(); err != nil {
+			return fmt.Errorf("move routing-list feed caches to %s: %w", s.cachePath, err)
+		}
+	}
+	data, err := json.MarshalIndent(stripFeedCaches(p), "", "  ")
 	if err != nil {
 		return err
 	}
-	return atomicfile.Write(s.path, data, 0o600)
+	d := profileDigest(data)
+	if s.hasDigest && d == s.lastDigest {
+		atomicfile.NoteSkip(s.path, len(data))
+		return nil
+	}
+	if err := atomicfile.Write(s.path, data, 0o600); err != nil {
+		return err
+	}
+	s.lastDigest, s.hasDigest = d, true
+	s.legacyEmbedded = false
+	return nil
 }
 
 // publish persists the mutated working copy and, ONLY if the durable write succeeds,
@@ -835,6 +885,10 @@ func (s *Store) persist(p *model.Profile) error {
 // vanishes on reboot is worse than a surfaced error. Callers must hold s.wmu, so the
 // snapshot()..Store() window is atomic with respect to other writers.
 func (s *Store) publish(p *model.Profile) error {
+	// A fastest list's pin, exclusions and Outbound follow its tunnels, which every other write can
+	// change (a group member removed, an exit deleted). Validate refuses the mismatch, and a stored
+	// profile that fails Validate fails every later Apply, so it is restored here for every writer.
+	model.TidyListFastest(p)
 	// A write may not switch something off while live references still point at it, nor aim a new
 	// reference at something already off. The delete paths refuse exactly these references, but the
 	// same break is reachable by ordinary edits that strand nothing and are answered 200 — disabling
@@ -872,10 +926,16 @@ func (s *Store) publish(p *model.Profile) error {
 	// lock-free reader never sees the new profile paired with the old gen. The caller
 	// holds s.wmu, so reading the previous gen and computing gen+1 is race-free.
 	var g uint64
-	if prev := s.cur.Load(); prev != nil {
+	prev := s.cur.Load()
+	if prev != nil {
 		g = prev.gen
 	}
 	s.cur.Store(&published{p: p, gen: g + 1})
+	// After the swap: the writer renders the profile current when it writes. Only when a cache changed:
+	// marked on every publish, each commit's flush rendered the whole file only to skip it.
+	if prev == nil || !sameListCaches(prev.p, p) {
+		s.markListCache()
+	}
 	return nil
 }
 
@@ -951,7 +1011,7 @@ type EndpointDependent struct {
 // GroupDeleteBlockers lists what makes DeleteGroup refuse, in the same shape the endpoint path
 // already uses.
 //
-// DeleteGroup answered with a sentence, so the panel could only show it raw — measured on the demo:
+// DeleteGroup answered with a sentence, so the panel could only show it raw:
 // pointing the default route at a group and pressing Delete produced the toast `group
 // "grp-order-probe" is used by rule "default"; repoint it first`, with nothing to act on. The
 // endpoint path solved this long ago by naming its dependents; groups now answer the same way.
@@ -971,12 +1031,11 @@ func (s *Store) GroupDeleteBlockers(id string) []EndpointDependent {
 			out = append(out, EndpointDependent{Kind: "sole_member_of", ID: g.ID, Name: g.Name})
 		}
 	}
-	// Routing lists and DNS detours refuse too. They were missing from the first cut of this list, and
-	// a live DELETE on the demo answered `group "auto" is used by DNS server "dns_secure_bk" (detour)`
-	// while the blockers came back empty — a list shorter than the refusal promises a delete the store
-	// then rejects, which is the failure this function exists to prevent.
+	// Routing lists and DNS detours refuse too. A list shorter than the refusal (blockers empty while
+	// the DELETE answers `group "auto" is used by DNS server "x" (detour)`) promises a delete the
+	// store then rejects, which is the failure this function exists to prevent.
 	for _, rl := range p.RoutingLists {
-		if rl.Outbound == id || rl.DownloadVia == id {
+		if (rl.Outbound == id && !hasOtherTunnel(rl, id)) || rl.DownloadVia == id {
 			out = append(out, EndpointDependent{Kind: "routing_list", ID: rl.ID, Name: rl.Name})
 		}
 	}
@@ -992,8 +1051,7 @@ func (s *Store) GroupDeleteBlockers(id string) []EndpointDependent {
 
 // EndpointDependents lists everything that would dangle if this endpoint were removed.
 //
-// Deletion used to simply refuse while naming the first blocker, which is a dead end: the operator
-// is told to "repoint it first" without being told what to repoint it to, and with several
+// Refusing while naming only the first blocker is a dead end: the operator is told to "repoint it first" without being told what to repoint it to, and with several
 // dependents they discover them one refusal at a time. Returning the whole set lets the panel offer
 // a replacement and do it in one step.
 func (s *Store) EndpointDependents(id string) []EndpointDependent {
@@ -1005,7 +1063,7 @@ func (s *Store) EndpointDependents(id string) []EndpointDependent {
 		}
 	}
 	for _, rl := range p.RoutingLists {
-		if rl.Outbound == id {
+		if rl.Outbound == id && !hasOtherTunnel(rl, id) {
 			out = append(out, EndpointDependent{Kind: "routing_list", ID: rl.ID, Name: rl.Name})
 		}
 		if rl.DownloadVia == id {
@@ -1028,6 +1086,17 @@ func (s *Store) EndpointDependents(id string) []EndpointDependent {
 		}
 	}
 	return out
+}
+
+// hasOtherTunnel reports whether a list names a tunnel besides id: removing id then moves the list to
+// the next one (model.RepointListCandidates) instead of leaving it without an exit.
+func hasOtherTunnel(rl model.RoutingList, id string) bool {
+	for _, c := range rl.Candidates {
+		if c != id {
+			return true
+		}
+	}
+	return false
 }
 
 // StrandedResolverError refuses a write that would leave an enabled DNS server asking the pushed
@@ -1083,7 +1152,7 @@ func usesVPNResolvers(ds model.DNSServer, id string) bool {
 
 // parkVPNResolver switches off the DNS server tagged tag and every enabled DNS rule that sends names
 // to it, keeping both. The rules have to go with it: an enabled rule aimed at a disabled server fails
-// validation (LOOP-029), and dropping them silently would send the VPN's private names to the default
+// validation, and dropping them silently would send the VPN's private names to the default
 // resolver.
 func parkVPNResolver(dns *model.DNSSettings, tag string) {
 	for i := range dns.Servers {
@@ -1176,6 +1245,15 @@ func (s *Store) DeleteEndpointReplacing(id, replacement string) error {
 // Groups are NOT touched here: their membership rules differ between the two callers (a delete
 // prunes the member, a disable swaps it), and that difference is the caller's to state.
 func repointDependents(p *model.Profile, id, replacement string) {
+	// A DNS detour and a list download are not routing decisions: "block" is a route action there, and
+	// Validate refuses it. They fall back to no detour (direct), as parkDependents leaves them.
+	viaReplacement := replacement
+	if replacement == model.OutboundBlock {
+		viaReplacement = ""
+	}
+	// A fastest list's tunnels first: Outbound follows them, so the loop below only moves a list that
+	// was left with no tunnel at all.
+	model.RepointListCandidates(p, id, replacement)
 	for i := range p.Rules {
 		if p.Rules[i].Outbound == id {
 			p.Rules[i].Outbound = replacement
@@ -1186,7 +1264,7 @@ func repointDependents(p *model.Profile, id, replacement string) {
 			p.RoutingLists[i].Outbound = replacement
 		}
 		if p.RoutingLists[i].DownloadVia == id {
-			p.RoutingLists[i].DownloadVia = replacement
+			p.RoutingLists[i].DownloadVia = viaReplacement
 		}
 	}
 	if p.DNS == nil {
@@ -1194,7 +1272,7 @@ func repointDependents(p *model.Profile, id, replacement string) {
 	}
 	for i := range p.DNS.Servers {
 		if p.DNS.Servers[i].Detour == id {
-			p.DNS.Servers[i].Detour = replacement
+			p.DNS.Servers[i].Detour = viaReplacement
 		}
 	}
 	// A server asking id's pushed resolvers can only move to another connection of the same protocol
@@ -1234,6 +1312,8 @@ func vpnResolverTarget(p *model.Profile, typ, id string) bool {
 // retarget: left enabled on `direct`, those destinations would get real ISP routes, which is a
 // routing decision nobody made.
 func parkDependents(p *model.Profile, id string) {
+	// A list with other tunnels keeps routing by them; only one left with none is parked.
+	model.RepointListCandidates(p, id, "")
 	for i := range p.Rules {
 		if p.Rules[i].Outbound == id {
 			p.Rules[i].Outbound = model.OutboundDirect
@@ -1384,7 +1464,7 @@ func (s *Store) EndpointDisableBlockers(id string) []EndpointDependent {
 
 // EndpointDisableReplacements are the outbounds those blockers may be moved to. Same set a delete
 // offers, minus the two builtins when a failover group holds the endpoint: a group member must be an
-// endpoint or another group, so offering `direct` there would be offering a choice we then refuse.
+// endpoint or another group, so offering `direct` there would be offering a choice the store then refuses.
 func (s *Store) EndpointDisableReplacements(id string) []string {
 	out := s.EndpointReplacements(id)
 	p := s.Profile()
@@ -1543,4 +1623,166 @@ func (s *Store) SetEndpointDisabledDetachingAt(e model.Endpoint, rev Rev) (Saved
 	}
 	saved.Rev = model.EndpointRev(e)
 	return saved, nil
+}
+
+// GroupReplacements are the outbounds a dependent may be moved to when a group is deleted: the
+// builtins, every connection, and every other group that does not hold this one as a member.
+func (s *Store) GroupReplacements(id string) []string {
+	p := s.Profile()
+	out := []string{model.OutboundDirect, model.OutboundBlock}
+	for _, e := range p.Endpoints {
+		out = append(out, e.ID)
+	}
+	for _, g := range p.Groups {
+		if g.ID != id && !groupReplacementLoops(&p, id, g.ID) {
+			out = append(out, g.ID)
+		}
+	}
+	return out
+}
+
+// DeleteGroupReplacing deletes a group together with what points at it, in one published revision,
+// so a delete never ends in "remove every mention first".
+//
+//   - replacement != "": every rule, routing list, list download and DNS detour that used the group
+//     moves onto replacement (another group, a connection, or `direct`), and a group that nested this
+//     one takes replacement as the member instead when that is a connection or a group;
+//   - detach: the same dependents are parked (parkDependents): kept with their addresses, pointed at
+//     `direct` and switched off, until the operator gives them an exit;
+//   - neither: the old refuse-if-referenced behaviour (DeleteGroup).
+func (s *Store) DeleteGroupReplacing(id, replacement string, detach bool) error {
+	if replacement == "" && !detach {
+		return s.DeleteGroup(id)
+	}
+	if replacement == id {
+		return fmt.Errorf("group %q cannot replace itself", id)
+	}
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	p := s.snapshot()
+	if p.GroupByID(id) == nil {
+		return fmt.Errorf("group %q not found", id)
+	}
+	holdsMembers := replacement != "" && (p.EndpointByID(replacement) != nil || p.GroupByID(replacement) != nil)
+	if replacement != "" {
+		if !outboundExists(&p, replacement) {
+			return fmt.Errorf("replacement outbound %q does not exist", replacement)
+		}
+		if groupReplacementLoops(&p, id, replacement) {
+			return fmt.Errorf("group %q is part of a group that holds %q, so it cannot take its place: that would make a loop; choose a connection or another group", replacement, id)
+		}
+	}
+	for _, g := range p.Groups {
+		if g.ID != id && onlyMember(g.Members, id) && !holdsMembers {
+			return fmt.Errorf("group %q has no other member than %q; choose a connection or a group to take its place, or delete group %q first", g.ID, id, g.ID)
+		}
+	}
+	if replacement != "" {
+		repointDependents(&p, id, replacement)
+	} else {
+		parkDependents(&p, id)
+	}
+	kept := p.Groups[:0]
+	for _, g := range p.Groups {
+		if g.ID != id {
+			kept = append(kept, g)
+		}
+	}
+	p.Groups = kept
+	for gi := range p.Groups {
+		members := p.Groups[gi].Members
+		if !containsString(members, id) {
+			continue
+		}
+		if holdsMembers {
+			p.Groups[gi].Members = replaceString(members, id, replacement)
+		} else {
+			p.Groups[gi].Members = removeString(members, id)
+		}
+	}
+	return s.publish(&p)
+}
+
+// RoutingListDNSRules lists the enabled DNS rules that name a routing list as a rule_set, the ones
+// DeleteRoutingList refuses on.
+func (s *Store) RoutingListDNSRules(id string) []EndpointDependent {
+	p := s.Profile()
+	var out []EndpointDependent
+	if p.DNS == nil {
+		return out
+	}
+	for _, r := range p.DNS.Rules {
+		if r.Disabled {
+			continue
+		}
+		if containsString(r.RuleSets, id) {
+			out = append(out, EndpointDependent{Kind: "dns_rule", ID: r.ID, Name: r.ID})
+		}
+	}
+	return out
+}
+
+// DeleteRoutingListDetaching deletes a routing list and takes it out of the DNS rules that name it, as
+// one revision. A rule that matched on nothing but this list is removed with it: left with no matcher
+// it would send every query to its server. A rule with other matchers keeps them.
+func (s *Store) DeleteRoutingListDetaching(id string) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	p := s.snapshot()
+	found := false
+	kept := p.RoutingLists[:0]
+	for _, rl := range p.RoutingLists {
+		if rl.ID == id {
+			found = true
+			continue
+		}
+		kept = append(kept, rl)
+	}
+	if !found {
+		return fmt.Errorf("routing list %q not found", id)
+	}
+	p.RoutingLists = kept
+	if p.DNS != nil {
+		rules := make([]model.DNSRule, 0, len(p.DNS.Rules))
+		for _, r := range p.DNS.Rules {
+			if containsString(r.RuleSets, id) {
+				r.RuleSets = removeString(r.RuleSets, id)
+				if len(r.RuleSets) == 0 && len(r.DomainSuffix) == 0 && len(r.Domain) == 0 && len(r.GeoSite) == 0 {
+					continue
+				}
+			}
+			rules = append(rules, r)
+		}
+		p.DNS.Rules = rules
+	}
+	return s.publish(&p)
+}
+
+// groupReplacementLoops reports whether putting group repl where group id was would close a loop: some
+// group that holds id would then hold repl, and repl holds it (directly or through other groups).
+func groupReplacementLoops(p *model.Profile, id, repl string) bool {
+	if p.GroupByID(repl) == nil {
+		return false
+	}
+	reach := map[string]bool{repl: true}
+	stack := []string{repl}
+	for len(stack) > 0 {
+		g := p.GroupByID(stack[len(stack)-1])
+		stack = stack[:len(stack)-1]
+		if g == nil {
+			continue
+		}
+		for _, m := range g.Members {
+			if m != id && !reach[m] && p.GroupByID(m) != nil {
+				reach[m] = true
+				stack = append(stack, m)
+			}
+		}
+	}
+	for _, g := range p.Groups {
+		if g.ID != id && containsString(g.Members, id) && reach[g.ID] {
+			return true
+		}
+	}
+	return false
 }

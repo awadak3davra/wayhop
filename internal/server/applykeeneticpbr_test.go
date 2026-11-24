@@ -18,7 +18,7 @@ func keeneticPBRTestTools() executionKernelIpsetArtifactV1 {
 		IP6Tool:      id(executionToolIp6tables, "/opt/sbin/ip6tables", "ip6tables v1.4.21", '3'),
 		IPTool:       id(executionToolIP, "/opt/bin/busybox", executionBusyBoxIPVersion, '4'),
 		DnsmasqTool:  id(executionToolDnsmasq, "/opt/sbin/dnsmasq", "Dnsmasq version 2.92", '5'),
-		ShellTool:    id(executionToolShell, "/opt/bin/sh", "BusyBox v1.37.0", '6'),
+		ShellTool:    id(executionToolShell, "/opt/bin/busybox", "BusyBox v1.37.0", '6'),
 	}
 }
 
@@ -30,7 +30,7 @@ func TestKeeneticPBRPreamblePinsEveryToolToItsAuthenticatedPath(t *testing.T) {
 	// The body of render_ipset.go calls these by bare name. Each must resolve to the probed binary
 	// and nothing else, which is the guarantee the argv runner gives the nft plane for free.
 	// iptables and ip6tables wait for the xtables lock: without -w a `-C || -A` that met NDM's own
-	// rebuild read the lock's exit 4 as "absent" and appended a duplicate jump (QA-067).
+	// rebuild read the lock's exit 4 as "absent" and appended a duplicate jump.
 	for _, want := range []string{
 		"ipset() { /opt/sbin/ipset \"$@\"; }",
 		"iptables() { /opt/sbin/iptables -w \"$@\"; }",

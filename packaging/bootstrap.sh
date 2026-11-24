@@ -134,7 +134,9 @@ if [ -n "$FORCE_TAG" ]; then
   case "$FORCE_TAG" in v*) TAG="$FORCE_TAG" ;; *) TAG="v$FORCE_TAG" ;; esac
 elif [ "$PRERELEASE" = 1 ]; then
   info "resolving the newest release (including pre-releases)…"
-  TAG="$(dlo "$API/repos/$REPO/releases" 2>/dev/null | grep '"tag_name"' | head -n1 | sed 's/.*"tag_name"[^"]*"//;s/".*//')"
+  # Only WayHop's own vX.Y.Z tags: the same repository also publishes awg-v* (AmneziaWG module)
+  # releases, and the newest of those is not a WayHop package (JK-07).
+  TAG="$(dlo "$API/repos/$REPO/releases" 2>/dev/null | grep '"tag_name" *: *"v[0-9]' | head -n1 | sed 's/.*"tag_name"[^"]*"//;s/".*//')"
 else
   info "resolving the latest stable release…"
   TAG="$(dlo "$API/repos/$REPO/releases/latest" 2>/dev/null | grep '"tag_name"' | head -n1 | sed 's/.*"tag_name"[^"]*"//;s/".*//')"

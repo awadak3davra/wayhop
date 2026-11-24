@@ -2,7 +2,7 @@ package nativedns
 
 import "testing"
 
-// Representative `uci show` output, modelled on the live test router DNS stack: 3 https-dns-proxy DoH
+// Representative `uci show` output, modelled on the reference OpenWrt router DNS stack: 3 https-dns-proxy DoH
 // instances + dnsmasq noresolv, split-DNS blocks, loopback refs to the proxies, and doh_backup_server
 // plaintext fallbacks. (Synthetic — no live device specifics committed.)
 const fixtureHTTPSDNSProxy = `https-dns-proxy.config=main

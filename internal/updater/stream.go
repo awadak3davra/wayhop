@@ -115,7 +115,7 @@ func extractStreamTo(assetName string, r io.Reader, ra io.ReaderAt, size int64, 
 // verifyDigestSum compares an already-computed "sha256:<hex>" sum against the asset's declared
 // digest. mandatory=true (every executable install — root self-update AND engine binaries) refuses
 // when the asset declares no/!sha256 digest; the non-mandatory mode skips a missing digest and is
-// kept only for the shared primitive — no production executable path passes false after LOOP-010.
+// kept only for the shared primitive — no production executable path passes false.
 func verifyDigestSum(sum, digest string, mandatory bool) error {
 	parts := strings.SplitN(digest, ":", 2)
 	if len(parts) != 2 || parts[0] != "sha256" || parts[1] == "" {
@@ -199,7 +199,7 @@ func enoughFlashFor(avail uint64, known bool, assetSize int64, assetName string,
 // actually goes through, and it returned lastErr while the shipped default list ends with
 // https://mirror.ghproxy.com/ — a host that no longer exists (it resolves from neither the
 // operator's Keenetic nor the dev machine). So every failed install, whatever went wrong, ended
-// with "lookup mirror.ghproxy.com: no such host": measured on the demo installing sing-box v1.13.16,
+// with "lookup mirror.ghproxy.com: no such host":
 // three paths were tried and the row showed the third. The direct download is the one whose failure
 // usually explains the rest, and it was the one dropped.
 func (u *Updater) streamAssetToFile(ctx context.Context, asset Asset, binName, dstPath string, requireDigest bool) error {
@@ -218,7 +218,7 @@ func (u *Updater) streamAsset(ctx context.Context, asset Asset, binName, dstPath
 	var attempts []string
 	note := func(m string, err error) {
 		lastErr = err
-		attempts = append(attempts, downloadPathLabel(m)+": "+err.Error())
+		attempts = append(attempts, downloadPathLabel(m)+": "+scrubErr(err))
 	}
 	for _, m := range u.Mirrors {
 		// For a digest-mandatory (root self-update) download, refuse a plaintext http:// mirror: a

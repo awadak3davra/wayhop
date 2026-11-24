@@ -8,7 +8,7 @@ import (
 // TestLogAnalyzerStripsTerminalColour (L5): the log the panel shows is the log a person can read.
 //
 // sing-box colours its output whether or not a terminal is attached, so the lines the daemon reads
-// carry raw CSI escapes and the analyzer passed them through. Measured on a live Keenetic:
+// carry raw CSI escapes and the analyzer passed them through. Observed on KeeneticOS:
 // "Load sing-box log" rendered its single line as "ESC[33mWARN ESC[0m inbound/tun[tun-in]: enable
 // offload: …" — escape bytes printed as text in a monospace block.
 //

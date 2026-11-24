@@ -91,7 +91,7 @@ func TestValidateRejectsBlankMatcherRule(t *testing.T) {
 // TestValidateRejectsMalformedIPCIDR: a malformed ip_cidr matcher (e.g. "garbage")
 // FATALs sing-box at config-load (netip.ParsePrefix: no '/'), bricking the shared
 // singbox.json on apply. Validate must reject it with a precise error. sing-box
-// accepts BOTH a bare IP and a CIDR (verified on the live router, cycle 72), so
+// accepts BOTH a bare IP and a CIDR (verified on a router), so
 // those stay valid; a blank entry is ignored (handled by ruleHasNoMatcher).
 func TestValidateRejectsMalformedIPCIDR(t *testing.T) {
 	mk := func(cidrs []string) *Profile {

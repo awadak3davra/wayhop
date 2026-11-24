@@ -123,7 +123,7 @@ func TestRouterOwnV6IsNotAClient(t *testing.T) {
 // TestInterceptReadFromAppliedNotSaved: the two halves of this row come from two different states on
 // purpose. What the operator PROMISED (domain lists) is read from the saved profile, because that is
 // the page they are looking at; whether the promise is ENFORCED is read from what was applied,
-// because a setting nobody applied enforces nothing. Measured on a live Keenetic: saved
+// because a setting nobody applied enforces nothing. Observed on KeeneticOS: saved
 // dns.intercept was true, the kernel carried no redirect, and reading both halves from the saved
 // profile reported a clean row over a wide open door.
 //
@@ -171,7 +171,7 @@ func TestInterceptReadFromAppliedNotSaved(t *testing.T) {
 
 // The intercept flag is not the redirect. On KeeneticOS only the kernel plane renders it, and that
 // plane exists in hybrid and fast; off KeeneticOS WayHop renders none and only the firewall's own
-// :53 redirect shuts the door. The flag alone passed this check in every one of those cases (QA-068).
+// :53 redirect shuts the door. The flag alone passed this check in every one of those cases.
 func TestInterceptEnforcedOnlyWhereSomethingInstallsIt(t *testing.T) {
 	on := model.Profile{DNS: &model.DNSSettings{Enabled: true, Intercept: true}}
 	withRedirect := executionKernelArtifactV1{Ipset: &executionKernelIpsetArtifactV1{

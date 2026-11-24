@@ -27,10 +27,9 @@ type Result struct {
 	DownMbps float64 `json:"down_mbps"`
 	UpMbps   float64 `json:"up_mbps"`
 	// LatencyMs is -1 when the latency probe did not complete, following the same convention as
-	// netdiag's LossPct/AvgMs. It used to stay at its zero value, and the panel renders
-	// `latency_ms ?? "?"` — which only substitutes for null/undefined — so a FAILED probe displayed
-	// as "0 ms": not merely wrong but the best possible reading, so a broken measurement looked
-	// like an excellent one.
+	// netdiag's LossPct/AvgMs. Left at its zero value it would mislead: the panel renders
+	// `latency_ms ?? "?"`, which only substitutes for null/undefined, so a FAILED probe would display
+	// as "0 ms", the best possible reading, and a broken measurement would look like an excellent one.
 	LatencyMs int   `json:"latency_ms"`
 	DownBytes int64 `json:"down_bytes"`
 	// UpErr is why the upload was not measured, "" when it was or was not tried. The upload is best

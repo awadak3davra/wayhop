@@ -10,9 +10,9 @@ import (
 //
 // The aggregation filtered destinations only. Every conntrack row with a public destination became a
 // "device" keyed by its source, and rows whose source is the far side of a tunnel came in with the
-// rest. Measured on a live Keenetic: 30 listed, 23 on the LAN (192.168.88.0/24, the br0
-// subnet), and seven from tunnel networks — 10.0.1.x, 10.50.1.x, 10.50.2.x, 10.50.3.x,
-// 10.50.4.x, 172.31.1.x, 172.31.2.x. Nearly a quarter of a list someone reads to find which of
+// rest. Observed on KeeneticOS: 30 listed, 23 on the LAN (192.168.88.0/24, the br0
+// subnet), and seven from several 10.x and 172.16-31.x tunnel
+// networks. Nearly a quarter of a list someone reads to find which of
 // THEIR devices is leaking.
 // The host octets are deliberately .20/.30/.2 and never .1x: the publish scrub rewrites the literal
 // "192.168.50.1" to "192.168.50.1" (it hides the operator's own LAN), and that is a SUBSTRING rule —

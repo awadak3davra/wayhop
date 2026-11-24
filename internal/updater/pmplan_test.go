@@ -134,7 +134,7 @@ func TestPlanPM_Rollback_RefusesAVersionTheFeedDoesNotHave(t *testing.T) {
 
 // A build that is installed but that no repository carries any more cannot be rolled back to: there
 // is nothing to install. apk says so by leaving it out of the available listing entirely — this is
-// the test router's own situation, where 1.12.17-r1 ran for weeks after the feed had moved to 1.13.
+// the reference router's own situation, where 1.12.17-r1 ran for weeks after the feed had moved to 1.13.
 func TestPlanPM_Rollback_RefusesABuildTheFeedNoLongerCarries(t *testing.T) {
 	u, e, r, _ := apkBox(t, map[string]string{
 		"apk list --available sing-box": "",
@@ -210,10 +210,9 @@ func TestPlanPM_Remove_And_Upgrade_Argv(t *testing.T) {
 	if !rm.Runnable() || !sameArgv(rm.Argv, []string{"apk", "del", "sing-box"}) {
 		t.Fatalf("remove plan = %+v", rm)
 	}
-	// apk's verb for moving an installed package to the feed's build is `upgrade`. It used to be
-	// planned — and executed — as `apk add sing-box`, which apk answers with a cheerful
-	// "OK: 76.6 MiB in 189 packages" and an unchanged installed version. This assertion is the one
-	// that was wrong for as long as the Update button was.
+	// apk's verb for moving an installed package to the feed's build is `upgrade`. `apk add sing-box`
+	// is not: apk answers it with a cheerful "OK: 76.6 MiB in 189 packages" and an unchanged
+	// installed version.
 	up := u.PlanPM(context.Background(), e, PlanUpgrade, "")
 	if !up.Runnable() || !sameArgv(up.Argv, []string{"apk", "upgrade", "sing-box"}) {
 		t.Fatalf("upgrade plan = %+v", up)
@@ -275,7 +274,7 @@ func TestPlanPM_NoPackageManager_IsBlockedNotCrashing(t *testing.T) {
 }
 
 // The install branch names the package from the engine ID, because with nothing on disk there is no
-// owner to ask. That guess is wrong for most of this panel's engines: measured against the test router's
+// owner to ask. That guess is wrong for most of this panel's engines: measured against the reference router's
 // own feed, only sing-box and dnscrypt-proxy exist as packages — mihomo, xray, hysteria and
 // amneziawg-go do not. A plan built on the guess reads as runnable, the operator confirms it, and apk
 // fails on a package that was never there.
@@ -312,10 +311,9 @@ func TestPlanPM_Install_ProceedsWhenTheFeedHasIt(t *testing.T) {
 }
 
 // The Keenetic's real answers. `sing-box-go` declares `Provides: sing-box`, so `opkg list sing-box`
-// is empty while the name resolves and `opkg install sing-box` works — measured with
-// `opkg install --noaction`, which reported the providing package as already installed. Refusing on
-// the empty list was a regression introduced by taking apk's behaviour, where an empty list really
-// does mean absent, and applying it to both managers.
+// is empty while the name resolves and `opkg install sing-box` works (`opkg install --noaction`
+// reports the providing package as already installed). Refusing on the empty list would apply apk's
+// behaviour, where an empty list really does mean absent, to opkg.
 func TestPlanPM_Install_Opkg_ResolvesAVirtualName(t *testing.T) {
 	u, _, _, _ := newBox(t, pm.Opkg, map[string]string{
 		"opkg list sing-box":         "",
@@ -348,7 +346,7 @@ func TestPlanPM_Install_Opkg_StillRefusesWhenNothingProvidesIt(t *testing.T) {
 }
 
 // The plan must carry what the command WOULD do, not just the command. Verbatim
-// `apk del --simulate sing-box` from the test router: the operator reads one package and two go.
+// `apk del --simulate sing-box` from the reference OpenWrt router: the operator reads one package and two go.
 //
 // Without this the earlier tests all still pass — the scripted runner has no answer for the dry run,
 // Simulate fails, and the failure is deliberately non-blocking — so the whole preview path would sit
@@ -425,9 +423,8 @@ func TestPlanPM_APassingCheckDoesNotCarryItsFailureText(t *testing.T) {
 	}
 }
 
-// The exception, and the reason the fix above cannot simply drop every passing note: one check passes
-// AND has something the operator needs. Measured read-only on a Keenetic, today:
-// `opkg list sing-box` is empty, `opkg whatprovides sing-box` answers `sing-box-go`, and
+// The exception, and the reason the rule above cannot simply drop every passing note: one check passes
+// AND has something the operator needs. On a Keenetic: `opkg list sing-box` is empty, `opkg whatprovides sing-box` answers `sing-box-go`, and
 // /opt/bin/sing-box is owned by `sing-box-go - 1.13.3-2`. So the plan asks the operator to confirm
 // `opkg install sing-box-go` for a name they never typed, and the sentence explaining the
 // substitution is the plan's own. This test exists to fail if that sentence is ever swept up by a

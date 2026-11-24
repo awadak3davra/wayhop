@@ -7,7 +7,7 @@ import (
 
 func TestDiskVerdict(t *testing.T) {
 	// 13 MiB is the size of the real arm64 binary, so `needed` works out at ~15 MiB: the swap stages
-	// the new one beside the old. The test router's 12.6 MB free is the case this rewrite exists for —
+	// the new one beside the old. A small router's 12.6 MB free is the case this rewrite exists for —
 	// Diagnostics called it "enough free space" while the Components page, which knows what an install
 	// costs, called the same filesystem "Little room on internal flash".
 	const selfSize = 13 << 20
@@ -26,7 +26,7 @@ func TestDiskVerdict(t *testing.T) {
 		{1 << 20, true, selfSize, "fail", false},   // 1 MiB — critical
 		{2 << 20, true, selfSize, "fail", false},   // 2 MiB — critical
 		{5 << 20, true, selfSize, "warn", false},   // 5 MiB — cannot swap
-		{12 << 20, true, selfSize, "warn", false},  // the test router: was "pass" under the flat 10 MiB rule
+		{12 << 20, true, selfSize, "warn", false},  // a small OpenWrt router: was "pass" under the flat 10 MiB rule
 		{15 << 20, true, selfSize, "warn", false},  // 13 + 10% + 1 = 15.3 MiB needed, so 15 is still short
 		{16 << 20, true, selfSize, "pass", true},   // clear of the swap need, under the install floor
 		{31 << 20, true, selfSize, "pass", true},   // still under it

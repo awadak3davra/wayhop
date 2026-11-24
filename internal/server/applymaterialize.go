@@ -47,8 +47,8 @@ func (e *materializeError) Error() string { return e.Stage + ": " + e.Detail }
 
 // withoutKernelCarriedFeeds drops the fetched IP feed of every list whose zone the KeeneticOS ipset
 // plane builds. Those destinations are marked and policy-routed before they reach wrtun0, so the
-// compatibility core's copy is never consulted - and on the live router it was 45.6k prefixes, about
-// 1.4 MB of config and parse memory (QA-066 review). A list without its own unscoped zone keeps its
+// compatibility core's copy is never consulted - and on a router it was 45.6k prefixes, about
+// 1.4 MB of config and parse memory. A list without its own unscoped zone keeps its
 // feed: then the core is what routes it. Names stay too: sniffing backs up clients that bypass the
 // router's resolver.
 func withoutKernelCarriedFeeds(lists []model.RoutingList, plan *pbr.Plan) []model.RoutingList {
@@ -114,7 +114,7 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 			// engine-plugin decisions. A generic baseline has no native plan, yet its engine plugins ran
 			// AmneziaWG connections on the very device names the native writer gives them
 			// (util.AWGIface): the router applied while its own AmneziaWG was missing, now installed
-			// (QA-043: or while one ByeDPI connection kept the native plan from compiling). Checked
+			// (or while one ByeDPI connection kept the native plan from compiling). Checked
 			// here, on a plan that compiled, rather than fed to the planner: there it would refuse even
 			// when another connection fails the native plan anyway, and that Apply goes to the generic
 			// path again, where the plugin simply keeps running.
@@ -335,6 +335,12 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 		}
 		opts.CoreVersion = executionCoreVersion(host.Host)
 		opts.NDMPolicies = in.ndmPolicies
+		if gotPlatform == platform.OpenWrt && (mode == "hybrid" || mode == "fast") && opts.TunEnabled {
+			// The kill-switch guard passes traffic by the TUN's device name, so the name is stated;
+			// and a kill switch over names has the core carry IPv6 too.
+			opts.TunName = generator.CoreTunName
+			opts.TunV6 = kernelPlan != nil && kernelPlan.GuardNames
+		}
 		result, generateErr := in.generate(&profile, opts)
 		if generateErr != nil {
 			return executionMaterializationV1{}, nil, newMaterializeError("core", "the sing-box config could not be generated: "+generateErr.Error(), "")
@@ -345,6 +351,11 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 		coreConfig, err = json.MarshalIndent(result.Config, "", "  ")
 		if err != nil {
 			return executionMaterializationV1{}, nil, newMaterializeError("core", "the sing-box config could not be encoded: "+err.Error(), "")
+		}
+		if kernelPlan != nil && gotPlatform == platform.OpenWrt {
+			// What the guard needs to know of the core, read from the config as generated (an
+			// operator's override included), and kept with the plan it was generated for.
+			kernelPlan.CoreTun, kernelPlan.CoreTunV6, _ = generator.TunFacts(result.Config)
 		}
 		plugins, err = captureExecutionPlugins(result.Plugins, expectedPlugins, executionExternalInterfaces(bindings))
 		if err != nil {
@@ -406,7 +417,35 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 				"the WAN uplink interface could not be determined, so the policy plane cannot be rendered", "")
 		}
 		ipsetOptions := keeneticPBROptionsFor(host.KernelWANIface, &in.desired.Profile)
+		ipsetOptions.DynamicDomainSets = mode == "fast"
+		ipsetOptions.FastDNSEnforce = mode == "fast" && keeneticFastDNSEnabled(desired.Config, kernelPlan)
 		ipsetOptions.MasqDevices = keeneticUserspaceDevices(nativeMaterialization)
+		ipsetOptions.LANIfaces = host.KernelLANIfaces
+		if err := keeneticFastEnforceRefusal(ipsetOptions); err != nil {
+			return executionMaterializationV1{}, nil, err
+		}
+		ipsetOptions.BackstopPref = pbr.BackstopPrefFromRules(host.KernelRules, exactKernelOptions())
+		ipsetOptions.FillTool, ipsetOptions.BootHoldLift = ksBootFillTool(), ksBootHoldLift(in.desired.Config)
+		if port := servedDNSPort(in.desired.Config, in.desired.Profile); port > 0 {
+			ipsetOptions.KillSwitchDNS = fmt.Sprintf("127.0.0.1#%d", port)
+		}
+		if err := keeneticKillSwitchRefusal(kernelPlan, ipsetOptions, in.desired.Config); err != nil {
+			return executionMaterializationV1{}, nil, err
+		}
+		// Overlap hand-off: a domain list's own names on an address a stronger list holds are decided
+		// by sing-box. Only with a core to hand off to; without one the stronger list routes them.
+		// Off unless the operator opts in (config experimental_handoff): on KeeneticOS the hand-off's
+		// way back ("default dev lo" + OUTPUT re-mark) lost every packet that was not one of
+		// the domain list's own names, which took youtubei.googleapis.com and Gemini down with it.
+		if h := kernelPlan.Handoff(); in.desired.Config.ExperimentalHandoff && h.Active() && coreAction == ExecutionEnsurePresent && len(coreConfig) != 0 && len(ipsetOptions.LANIfaces) != 0 {
+			injected, injectErr := injectHandoffCore(coreConfig, h, executionCoreVersion(host.Host))
+			if injectErr != nil {
+				warnings = append(warnings, "overlapping lists: the sing-box hand-off could not be added ("+injectErr.Error()+"); the stronger list carries the shared addresses")
+			} else {
+				coreConfig = injected
+				ipsetOptions.HandoffIface = pbr.HandoffIfaceDefault
+			}
+		}
 		ipsetArtifact, err := buildKeeneticKernelIpsetArtifact(
 			kernelPlan, exactKernelOptions(), ipsetOptions,
 			executionKernelIpsetArtifactV1{
@@ -430,6 +469,7 @@ func materialize(in materializeInput) (executionMaterializationV1, []string, err
 		kernelArtifact.IP = append([]string(nil), kernelPlan.RenderIP(pbr.Options{})...)
 		kernelArtifact.Offload = []byte(kernelPlan.RenderOffload())
 		kernelArtifact.Teardown = append([]string(nil), kernelPlan.RenderTeardown(pbr.Options{})...)
+		kernelArtifact.Renderer = kernelRendererID()
 	}
 	if kernelAction != ExecutionEnsurePresent {
 		// An absent plane carries no program; only the retire list below may name commands.
@@ -510,7 +550,8 @@ func bindKernelRetire(target *executionKernelArtifactV1, previous *executionMate
 	for _, command := range target.Teardown {
 		covered[command] = true
 	}
-	for _, command := range previous.Kernel.Teardown {
+	// An older build's stored plane also gets this build's teardown of it.
+	for _, command := range kernelTeardownOf(previous.Kernel) {
 		if !covered[command] {
 			target.Retire = append(target.Retire, command)
 		}

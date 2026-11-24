@@ -32,7 +32,7 @@ const (
 
 func reasons(st OffloadState) string { return strings.Join(st.Reasons, " | ") }
 
-// The test router contradiction, as one fixture. /etc/config/firewall said offload was off while the
+// The reference OpenWrt router contradiction, as one fixture. /etc/config/firewall said offload was off while the
 // same router had 1 of 2 sampled connections offloaded. The old healthcheck read only the config and
 // announced "flow offload is off … the hardware fast path is unused"; observed flows outrank intent,
 // so the verdict has to follow the flows and the config becomes the thing that needs explaining.

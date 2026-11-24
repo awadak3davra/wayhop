@@ -7,7 +7,7 @@ import (
 
 // A chat sending wrong codes while a flood from fresh chats keeps the memory at its cap must still hit
 // the limit. With equal timestamps the eviction picked whichever entry the map yielded first, which
-// could be the sender itself, resetting its count (QA-057). Repeated, because map order is random.
+// could be the sender itself, resetting its count. Repeated, because map order is random.
 func TestWrongCodeLimitSurvivesEvictionAtTheCap(t *testing.T) {
 	for round := 0; round < 200; round++ {
 		g := NewGate()

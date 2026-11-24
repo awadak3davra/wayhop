@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// The fixture is the awg0 interface as it actually exists on the test router (OpenWrt 25.12.2,
+// The fixture is the awg0 interface as it actually exists on the reference OpenWrt router (OpenWrt 25.12.2,
 // luci-proto-amneziawg), keys replaced. If the renderer cannot reproduce the shape of a tunnel the
 // router is already running, it cannot be trusted to create one.
 func liveShapedIface() AWGInterface {
@@ -128,7 +128,7 @@ func TestRenderUCI_QuotesHostileValues(t *testing.T) {
 
 // shellUnquote reverses one POSIX single-quoted word: the text is literal between quotes, and a
 // quote itself arrives as the four characters '\” — close, escaped quote, reopen. Anything else at
-// the top level means the value was not a single quoted word, which is the failure being hunted.
+// the top level means the value was not a single quoted word, which is the failure being checked for.
 func shellUnquote(t *testing.T, s string) string {
 	t.Helper()
 	var b strings.Builder
@@ -196,7 +196,7 @@ func TestRenderUCI_PlanDoesNotApplyItself(t *testing.T) {
 
 // The conditional that the router taught us, and that nothing was checking. RenderUCIFrom clears a
 // list option before rebuilding it, because add_list appends — but `uci -q delete` on an option that
-// is not there exits 1, and a batch aborts. The first real write to the test router died seven commands
+// is not there exits 1, and a batch aborts. The first real write to the reference OpenWrt router died seven commands
 // in on exactly that and the applier reverted a half-written interface.
 //
 // Both directions matter. Emitting the delete unconditionally breaks every FIRST write; omitting it

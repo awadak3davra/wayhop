@@ -22,12 +22,12 @@ import (
 // protected path), matching the app's stage-then-Apply model and avoiding a second apply
 // path. Returns per-list cache sizes + any per-feed errors so the UI can report
 // "refreshed N, M failed", and under refused, by list ID, the entries a feed that did load carried
-// and no list may (QA-111): those are named, not counted as failures.
+// and no list may: those are named, not counted as failures.
 //
 // A body naming one list ({"id": "..."}) refreshes only that one. Adding a preset fetches its feed so
 // it does not arrive empty; with no id that meant refetching every feed (antifilter, refilter, ...)
 // while Apply stayed blocked on the new list, and folding the other feeds' failures into the answer
-// about this one (QA-032). No body, or an empty id, still refreshes everything.
+// about this one. No body, or an empty id, still refreshes everything.
 func (s *Server) handleRoutingRefresh(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
@@ -86,7 +86,7 @@ func (s *Server) handleRoutingRefresh(w http.ResponseWriter, r *http.Request) {
 //
 // Entries no list may carry (cidrfeed.Screen: the default route, two /1 halves, anything shorter
 // than an IPv4 /4 or an IPv6 /8) are refused here, the one place a feed's content enters the
-// profile (QA-111). The rest of the feed is returned as usual, with a *feedRefusal error that counts
+// profile. The rest of the feed is returned as usual, with a *feedRefusal error that counts
 // and names what was left out; a feed with nothing else is a zero-entry result and keeps last-good.
 func (s *Server) fetchOne(ctx context.Context, rl model.RoutingList) (cidrs []string, changed bool, err error) {
 	if rl.CIDRSource == "" {

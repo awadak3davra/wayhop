@@ -420,7 +420,7 @@ func Evaluate(caps Capabilities, rt RuntimeFacts) CapabilitySet {
 				proto+" needs sing-box 1."+strconv.Itoa(min)+" or newer",
 				"sing-box "+rt.SingboxVersion,
 				// The package feeds trail: OpenWrt 25.12 ships 1.13, and the Components page will not
-				// replace a binary the package manager owns, so say how to get past that too (QA-024).
+				// replace a binary the package manager owns, so say how to get past that too.
 				"Update sing-box to 1."+strconv.Itoa(min)+" or newer on the Components page. If the package manager owns it and its feed is older (OpenWrt 25.12 ships 1.13), remove the package there and install the release build.", BlocksFeature))
 			continue
 		}

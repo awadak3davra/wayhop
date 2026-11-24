@@ -12,7 +12,7 @@ import (
 // Components page and the diagnostics page both ask what version is available, and in demo that
 // reached the live api.github.com from whatever machine happened to be running the panel.
 //
-// That made the verification suite depend on a third party. Two of three full runs on 2026-08-19
+// That made the verification suite depend on a third party. Two of three full runs
 // failed with `502 /api/updater/sing-box/fit` — once on the diagnostics page, once on Components —
 // while nothing in the panel was wrong: GitHub had simply not answered inside the 20s budget. A
 // gate that fails for reasons outside the code under test teaches its operator to ignore red, which

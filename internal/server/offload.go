@@ -1,6 +1,7 @@
 package server
 
 import (
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -47,6 +48,40 @@ func probeBridges() []string {
 	return out
 }
 
+// linkFact is what forwardIfaces needs to know of one network interface.
+type linkFact struct {
+	name                 string
+	up, loopback, member bool // member: a port of a bridge (its traffic arrives on the bridge)
+}
+
+// forwardIfaces names the interfaces a forwarded packet can arrive on: every interface that is up,
+// not the loopback (the router's own traffic, `iif lo`) and not a bridge port (a port's traffic
+// arrives with the bridge as its input interface). Pure, so it is tested without the host.
+func forwardIfaces(links []linkFact) []string {
+	var out []string
+	for _, l := range links {
+		if l.up && !l.loopback && !l.member && l.name != "" {
+			out = append(out, l.name)
+		}
+	}
+	return out
+}
+
+// probeForwardIfaces reads the router's interfaces for forwardIfaces. Empty off-Linux or on error.
+func probeForwardIfaces() []string {
+	ifs, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	links := make([]linkFact, 0, len(ifs))
+	for _, i := range ifs {
+		_, portErr := os.Stat("/sys/class/net/" + i.Name + "/brport")
+		links = append(links, linkFact{name: i.Name, up: i.Flags&net.FlagUp != 0,
+			loopback: i.Flags&net.FlagLoopback != 0, member: portErr == nil})
+	}
+	return forwardIfaces(links)
+}
+
 // parseBridgeLinks extracts interface names from `ip -o link show type bridge` output. Pure, so it is
 // unit-tested without the host. Each line begins "<idx>: <name>: <flags> ..." (a name may carry an
 // "@parent" suffix for a sub-interface — stripped, though bridges themselves never have one).
@@ -77,7 +112,7 @@ func parseDefaultRouteDev(out string) string {
 		// Only a default route answers. BusyBox ip (KeeneticOS's /opt/sbin/ip) ignores the `default`
 		// selector without -4 and prints the whole main table; the first line with a `dev` was the
 		// default only while one existed, and with the WAN down a tunnel's host route would have been
-		// taken for it (QA-095).
+		// taken for it.
 		if len(fields) == 0 || fields[0] != "default" {
 			continue
 		}

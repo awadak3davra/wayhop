@@ -98,11 +98,13 @@ func (s *Server) listsInForceCheck(ctx context.Context) healthRow {
 	cfg := s.config()
 	mode := s.routingMode(cfg)
 	zones := map[string]bool{}
+	corePin := false
 	if base := s.appliedBaseline(); base != nil {
 		if plan := base.Materialization.kernelPlan(); plan != nil {
 			for _, z := range plan.Zones {
 				zones[z.Name] = true
 			}
+			corePin = plan.CorePin
 		}
 	}
 	coreVisible, coreConfigKnown := coreVisibleLists(cfg.SingBox.Config)
@@ -119,7 +121,9 @@ func (s *Server) listsInForceCheck(ctx context.Context) healthRow {
 	// Only a TUN puts transparently-routed LAN traffic in front of the core. "mixed" is a local proxy
 	// by definition and "fast" deliberately keeps the kernel fast-path, so in both the core sees only
 	// what is aimed at its own port.
-	coreSeesLAN := mode == "tun" || mode == "hybrid"
+	// The fast DNS plane keeps the TUN for the lists only the core carries, and wr_corepin lets their
+	// destinations through to it.
+	coreSeesLAN := mode == "tun" || mode == "hybrid" || mode == "fast" && corePin
 
 	in, out, unknown := listsInForce(profile.RoutingLists, zones, coreVisible, coreConfigKnown, coreSeesLAN)
 	switch {

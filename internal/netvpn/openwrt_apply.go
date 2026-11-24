@@ -9,7 +9,7 @@ import (
 
 // openwrt_apply.go runs a Plan against a router, and refuses to more often than it agrees to.
 //
-// The sequence rests on a property of uci that was MEASURED on the test router rather than assumed,
+// The sequence rests on a property of uci that was MEASURED on the reference OpenWrt router rather than assumed,
 // because the whole safety argument depends on it: `uci set` writes to a staging buffer, `uci show`
 // reflects that buffer, /etc/config is untouched until `uci commit`, and `uci revert` discards the
 // buffer completely — verified by staging a probe section, seeing it in `uci show`, confirming

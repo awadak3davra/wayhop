@@ -119,6 +119,13 @@ CLEANED=0
 if command -v nft >/dev/null 2>&1 && nft list table inet wayhop_pbr >/dev/null 2>&1; then
   if nft delete table inet wayhop_pbr 2>/dev/null; then ok "removed nft table inet wayhop_pbr"; CLEANED=1; fi
 fi
+# The kill switch guard: its own table, and the copy the router loads at boot (S18, before the
+# firewall). After the routing table, so a kill-switched list is held until its marks are gone too.
+# Left behind, the guard would go on dropping those lists' addresses with no WayHop to route them.
+if command -v nft >/dev/null 2>&1 && nft list table inet wayhop_ks >/dev/null 2>&1; then
+  if nft delete table inet wayhop_ks 2>/dev/null; then ok "removed nft table inet wayhop_ks (kill switch guard)"; CLEANED=1; fi
+fi
+rm -f /etc/rc.d/S18wayhop-guard "$INITD/wayhop-guard" "$ETC/ks-guard.nft" "$ETC/ks-learned.nft"
 if command -v ip >/dev/null 2>&1; then
   # WayHop marks its traffic with fwmark <N>/0x00ff0000 — one mark PER egress, so a multi-tunnel
   # failover setup has several (0x10000, 0x20000, 0x30000, …), each routed via its OWN table. The
