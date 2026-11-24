@@ -159,6 +159,8 @@ func fastSyncServer(t *testing.T) (*Server, string, *int) {
 		fastDNSConfGlob, fastDNSRestart, fastDNSAlive, fastWarmResolve, fastDNSVersion = oldGlob, oldRestart, oldAlive, oldWarm, oldVer
 	})
 	s := &Server{cfg: &config.Config{RoutingMode: "fast"}, platformOf: func() platform.Platform { return platform.OpenWrt }}
+	// Runs before the hooks are restored (cleanups run last-in first-out).
+	t.Cleanup(s.stopBackground)
 	return s, confDir, &restarts
 }
 
@@ -389,6 +391,7 @@ func TestSyncFastDNSKeepModeRestoresLastSnippet(t *testing.T) {
 	if err := s.syncFastDNS(context.Background(), plan); err != nil {
 		t.Fatal(err)
 	}
+	s.stopBackground() // join the warm-up before the test changes what it reads
 	good, _ := os.ReadFile(filepath.Join(confDir, fastDNSSnippetName))
 	// New content arrives (a remote list), and dnsmasq does not answer with it.
 	plan.Zones = append(plan.Zones, pbr.Zone{Name: "list_srs", RemoteList: "srs"})
@@ -508,9 +511,11 @@ func TestFastDNSWatchBacksOut(t *testing.T) {
 	if err := s.syncFastDNS(context.Background(), plan); err != nil {
 		t.Fatal(err)
 	}
+	s.stopBackground() // join the warm-up before the test changes what it reads
 	snippet := filepath.Join(confDir, fastDNSSnippetName)
 	oldUp, oldAlive, oldFor, oldEvery := fastDNSUpstream, fastDNSAlive, fastDNSWatchFor, fastDNSWatchEvery
 	t.Cleanup(func() {
+		s.stopBackground()
 		fastDNSUpstream, fastDNSAlive, fastDNSWatchFor, fastDNSWatchEvery = oldUp, oldAlive, oldFor, oldEvery
 	})
 	fastDNSWatchFor, fastDNSWatchEvery = 600*time.Millisecond, 30*time.Millisecond
@@ -528,6 +533,7 @@ func TestFastDNSWatchBacksOut(t *testing.T) {
 	if backedOut() {
 		t.Fatal("an upstream outage backed the names out")
 	}
+	s.stopBackground()
 	fastDNSUpstream = func(context.Context) error { return nil }
 
 	// dnsmasq does not answer, but it did not before the install either (a boot): not watched.
@@ -566,6 +572,7 @@ func TestFastDNSWatchBacksOut(t *testing.T) {
 		t.Error("the snippet stayed after the back-out")
 	}
 	// dnsmasq recovers and the retry time has come: the loop restores the snippet.
+	s.stopBackground()
 	dnsmasqDown = false
 	s.fastDNS.mu.Lock()
 	s.fastDNS.retryAt = time.Now().Add(-time.Second)
@@ -585,7 +592,7 @@ func TestFastDNSBackoutBookkeeping(t *testing.T) {
 	s, _, _ := fastSyncServer(t)
 	plan, _, _ := pbr.Compile(fastReviewProfile(), pbr.Options{FastDNS: true})
 	oldAlive := fastDNSAlive
-	t.Cleanup(func() { fastDNSAlive = oldAlive })
+	t.Cleanup(func() { s.stopBackground(); fastDNSAlive = oldAlive })
 	// No snippet written yet: an armed watch does not start.
 	fastDNSAlive = func(context.Context, bool) error { return errors.New("no canary") }
 	s.startFastDNSWatch(plan, true)
@@ -621,8 +628,12 @@ func TestFastDNSWatchHunt1122(t *testing.T) {
 	if err := s.syncFastDNS(context.Background(), plan); err != nil {
 		t.Fatal(err)
 	}
+	s.stopBackground() // join the warm-up before the test changes what it reads
 	oldAlive, oldFor, oldEvery := fastDNSAlive, fastDNSWatchFor, fastDNSWatchEvery
-	t.Cleanup(func() { fastDNSAlive, fastDNSWatchFor, fastDNSWatchEvery = oldAlive, oldFor, oldEvery })
+	t.Cleanup(func() {
+		s.stopBackground()
+		fastDNSAlive, fastDNSWatchFor, fastDNSWatchEvery = oldAlive, oldFor, oldEvery
+	})
 	fastDNSWatchFor, fastDNSWatchEvery = 600*time.Millisecond, 30*time.Millisecond
 	backedOut := func() bool {
 		s.fastDNS.mu.Lock()
@@ -654,6 +665,7 @@ func TestFastDNSWatchHunt1122(t *testing.T) {
 	for time.Now().Before(deadline) && !backedOut() {
 		time.Sleep(20 * time.Millisecond)
 	}
+	s.stopBackground()
 	s.fastDNS.mu.Lock()
 	owed := s.fastDNS.restartOwed
 	s.fastDNS.mu.Unlock()
@@ -757,6 +769,7 @@ func TestFastRemoteLiveContent(t *testing.T) {
 	if err := s.syncFastDNS(context.Background(), plan); err != nil {
 		t.Fatal(err)
 	}
+	s.stopBackground() // join the warm-up before the test changes what it reads
 	_, _, key := s.planRemote(plan)
 	s.fastDNS.elemKey, s.fastDNS.pinReady = key, true
 	var programs []string
@@ -767,6 +780,7 @@ func TestFastRemoteLiveContent(t *testing.T) {
 	moved.CIDRs = []string{"203.0.113.0/24"}
 	s.fastDNS.remote["a"] = entry(moved)
 	s.fastRemoteReload(context.Background(), plan)
+	s.stopBackground()
 	if len(programs) != 1 || !strings.Contains(programs[0], "203.0.113.0/24") || strings.Contains(programs[0], "flush set inet wayhop_dns") {
 		t.Fatalf("prefix-only change: %q", programs)
 	}
@@ -784,6 +798,7 @@ func TestFastRemoteLiveContent(t *testing.T) {
 		return nil
 	}
 	s.fastRemoteReload(context.Background(), plan)
+	s.stopBackground()
 	if len(programs) != 0 {
 		t.Fatalf("the kernel moved although the names were refused: %q", programs)
 	}
@@ -791,6 +806,7 @@ func TestFastRemoteLiveContent(t *testing.T) {
 	fastDNSAlive = func(context.Context, bool) error { return nil }
 	s.fastDNS.retryAt = time.Time{}
 	s.fastRemoteReload(context.Background(), plan)
+	s.stopBackground()
 	if len(programs) != 1 || !strings.Contains(programs[0], "flush set inet wayhop_dns dlist_list_b_4") || strings.Contains(programs[0], "dlist_list_a_4") {
 		t.Fatalf("names change of b: %q", programs)
 	}
@@ -863,6 +879,7 @@ func TestFastRemoteReloadMinimal(t *testing.T) {
 	if err := s.syncFastDNS(context.Background(), plan); err != nil {
 		t.Fatal(err)
 	}
+	s.stopBackground() // join the warm-up before the test changes what it reads
 	_, _, key := s.planRemote(plan)
 	s.fastDNS.elemKey, s.fastDNS.pinReady = key, true
 	var programs []string
@@ -874,6 +891,7 @@ func TestFastRemoteReloadMinimal(t *testing.T) {
 	grown.CIDRs = []string{"198.51.100.0/24", "192.0.2.0/24"}
 	s.fastDNS.remote["a"] = entry(grown)
 	s.fastRemoteReload(context.Background(), plan)
+	s.stopBackground()
 	if len(programs) != 1 {
 		t.Fatalf("programs %q", programs)
 	}

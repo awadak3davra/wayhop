@@ -128,6 +128,8 @@ type Server struct {
 	// fastDNS is the fast DNS plane's runtime state (fastdns.go): the remote rule-sets decompiled into
 	// RAM and the dnsmasq snippet last written.
 	fastDNS fastDNSRuntime
+	// bg joins the goroutines started and not waited for (background.go).
+	bg background
 	// ksGuardTx is held over a load of the nft guard with its replay of the learned addresses, and
 	// over a learn pass's change of them, so neither can fall between the other's two halves.
 	ksGuardTx sync.Mutex

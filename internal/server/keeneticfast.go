@@ -138,14 +138,14 @@ func (s *Server) keeneticFastReload(ctx context.Context, run keeneticToolRun, ta
 // startKeeneticWarmUp runs one warm-up at a time: a new one cancels the one running, and
 // leaving fast mode cancels it too.
 func (s *Server) startKeeneticWarmUp(plan *pbr.Plan) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(s.bgContext())
 	s.fastDNS.mu.Lock()
 	if s.fastDNS.keenetic.warmCancel != nil {
 		s.fastDNS.keenetic.warmCancel()
 	}
 	s.fastDNS.keenetic.warmCancel = cancel
 	s.fastDNS.mu.Unlock()
-	go s.keeneticFastWarmUp(ctx, plan)
+	s.goBackground(func() { s.keeneticFastWarmUp(ctx, plan) })
 }
 
 // keeneticFastInstalled starts the back-out bookkeeping afresh for an install and the watch of it, when
@@ -190,8 +190,9 @@ func (s *Server) keeneticFastLeft() {
 // missed canaries in a row (pid, and the policy file's own answer on 127.0.0.1:53; an upstream outage is not dnsmasq
 // stalling) back the policy out. A newer install's generation ends it.
 func (s *Server) keeneticFastWatch(gen int) {
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), fastDNSWatchFor+30*time.Second)
+	parent := s.bgContext()
+	s.goBackground(func() {
+		ctx, cancel := context.WithTimeout(parent, fastDNSWatchFor+30*time.Second)
 		defer cancel()
 		deadline := time.Now().Add(fastDNSWatchFor)
 		fails := 0
@@ -218,7 +219,7 @@ func (s *Server) keeneticFastWatch(gen int) {
 			s.fastDNS.backoff, s.fastDNS.backouts = 0, 0
 		}
 		s.fastDNS.mu.Unlock()
-	}()
+	})
 }
 
 // keeneticFastBackout gives the LAN its DNS back: a Test still in its window is rolled back whole;

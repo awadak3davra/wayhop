@@ -118,6 +118,8 @@ func useKeeneticFastFakes(t *testing.T) (*Server, *keeneticFastFakes) {
 	fastDNSUpstream = func(context.Context) error { return nil }
 	fastDNSWatchFor, fastDNSWatchEvery = 400*time.Millisecond, 20*time.Millisecond
 	s := &Server{cfg: &config.Config{RoutingMode: "fast"}, platformOf: func() platform.Platform { return platform.Keenetic }}
+	// Runs before the hooks are restored (cleanups run last-in first-out).
+	t.Cleanup(s.stopBackground)
 	return s, f
 }
 

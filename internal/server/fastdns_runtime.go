@@ -296,8 +296,9 @@ func (s *Server) startFastDNSWatch(plan *pbr.Plan, armed bool) {
 	if !armed || snippet == "" {
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), fastDNSWatchFor+30*time.Second)
+	parent := s.bgContext()
+	s.goBackground(func() {
+		ctx, cancel := context.WithTimeout(parent, fastDNSWatchFor+30*time.Second)
 		defer cancel()
 		deadline := time.Now().Add(fastDNSWatchFor)
 		fails := 0
@@ -326,7 +327,7 @@ func (s *Server) startFastDNSWatch(plan *pbr.Plan, armed bool) {
 			s.fastDNS.backoff, s.fastDNS.backouts = 0, 0
 		}
 		s.fastDNS.mu.Unlock()
-	}()
+	})
 }
 
 // fastDNSMaxOwedRestarts bounds the further dnsmasq restarts after a back-out (one per loop tick).
@@ -574,7 +575,7 @@ func (s *Server) FastDNSLoop(ctx context.Context) {
 		}
 		if !warmed {
 			warmed = true
-			go s.fastDNSWarmUp(ctx, plan)
+			s.goBackground(func() { s.fastDNSWarmUp(ctx, plan) })
 		}
 		s.fastDNSResponsive(ctx)
 		st = s.fastFreshTick(ctx, st, plan)
@@ -675,7 +676,8 @@ func (s *Server) fastRemoteReload(ctx context.Context, plan *pbr.Plan) {
 	s.markRemoteLive(sets)
 	// The warm-up runs after any flush; syncFastDNSMode leaves it to this in keep mode.
 	if key != loaded {
-		go s.fastDNSWarmUp(context.Background(), plan)
+		wctx := s.bgContext()
+		s.goBackground(func() { s.fastDNSWarmUp(wctx, plan) })
 	}
 	// A large remote list's prefixes are routes (fastdns_routed.go): diffed, so a list whose content
 	// did not move costs a read.

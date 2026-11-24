@@ -229,7 +229,8 @@ func (s *Server) fastRemoteSets(c config.Config) map[string]pbr.RemoteSet {
 	}
 	s.fastDNS.mu.Unlock()
 	if missing && !c.Demo && fastRemoteAutoFetch {
-		go s.fastRemoteRefresh(context.Background(), time.Now())
+		wctx, now := s.bgContext(), time.Now()
+		s.goBackground(func() { s.fastRemoteRefresh(wctx, now) })
 	}
 	return out
 }
@@ -789,7 +790,8 @@ func (s *Server) syncFastDNSMode(ctx context.Context, plan *pbr.Plan, keep bool)
 	record(content, errs, time.Now())
 	if content != "" && !keep {
 		// A live reload runs it itself, after any flush of the sets.
-		go s.fastDNSWarmUp(context.Background(), plan)
+		wctx := s.bgContext()
+		s.goBackground(func() { s.fastDNSWarmUp(wctx, plan) })
 	}
 	return nil
 }
