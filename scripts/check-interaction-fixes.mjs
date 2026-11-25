@@ -4094,8 +4094,8 @@ globalThis.filterRaw = dnsCheckText(DNS_FAST_FILTER_TEXT, "future_filter");`, ra
   const guard = functionSource(app, 'onHashChange');
   check(/history\.replaceState\(null, "", _navGuardHash\)/.test(guard) && !/location\.hash = _navGuardHash/.test(guard),
     'BW-02: cancelling "leave without saving" restores the address without a hashchange that rebuilds the page');
-  check(/baseline = JSON\.stringify\(next\); markDirty\(\);/.test(app),
-    'BW-01: after a save the baseline is what was sent, so an edit made during the request stays dirty');
+  check(/baseline = JSON\.stringify\(\{ \.\.\.next, rev: r\.rev \}\); markDirty\(\);/.test(app),
+    'BW-01: after a save the baseline is what was sent (with the revision the save advanced), so an edit made during the request stays dirty and a clean save leaves the page clean');
   check(/function saveDNSAfter\(mutate, msg, rerender\)/.test(app) &&
     (dns.match(/saveDNSAfter\(\(\) => \{/g) || []).length >= 2 && !/dnsState\.rules\.splice\(idx, 1\);\s*saveDNS\(/.test(dns),
     'BW-03: a DNS rule or resolver delete mutates dnsState only after earlier saves land');
