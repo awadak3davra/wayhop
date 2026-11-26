@@ -88,6 +88,27 @@ const flapThreshold = 2
 // Demo mode uses 1 (instant showcase).
 const aliveThreshold = 2
 
+// probeConcurrency is how many probes one tick runs at a time. Each is a handshake the core makes
+// through one exit, so the number is small for a router's CPU and memory.
+const probeConcurrency = 8
+
+// coldAfter is how many consecutive Down probes make an endpoint cold, and coldPerTick how many cold
+// endpoints one tick still probes, in rotation.
+//
+// A dead exit costs its probe the whole timeout. With probeConcurrency at a time, every 8 dead exits
+// add one timeout to the tick, so a subscription with 44 dead exits out of 54 would hold each tick
+// for half a minute and failover would learn of a live exit failing that much later. Probing every
+// hot endpoint and one round of the cold ones keeps a tick near one timeout whatever the profile
+// holds, and each cold exit is still asked again every len(cold)/coldPerTick ticks. A profile with
+// no more than coldPerTick cold endpoints probes all of them on every tick.
+//
+// An endpoint goes cold only on failures of its own. While the local-fault gate holds (every probe
+// of the tick failed), nothing is counted, so an outage of the uplink leaves the live exits hot.
+const (
+	coldAfter   = 3
+	coldPerTick = probeConcurrency
+)
+
 func (s *stat) pushSample(p probeSample) {
 	s.recent[s.recentPos] = p
 	s.recentPos = (s.recentPos + 1) % healthWindow
@@ -125,6 +146,11 @@ type Monitor struct {
 	mu         sync.Mutex
 	stats      map[string]*stat
 	localFault bool // last tick saw EVERY endpoint down at once ⇒ likely local uplink, not N exits
+	// probeFails counts each endpoint's consecutive Down probes, leaving out those the local-fault
+	// gate held back. coldAfter of them make the endpoint cold (see pickProbes); coldCursor is where
+	// the next tick's share of the cold ones starts.
+	probeFails map[string]int
+	coldCursor int
 	clash      *clash.Client
 	store      *store.Store
 	logs       LogSource
@@ -132,6 +158,8 @@ type Monitor struct {
 	testURL    string
 	interval   time.Duration
 	timeoutMS  int
+	// probeHeadroom is what one probe gets on top of timeoutMS: the HTTP round trip to the Clash API.
+	probeHeadroom time.Duration
 	// ifaceBytesFn reads a kernel iface's cumulative rx/tx byte counters (injectable for tests;
 	// defaults to ifaceBytes/sysfs). Kernel-routed endpoints bypass sing-box and never appear in
 	// Clash /connections, so their throughput is read from the tunnel iface here instead.
@@ -197,15 +225,16 @@ const causeTTLms int64 = 30_000
 // what real data looks like without a running sing-box).
 func NewMonitor(cl *clash.Client, st *store.Store, logs LogSource, demo bool) *Monitor {
 	return &Monitor{
-		stats:        map[string]*stat{},
-		clash:        cl,
-		store:        st,
-		logs:         logs,
-		demo:         demo,
-		testURL:      "http://cp.cloudflare.com/generate_204",
-		interval:     10 * time.Second,
-		timeoutMS:    5000,
-		ifaceBytesFn: ifaceBytes,
+		stats:         map[string]*stat{},
+		clash:         cl,
+		store:         st,
+		logs:          logs,
+		demo:          demo,
+		testURL:       "http://cp.cloudflare.com/generate_204",
+		interval:      10 * time.Second,
+		timeoutMS:     5000,
+		probeHeadroom: 5 * time.Second,
+		ifaceBytesFn:  ifaceBytes,
 	}
 }
 
@@ -458,47 +487,121 @@ func (m *Monitor) tick(ctx context.Context) {
 		m.demoTick(nowMS())
 		return
 	}
-	// Bound the tick so a wedged Clash API can't leave probe goroutines hanging
-	// forever (the shared HTTP client has no timeout because /traffic streams).
-	// Headroom = the proxy-side delay timeout plus the HTTP round trip.
-	tctx, cancel := context.WithTimeout(ctx, time.Duration(m.timeoutMS)*time.Millisecond+5*time.Second)
-	defer cancel()
+	// Bound each probe, not the tick, so a wedged Clash API can't leave a probe goroutine hanging
+	// forever (the shared HTTP client has no timeout because /traffic streams). Headroom = the
+	// proxy-side delay timeout plus the HTTP round trip.
+	//
+	// One deadline over the whole tick would be reached by the probes still queued behind dead
+	// exits, each of which takes the full timeout: more than two rounds of them and the tick would
+	// end with nothing to record, on every tick, leaving every exit unmeasured and the local-fault
+	// flag at whatever it last was.
+	probeBudget := time.Duration(m.timeoutMS)*time.Millisecond + m.probeHeadroom
 	p := m.store.Profile()
 	tgs := m.targetsFrom(p)
 	now := nowMS()
+	// The endpoints this tick probes: every hot one and one round of the cold ones (pickProbes).
+	// A group is an aggregation/selection policy, not necessarily a concrete Clash outbound. That
+	// is especially true on native-first Keenetic/OpenWrt plans, where the members are kernel
+	// interfaces and no compatibility-core group tag exists. Probing the group ID through Clash
+	// records a false Down even while every member is healthy. Probe only real endpoints;
+	// applyResultsWithGroups derives the group result from their committed member health.
+	probed := m.pickProbes(tgs)
 	// Probe concurrently into per-index result slots (distinct indices → no data race; wg.Wait
 	// establishes the happens-before before we read them). Recording is deferred until after the
 	// whole tick's results are in, so a tick-global decision (the local-fault gate) can be made
 	// BEFORE any single Down flip is committed.
-	states := make([]State, len(tgs))
-	lats := make([]int, len(tgs))
-	sem := make(chan struct{}, 8)
+	states := make([]State, len(probed))
+	lats := make([]int, len(probed))
+	sem := make(chan struct{}, probeConcurrency)
 	var wg sync.WaitGroup
-	for i, tg := range tgs {
-		// A group is an aggregation/selection policy, not necessarily a concrete Clash outbound.
-		// That is especially true on native-first Keenetic/OpenWrt plans, where the members are
-		// kernel interfaces and no compatibility-core group tag exists. Probing the group ID through
-		// Clash records a false Down even while every member is healthy. Probe only real endpoints;
-		// applyResultsWithGroups derives the group result from their committed member health.
-		if tg.kind == "group" {
-			continue
-		}
+	for i, tg := range probed {
 		wg.Add(1)
 		go func(i int, tg target) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			states[i], lats[i] = m.probe(tctx, tg.id, tg.testURL, tg.iface)
+			// The budget starts when the probe does, not while it waits for its turn.
+			pctx, cancel := context.WithTimeout(ctx, probeBudget)
+			defer cancel()
+			states[i], lats[i] = m.probe(pctx, tg.id, tg.testURL, tg.iface)
 		}(i, tg)
 	}
 	wg.Wait()
-	if tctx.Err() != nil {
-		return
+	if ctx.Err() != nil {
+		return // shutting down: the probes were cut short, their results say nothing
 	}
-	m.applyResultsWithGroups(tgs, p.Groups, states, lats, now)
-	m.sampleTraffic(tctx, tgs, now)
-	m.sampleElection(tctx)
+	// A probe that ran out of its own budget is Unknown, which record holds the committed state
+	// through; every probe that did answer is recorded.
+	m.applyResultsWithGroups(probed, p.Groups, states, lats, now)
+	m.noteProbes(tgs, probed, states, m.LocalFault())
+	sctx, cancel := context.WithTimeout(ctx, probeBudget)
+	defer cancel()
+	m.sampleTraffic(sctx, tgs, now)
+	m.sampleElection(sctx)
 	m.pruneStats(tgs)
+}
+
+// pickProbes returns the endpoints one tick probes: every hot endpoint, and of the cold ones (those
+// with coldAfter consecutive Down probes behind them) coldPerTick, taken in rotation so each is
+// asked again in its turn. Groups are never probed.
+func (m *Monitor) pickProbes(tgs []target) []target {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]target, 0, len(tgs))
+	var cold []target
+	for _, tg := range tgs {
+		switch {
+		case tg.kind != "endpoint":
+		case m.probeFails[tg.id] >= coldAfter:
+			cold = append(cold, tg)
+		default:
+			out = append(out, tg)
+		}
+	}
+	if len(cold) <= coldPerTick {
+		return append(out, cold...)
+	}
+	start := m.coldCursor % len(cold)
+	for i := 0; i < coldPerTick; i++ {
+		out = append(out, cold[(start+i)%len(cold)])
+	}
+	m.coldCursor = (start + coldPerTick) % len(cold)
+	return out
+}
+
+// noteProbes keeps the consecutive-Down count pickProbes reads: a Down probe adds one, an Alive
+// probe clears it, an Unknown one (nothing was measured) leaves it. Counts of endpoints no longer in
+// the profile are dropped.
+//
+// gated is the tick's local-fault verdict. A Down probe the gate held back is not counted, as record
+// does not count it: with the uplink away every exit fails, and counting those would make the live
+// ones cold. They have to stay hot, because they are the ones whose answer ends the fault, and in a
+// rotation the tick that finds the uplink back could fall on a share of dead exits and miss it.
+func (m *Monitor) noteProbes(tgs, probed []target, states []State, gated bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.probeFails == nil {
+		m.probeFails = map[string]int{}
+	}
+	for i, tg := range probed {
+		switch states[i] {
+		case Down:
+			if !gated {
+				m.probeFails[tg.id]++
+			}
+		case Alive:
+			delete(m.probeFails, tg.id)
+		}
+	}
+	live := make(map[string]struct{}, len(tgs))
+	for _, tg := range tgs {
+		live[tg.id] = struct{}{}
+	}
+	for id := range m.probeFails {
+		if _, ok := live[id]; !ok {
+			delete(m.probeFails, id)
+		}
+	}
 }
 
 // applyResults commits one tick's probe results, applying the local-fault (Envoy "panic
@@ -841,9 +944,15 @@ func (m *Monitor) ProbeOne(ctx context.Context, id string) View {
 		m.recordDerivedGroups(p.Groups, nowMS())
 		return m.viewWithCause(id)
 	}
-	tctx, cancel := context.WithTimeout(ctx, time.Duration(m.timeoutMS)*time.Millisecond+5*time.Second)
+	tctx, cancel := context.WithTimeout(ctx, time.Duration(m.timeoutMS)*time.Millisecond+m.probeHeadroom)
 	defer cancel()
 	st, lat := m.probe(tctx, id, tgt.testURL, tgt.iface)
+	if st == Alive {
+		// An exit that answers a test asked for by hand is probed on every tick again.
+		m.mu.Lock()
+		delete(m.probeFails, id)
+		m.mu.Unlock()
+	}
 	m.record(id, tgt.name, tgt.kind, st, lat, nowMS())
 	return m.viewWithCause(id)
 }

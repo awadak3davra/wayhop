@@ -3,6 +3,20 @@
 All notable changes to WayHop are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.12] — 2026-11-26
+
+### Fixed
+- **Exits are measured again when many of them are dead.** One health check had 10 seconds for all
+  exits, eight at a time, and a dead exit used 5 of them. With more than 16 dead exits (a
+  subscription whose provider rotated its servers, or a network that blocks most of them) the check
+  ended with nothing recorded: every exit stayed at "checking", failover saw no change, and the
+  "Local network problem" notice stayed up until a restart. Each exit's check now has its own time
+  limit and every answer is recorded.
+- **Dead exits no longer hold up the health check.** An exit that failed three checks in a row is
+  asked again in its turn, eight per check, while the others are asked every time, so a check takes
+  about one timeout whatever the list holds. Checks that fail while the local network is down do not
+  count, so the working exits are asked the moment it comes back.
+
 ## [0.5.11] — 2026-11-24
 
 **Upgrading: press Review & Apply once after the update.** In fast mode, on OpenWrt and Keenetic alike, the same
